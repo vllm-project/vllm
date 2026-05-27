@@ -113,6 +113,46 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
+def _iter_kv_cache_group_specs(kv_cache_spec: KVCacheSpec) -> Iterator[KVCacheSpec]:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        yield from kv_cache_spec.kv_cache_specs.values()
+    else:
+        yield kv_cache_spec
+
+
+def _is_deepseek_v4_hybrid_kv_cache_groups(
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+) -> bool:
+    if len(kv_cache_groups) <= 1:
+        return False
+
+    has_deepseek_v4_spec = False
+    for group in kv_cache_groups:
+        for spec in _iter_kv_cache_group_specs(group.kv_cache_spec):
+            if not isinstance(spec, MLAAttentionSpec | SlidingWindowMLASpec):
+                return False
+            has_deepseek_v4_spec = (
+                has_deepseek_v4_spec
+                or getattr(spec, "model_version", None) == "deepseek_v4"
+            )
+
+    return has_deepseek_v4_spec
+
+
+def _is_deepseek_v4_megamoe_pcp(
+    vllm_config: VllmConfig,
+    kv_cache_groups: Sequence[KVCacheGroupSpec],
+) -> bool:
+    parallel_config = vllm_config.parallel_config
+    return (
+        parallel_config.decode_context_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size > 1
+        and parallel_config.enable_expert_parallel
+        and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        and _is_deepseek_v4_hybrid_kv_cache_groups(kv_cache_groups)
+    )
+
+
 @dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -617,13 +657,32 @@ def resolve_kv_cache_block_sizes(
         bs = cache_config.block_size * dcp * pcp
         return bs, bs
 
+    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    is_dsv4_pcp = _is_deepseek_v4_megamoe_pcp(vllm_config, groups)
     if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
+        if not is_dsv4_pcp:
+            raise ValueError(
+                "Hybrid KV cache groups with multiple block sizes do not "
+                "support context parallelism "
+                "(dcp_world_size/pcp_world_size > 1)."
+            )
+        logger.warning_once(
+            "Allowing experimental DeepSeek V4 MegaMoE hybrid KV cache groups "
+            "with prefill context parallelism. Prefix caching and KV transfer "
+            "must remain disabled for this experimental path."
         )
 
-    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    if is_dsv4_pcp:
+        connector_enabled = vllm_config.kv_transfer_config is not None
+        if cache_config.enable_prefix_caching or connector_enabled:
+            raise ValueError(
+                "Experimental DeepSeek V4 MegaMoE PCP does not support prefix "
+                "caching or KV transfer yet. Disable prefix caching with "
+                "--no-enable-prefix-caching."
+            )
+        scheduler_block_size = math.lcm(*(bs * pcp for bs in group_block_sizes))
+        return scheduler_block_size, scheduler_block_size
+
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors

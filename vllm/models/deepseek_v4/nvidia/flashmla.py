@@ -5,11 +5,12 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
+    compute_local_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
@@ -20,6 +21,8 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
+from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -28,6 +31,126 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+
+def _get_pcp_group_for_merge():
+    try:
+        pcp_group = get_pcp_group()
+    except AssertionError:
+        return None
+    return pcp_group if pcp_group.world_size > 1 else None
+
+
+def _decode_lse_to_2d(lse: torch.Tensor) -> torch.Tensor:
+    if lse.ndim == 3 and lse.shape[-1] == 1:
+        lse = lse.squeeze(-1)
+    if lse.ndim == 3 and lse.shape[1] == 1:
+        lse = lse.squeeze(1)
+    assert lse.ndim == 2, f"expected decode lse [B,H], got {tuple(lse.shape)}"
+    return lse
+
+
+@triton.jit
+def _mask_empty_lse_kernel(
+    lse_ptr,
+    lengths_ptr,
+    lse_stride_t,
+    lse_stride_h,
+    H: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_offsets = tl.arange(0, BLOCK_H)
+    mask = head_offsets < H
+    length = tl.load(lengths_ptr + token_idx)
+    lse_offsets = token_idx * lse_stride_t + head_offsets * lse_stride_h
+    lse = tl.load(lse_ptr + lse_offsets, mask=mask)
+    lse = tl.where(length <= 0, -float("inf"), lse)
+    tl.store(lse_ptr + lse_offsets, lse, mask=mask)
+
+
+@triton.jit
+def _apply_attn_sink_and_copy_kernel(
+    src_ptr,
+    lse_ptr,
+    attn_sink_ptr,
+    dst_ptr,
+    src_stride_t,
+    src_stride_h,
+    src_stride_d,
+    lse_stride_t,
+    lse_stride_h,
+    dst_stride_t,
+    dst_stride_h,
+    dst_stride_d,
+    HEAD_DIM: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    head_idx = tl.program_id(1).to(tl.int64)
+    d_offsets = tl.arange(0, HEAD_DIM)
+
+    lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(
+        tl.float32
+    )
+    sink = tl.load(attn_sink_ptr + head_idx).to(tl.float32)
+    scale = tl.sigmoid(lse - sink)
+
+    src_offsets = (
+        token_idx * src_stride_t + head_idx * src_stride_h + d_offsets * src_stride_d
+    )
+    dst_offsets = (
+        token_idx * dst_stride_t + head_idx * dst_stride_h + d_offsets * dst_stride_d
+    )
+    output = tl.load(src_ptr + src_offsets)
+    tl.store(dst_ptr + dst_offsets, output * scale)
+
+
+def _mask_empty_lse_(lse: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
+    assert lse.ndim == 2, f"expected lse [T,H], got {tuple(lse.shape)}"
+    assert lengths.ndim == 1, f"expected lengths [T], got {tuple(lengths.shape)}"
+    if lse.numel() == 0:
+        return lse
+    T, H = lse.shape
+    _mask_empty_lse_kernel[(T,)](
+        lse,
+        lengths,
+        lse.stride(0),
+        lse.stride(1),
+        H=H,
+        BLOCK_H=triton.next_power_of_2(H),
+    )
+    return lse
+
+
+def _apply_attn_sink_and_copy(
+    src: torch.Tensor,
+    lse: torch.Tensor,
+    attn_sink: torch.Tensor,
+    dst: torch.Tensor,
+) -> None:
+    assert src.ndim == 3, f"expected src [T,H,D], got {tuple(src.shape)}"
+    assert dst.ndim == 3, f"expected dst [T,H,D], got {tuple(dst.shape)}"
+    assert lse.ndim == 2, f"expected lse [T,H], got {tuple(lse.shape)}"
+    if src.numel() == 0:
+        return
+    T, H, D = src.shape
+    assert dst.shape == src.shape
+    assert lse.shape == (T, H)
+    _apply_attn_sink_and_copy_kernel[(T, H)](
+        src,
+        lse,
+        attn_sink,
+        dst,
+        src.stride(0),
+        src.stride(1),
+        src.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        dst.stride(0),
+        dst.stride(1),
+        dst.stride(2),
+        HEAD_DIM=triton.next_power_of_2(D),
+    )
 
 
 class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
@@ -164,14 +287,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             if self.compress_ratio == 4:
                 # C4A: local indices differ per layer (filled by Indexer).
                 assert self.topk_indices_buffer is not None
-                global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                slot_indices, topk_lens = compute_local_topk_indices_and_lens(
                     self.topk_indices_buffer[:num_decode_tokens],
                     swa_metadata.token_to_req_indices,
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
                 )
-                topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                topk_indices = slot_indices.view(num_decode_tokens, 1, -1)
             else:
                 # C128A: pre-computed during metadata build.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -216,7 +339,13 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             "allocate one for this layer type."
         )
 
-        out, _ = flash_mla_with_kvcache(
+        pcp_group = _get_pcp_group_for_merge()
+        out_buffer = (
+            torch.empty_like(output).unsqueeze(1)
+            if pcp_group is not None
+            else output.unsqueeze(1)
+        )
+        out, lse = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
             block_table=None,
@@ -227,12 +356,25 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             indices=swa_indices,
             topk_length=swa_lens,
             softmax_scale=self.scale,
-            attn_sink=self.attn_sink,
+            attn_sink=None if pcp_group is not None else self.attn_sink,
             extra_k_cache=kv_cache if not swa_only else None,
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
-            out=output.unsqueeze(1),
+            out=out_buffer,
         )
+        if pcp_group is not None:
+            lse = _decode_lse_to_2d(lse)
+            local_lens = swa_lens if topk_lens is None else swa_lens + topk_lens
+            lse = _mask_empty_lse_(lse, local_lens)
+            partial_out = out.squeeze(1)
+            merged_out, merged_lse = cp_lse_ag_out_ar(
+                partial_out,
+                lse,
+                pcp_group,
+                return_lse=True,
+                is_lse_base_on_e=True,
+            )
+            _apply_attn_sink_and_copy(merged_out, merged_lse, self.attn_sink, output)
 
     def _forward_prefill(
         self,
@@ -309,6 +451,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
+                    total_cp_world_size=attn_metadata.total_cp_world_size,
+                    total_cp_rank=attn_metadata.total_cp_rank,
+                    cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
                 )
 
             # Gather SWA KV
@@ -321,6 +466,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                total_cp_world_size=swa_metadata.total_cp_world_size,
+                total_cp_rank=swa_metadata.total_cp_rank,
+                cp_kv_cache_interleave_size=swa_metadata.cp_kv_cache_interleave_size,
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
@@ -343,13 +491,33 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 top_k,
                 M,
                 N,
+                total_cp_world_size=swa_metadata.total_cp_world_size,
+                total_cp_rank=swa_metadata.total_cp_rank,
+                cp_kv_cache_interleave_size=swa_metadata.cp_kv_cache_interleave_size,
             )
-            flash_mla_sparse_fwd(
+            pcp_group = _get_pcp_group_for_merge()
+            out_slice = output[query_start:query_end]
+            partial_out = (
+                torch.empty_like(out_slice) if pcp_group is not None else out_slice
+            )
+            partial_out, _, partial_lse = flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=self.scale,
-                attn_sink=self.attn_sink,
+                attn_sink=None if pcp_group is not None else self.attn_sink,
                 topk_length=combined_lens,
-                out=output[query_start:query_end],
+                out=partial_out,
             )
+            if pcp_group is not None:
+                partial_lse = _mask_empty_lse_(partial_lse, combined_lens)
+                merged_out, merged_lse = cp_lse_ag_out_ar(
+                    partial_out,
+                    partial_lse,
+                    pcp_group,
+                    return_lse=True,
+                    is_lse_base_on_e=True,
+                )
+                _apply_attn_sink_and_copy(
+                    merged_out, merged_lse, self.attn_sink, out_slice
+                )

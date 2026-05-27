@@ -12,6 +12,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
     KVCacheBlock,
+    _is_deepseek_v4_hybrid_kv_cache_groups,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -505,8 +506,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             g.kv_cache_spec.block_size % hash_block_size == 0
             for g in kv_cache_config.kv_cache_groups
         ), "block_size must be divisible by hash_block_size"
+        is_dsv4_pcp = (
+            dcp_world_size == 1
+            and pcp_world_size > 1
+            and _is_deepseek_v4_hybrid_kv_cache_groups(kv_cache_config.kv_cache_groups)
+        )
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
-        assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        assert pcp_world_size == 1 or is_dsv4_pcp, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:

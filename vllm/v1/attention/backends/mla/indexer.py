@@ -24,12 +24,40 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.cp_utils import (
+    get_total_cp_world_size,
+    get_total_cp_world_size_and_rank,
+)
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _cp_local_len(
+    length,
+    total_cp_world_size: tl.constexpr,
+    total_cp_rank: tl.constexpr,
+    cp_kv_cache_interleave_size: tl.constexpr,
+):
+    base = (
+        length
+        // cp_kv_cache_interleave_size
+        // total_cp_world_size
+        * cp_kv_cache_interleave_size
+    )
+    remainder = length - base * total_cp_world_size
+    extra = tl.minimum(
+        tl.maximum(
+            remainder - total_cp_rank * cp_kv_cache_interleave_size,
+            0,
+        ),
+        cp_kv_cache_interleave_size,
+    )
+    return base + extra
 
 
 @triton.jit
@@ -245,6 +273,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
+        self.total_cp_world_size, self.total_cp_rank = (
+            get_total_cp_world_size_and_rank()
+        )
+        self.cp_kv_cache_interleave_size = (
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -499,6 +533,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 block_table,
                 self.kv_cache_spec.storage_block_size,
                 self.compress_ratio,
+                total_cp_world_size=self.total_cp_world_size,
+                total_cp_rank=self.total_cp_rank,
+                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 out=self.compressed_slot_mapping_buffer,
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
@@ -515,16 +552,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            local_compressed_seq_lens = compressed_seq_lens
+            local_compressed_seq_lens_cpu = compressed_seq_lens_cpu
+            if self.total_cp_world_size > 1:
+                local_compressed_seq_lens = get_dcp_local_seq_lens(
+                    compressed_seq_lens,
+                    self.total_cp_world_size,
+                    self.total_cp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
+                local_compressed_seq_lens_cpu = get_dcp_local_seq_lens(
+                    compressed_seq_lens_cpu,
+                    self.total_cp_world_size,
+                    self.total_cp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-            # Upper bound is exact for prefill rows (the `[num_decodes:]`
-            # slice below).
-            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             chunk_specs = split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+                local_compressed_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
@@ -539,12 +587,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     query_start_loc,
                     query_start_loc_cpu,
                     seq_lens,
-                    compressed_seq_lens,
-                    compressed_seq_lens_cpu,
+                    local_compressed_seq_lens,
+                    local_compressed_seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
+                    total_cp_world_size=self.total_cp_world_size,
+                    total_cp_rank=self.total_cp_rank,
+                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -587,18 +638,24 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
             if self.compress_ratio > 1:
+                seq_lens = seq_lens // self.compress_ratio
+                if self.total_cp_world_size > 1:
+                    seq_lens = get_dcp_local_seq_lens(
+                        seq_lens,
+                        self.total_cp_world_size,
+                        self.total_cp_rank,
+                        self.cp_kv_cache_interleave_size,
+                    )
                 # True iff seq_lens aliases decode_seq_lens_buffer (flatten or
                 # native wrote it); False iff it aliases common_attn_metadata.
                 seq_lens_is_local_view = (use_native and next_n > 1) or (
                     not use_native and max_decode_len > 1
                 )
                 if seq_lens_is_local_view:
-                    seq_lens //= self.compress_ratio
+                    pass
                 else:
                     # Copy to avoid mutating shared state; keeps CG address stable.
-                    self.expanded_seq_lens_buffer[:num_decodes] = (
-                        seq_lens // self.compress_ratio
-                    )
+                    self.expanded_seq_lens_buffer[:num_decodes] = seq_lens
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
@@ -651,6 +708,9 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
+    total_cp_world_size: int = 1,
+    total_cp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
@@ -694,6 +754,9 @@ def build_prefill_chunk_metadata(
         qs_stop,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
+        TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+        TOTAL_CP_RANK=total_cp_rank,
+        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
     )
 
     token_start = query_start_loc_cpu[start_idx].item()
@@ -732,6 +795,9 @@ def _build_prefill_chunk_metadata_kernel(
     query_slice_stop,
     BLOCK_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr,
+    TOTAL_CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
 
@@ -761,6 +827,12 @@ def _build_prefill_chunk_metadata_kernel(
 
         # Compute cu_seq_len_ke
         seq_len_per_token = (start_pos + 1 + offset) // COMPRESS_RATIO
+        seq_len_per_token = _cp_local_len(
+            seq_len_per_token,
+            TOTAL_CP_WORLD_SIZE,
+            TOTAL_CP_RANK,
+            CP_KV_CACHE_INTERLEAVE_SIZE,
+        )
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,

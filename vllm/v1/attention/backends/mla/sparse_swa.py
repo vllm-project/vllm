@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.worker.cp_utils import get_total_cp_world_size_and_rank
 
 # DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct
 # (topk, extra_topk, extra_page_block_size) config, so they cannot share a
@@ -187,6 +188,9 @@ class DeepseekSparseSWAMetadata:
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    total_cp_world_size: int = 1
+    total_cp_rank: int = 0
+    cp_kv_cache_interleave_size: int = 1
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -213,6 +217,12 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.head_size = mla_spec.head_size  # Already considered quantization.
         self.compress_ratio = mla_spec.compress_ratio
         self.block_size = mla_spec.block_size
+        self.total_cp_world_size, self.total_cp_rank = (
+            get_total_cp_world_size_and_rank()
+        )
+        self.cp_kv_cache_interleave_size = (
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
 
         # Handle MTP: adjust decode_threshold like the indexer does
         self.num_speculative_tokens = (
@@ -299,7 +309,14 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices.copy_(x, non_blocking=True)
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
-        is_valid_token.copy_(slot_mapping >= 0)
+        if self.total_cp_world_size > 1:
+            # In CP, slot_mapping marks the rank that owns the KV write slot.
+            # Query tokens are still valid on every CP rank for partial attention.
+            num_query_tokens = int(query_start_loc_cpu[num_reqs].item())
+            is_valid_token[:num_query_tokens].fill_(True)
+            is_valid_token[num_query_tokens:].fill_(False)
+        else:
+            is_valid_token.copy_(slot_mapping >= 0)
 
         if num_decode_tokens > 0:
             self.decode_swa_lens[num_decode_tokens:] = 0
@@ -315,6 +332,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 block_table,
                 block_table.stride(0),
                 self.block_size,
+                TOTAL_CP_WORLD_SIZE=self.total_cp_world_size,
+                TOTAL_CP_RANK=self.total_cp_rank,
+                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
                 TRITON_BLOCK_SIZE=1024,
             )
 
@@ -350,6 +370,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
+            total_cp_world_size=self.total_cp_world_size,
+            total_cp_rank=self.total_cp_rank,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             **deepseek_v4_fields,
         )
 
@@ -464,6 +487,9 @@ def _compute_swa_indices_and_lens_kernel(
     block_table_ptr,
     block_table_stride,
     block_size,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr,
+    TOTAL_CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -486,23 +512,42 @@ def _compute_swa_indices_and_lens_kernel(
     end_pos = pos + 1
 
     swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + token_idx, swa_len)
+    count = tl.zeros((), dtype=tl.int32)
 
     for i in range(0, window_size, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-
-        pos_offset = start_pos + offset
-        block_indices = pos_offset // block_size
-        block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
-            mask=pos_offset < end_pos,
-        )
-        block_offsets = pos_offset % block_size
-        slot_ids = block_numbers * block_size + block_offsets
-
-        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
         tl.store(
             swa_indices_ptr + token_idx * swa_indices_stride + offset,
-            slot_ids,
+            -1,
             mask=offset < window_size,
         )
+
+        pos_offset = start_pos + offset
+        is_in_window = offset < swa_len
+        virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE
+        block_indices = pos_offset // virtual_block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=is_in_window,
+        )
+        virtual_block_offsets = pos_offset - block_indices * virtual_block_size
+        is_local = (
+            virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
+        ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+        local_block_offsets = (
+            virtual_block_offsets // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
+            virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+        )
+        is_valid_local = is_in_window & is_local
+        local_rank = count + tl.cumsum(is_valid_local.to(tl.int32), 0) - 1
+
+        slot_ids = block_numbers * block_size + local_block_offsets
+        tl.store(
+            swa_indices_ptr + token_idx * swa_indices_stride + local_rank,
+            slot_ids,
+            mask=is_valid_local,
+        )
+        count += tl.sum(is_valid_local.to(tl.int32), axis=0)
+
+    tl.store(swa_lens_ptr + token_idx, count)
