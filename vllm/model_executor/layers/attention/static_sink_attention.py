@@ -22,14 +22,6 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     subclass_attention_backend_with_overrides,
 )
-from vllm.v1.attention.backends.mla.flashattn_mla import (
-    FlashAttnMLAImpl,
-    FlashAttnStaticSinkMLAImpl,
-)
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    FlashMLASparseImpl,
-    FlashMLASparseStaticSinkImpl,
-)
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -44,11 +36,35 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
-# Maps underlying attention impl classes to static-sink variants.
-_STATIC_SINK_ATTN_IMPL_OVERRIDE: dict[type, type] = {
-    FlashAttnMLAImpl: FlashAttnStaticSinkMLAImpl,
-    FlashMLASparseImpl: FlashMLASparseStaticSinkImpl,
-}
+
+@functools.lru_cache
+def _get_static_sink_attn_impl_override() -> dict[type, type]:
+    """Maps underlying attention impl classes to static-sink variants.
+
+    Flash-attn based overrides are CUDA-only and may fail to import when FA2/FA3
+    extensions are unavailable. Non-CUDA platforms fall back to the underlying
+    impl with only the KV-cache reshape override applied.
+    """
+    overrides: dict[type, type] = {}
+    try:
+        from vllm.v1.attention.backends.mla.flashattn_mla import (
+            FlashAttnMLAImpl,
+            FlashAttnStaticSinkMLAImpl,
+        )
+
+        overrides[FlashAttnMLAImpl] = FlashAttnStaticSinkMLAImpl
+    except ImportError:
+        pass
+    try:
+        from vllm.v1.attention.backends.mla.flashmla_sparse import (
+            FlashMLASparseImpl,
+            FlashMLASparseStaticSinkImpl,
+        )
+
+        overrides[FlashMLASparseImpl] = FlashMLASparseStaticSinkImpl
+    except ImportError:
+        pass
+    return overrides
 
 
 @functools.lru_cache
@@ -57,7 +73,7 @@ def create_static_sink_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = "StaticSink_"
     underlying_impl = underlying_attn_backend.get_impl_cls()
-    sink_impl = _STATIC_SINK_ATTN_IMPL_OVERRIDE.get(underlying_impl)
+    sink_impl = _get_static_sink_attn_impl_override().get(underlying_impl)
 
     def reshape_kv_cache(
         raw_tensor: torch.Tensor,
