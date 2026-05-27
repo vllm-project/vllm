@@ -268,16 +268,11 @@ class ApplyRotaryEmb(CustomOp):
             x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
             seq_len = x.shape[-3]
-            nheads = x.shape[-2]
+            batch = x.shape[0]
             rotary_dim = cos.shape[-1] * 2
             block_m = 8 if rotary_dim <= 128 else 4
-            block_h = 2
             grid_y = (seq_len + block_m - 1) // block_m
-            grid_x = (nheads + block_h - 1) // block_h
-            if (
-                grid_y > self._HIP_MAX_GRID_DIM
-                or grid_x > self._HIP_MAX_GRID_DIM
-            ):
+            if grid_y > self._HIP_MAX_GRID_DIM or batch > self._HIP_MAX_GRID_DIM:
                 output = self.forward_static(
                     x, cos, sin, self.is_neox_style, self.enable_fp32_compute
                 )
