@@ -8,6 +8,7 @@ license.workspace = true
 test-util = []
 
 [dependencies]
+easy-ext.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -16,7 +17,6 @@ winnow.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-easy-ext.workspace = true
 expect-test.workspace = true
 futures.workspace = true
 openai-protocol.workspace = true
