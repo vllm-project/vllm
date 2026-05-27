@@ -44,10 +44,10 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
         value_layout = StridedLayout
         scale_layout = StridedLayout
     elif current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
         value_layout = StridedLayout
-        if on_gfx950():
+        if on_gfx950() or on_gfx1250():
             try:
                 # triton < 3.6
                 from triton_kernels.tensor_details.layout import GFX950MXScaleLayout

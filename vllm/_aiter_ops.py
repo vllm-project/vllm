@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Protocol
 
 import torch
+import torch.nn.functional as F
 from torch._ops import OpOverload
 from torch.distributed import ProcessGroup
 
@@ -124,6 +125,143 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def _mxfp4_moe_w1_triton_gemm_view(w1: torch.Tensor, w2: torch.Tensor) -> torch.Tensor:
+    """Map expert w1 to moe_gemm_a4w4 layout (stride(-2)==1 on [E, K, N]).
+
+    vLLM stores w13 as [E, 2*inter, hidden/2] (K along dim2). aiter downcast uses the
+    same axis order with K-packed stride-1 on dim1; do not compose transpose+as_strided
+    (that overruns storage). Standard layout only needs transpose(1, 2).
+    """
+    if w1.stride(-2) == 1:
+        return w1
+    h = w2.shape[1]
+    e, a, b = w1.shape
+    if b * 2 == h:
+        return w1.transpose(1, 2)
+    if a * 2 == h:
+        kp, n_out = a, b
+        return w1.as_strided((e, kp, n_out), (kp * n_out, 1, kp))
+    return w1.transpose(1, 2)
+
+
+def _mxfp4_moe_w2_triton_gemm_view(w2: torch.Tensor) -> torch.Tensor:
+    """Map vLLM w2 [E, model_dim, inter/2] to moe_gemm_a4w4 layout."""
+    if w2.stride(-2) == 1:
+        return w2
+    return w2.transpose(1, 2)
+
+
+def _silu_and_mul_glu(x: torch.Tensor) -> torch.Tensor:
+    """SiLU(gate) * up for g1u1 tensors with last dim 2 * inter (matches CK ``silu_and_mul``)."""
+    d = x.shape[-1] // 2
+    gate, up = x[..., :d], x[..., d:]
+    return (F.silu(gate.to(torch.float32)) * up.to(torch.float32)).to(dtype=x.dtype)
+
+
+def _mxfp4_moe_weight_as_uint8(w: torch.Tensor) -> torch.Tensor:
+    """Triton moe_gemm_a4w4 JIT cannot canonicalize torch float4 dtypes (KeyError)."""
+    if w.dtype == torch.uint8:
+        return w
+    fp4 = getattr(torch, "float4_e2m1fn_x2", None)
+    if fp4 is not None and w.dtype == fp4:
+        return w.view(torch.uint8)
+    name = getattr(w.dtype, "name", str(w.dtype))
+    if "float4" in name or "e2m1" in name:
+        return w.view(torch.uint8)
+    return w
+
+
+def _rocm_aiter_fused_moe_triton_gemm_a4w4(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation_method: int,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    output_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    from aiter import ActivationType
+    from aiter.fused_moe import get_inter_dim
+    from aiter.ops.triton.moe.moe_op_gemm_a4w4 import moe_gemm_a4w4, mxfp4_quant
+    from aiter.ops.triton.moe.moe_routing.routing import routing
+
+    if activation_method != int(ActivationType.Silu):
+        raise RuntimeError(
+            "Triton moe_gemm_a4w4 path supports only Silu/SwiGLU (ActivationType.Silu)."
+        )
+
+    device = hidden_states.device
+    out_dtype = output_dtype or hidden_states.dtype
+    # FP32 matmul outputs for numerical headroom before the second mxfp4_quant.
+    gemm_out_dt = torch.float32
+    m, _ = topk_ids.shape
+    num_experts = w1.shape[0]
+
+    logits = torch.full(
+        (m, num_experts), -1e9, device=device, dtype=torch.float32
+    )
+    tid = topk_ids.long().clamp(min=0, max=num_experts - 1)
+    logits.scatter_(
+        1,
+        tid,
+        torch.log(topk_weight.to(torch.float32).clamp(min=1e-20)),
+    )
+
+    rdata, gather_idx, scatter_idx = routing(logits, topk_ids.shape[1])
+    gate_scal = rdata.gate_scal
+
+    e, model_dim, inter_dim = get_inter_dim(w1.shape, w2.shape)
+    is_g1u1 = inter_dim != w1.shape[1]
+    if not is_g1u1:
+        raise RuntimeError(
+            "Triton moe_gemm_a4w4 path expects SwiGLU (w1 dim1 == 2 * inter)."
+        )
+
+    w1_v = _mxfp4_moe_weight_as_uint8(_mxfp4_moe_w1_triton_gemm_view(w1, w2))
+    w2_v = _mxfp4_moe_weight_as_uint8(_mxfp4_moe_w2_triton_gemm_view(w2))
+
+    x_q, x_s = mxfp4_quant(hidden_states.to(out_dtype))
+    # Raw W1@x per (token, expert), then CK-style silu_and_mul (not Triton ``apply_swiglu``).
+    # ``scatter_indx=None`` keeps expanded rows until after activation; higher VRAM than fused swiglu.
+    mid_raw = moe_gemm_a4w4(
+        x_q,
+        w1_v,
+        x_s,
+        w1_scale,
+        x_static_scale=None,
+        quant_static_scale=None,
+        bias=None,
+        routing_data=rdata,
+        gather_indx=gather_idx,
+        scatter_indx=None,
+        gammas=None,
+        swizzle_mx_scale=None,
+        out_dtype=gemm_out_dt,
+        apply_swiglu=False,
+    )
+    mid = _silu_and_mul_glu(mid_raw)
+    mid_q, mid_s = mxfp4_quant(mid.to(out_dtype))
+    out = moe_gemm_a4w4(
+        mid_q,
+        w2_v,
+        mid_s,
+        w2_scale,
+        x_static_scale=None,
+        quant_static_scale=None,
+        bias=None,
+        routing_data=rdata,
+        gather_indx=None,
+        scatter_indx=scatter_idx,
+        gammas=gate_scal,
+        swizzle_mx_scale=None,
+        out_dtype=gemm_out_dt,
+        apply_swiglu=False,
+    )
+    return out.to(out_dtype)
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -150,6 +288,30 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
+
+    m_tokens = hidden_states.shape[0]
+    use_triton_a4w4 = (
+        envs.VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4
+        and quant_type == QuantType.per_1x32
+        and expert_mask is None
+        and not doweight_stage1
+        and num_local_tokens is None
+        and a1_scale is None
+        and a2_scale is None
+        and m_tokens >= envs.VLLM_ROCM_AITER_TRITON_MOE_MIN_TOKENS
+    )
+    if use_triton_a4w4:
+        return _rocm_aiter_fused_moe_triton_gemm_a4w4(
+            hidden_states,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids,
+            activation_method,
+            w1_scale,
+            w2_scale,
+            output_dtype,
+        )
 
     return fused_moe(
         hidden_states,

@@ -50,7 +50,6 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
-from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -289,7 +288,7 @@ class Worker(WorkerBase):
                 logger.info_once("Using V2 Model Runner")
 
             # Set random seed.
-            set_random_seed(self.model_config.seed)
+            # set_random_seed(self.model_config.seed)
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
@@ -709,7 +708,7 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        # set_random_seed(self.model_config.seed)
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
