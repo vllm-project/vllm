@@ -79,6 +79,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_ROCM_DSV4_CSA_MS_STRATEGY = "overlap"
+_ROCM_DSV4_CSA_MS_GRAPH_MODES = frozenset(("none", "piecewise"))
+_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR = True
+_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS = False
+_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST = True
+_ROCM_DSV4_CSA_MS_OUTER_INDEXER = False
+_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS = True
+
 
 def _iter_deepseek_v4_swa_metadata(
     attn_metadata: dict[str, AttentionMetadata]
@@ -406,10 +414,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> str:
         if not current_platform.is_rocm():
             return "off"
-        if not envs.VLLM_ROCM_DSV4_CSA_MULTISTREAM or self.aux_stream_list is None:
+        if self.aux_stream_list is None:
             return "off"
 
-        strategy = envs.VLLM_ROCM_DSV4_CSA_MS_STRATEGY.lower()
+        strategy = _ROCM_DSV4_CSA_MS_STRATEGY
         if strategy == "off":
             return "off"
         if not _is_decode_only_deepseek_v4_step(attn_metadata):
@@ -418,16 +426,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         graph_mode = forward_context.cudagraph_runtime_mode
         assert graph_mode in CUDAGraphMode.valid_runtime_modes()
         graph_mode_name = graph_mode.name.lower()
-        enabled_graph_modes = {
-            mode.lower() for mode in envs.VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES
-        }
         # Standalone ROCm repro in benchmarks/kernels/rocm_dsv4_stream_probe.py
         # shows that putting the Python stream scheduler inside a compiled
         # full-graph wrapper can collapse the replayed work onto stream 0.
         # Keep the ROCm CSA multi-stream scheduler in eager/piecewise graph
-        # islands by default; FULL can be enabled explicitly for debugging via
-        # VLLM_ROCM_DSV4_CSA_MS_GRAPH_MODES=none,piecewise,full.
-        if graph_mode_name not in enabled_graph_modes:
+        # islands.
+        if graph_mode_name not in _ROCM_DSV4_CSA_MS_GRAPH_MODES:
             return "off"
 
         if strategy == "overlap" and len(self.aux_stream_list) < 5:
@@ -710,17 +714,17 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 indexer_weights,
                 positions,
                 self.indexer_rotary_emb,
-                use_aux_stream=envs.VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS,
+                use_aux_stream=_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS,
                 project_inputs=defer_rocm_branch_projections,
                 compressed_kv_score_out=indexer_kv_score_out,
                 indexer_weights_out=indexer_weights_out,
             )
 
         launched_indexer = (
-            self.indexer is not None and envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER
+            self.indexer is not None and _ROCM_DSV4_CSA_MS_OUTER_INDEXER
         )
         launched_compressor = (
-            self.compressor is not None and envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
+            self.compressor is not None and _ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
         )
 
         if launched_indexer:
@@ -761,7 +765,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         defer_rocm_branch_projections = (
             current_platform.is_rocm()
             and rocm_ms_strategy == "overlap"
-            and envs.VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS
+            and _ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS
         )
         gemm_aux_streams = None if current_platform.is_rocm() else aux_streams
 
@@ -777,7 +781,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         use_rocm_split_post = (
             current_platform.is_rocm()
             and rocm_ms_strategy == "overlap"
-            and envs.VLLM_ROCM_DSV4_CSA_MS_SPLIT_QKV_POST
+            and _ROCM_DSV4_CSA_MS_SPLIT_QKV_POST
             and aux_streams is not None
             and len(aux_streams) >= 5
         )
@@ -879,8 +883,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
             # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
             # MLA compressor. Slot [2] is reserved for the indexer's inner
-            # overlap. ROCm can optionally defer branch projections under
-            # VLLM_ROCM_DSV4_CSA_MS_DEFER_PROJECTIONS=1.
+            # overlap.
             run_indexer: Callable[[], Any] = lambda: indexer(
                 hidden_states,
                 qr,
@@ -893,7 +896,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                     not current_platform.is_rocm()
                     or (
                         rocm_ms_strategy == "overlap"
-                        and envs.VLLM_ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS
+                        and _ROCM_DSV4_CSA_MS_INDEXER_SUBSTREAMS
                     )
                 ),
                 project_inputs=defer_rocm_branch_projections,
@@ -911,10 +914,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             compressor_fn: Callable[[], Any] | None = run_compressor
             if rocm_ms_active and (
                 rocm_ms_strategy == "indexer_only"
-                or not envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
+                or not _ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
             ):
                 compressor_fn = None
-            if rocm_ms_active and not envs.VLLM_ROCM_DSV4_CSA_MS_OUTER_INDEXER:
+            if rocm_ms_active and not _ROCM_DSV4_CSA_MS_OUTER_INDEXER:
                 indexer_fn = None
 
             q, (indexer_result, compressor_result) = execute_in_parallel(
@@ -950,7 +953,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             if (
                 rocm_ms_active
-                and not envs.VLLM_ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
+                and not _ROCM_DSV4_CSA_MS_MAIN_COMPRESSOR
             ):
                 aux_stream = None
             compressor = self.compressor

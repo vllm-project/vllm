@@ -55,6 +55,20 @@ from vllm.models.deepseek_v4.attention import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+_ROCM_DSV4_CSA_AUX_STREAM_COUNT = 5
+_ROCM_DSV4_CSA_AUX_STREAM_PRIORITY = -1
+
+
+def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
+    if not current_platform.is_rocm():
+        return None
+    # ROCm DeepSeek-V4 decode overlap uses five streams: three top-level
+    # preparation branches and two C4-indexer sub-branches.
+    return [
+        torch.cuda.Stream(priority=_ROCM_DSV4_CSA_AUX_STREAM_PRIORITY)
+        for _ in range(_ROCM_DSV4_CSA_AUX_STREAM_COUNT)
+    ]
+
 
 class DeepseekV4MLP(nn.Module):
     def __init__(
@@ -339,6 +353,16 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
+            indexer_aux_stream = (
+                aux_stream_list[3]
+                if aux_stream_list is not None and len(aux_stream_list) >= 5
+                else None
+            )
+            indexer_aux_streams = (
+                aux_stream_list[3:5]
+                if aux_stream_list is not None and len(aux_stream_list) >= 5
+                else None
+            )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -349,6 +373,8 @@ class DeepseekV4Attention(nn.Module):
                 topk_indices_buffer=topk_indices_buffer,
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
+                aux_stream=indexer_aux_stream,
+                aux_streams=indexer_aux_streams,
             )
 
         mla_modules = DeepseekV4MLAModules(
@@ -616,16 +642,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
-        # (compressor kv_score, indexer.weights_proj, indexer.compressor
-        # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm because of hang issues.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = make_deepseek_v4_aux_streams()
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.

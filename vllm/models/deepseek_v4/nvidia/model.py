@@ -8,7 +8,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -64,26 +63,6 @@ from vllm.models.deepseek_v4.nvidia.ops import prepare_megamoe_inputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
-
-
-def make_deepseek_v4_aux_streams() -> list[torch.cuda.Stream] | None:
-    if current_platform.is_rocm():
-        if (
-            not envs.VLLM_ROCM_DSV4_CSA_MULTISTREAM
-            or envs.VLLM_ROCM_DSV4_CSA_MS_STRATEGY.lower() == "off"
-        ):
-            return None
-        # ROCm uses five streams for DeepSeek-V4 decode overlap: three
-        # top-level preparation branches and two C4-indexer sub-branches:
-        # [0] main KV cache insert, [1] main compressor, [2] C4 indexer,
-        # [3] indexer Q branch, [4] indexer weights branch.
-        return [
-            torch.cuda.Stream(priority=envs.VLLM_ROCM_DSV4_CSA_MS_AUX_PRIORITY)
-            for _ in range(5)
-        ]
-    if current_platform.is_xpu():
-        return None
-    return [torch.cuda.Stream() for _ in range(3)]
 
 
 class DeepseekV4MLP(nn.Module):
@@ -801,28 +780,11 @@ class DeepseekV4Attention(nn.Module):
         self.indexer = None
         if self.compress_ratio == 4:
             # Only C4A uses sparse attention and hence has indexer.
-            # NVIDIA uses aux_stream_list[2] for the legacy inner overlap.
-            # ROCm decode overlap uses aux_stream_list[3:5] for the C4 indexer
-            # q/weights sub-branches while the outer indexer branch runs on
-            # aux_stream_list[2].
-            if (
-                current_platform.is_rocm()
-                and aux_stream_list is not None
-                and len(aux_stream_list) >= 5
-            ):
-                indexer_aux_stream = aux_stream_list[3]
-            else:
-                indexer_aux_stream = (
-                    aux_stream_list[2] if aux_stream_list is not None else None
-                )
-            indexer_aux_streams = (
-                aux_stream_list[3:5]
-                if (
-                    current_platform.is_rocm()
-                    and aux_stream_list is not None
-                    and len(aux_stream_list) >= 5
-                )
-                else None
+            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
+            # free here (outer GEMMs joined) for the inner overlap of
+            # wq_b+fused_indexer_q_rope_quant vs compressor.
+            indexer_aux_stream = (
+                aux_stream_list[2] if aux_stream_list is not None else None
             )
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
@@ -835,7 +797,6 @@ class DeepseekV4Attention(nn.Module):
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
                 aux_stream=indexer_aux_stream,
-                aux_streams=indexer_aux_streams,
             )
 
         mla_modules = DeepseekV4MLAModules(
@@ -1133,7 +1094,16 @@ class DeepseekV4Model(nn.Module):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        aux_stream_list = make_deepseek_v4_aux_streams()
+        # Three aux streams: one per non-default input GEMM in
+        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
+        # (compressor kv_score, indexer.weights_proj, indexer.compressor
+        # kv_score). fused_wqa_wkv stays on the default stream.
+        # Disable them on ROCm / XPU because of hang issues / no overlap.
+        aux_stream_list = (
+            None
+            if current_platform.is_rocm() or current_platform.is_xpu()
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
