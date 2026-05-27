@@ -3,9 +3,10 @@
 
 import ast
 import json
-import re
 from collections.abc import Sequence
 from typing import Any
+
+import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
