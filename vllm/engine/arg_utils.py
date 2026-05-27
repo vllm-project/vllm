@@ -712,7 +712,7 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
+    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1527,7 +1527,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton"],
+            choices=["flashinfer", "triton", "cutedsl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2439,6 +2439,39 @@ class EngineArgs:
             self.reasoning_config = ReasoningConfig()
         self.reasoning_config.reasoning_parser = self.reasoning_parser
 
+    @staticmethod
+    def _get_min_mm_batched_tokens(
+        model_config: ModelConfig,
+    ) -> tuple[int, str] | None:
+        """Get the minimum max_num_batched_tokens needed for a multimodal
+        prefix-LM model to process at least one item of any supported modality.
+
+        Returns (token_count, modality_name) for the most expensive modality,
+        or None if the value cannot be determined at this stage.
+        """
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            # get_processing_info returns the model's multimodal processing
+            # metadata (supported modalities, token limits) without loading
+            # model weights or generating dummy data.
+            info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+            mm_counts = {modality: 1 for modality in info.supported_mm_limits}
+            # get_mm_max_tokens_per_item returns pre-computed per-item token
+            # ceilings for models that override it (e.g., Gemma4), or None
+            # for models that rely on dummy-input profiling. When None is
+            # returned we bail out — no dummy generation is triggered here.
+            max_tokens = info.get_mm_max_tokens_per_item(
+                seq_len=model_config.max_model_len,
+                mm_counts=mm_counts,
+            )
+            if max_tokens is not None:
+                modality = max(max_tokens, key=max_tokens.__getitem__)
+                return (max_tokens[modality], modality)
+        except Exception as e:
+            logger.warning("Failed to determine min multimodal batched tokens: %s", e)
+        return None
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
@@ -2488,6 +2521,23 @@ class EngineArgs:
                     model_config.max_model_len,
                     self.max_num_batched_tokens,
                 )
+
+            # For multimodal prefix-LM models (e.g., Gemma 4) that disable
+            # chunked MM input, a single multimodal item must fit in one batch.
+            # Raise the floor to accommodate the largest per-item token count.
+            if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
+                result = self._get_min_mm_batched_tokens(model_config)
+                if result is not None and result[0] > self.max_num_batched_tokens:
+                    mm_min, modality = result
+                    logger.info(
+                        "Raising max_num_batched_tokens from %d to %d to "
+                        "accommodate '%s' input for prefix-LM model %s.",
+                        self.max_num_batched_tokens,
+                        mm_min,
+                        modality,
+                        model_config.model,
+                    )
+                    self.max_num_batched_tokens = mm_min
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
