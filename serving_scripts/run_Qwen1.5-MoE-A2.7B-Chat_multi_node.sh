@@ -173,7 +173,7 @@ export RAY_raylet_start_wait_time_s="${RAY_raylet_start_wait_time_s:-180}"
 # Useful when Nsight overhead makes Ray compiled graph waits too aggressive.
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-900}"
 
-export RAY_PORT="${RAY_PORT:-6378}"
+export RAY_PORT="${RAY_PORT:-$((6300 + (${SLURM_JOB_ID:-0} % 1000)))}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
 
