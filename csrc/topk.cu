@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #ifndef USE_ROCM
-  #include "persistent_topk.cuh"
+  #include "cooperative_topk.cuh"
 #endif
 namespace ct = vllm::cooperative;
 
