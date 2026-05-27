@@ -12,6 +12,9 @@
     #include <hip/hip_bf16.h>
 #endif
 #include <cuda_fp16.h>
+
+#include <torch/headeronly/util/Half.h>
+#include <torch/headeronly/util/BFloat16.h>
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct SSMParamsBase {
@@ -159,8 +162,8 @@ struct Converter{
 };
 
 template<int N>
-struct Converter<at::Half, N>{
-    static inline __device__ void to_float(const at::Half (&src)[N], float (&dst)[N]) {
+struct Converter<torch::headeronly::Half, N>{
+    static inline __device__ void to_float(const torch::headeronly::Half (&src)[N], float (&dst)[N]) {
         static_assert(N % 2 == 0);
         auto &src2 = reinterpret_cast<const half2 (&)[N / 2]>(src);
         auto &dst2 = reinterpret_cast<float2 (&)[N / 2]>(dst);
@@ -171,8 +174,8 @@ struct Converter<at::Half, N>{
 
 #if __CUDA_ARCH__ >= 800
 template<int N>
-struct Converter<at::BFloat16, N>{
-    static inline __device__ void to_float(const at::BFloat16 (&src)[N], float (&dst)[N]) {
+struct Converter<torch::headeronly::BFloat16, N>{
+    static inline __device__ void to_float(const torch::headeronly::BFloat16 (&src)[N], float (&dst)[N]) {
         static_assert(N % 2 == 0);
         auto &src2 = reinterpret_cast<const nv_bfloat162 (&)[N / 2]>(src);
         auto &dst2 = reinterpret_cast<float2 (&)[N / 2]>(dst);
