@@ -516,7 +516,7 @@ __device__ void register_topk(const float* __restrict__ scores,
   const auto [thr_bin, num_above, num_equal] = smem->match;
   const bool need_tie = (num_equal + num_above > TopK);
 
-  bool done = false;
+  done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
     const float* elems = reinterpret_cast<const float*>(&vecs[v]);

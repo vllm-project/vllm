@@ -40,6 +40,7 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   const int64_t num_rows = logits.size(0);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  const uint32_t stride = static_cast<uint32_t>(logits.stride(0));
   // 32 = max clusters for CS=4 (32 x 4 = 128 CTAs = 66% of SMs, leaves
   // headroom)
   if (num_rows > 32) {
@@ -47,11 +48,18 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
         vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
             logits.data_ptr<float>(), output.data_ptr<int32_t>(),
             lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows), TopK,
-            static_cast<uint32_t>(logits.size(1)), stream);
+            stride, stream);
     TORCH_CHECK(status == cudaSuccess,
                 "FilteredTopK failed: ", cudaGetErrorString(status));
     return;
   }
+
+  // TODO (roberto): TMA (cp.aync.bulk) requires the source address to be 16-byte aligned
+  // instead of exiting otherwise, we can either fallback to persistent topk v1, add padding 
+  // to the logits tensor, or use FilteredTopKRaggedTransform (probably not recommended)
+  TORCH_CHECK(num_rows <= 1 || stride % 4 == 0,
+              "cooperative_topk: stride must be multiple of 4 for TMA "
+              "alignment with bs>1, got stride (max_model_len)=", stride);
 
   TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
   TORCH_CHECK(workspace.dtype() == torch::kUInt8, "workspace must be uint8");
@@ -61,7 +69,7 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   params.output = output.data_ptr<int32_t>();
   params.lengths = lengths.data_ptr<int32_t>();
   params.num_rows = static_cast<uint32_t>(num_rows);
-  params.stride = static_cast<uint32_t>(logits.size(1));
+  params.stride = stride;
   params.tie_ws = reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>());
 
   // TODO (roberto): can't the workspace size be smaller now? - only used in
@@ -79,7 +87,7 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
 }
 #endif  // USE_ROCM
 
-void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+void cooperative_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
                      int64_t max_seq_len) {
 #ifndef USE_ROCM
