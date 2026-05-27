@@ -43,7 +43,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe.minimax_m2_kernels import (
+from vllm.model_executor.layers.fused_moe.topk_quant_kernels import (
     minimax_moe_topk_sigmoid_quant_dispatch,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
