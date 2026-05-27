@@ -1151,7 +1151,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
-    def _is_glmga_model(processor: object) -> bool:
+    def _is_glmga_model(self, processor: object) -> bool:
         """Detect GLMGA variant via its Glmga sub-processors."""
         for attr in ("image_processor", "video_processor"):
             sub = getattr(processor, attr, None)
