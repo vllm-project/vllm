@@ -882,7 +882,7 @@ class OffloadingConnectorScheduler:
         req_context = (
             req_status.req_context if req_status else _create_req_context(request)
         )
-        self.manager.request_finished(req_context)
+        self.manager.on_request_finished(req_context)
 
         if req_status is None:
             return False, None

@@ -416,12 +416,12 @@ class TestTieringOffloadingManager:
 
     def test_get_request_offloading_context_lifecycle(self, manager_setup):
         """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
-        and is cleaned up on request_finished."""
+        and is cleaned up on on_request_finished."""
         # Default: all tiers return BLOCK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
         result = self.manager.get_request_offloading_context(ctx)
         assert result.policy == OffloadPolicy.BLOCK_LEVEL
-        self.manager.request_finished(ctx)
+        self.manager.on_request_finished(ctx)
 
         # Escalate: tier1 requests REQUEST_LEVEL
         self.secondary_tier1.get_request_offloading_context = (
@@ -436,7 +436,7 @@ class TestTieringOffloadingManager:
         assert ctx.req_id in self.manager._request_level_tiers
 
         # Cleanup
-        self.manager.request_finished(ctx)
+        self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._request_level_tiers
 
     def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(

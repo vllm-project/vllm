@@ -239,7 +239,7 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def request_finished(self, req_context: ReqContext) -> None:
+    def on_request_finished(self, req_context: ReqContext) -> None:
         """
         Called when a request has finished.
 

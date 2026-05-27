@@ -162,7 +162,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Per-request set of secondary tiers that requested REQUEST_LEVEL
         # policy. Populated in get_request_offloading_context(),
-        # cleaned up in request_finished().
+        # cleaned up in on_request_finished().
         self._request_level_tiers: dict[str, set[SecondaryTierManager]] = {}
 
     def _next_job_id(self) -> JobId:
@@ -549,10 +549,10 @@ class TieringOffloadingManager(OffloadingManager):
         )
         return RequestOffloadingContext(policy=result_policy)
 
-    def request_finished(self, req_context: ReqContext) -> None:
-        self.primary_tier.request_finished(req_context)
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        self.primary_tier.on_request_finished(req_context)
         for tier in self.secondary_tiers:
-            tier.request_finished(req_context)
+            tier.on_request_finished(req_context)
         self._request_level_tiers.pop(req_context.req_id, None)
 
     def take_events(self) -> Iterable[OffloadingEvent]:
