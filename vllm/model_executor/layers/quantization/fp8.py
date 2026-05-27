@@ -377,6 +377,7 @@ class Fp8LinearMethod(LinearMethodBase):
             scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
+            layer.input_quant_key = kFp8StaticTensorSym
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,

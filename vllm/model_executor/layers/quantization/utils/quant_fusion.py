@@ -17,11 +17,15 @@ def get_static_fp8_attn_output_scale(
     if not getattr(attn, "use_fused_attn_quant", False):
         return None
 
+    if getattr(output_proj, "input_quant_key", None) != kFp8StaticTensorSym:
+        return None
+
+    input_scale = getattr(output_proj, "input_scale", None)
+    if input_scale is None:
+        return None
+
     fused_supported = getattr(attn.impl, "fused_output_quant_supported", None)
     if fused_supported is None or not fused_supported(kFp8StaticTensorSym):
         return None
 
-    if getattr(output_proj, "input_quant_key", None) != kFp8StaticTensorSym:
-        return None
-
-    return getattr(output_proj, "input_scale", None)
+    return input_scale

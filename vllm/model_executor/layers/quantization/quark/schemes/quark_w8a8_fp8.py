@@ -175,6 +175,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             )
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
+            layer.input_quant_key = kFp8StaticTensorSym
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
