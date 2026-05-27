@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 
 from vllm.models.deepseek_v4 import attention as dsv4_attention
 from vllm.models.deepseek_v4.amd import model as dsv4_model
@@ -12,63 +15,161 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def test_deepseek_v4_rocm_aux_streams_enabled(monkeypatch):
-    streams = [object(), object(), object(), object(), object()]
-
-    def make_stream(**kwargs):
-        assert kwargs == {"priority": -1}
-        return streams.pop()
-
-    monkeypatch.setattr(dsv4_model.torch.cuda, "Stream", make_stream)
-
+def test_deepseek_v4_rocm_aux_streams_enabled():
     aux_streams = dsv4_model.make_deepseek_v4_aux_streams()
 
     assert aux_streams is not None
     assert len(aux_streams) == 5
+    assert all(stream.priority == -1 for stream in aux_streams)
 
 
-class _Metadata:
-    def __init__(
-        self,
-        num_decodes: int,
-        num_decode_tokens: int,
-        num_prefill_tokens: int = 0,
-    ):
-        self.num_decodes = num_decodes
-        self.num_decode_tokens = num_decode_tokens
-        self.num_prefill_tokens = num_prefill_tokens
-
-
-def _rocm_ms_strategy_for_decodes(
-    monkeypatch,
-    num_decodes: int,
+def _swa_metadata(
+    num_decode_tokens: int,
     num_prefill_tokens: int = 0,
-) -> str:
+) -> dsv4_attention.DeepseekSparseSWAMetadata:
+    return dsv4_attention.DeepseekSparseSWAMetadata(
+        block_table=torch.empty(0, dtype=torch.int32),
+        slot_mapping=torch.empty(0, dtype=torch.int64),
+        block_size=256,
+        num_decodes=num_decode_tokens,
+        num_decode_tokens=num_decode_tokens,
+        num_prefill_tokens=num_prefill_tokens,
+    )
+
+
+def _use_rocm_multistream(
+    cudagraph_runtime_mode: dsv4_attention.CUDAGraphMode,
+    metadata: dsv4_attention.DeepseekSparseSWAMetadata,
+) -> bool:
     class _ForwardContext:
-        cudagraph_runtime_mode = dsv4_attention.CUDAGraphMode.PIECEWISE
+        pass
 
     class _Wrapper:
         aux_stream_list = [object(), object(), object(), object(), object()]
-        indexer = object()
 
-    monkeypatch.setattr(dsv4_attention, "DeepseekSparseSWAMetadata", _Metadata)
-    attn_metadata = {
-        "layer_0.swa": _Metadata(num_decodes, num_decodes, num_prefill_tokens)
-    }
+    forward_context = _ForwardContext()
+    forward_context.cudagraph_runtime_mode = cudagraph_runtime_mode
+    attn_metadata = {"layer_0.swa": metadata}
 
     wrapper_cls = dsv4_attention.DeepseekV4MultiHeadLatentAttentionWrapper
-    method = wrapper_cls._rocm_csa_ms_strategy_for_step
-    return method(_Wrapper(), _ForwardContext(), attn_metadata)
+    method = wrapper_cls._use_rocm_csa_multistream
+    return method(_Wrapper(), forward_context, attn_metadata)
 
 
-def test_deepseek_v4_rocm_multistream_all_decode_counts(monkeypatch):
-    assert _rocm_ms_strategy_for_decodes(monkeypatch, 4) == "overlap"
-    assert _rocm_ms_strategy_for_decodes(monkeypatch, 64) == "overlap"
-    assert _rocm_ms_strategy_for_decodes(monkeypatch, 128) == "overlap"
-    assert _rocm_ms_strategy_for_decodes(monkeypatch, 512) == "overlap"
+def test_deepseek_v4_rocm_multistream_decode_policy():
+    decode_metadata = _swa_metadata(num_decode_tokens=4)
+
+    assert (
+        _use_rocm_multistream(dsv4_attention.CUDAGraphMode.NONE, decode_metadata)
+        is True
+    )
+    assert (
+        _use_rocm_multistream(dsv4_attention.CUDAGraphMode.PIECEWISE, decode_metadata)
+        is True
+    )
+    assert (
+        _use_rocm_multistream(dsv4_attention.CUDAGraphMode.FULL, decode_metadata)
+        is False
+    )
+
+    mixed_metadata = _swa_metadata(num_decode_tokens=4, num_prefill_tokens=1)
+    assert (
+        _use_rocm_multistream(dsv4_attention.CUDAGraphMode.PIECEWISE, mixed_metadata)
+        is False
+    )
 
 
-def test_deepseek_v4_rocm_multistream_prefill_stays_off(monkeypatch):
-    strategy = _rocm_ms_strategy_for_decodes(monkeypatch, 4, num_prefill_tokens=1)
+def test_deepseek_v4_rocm_post_rmsnorm_stream_mapping(monkeypatch):
+    calls = []
+    streams = [object(), object(), object(), object(), object()]
 
-    assert strategy == "off"
+    def fake_execute_in_parallel(
+        default_fn,
+        aux_fns,
+        start_event,
+        done_events,
+        aux_streams,
+        enable=False,
+    ):
+        assert enable is True
+        assert aux_streams == [streams[2], streams[1]]
+        assert len(aux_fns) == 2
+        assert aux_fns[0] is None
+        assert aux_fns[1] is not None
+
+        q = default_fn()
+        compressor_result = aux_fns[1]()
+        return q, [None, compressor_result]
+
+    monkeypatch.setattr(dsv4_attention, "execute_in_parallel", fake_execute_in_parallel)
+
+    class _WqB:
+        def __call__(self, qr):
+            calls.append("wq_b")
+            return torch.empty((qr.shape[0], 3))
+
+    class _Indexer:
+        def __call__(
+            self,
+            hidden_states,
+            qr,
+            indexer_kv_score,
+            indexer_weights,
+            positions,
+            rotary_emb,
+            use_aux_stream=True,
+        ):
+            calls.append(("indexer", use_aux_stream))
+            return object()
+
+    class _Compressor:
+        def __call__(self, kv_score, positions, rotary_emb):
+            calls.append("compressor")
+            return object()
+
+    wrapper = SimpleNamespace(
+        wq_b=_WqB(),
+        indexer=_Indexer(),
+        compressor=_Compressor(),
+        n_local_heads=1,
+        head_dim=3,
+        indexer_rotary_emb=object(),
+        rotary_emb=object(),
+        ln_events=[object(), object(), object()],
+    )
+
+    def fake_kv_insert(q, kv, positions, attn_metadata):
+        calls.append("kv_insert")
+        return q
+
+    def fail_project_compressor_kv_score(hidden_states, compressor):
+        raise AssertionError("kv_score should be reused in this test")
+
+    wrapper._fused_qnorm_rope_kv_insert = fake_kv_insert
+    wrapper._project_compressor_kv_score = fail_project_compressor_kv_score
+
+    hidden_states = torch.empty((2, 3))
+    qr = torch.empty((2, 3))
+    kv = torch.empty((2, 3))
+    positions = torch.empty(2, dtype=torch.int64)
+    kv_score = torch.empty((2, 3))
+    indexer_kv_score = torch.empty((2, 3))
+    indexer_weights = torch.empty((2, 3))
+
+    method = dsv4_attention.DeepseekV4MultiHeadLatentAttentionWrapper
+    q = method._post_rmsnorm_prepare(
+        wrapper,
+        hidden_states,
+        qr,
+        kv,
+        kv_score,
+        indexer_kv_score,
+        indexer_weights,
+        positions,
+        None,
+        streams,
+        True,
+    )
+
+    assert q.shape == (2, 1, 3)
+    assert calls == ["wq_b", "kv_insert", "compressor", ("indexer", False)]
