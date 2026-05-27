@@ -33,13 +33,15 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
 
 template <uint32_t TopK>
 void launch_cooperative_topk_impl(const torch::Tensor& logits,
-                              const torch::Tensor& lengths,
-                              torch::Tensor& output, torch::Tensor& workspace,
-                              int64_t max_seq_len) {
+                                  const torch::Tensor& lengths,
+                                  torch::Tensor& output,
+                                  torch::Tensor& workspace,
+                                  int64_t max_seq_len) {
   const int64_t num_rows = logits.size(0);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  // 32 = max clusters for CS=4 (32 x 4 = 128 CTAs = 66% of SMs, leaves headroom)
+  // 32 = max clusters for CS=4 (32 x 4 = 128 CTAs = 66% of SMs, leaves
+  // headroom)
   if (num_rows > 32) {
     cudaError_t status =
         vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
@@ -60,10 +62,10 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
   params.lengths = lengths.data_ptr<int32_t>();
   params.num_rows = static_cast<uint32_t>(num_rows);
   params.stride = static_cast<uint32_t>(logits.size(1));
-  params.tie_ws =
-      reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>());
+  params.tie_ws = reinterpret_cast<ct::Tie*>(workspace.data_ptr<uint8_t>());
 
-  // TODO (roberto): can't the workspace size be smaller now? - only used in large_topk_twopass
+  // TODO (roberto): can't the workspace size be smaller now? - only used in
+  // large_topk_twopass
   TORCH_CHECK(
       workspace.size(0) >=
           static_cast<int64_t>(num_rows * ct::kMaxTies * sizeof(ct::Tie)),
@@ -77,11 +79,10 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
 }
 #endif  // USE_ROCM
 
-void persistent_topk(const torch::Tensor& logits,
-                         const torch::Tensor& lengths, torch::Tensor& output,
-                         torch::Tensor& workspace, int64_t k,
-                         int64_t max_seq_len) {
-  #ifndef USE_ROCM
+void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len) {
+#ifndef USE_ROCM
   TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
@@ -102,16 +103,15 @@ void persistent_topk(const torch::Tensor& logits,
 
   if (k == 512) {
     launch_cooperative_topk_impl<512>(logits, lengths, output, workspace,
-                                  max_seq_len);
+                                      max_seq_len);
   } else if (k == 1024) {
     launch_cooperative_topk_impl<1024>(logits, lengths, output, workspace,
-                                   max_seq_len);
+                                       max_seq_len);
   } else {
     launch_cooperative_topk_impl<2048>(logits, lengths, output, workspace,
-                                   max_seq_len);
+                                       max_seq_len);
   }
-  #else
+#else
   TORCH_CHECK(false, "cooperative_topk is not supported on ROCm");
-  #endif
+#endif
 }
-
