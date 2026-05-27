@@ -676,7 +676,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     sublayer_name = "w2" if shard_id == "w2" else "w13"
 
                     param = getattr(layer, sublayer_name + "_" + key)
-                    part_subccess = param.weight_loader(
+                    part_success = param.weight_loader(
                         param=param,
                         loaded_weight=tensor.cpu(),
                         weight_name=shard_id + "_" + key,
@@ -684,7 +684,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                         expert_id=expert_id,
                         return_success=return_success,
                     )
-                    success = success and part_subccess
+                    success = success and part_success
 
                 return success if return_success else None
 

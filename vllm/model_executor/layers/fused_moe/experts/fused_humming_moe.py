@@ -264,9 +264,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         torch_dtype_map = {
             dtypes.float16: torch.float16,
             dtypes.bfloat16: torch.bfloat16,
+            dtypes.float32: torch.float32,
             dtypes.float8e4m3: torch.float8_e4m3fn,
+            dtypes.float8e5m2: torch.float8_e5m2,
             dtypes.int8: torch.int8,
             dtypes.int4: torch.uint8,
+            dtypes.int16: torch.int16,
         }
 
         buffer_metas = {
@@ -299,7 +302,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         for key in buffer_metas:
             meta = buffer_metas[key]
             if "quanted" in key and a_dtype.num_bits == 4:
-                meta["shape"] = meta["shape"][:-1] + (meta["shape"][-1] // 2,)
+                last_dim = meta["shape"][-1]
+                if last_dim % 2 != 0:
+                    raise ValueError(
+                        f"Int4 packing requires last dimension to be even, "
+                        f"got {last_dim} for buffer '{key}'"
+                    )
+                meta["shape"] = meta["shape"][:-1] + (last_dim // 2,)
 
         if num_bits == 16:
             required_buffers = ["gate_up_output", "activation_output", "down_output"]
@@ -335,8 +344,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         output_key = "down_output" if self.is_batched() else "output"
         output_shape = buffer_metas[output_key]["shape"]
+        elem_size = self.layer.param_dtype.itemsize
 
-        return (workspace1_nbytes // 2,), (workspace2_nbytes // 2,), output_shape
+        return (
+            (workspace1_nbytes // elem_size,),
+            (workspace2_nbytes // elem_size,),
+            output_shape,
+        )
 
     def workspace_shapes(
         self,
@@ -443,12 +457,18 @@ class HummingIndexedExperts(HummingExpertsBase):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
 
+        moe_block_size = None
         for min_shape_m, max_shape_m, config in self.w13_tuning_config:
             if valid_shape_m > min_shape_m and valid_shape_m <= max_shape_m:
                 moe_block_size = config["block_shape"][0]
                 break
-        else:
-            raise ValueError(f"cannot found moe_block_size for shape {valid_shape_m}")
+
+        if moe_block_size is None:
+            logger.warning(
+                "No tuning config found for shape %s, using default block_size=64",
+                valid_shape_m,
+            )
+            moe_block_size = 64
 
         sorted_ids, expert_ids, num_tokens_padded = moe_align_block_size(
             topk_ids=topk_ids,
