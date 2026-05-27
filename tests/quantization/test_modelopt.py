@@ -7,13 +7,24 @@ Run `pytest tests/quantization/test_modelopt.py`.
 
 import os
 from typing import Any, NoReturn
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.config.model import ModelConfig
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptFp8Config,
+    ModelOptMixedPrecisionConfig,
+    ModelOptNvFp4Config,
+    ModelOptNvFp4LinearMethod,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -42,6 +53,87 @@ def _snapshot_download_or_skip(model_id: str) -> str:
         )
     except Exception as e:
         _skip(f"Failed to download {model_id} from the HF Hub: {e}")
+
+
+def _mock_lm_head() -> Mock:
+    lm_head = Mock(spec=ParallelLMHead)
+    lm_head.__class__ = ParallelLMHead
+    return lm_head
+
+
+def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
+    return ModelOptMixedPrecisionConfig(
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+        quantized_layers=quantized_layers,
+        fp8_config=ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        ),
+        nvfp4_config=ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        w4a16_nvfp4_config=ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+    )
+
+
+def test_modelopt_nvfp4_quantizes_parallel_lm_head():
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
+    ):
+        method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+
+    assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=["lm_head"],
+    )
+
+    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
+    config = _mixed_precision_config(
+        {"lm_head": {"quant_algo": "NVFP4", "group_size": 16}}
+    )
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
+    ):
+        method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+
+    assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
+    holder = Mock()
+    scale = torch.nn.Parameter(torch.empty(1))
+    loaded_scale = torch.tensor(2.0)
+
+    VocabParallelEmbedding.weight_loader(holder, scale, loaded_scale)
+
+    assert torch.equal(scale, loaded_scale.reshape(1))
 
 
 @pytest.mark.skipif(
