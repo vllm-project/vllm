@@ -8,6 +8,7 @@ from importlib.util import find_spec
 import torch
 import torch.nn.functional as F
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -143,35 +144,57 @@ def _cp_gather_indexer_quant_cache_kernel(
     HEAD_DIM: tl.constexpr,
     BLOCK_TILE_SIZE: tl.constexpr,
     HEAD_TILE_SIZE: tl.constexpr,
+    NUM_TOKENS: tl.constexpr,
+    NUM_BATCHES: tl.constexpr,
+    BLOCK_TABLE_WIDTH: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
 ):
     tid = tl.program_id(0)
     offset = tl.arange(0, HEAD_DIM)
-    batch_id = tl.load(token_to_seq_ptr + tid)
-    batch_start = tl.load(cu_seqlen_ptr + batch_id)
-    batch_end = tl.load(cu_seqlen_ptr + batch_id + 1)
+    valid_tid = tid < NUM_TOKENS
+    batch_id = tl.load(token_to_seq_ptr + tid, mask=valid_tid, other=-1)
+    valid_batch = (batch_id >= 0) & (batch_id < NUM_BATCHES)
+    safe_batch_id = tl.where(valid_batch, batch_id, 0)
+    batch_start = tl.load(cu_seqlen_ptr + safe_batch_id, mask=valid_batch, other=0)
+    batch_end = tl.load(cu_seqlen_ptr + safe_batch_id + 1, mask=valid_batch, other=0)
     batch_offset = tid - batch_start
-    if tid >= batch_end:
+    valid_token = valid_tid & valid_batch & (tid >= batch_start) & (tid < batch_end)
+    if not valid_token:
         return
     block_table_id = batch_offset // block_size
     block_offset = batch_offset % block_size
-    block_table_offset = batch_id * block_table_stride + block_table_id
-    block_id = tl.load(block_table_ptr + block_table_offset)
-    tiled_block_id = block_offset // BLOCK_TILE_SIZE
-    tiled_block_offset = block_offset % BLOCK_TILE_SIZE
+    valid_block_table = (
+        valid_token
+        & (block_table_id >= 0)
+        & (block_table_id < BLOCK_TABLE_WIDTH)
+        & (block_offset >= 0)
+        & (block_offset < block_size)
+    )
+    safe_block_table_id = tl.where(valid_block_table, block_table_id, 0)
+    block_table_offset = safe_batch_id * block_table_stride + safe_block_table_id
+    block_id = tl.load(
+        block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
+    )
+    valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
+    safe_block_id = tl.where(valid_block, block_id, 0)
+    safe_block_offset = tl.where(valid_block, block_offset, 0)
+    tiled_block_offset = safe_block_offset % BLOCK_TILE_SIZE
     if LAYOUT == "SHUFFLE":
         src_cache_offset = (
-            block_id * kv_cache_stride
-            + tiled_block_id * HEAD_DIM * BLOCK_TILE_SIZE
+            safe_block_id * kv_cache_stride
+            + (safe_block_offset // BLOCK_TILE_SIZE) * HEAD_DIM * BLOCK_TILE_SIZE
             + tiled_block_offset * HEAD_TILE_SIZE
         )
     else:
-        src_cache_offset = block_id * kv_cache_stride + block_offset * HEAD_DIM
-    src_scale_offset = block_id * kv_cache_scale_stride + block_offset
+        src_cache_offset = (
+            safe_block_id * kv_cache_stride + safe_block_offset * HEAD_DIM
+        )
+    src_scale_offset = safe_block_id * kv_cache_scale_stride + safe_block_offset
     dst_offset = tid * HEAD_DIM
     src_scale_ptr = kv_cache_scale_ptr + src_scale_offset
     src_cache_ptr = kv_cache_ptr + src_cache_offset
     dst_k_ptr = k_fp8_ptr + dst_offset
-    scale_val = tl.load(src_scale_ptr)
+    scale_val = tl.load(src_scale_ptr, mask=valid_block, other=0.0)
     tl.store(k_scale_ptr + tid, scale_val)
     if LAYOUT == "SHUFFLE":
         tiled_src_offset = (
@@ -181,7 +204,7 @@ def _cp_gather_indexer_quant_cache_kernel(
     else:
         tiled_src_offset = offset
     val = tl.load(src_cache_ptr + tiled_src_offset)
-    tl.store(dst_k_ptr + offset, val)
+    tl.store(dst_k_ptr + offset, val, mask=valid_block)
 
 
 def cp_gather_indexer_k_quant_cache_triton(
@@ -222,6 +245,10 @@ def cp_gather_indexer_k_quant_cache_triton(
         head_dim,
         block_tile_size,
         head_tile_size,
+        num_tokens,
+        cu_seqlen.shape[0] - 1,
+        block_table.shape[1],
+        num_blocks,
     )
 
 
@@ -467,12 +494,13 @@ def fp8_mqa_logits_torch(
     seq_len_kv = k_fp8.shape[0]
     k = k_fp8.to(torch.bfloat16)
     q = q.to(torch.bfloat16)
+    device = q.device
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -541,7 +569,11 @@ def rocm_fp8_mqa_logits(
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
-def _topk_indices_torch(logits: torch.Tensor, topk_tokens: int) -> torch.Tensor:
+def _topk_indices_torch(
+    logits: torch.Tensor,
+    topk_tokens: int,
+    row_starts: torch.Tensor | None = None,
+) -> torch.Tensor:
     k = min(topk_tokens, logits.shape[-1])
     values, indices = torch.topk(logits, k=k, dim=-1)
     indices = indices.to(torch.int32)
@@ -550,6 +582,12 @@ def _topk_indices_torch(logits: torch.Tensor, topk_tokens: int) -> torch.Tensor:
         torch.full_like(indices, -1, dtype=torch.int32),
         indices,
     )
+    if row_starts is not None:
+        # Match the CUDA top_k_per_row_prefill contract: indices are local to
+        # each row's valid [row_start, row_end) range, not columns in the
+        # concatenated chunk logits matrix.
+        starts = row_starts.to(dtype=torch.int32).view(-1, 1)
+        indices = torch.where(indices < 0, indices, indices - starts)
     if k == topk_tokens:
         return indices
     padded = torch.full(
@@ -576,21 +614,13 @@ def rocm_aiter_sparse_attn_indexer_fake(
     max_model_len: int,
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
+    skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
-    # profile run
-    # NOTE(Chen): create the max possible flattened_kv. So that
-    # profile_run can get correct memory usage.
-    device = hidden_states.device if k is None else k.device
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=device, dtype=torch.uint8
-    )
-    fp8_dtype = current_platform.fp8_dtype()
-    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
-    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
 
-def rocm_aiter_sparse_attn_indexer_native(
+@eager_break_during_capture
+def rocm_aiter_sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
     kv_cache: torch.Tensor,
@@ -629,6 +659,7 @@ def rocm_aiter_sparse_attn_indexer_native(
             max_model_len,
             total_seq_lens,
             topk_indices_buffer,
+            skip_k_cache_insert,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -709,7 +740,19 @@ def rocm_aiter_sparse_attn_indexer_native(
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-            topk_indices.copy_(_topk_indices_torch(logits, topk_tokens))
+
+            num_rows = logits.shape[0]
+
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -746,14 +789,25 @@ def rocm_aiter_sparse_attn_indexer_native(
             max_model_len=max_model_len,
         )
 
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-        topk_indices.copy_(_topk_indices_torch(logits, topk_tokens)[:num_decode_tokens])
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        num_rows = logits.shape[0]
+
+        torch.ops._C.top_k_per_row_decode(
+            logits,
+            next_n,
+            decode_metadata.seq_lens,
+            topk_indices,
+            num_rows,
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
+                topk_indices.reshape(batch_size, next_n, topk_indices.shape[-1]),
                 decode_lens,
             )
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
@@ -761,39 +815,6 @@ def rocm_aiter_sparse_attn_indexer_native(
             )
 
     return topk_indices_buffer
-
-
-def rocm_aiter_sparse_attn_indexer(
-    hidden_states: torch.Tensor,
-    k_cache_prefix: LayerNameType,
-    kv_cache: torch.Tensor,
-    q_fp8: torch.Tensor,
-    k: torch.Tensor,
-    weights: torch.Tensor,
-    quant_block_size: int,
-    scale_fmt: str | None,
-    topk_tokens: int,
-    head_dim: int,
-    max_model_len: int,
-    total_seq_lens: int,
-    topk_indices_buffer: torch.Tensor | None,
-) -> torch.Tensor:
-    return rocm_aiter_sparse_attn_indexer_native(
-        hidden_states,
-        k_cache_prefix,
-        kv_cache,
-        q_fp8,
-        k,
-        weights,
-        quant_block_size,
-        scale_fmt,
-        topk_tokens,
-        head_dim,
-        max_model_len,
-        total_seq_lens,
-        topk_indices_buffer,
-        skip_k_cache_insert=False,
-    )
 
 
 def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
@@ -948,8 +969,9 @@ def _pack_dense_prefix_to_ragged_kernel(
         return
 
     mask = offsets < row_len
+    safe_offsets = tl.where(offsets < row_width, offsets, 0)
     vals = tl.load(
-        indices_ptr + row_idx * indices_stride0 + offsets,
+        indices_ptr + row_idx * indices_stride0 + safe_offsets,
         mask=mask & (offsets < row_width),
         other=-1,
     ).to(tl.int32)
@@ -1065,9 +1087,12 @@ def _sparse_attn_prefill_ragged_kernel(
         in_range = k_pos < kv_len
         slot = tl.load(kv_indices_ptr + kv_start + k_pos, mask=in_range, other=-1)
         valid = in_range & (slot >= 0) & (slot < num_kv)
+        safe_slot = tl.where(valid, slot, 0)
 
         kv = tl.load(
-            kv_ptr + slot[:, None] * kv_stride_n + dim_offsets[None, :] * kv_stride_d,
+            kv_ptr
+            + safe_slot[:, None] * kv_stride_n
+            + dim_offsets[None, :] * kv_stride_d,
             mask=valid[:, None] & dim_mask[None, :],
             other=0.0,
         )
@@ -1361,7 +1386,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
     assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
     assert indptr.ndim == 1, f"expected indptr=[sq+1], got {indptr.shape}"
-    assert q.is_cuda and kv.is_cuda and indices.is_cuda and indptr.is_cuda
+    assert not q.is_cpu and not kv.is_cpu and not indices.is_cpu and not indptr.is_cpu
 
     indices = _as_int32_contiguous_1d(indices)
     indptr = _as_int32_contiguous_1d(indptr)
@@ -1465,10 +1490,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     )
     assert main_indptr.ndim == 1, f"expected main_indptr=[b+1], got {main_indptr.shape}"
     assert (
-        q.is_cuda
-        and main_cache.is_cuda
-        and main_indices.is_cuda
-        and main_indptr.is_cuda
+        not q.is_cpu
+        and not main_cache.is_cpu
+        and not main_indices.is_cpu
+        and not main_indptr.is_cpu
     )
 
     main_indices = _as_int32_contiguous_1d(main_indices)
