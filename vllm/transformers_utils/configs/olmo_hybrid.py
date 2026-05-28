@@ -1,8 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
+
+
+def _normalize_rope_parameters(
+    rope_parameters: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if rope_parameters is None:
+        return None
+
+    rope_parameters = dict(rope_parameters)
+    if set(rope_parameters) == {"rope_theta"} and rope_parameters["rope_theta"] is None:
+        return None
+
+    rope_parameters.setdefault("rope_type", "default")
+    return rope_parameters
 
 
 class OlmoHybridConfig(PretrainedConfig):
@@ -284,7 +298,7 @@ class OlmoHybridConfig(PretrainedConfig):
         self.use_cache = use_cache
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
-        self.rope_parameters = rope_parameters
+        self.rope_parameters = _normalize_rope_parameters(rope_parameters)
 
         self.tie_word_embeddings = tie_word_embeddings
         self.pad_token_id = pad_token_id
