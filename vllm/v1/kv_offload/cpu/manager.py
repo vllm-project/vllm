@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from typing import Literal
 
@@ -37,6 +38,8 @@ class CPUOffloadingManager(OffloadingManager):
         num_blocks: int,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
+        store_threshold: int = 1,
+        max_tracker_size: int = 64_000,
     ):
         self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
@@ -50,6 +53,13 @@ class CPUOffloadingManager(OffloadingManager):
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
+        self.store_threshold: int = store_threshold
+        self.max_tracker_size: int = max_tracker_size
+
+        # Number of block references. It is ordered so can evict the LRU entry in O(1).
+        self.counts: OrderedDict[OffloadKey, int] | None = (
+            OrderedDict() if store_threshold >= 2 else None
+        )
 
     # --- block pool ---
 
@@ -85,6 +95,14 @@ class CPUOffloadingManager(OffloadingManager):
     # --- OffloadingManager interface ---
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        if self.counts is not None:
+            if key in self.counts:
+                self.counts.move_to_end(key)
+                self.counts[key] += 1
+            else:
+                if len(self.counts) >= self.max_tracker_size:
+                    self.counts.popitem(last=False)
+                self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
             return False
@@ -123,6 +141,8 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
+        if self.counts is not None:
+            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
@@ -202,6 +222,17 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                 )
             )
+
+    def reset_cache(self) -> None:
+        # Clear ALL blocks unconditionally. The scheduler's _stale_job_threshold
+        # guarantees that complete_load / complete_store are never called for
+        # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
+        # flushes in-flight load job IDs to the workers before any new stores
+        # can begin, preventing a cross-direction data race on reused offload block IDs.
+        self._policy.clear()
+
+        self._free_list.clear()
+        self._num_allocated_blocks = 0
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:

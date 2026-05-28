@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 import torch
 
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
@@ -25,11 +26,74 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _MockCompilationConfig:
+    """Minimal mock for VllmConfig.compilation_config."""
+
+    def __init__(
+        self,
+        token_budgets: list[int] | None = None,
+        max_mm_items: int = 0,
+    ):
+        self.encoder_cudagraph_token_budgets = token_budgets or []
+        self.encoder_cudagraph_max_vision_items_per_batch = max_mm_items
+        self.encoder_cudagraph_max_frames_per_batch = None
+
+
+class _MockMultimodalConfig:
+    mm_encoder_tp_mode = "replicate"
+
+    def get_limit_per_prompt(self, modality: str) -> int:
+        # Image-only mocks — return 0 for "video" to short-circuit the
+        # max_frames_per_batch branch, so tests don't need a video-frame mock.
+        return 0
+
+
+class _MockModelConfig:
+    multimodal_config = _MockMultimodalConfig()
+
+
+class _MockParallelConfig:
+    tensor_parallel_size = 1
+
+
+class _MockVllmConfig:
+    """Minimal mock for VllmConfig used in __init__ tests."""
+
+    def __init__(
+        self,
+        token_budgets: list[int] | None = None,
+        max_mm_items: int = 0,
+    ):
+        self.compilation_config = _MockCompilationConfig(token_budgets, max_mm_items)
+        self.model_config = _MockModelConfig()
+        self.parallel_config = _MockParallelConfig()
+
+
+class _MockModel(SupportsEncoderCudaGraph):
+    """Minimal mock implementing SupportsEncoderCudaGraph for __init__."""
+
+    def __init__(self, min_budget: int = 4, max_budget: int = 128):
+        self._min_budget = min_budget
+        self._max_budget = max_budget
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            input_key_by_modality={"image": "pixel_values"},
+            buffer_keys=["dummy_buf"],
+            out_hidden_size=32,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config):
+        return (self._min_budget, self._max_budget)
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
@@ -188,15 +252,13 @@ def _count_output_tokens(
     return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
 
 
-class SimpleMockViTModel(torch.nn.Module):
+class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     """Minimal ViT model for CUDA graph tests.
 
     Implements the SupportsEncoderCudaGraph protocol by providing
     all required methods. The forward pass projects patches and
     simulates spatial merge by averaging groups of m^2 patches.
     """
-
-    supports_encoder_cudagraph = True
 
     def __init__(self):
         super().__init__()
@@ -227,24 +289,18 @@ class SimpleMockViTModel(torch.nn.Module):
         # For tests: min=4, max=128 (small values for fast capture)
         return (4, 128)
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(mm_kwargs["image_grid_thw"])
-
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
+    ) -> list[EncoderItemSpec]:
         m = _SPATIAL_MERGE
-        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in mm_kwargs["image_grid_thw"]
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -530,19 +586,18 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
     # Protocol overrides that depend on modality keys
     # ------------------------------------------------------------------
 
-    def get_encoder_cudagraph_num_items(self, mm_kwargs: dict[str, Any]) -> int:
-        return len(self._get_grid_thw(mm_kwargs))
-
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[int]:
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[EncoderItemSpec]:
         m = _SPATIAL_MERGE
-        return [t * (h // m) * (w // m) for t, h, w in self._get_grid_thw(mm_kwargs)]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[int]:
-        return [t * h * w for t, h, w in self._get_grid_thw(mm_kwargs)]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in self._get_grid_thw(mm_kwargs)
+        ]
 
     def select_encoder_cudagraph_items(
         self, mm_kwargs: dict[str, Any], indices: list[int]
@@ -618,11 +673,16 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
 
     def encoder_cudagraph_forward(
-        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 
 
@@ -760,3 +820,113 @@ class TestEncoderCudaGraphVideoReplay:
         assert len(vid_result) == 1
         assert img_result[0].shape == (4, _HIDDEN)
         assert vid_result[0].shape == (8, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# __init__ invariant validation tests (no GPU required)
+# ---------------------------------------------------------------------------
+
+
+class TestInitInvariantValidation:
+    """Ensure max_batch_size <= min(token_budgets) for all config paths."""
+
+    def _make_mgr(
+        self,
+        token_budgets=None,
+        max_mm_items=0,
+        min_budget=4,
+        max_budget=128,
+    ):
+        vllm_config = _MockVllmConfig(token_budgets, max_mm_items)
+        model = _MockModel(min_budget, max_budget)
+        return EncoderCudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=model,
+        )
+
+    # --- Finding 1: fully auto-inferred ---
+
+    def test_auto_inferred_invariant_holds(self):
+        mgr = self._make_mgr(min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+
+    def test_auto_inferred_small_range(self):
+        mgr = self._make_mgr(min_budget=4, max_budget=128)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+
+    # --- Finding 2: fully user-specified, bad combo ---
+
+    def test_user_specified_bad_combo_raises(self):
+        with pytest.raises(ValueError, match="must be <= smallest token budget"):
+            self._make_mgr(token_budgets=[64], max_mm_items=256)
+
+    def test_user_specified_valid_combo(self):
+        mgr = self._make_mgr(token_budgets=[64, 128], max_mm_items=32)
+        assert mgr.max_batch_size == 32
+        assert mgr.token_budgets == [64, 128]
+
+    def test_user_specified_exact_boundary(self):
+        # max_mm_items == min(budgets) is OK (per_image_output = 1)
+        mgr = self._make_mgr(token_budgets=[64, 128], max_mm_items=64)
+        assert mgr.max_batch_size == 64
+
+    # --- Finding 3: user provides only max_mm_items ---
+
+    def test_user_max_mm_items_only_adjusts_budgets(self):
+        # model min_budget=64, user max_mm_items=128 → budgets start at 128
+        mgr = self._make_mgr(max_mm_items=128, min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size == 128
+        assert min(mgr.token_budgets) >= 128
+
+    def test_user_max_mm_items_smaller_than_min_budget(self):
+        # max_mm_items=2, model min=4 → budgets start at 4 (>= 2), OK
+        mgr = self._make_mgr(max_mm_items=2, min_budget=4, max_budget=128)
+        assert mgr.max_batch_size == 2
+        assert min(mgr.token_budgets) >= 2
+
+    # --- Finding 4: user provides only budgets ---
+
+    def test_user_budgets_only_caps_max_batch_size(self):
+        # user budgets start at 32, model min_budget=64
+        # without fix: max_batch_size = min(128//64, 64) = 2 → OK
+        # but if user budgets=[16, 64]:
+        # without fix: max_batch_size = min(128//4, 4) = 4 > 16? No.
+        # Let's use a case that triggers it:
+        # model min=64, max=16384 → max_budget//min_budget = 256
+        # user budgets=[32, 64] → min = 32
+        # without fix: max_batch_size = min(256, 64) = 64 > 32 → BUG
+        # with fix: max_batch_size = min(256, 32) = 32 → OK
+        mgr = self._make_mgr(token_budgets=[32, 64], min_budget=64, max_budget=16384)
+        assert mgr.max_batch_size <= min(mgr.token_budgets)
+        assert mgr.max_batch_size == 32
+
+    # --- Finding 5/6: bad model budget range ---
+
+    def test_zero_min_budget_raises(self):
+        with pytest.raises(ValueError, match="Both must be positive"):
+            self._make_mgr(min_budget=0, max_budget=128)
+
+    def test_negative_max_budget_raises(self):
+        with pytest.raises(ValueError, match="Both must be positive"):
+            self._make_mgr(min_budget=4, max_budget=-1)
+
+    def test_min_greater_than_max_raises(self):
+        with pytest.raises(ValueError, match="min_budget=200 > max_budget=100"):
+            self._make_mgr(min_budget=200, max_budget=100)
+
+    # --- Finding 7: user-provided budgets with non-positive values ---
+
+    def test_user_budgets_zero_raises(self):
+        """Non-positive budgets should be caught at config validation."""
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[0, 128])
+
+    def test_user_budgets_negative_raises(self):
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
