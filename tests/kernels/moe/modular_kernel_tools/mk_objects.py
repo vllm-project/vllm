@@ -232,7 +232,7 @@ if has_mori():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        backend="mori",
+        backend="mori_high_throughput",
         supports_apply_weight_on_input=False,
     )
 

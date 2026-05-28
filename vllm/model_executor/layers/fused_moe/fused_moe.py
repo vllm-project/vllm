@@ -5,7 +5,6 @@
 import functools
 import json
 import os
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -27,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
     moe_kernel_quantize_input,
 )
 from vllm.platforms import current_platform
@@ -1334,99 +1332,7 @@ def try_get_optimal_moe_config(
     return config
 
 
-def inplace_fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str = "silu",
-    apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
-    per_channel_quant: bool = False,
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    w1_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-    block_shape: list[int] | None = None,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-) -> None:
-    fused_experts_impl(
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        True,
-        activation,
-        apply_router_weight_on_input,
-        use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
-        use_int4_w4a16,
-        ocp_mx_scheme,
-        per_channel_quant,
-        global_num_experts,
-        expert_map,
-        w1_scale,
-        w2_scale,
-        w1_zp,
-        w2_zp,
-        a1_scale,
-        a2_scale,
-        block_shape,
-        w1_bias,
-        w2_bias,
-    )
-
-
-def inplace_fused_experts_fake(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    activation: str = "silu",
-    apply_router_weight_on_input: bool = False,
-    use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
-    ocp_mx_scheme: str | None = None,
-    per_channel_quant: bool = False,
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    w1_scale: torch.Tensor | None = None,
-    w2_scale: torch.Tensor | None = None,
-    w1_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
-    block_shape: list[int] | None = None,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-) -> None:
-    pass
-
-
-direct_register_custom_op(
-    op_name="inplace_fused_experts",
-    op_func=inplace_fused_experts,
-    mutates_args=["hidden_states"],
-    fake_impl=inplace_fused_experts_fake,
-)
-
-
-def outplace_fused_experts(
+def fused_experts_op(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1458,7 +1364,6 @@ def outplace_fused_experts(
         w2,
         topk_weights,
         topk_ids,
-        False,
         activation,
         apply_router_weight_on_input,
         use_fp8_w8a8,
@@ -1481,7 +1386,7 @@ def outplace_fused_experts(
     )
 
 
-def outplace_fused_experts_fake(
+def fused_experts_op_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -1511,26 +1416,10 @@ def outplace_fused_experts_fake(
 
 
 direct_register_custom_op(
-    op_name="outplace_fused_experts",
-    op_func=outplace_fused_experts,
-    fake_impl=outplace_fused_experts_fake,
+    op_name="fused_experts",
+    op_func=fused_experts_op,
+    fake_impl=fused_experts_op_fake,
 )
-
-
-def torch_vllm_inplace_fused_experts(**kwargs) -> torch.Tensor:
-    torch.ops.vllm.inplace_fused_experts(**kwargs)
-    hidden_states = kwargs["hidden_states"]
-    return hidden_states
-
-
-def torch_vllm_outplace_fused_experts(**kwargs) -> torch.Tensor:
-    return torch.ops.vllm.outplace_fused_experts(**kwargs)
-
-
-def dispatch_fused_experts_func(inplace: bool) -> Callable[..., torch.Tensor]:
-    if inplace:
-        return torch_vllm_inplace_fused_experts
-    return torch_vllm_outplace_fused_experts
 
 
 def _prepare_expert_assignment(
@@ -1582,15 +1471,12 @@ def _prepare_expert_assignment(
     )
 
 
-# TODO (bnell): replace this with modular op.  Can get rid of inplace/outplace
-# torch ops.
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool = False,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -1601,9 +1487,7 @@ def fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    assert not inplace or not disable_inplace()
-
-    return dispatch_fused_experts_func(inplace)(
+    return torch.ops.vllm.fused_experts(
         hidden_states=hidden_states,
         w1=w1,
         w2=w2,
@@ -1656,7 +1540,6 @@ def fused_experts_impl(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    inplace: bool,
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
@@ -1763,7 +1646,7 @@ def fused_experts_impl(
     else:
         raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
-    out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
+    out_hidden_states = torch.empty_like(hidden_states)
 
     qhidden_states, a1q_scale = moe_kernel_quantize_input(
         A=hidden_states,

@@ -30,7 +30,7 @@ use crate::protocol::{
     EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
 };
 use crate::test_utils::{
-    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
+    IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
 };
 use crate::{
@@ -477,8 +477,8 @@ async fn coordinator_handshake_includes_engine_control_addresses() {
     let (init_tx, init_rx) = oneshot::channel();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let connections = setup_mock_engine_connections(handshake_address, &engine_id).await;
-        let _ = init_tx.send(connections.init.clone());
+        let sockets = setup_mock_engine_sockets(handshake_address, &engine_id).await;
+        let _ = init_tx.send(sockets.init.clone());
         let _ = shutdown_rx.await;
     });
 
@@ -515,14 +515,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (0, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-1");
@@ -538,7 +539,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             );
 
             send_outputs(
-                &mut engine.push,
+                &mut data_socket.push,
                 EngineCoreOutputs {
                     engine_index: 0,
                     outputs: vec![request_output(
@@ -565,14 +566,14 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (1, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-3");
             assert_eq!(request.current_wave, 1);
 
             send_outputs(
-                &mut engine.push,
+                &mut data_socket.push,
                 EngineCoreOutputs {
                     engine_index: 0,
                     outputs: vec![request_output(
@@ -594,14 +595,15 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
+            let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
             let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
             assert_eq!((wave, exclude_engine), (0, 0));
 
-            let add = recv_engine_message(&mut engine.dealer).await;
+            let add = recv_engine_message(&mut data_socket.dealer).await;
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
             assert_eq!(request.request_id, "req-2");
@@ -617,7 +619,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             );
 
             send_outputs(
-                &mut engine.push,
+                &mut data_socket.push,
                 EngineCoreOutputs {
                     engine_index: 1,
                     outputs: vec![request_output(
@@ -637,7 +639,7 @@ async fn coordinator_wave_control_tracks_pause_running_and_rebroadcasts() {
             assert!(
                 timeout(
                     Duration::from_millis(200),
-                    recv_engine_message(&mut engine.dealer)
+                    recv_engine_message(&mut data_socket.dealer)
                 )
                 .await
                 .is_err()
@@ -712,7 +714,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine0_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -727,7 +729,7 @@ async fn coordinator_rebroadcasts_engine_start_wave_control() {
     let engine1_task = tokio::spawn({
         let handshake_address = handshake_address.clone();
         async move {
-            let mut engine = setup_mock_engine_connections(handshake_address, &[0x01, 0x00]).await;
+            let mut engine = setup_mock_engine_sockets(handshake_address, &[0x01, 0x00]).await;
             let mut coordinator =
                 engine.coordinator.take().expect("coordinator sockets should be present");
 
@@ -778,9 +780,10 @@ async fn coordinator_accepts_stats_only_outputs() {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let engine_task = tokio::spawn(async move {
-        let mut engine = setup_mock_engine_connections(handshake_address, &[0x00, 0x00]).await;
+        let mut engine = setup_mock_engine_sockets(handshake_address, &[0x00, 0x00]).await;
         let mut coordinator =
             engine.coordinator.take().expect("coordinator sockets should be present");
+        let data_socket = engine.data_sockets.first_mut().expect("data socket");
 
         let (wave, exclude_engine) = recv_start_dp_wave(&mut coordinator.input_sub).await;
         assert_eq!((wave, exclude_engine), (0, 0));
@@ -799,13 +802,13 @@ async fn coordinator_accepts_stats_only_outputs() {
         )
         .await;
 
-        let add = recv_engine_message(&mut engine.dealer).await;
+        let add = recv_engine_message(&mut data_socket.dealer).await;
         assert_eq!(add[0].as_ref(), &[0x00]);
         let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
         assert_eq!(request.request_id, "req-stats");
 
         send_outputs(
-            &mut engine.push,
+            &mut data_socket.push,
             EngineCoreOutputs {
                 engine_index: 0,
                 outputs: vec![request_output(
@@ -2108,6 +2111,226 @@ async fn collective_rpc_flattens_results_from_all_engines() {
             Value::from("engine-1-worker")
         ]
     );
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+/// Spawn a mock engine that handles a single utility call, asserts the method
+/// name and serialized args match, and replies with `result`.
+fn spawn_mock_utility_engine(
+    handshake_address: String,
+    engine_id: Vec<u8>,
+    expected_method: &'static str,
+    expected_args: Value,
+    result: bool,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_mock_engine_task(handshake_address, engine_id, move |dealer, push| {
+        Box::pin(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]);
+            let array = match payload {
+                Value::Array(array) => array,
+                other => panic!("expected utility payload array, got {other:?}"),
+            };
+            // Utility requests serialize as `(client_index, call_id, method, args)`.
+            let call_id = array[1].as_u64().expect("call_id");
+            assert_eq!(array[2], Value::from(expected_method));
+            assert_eq!(array[3], expected_args, "unexpected utility args");
+            send_outputs(
+                push,
+                EngineCoreOutputs {
+                    utility_output: Some(UtilityOutput {
+                        call_id: call_id.into(),
+                        failure_message: None,
+                        result: Some(utility_result_value(result)),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_error_when_engines_disagree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let error = client.is_sleeping().await.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::InconsistentUtilityResults { method, .. } if method == "is_sleeping"
+        ),
+        "expected InconsistentUtilityResults, got {error:?}",
+    );
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_value_when_all_engines_agree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.is_sleeping().await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_true_when_all_engines_succeed() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.reset_prefix_cache(false, false).await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(!client.reset_prefix_cache(false, false).await.unwrap());
 
     let _ = shutdown_tx_0.send(());
     let _ = shutdown_tx_1.send(());
