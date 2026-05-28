@@ -28,7 +28,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       depends_on:
       - image-build-amd
@@ -46,7 +46,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       timeout_in_minutes: 80
       depends_on:
@@ -65,7 +65,7 @@ steps:
   - pytest -v -s entrypoints/test_chat_utils.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       timeout_in_minutes: 60
       depends_on:
@@ -85,7 +85,7 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       timeout_in_minutes: 60
       depends_on:
@@ -108,7 +108,7 @@ steps:
   - pytest -v -s tool_use
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       depends_on:
       - image-build-amd
