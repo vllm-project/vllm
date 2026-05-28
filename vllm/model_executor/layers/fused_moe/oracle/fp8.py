@@ -627,10 +627,6 @@ def make_fp8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=(
-            not moe_config.disable_inplace
-            and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
-        ),
     )
 
     return kernel
