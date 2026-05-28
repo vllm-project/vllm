@@ -996,6 +996,21 @@ async fn list_models_returns_configured_model() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn version_returns_engine_vllm_version() {
+    let mut app = test_app().await;
+    let response = app
+        .call(Request::builder().uri("/version").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json, json!({"version": "test-vllm-version"}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn http_metrics_record_list_models_requests() {
     let mut app = test_app().await;
     let before = METRICS.render().unwrap();

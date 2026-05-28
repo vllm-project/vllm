@@ -379,7 +379,17 @@ impl EngineCoreClient {
         self.engines
             .iter()
             .filter_map(|engine| engine.ready_response.as_ref())
-            .find_map(|response| response.dtype)
+            .map(|response| response.dtype)
+            .next()
+    }
+
+    /// Return the engine-reported Python vLLM version, when available.
+    pub fn vllm_version(&self) -> Option<&str> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.as_ref())
+            .map(|response| response.vllm_version.as_str())
+            .next()
     }
 
     /// Return the total number of GPU blocks summed across all connected

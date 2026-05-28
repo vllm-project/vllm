@@ -925,6 +925,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
     assert!(client.ready_responses()[0].max_model_len > 0);
+    assert_eq!(client.vllm_version(), Some("test-vllm-version"));
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();

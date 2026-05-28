@@ -61,7 +61,8 @@ fn test_mock_engine_config() -> MockEngineConfig {
             max_model_len: 4096,
             num_gpu_blocks: 0,
             dp_stats_address: None,
-            dtype: Some(ModelDtype::Float32),
+            dtype: ModelDtype::Float32,
+            vllm_version: "test-vllm-version".to_string(),
         },
         ..Default::default()
     }
