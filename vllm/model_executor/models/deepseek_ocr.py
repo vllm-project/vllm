@@ -392,6 +392,7 @@ class DeepseekOCRForCausalLM(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
 
         self.vision_config = config.vision_config
@@ -635,7 +636,9 @@ class DeepseekOCRForCausalLM(
         patch_size = 16
         downsample_ratio = 4
 
-        is_tiled = (image_spatial_crop[0] > 1) or (image_spatial_crop[1] > 1)
+        is_tiled = False
+        if image_spatial_crop is not None:
+            is_tiled = (image_spatial_crop[0] > 1) or (image_spatial_crop[1] > 1)
 
         # Compute input size:
         global_input_side = base_size // patch_size  # 1024 / 16 = 64
@@ -673,8 +676,7 @@ class DeepseekOCRForCausalLM(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_keys=["pixel_values", "images_crop"],
-            buffer_keys=[],
+            buffer_keys=["pixel_values", "images_crop"],
             out_hidden_size=self.projector_config.n_embed,
         )
 
@@ -781,12 +783,11 @@ class DeepseekOCRForCausalLM(
             dtype=dtype,
         )
 
-        mm_kwargs = {
+        values = {
             "pixel_values": dummy_pixel_values,
             "images_crop": dummy_images_crop,
         }
-
-        return EncoderCudaGraphCaptureInputs(mm_kwargs=mm_kwargs, buffers={})
+        return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -794,12 +795,15 @@ class DeepseekOCRForCausalLM(
         max_batch_size: int,
         max_frames_per_batch: int,
     ):
-        return EncoderCudaGraphReplayBuffers(buffers={})
+        values = {
+            "pixel_values": mm_kwargs["pixel_values"],
+            "images_crop": mm_kwargs["images_crop"],
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """
         Encode batched global/local vision inputs to raw outputs (without new
@@ -817,8 +821,8 @@ class DeepseekOCRForCausalLM(
         capturing all GPU kernels. Per-image tile arrangement and view_separator
         merging happen CPU-side in `postprocess_encoder_output()`.
         """
-        pixel_values = mm_kwargs["pixel_values"]
-        images_crop = mm_kwargs["images_crop"]
+        pixel_values = values["pixel_values"]
+        images_crop = values["images_crop"]
 
         # Encode batched global images (without adding new line token).
         global_feat_1 = self.sam_model(pixel_values)
