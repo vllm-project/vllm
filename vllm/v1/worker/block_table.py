@@ -139,23 +139,6 @@ class BlockTable:
         query_start_loc: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
-        # PCP diagnostic: stash a copy of the block_table tensor.
-        import os as _os
-        if _os.environ.get("VLLM_KV_DUMP_DIR"):
-            try:
-                import torch.distributed as _dist
-                _rank = _dist.get_rank() if _dist.is_initialized() else 0
-            except Exception:
-                _rank = int(_os.environ.get("RANK", "0"))
-            _path = _os.path.join(
-                _os.environ["VLLM_KV_DUMP_DIR"],
-                f"rank{_rank}_block_table.pt",
-            )
-            if not _os.path.exists(_path):
-                torch.save(
-                    self.block_table.gpu[:num_reqs].detach().cpu().to(torch.int64),
-                    _path,
-                )
         num_tokens = positions.shape[0]
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,

@@ -124,9 +124,7 @@ class MLAPrefillBackend(ABC):
         """PCP DualChunkSwap helper: causal new-tokens attention with
         explicit per-chunk cu_seqlens. Only the FA prefill backend implements
         this; other backends should raise."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support PCP prefill"
-        )
+        raise NotImplementedError(f"{type(self).__name__} does not support PCP prefill")
 
     @abstractmethod
     def run_prefill_context_chunk(

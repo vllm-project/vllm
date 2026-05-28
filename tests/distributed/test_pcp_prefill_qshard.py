@@ -123,9 +123,7 @@ def _local_kv_for_rank(
         f"local_total {pm.local_total} != recomputed pcp_total {pcp_total}"
     )
 
-    local_kv = torch.empty(
-        pcp_total, global_kv.shape[-1], dtype=global_kv.dtype
-    )
+    local_kv = torch.empty(pcp_total, global_kv.shape[-1], dtype=global_kv.dtype)
     write_off = 0
     for r, (n, padded) in enumerate(zip(num_scheduled, cu_padded_per_req)):
         ch = chunks[r]
@@ -138,9 +136,7 @@ def _local_kv_for_rank(
                 # Local position within request:
                 local_pos_in_req = padded_pos - starts[r]
                 if local_pos_in_req < n:
-                    global_idx = (
-                        int(num_scheduled[:r].sum()) + local_pos_in_req
-                    )
+                    global_idx = int(num_scheduled[:r].sum()) + local_pos_in_req
                 else:
                     # Padding: clamp to request start (matches partition_inputs).
                     global_idx = int(num_scheduled[:r].sum())

@@ -943,41 +943,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             return
         from vllm import _custom_ops as ops
 
-        # PCP KV-cache diagnostic dump (gated by VLLM_KV_DUMP_DIR).
-        # See scripts/pcp_kv_cache_diff.py for usage. Skip dummy/warmup
-        # calls whose slot_mapping is all -1.
-        import os as _os
-        _dump_dir = _os.environ.get("VLLM_KV_DUMP_DIR")
-        if _dump_dir:
-            import vllm.v1.attention.backend as _be
-            if not hasattr(_be, "_KV_DUMP_LAYER_IDS"):
-                _be._KV_DUMP_LAYER_IDS = {}
-                _be._KV_DUMP_RECORDED = set()
-            _kv_id = id(kv_cache)
-            if _kv_id not in _be._KV_DUMP_LAYER_IDS:
-                _be._KV_DUMP_LAYER_IDS[_kv_id] = len(_be._KV_DUMP_LAYER_IDS)
-            _layer_idx = _be._KV_DUMP_LAYER_IDS[_kv_id]
-            try:
-                import torch.distributed as _dist
-                _rank = _dist.get_rank() if _dist.is_initialized() else 0
-            except Exception:
-                _rank = int(_os.environ.get("RANK", "0"))
-            _key = (int(_rank), _layer_idx)
-            _has_real_slot = bool((slot_mapping >= 0).any().item())
-            if _has_real_slot and _key not in _be._KV_DUMP_RECORDED:
-                _be._KV_DUMP_RECORDED.add(_key)
-                _path = _os.path.join(
-                    _dump_dir, f"rank{_rank}_layer{_layer_idx:02d}.pt"
-                )
-                torch.save(
-                    {
-                        "k_c_normed": kv_c_normed.detach().cpu().to(torch.float32),
-                        "k_pe": k_pe.detach().cpu().to(torch.float32),
-                        "slot_mapping": slot_mapping.detach().cpu().to(torch.int64),
-                    },
-                    _path,
-                )
-
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
@@ -1057,44 +1022,6 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         if kv_cache.numel() == 0:
             return
         from vllm import _custom_ops as ops
-
-        # PCP KV-cache diagnostic dump (gated by VLLM_KV_DUMP_DIR).
-        # See scripts/pcp_kv_cache_diff.py for usage. Layer index is
-        # global across all attention impls (kept on the module so it
-        # persists across calls). We only record the FIRST write per
-        # (rank, layer) pair so we don't get hammered during decode.
-        import os as _os
-        _dump_dir = _os.environ.get("VLLM_KV_DUMP_DIR")
-        if _dump_dir:
-            import vllm.v1.attention.backend as _be
-            if not hasattr(_be, "_KV_DUMP_LAYER_IDS"):
-                _be._KV_DUMP_LAYER_IDS = {}
-                _be._KV_DUMP_RECORDED = set()
-            _kv_id = id(kv_cache)
-            if _kv_id not in _be._KV_DUMP_LAYER_IDS:
-                _be._KV_DUMP_LAYER_IDS[_kv_id] = len(_be._KV_DUMP_LAYER_IDS)
-            _layer_idx = _be._KV_DUMP_LAYER_IDS[_kv_id]
-            try:
-                import torch.distributed as _dist
-                _rank = _dist.get_rank() if _dist.is_initialized() else 0
-            except Exception:
-                _rank = int(_os.environ.get("RANK", "0"))
-            _key = (int(_rank), _layer_idx)
-            # Skip the dummy_run write — its slot_mapping is all -1.
-            _has_real_slot = bool((slot_mapping >= 0).any().item())
-            if _has_real_slot and _key not in _be._KV_DUMP_RECORDED:
-                _be._KV_DUMP_RECORDED.add(_key)
-                _path = _os.path.join(
-                    _dump_dir, f"rank{_rank}_layer{_layer_idx:02d}.pt"
-                )
-                torch.save(
-                    {
-                        "k_c_normed": kv_c_normed.detach().cpu().to(torch.float32),
-                        "k_pe": k_pe.detach().cpu().to(torch.float32),
-                        "slot_mapping": slot_mapping.detach().cpu().to(torch.int64),
-                    },
-                    _path,
-                )
 
         ops.concat_and_cache_mla(
             kv_c_normed,

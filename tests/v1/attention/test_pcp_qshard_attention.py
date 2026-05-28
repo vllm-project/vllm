@@ -46,9 +46,7 @@ def _causal_fa_q_aligned_to_end(
     sk = k.shape[0]
     assert sq <= sk
     # scores: [H, Sq, Sk]
-    scores = (
-        torch.einsum("qhd,khd->hqk", q.float(), k.float()) * softmax_scale
-    )
+    scores = torch.einsum("qhd,khd->hqk", q.float(), k.float()) * softmax_scale
     # causal-with-end-alignment mask
     offset = sk - sq
     q_pos = torch.arange(sq).view(1, sq, 1)
@@ -209,12 +207,8 @@ def test_pcp_qshard_restore_idx_two_requests(pcp_world_size: int):
     #   heads:  req0 positions [0..chunk0-1]    + req1 positions [L0..L0+chunk1-1]
     #   tails:  req0 positions [chunk0..L0-1]  + req1 positions [L0+chunk1..L0+L1-1]
     # concat = heads ++ tails. argsort gives the inverse permutation.
-    heads = np.concatenate(
-        [np.arange(0, chunk0), np.arange(L0, L0 + chunk1)]
-    )
-    tails = np.concatenate(
-        [np.arange(chunk0, L0), np.arange(L0 + chunk1, L0 + L1)]
-    )
+    heads = np.concatenate([np.arange(0, chunk0), np.arange(L0, L0 + chunk1)])
+    tails = np.concatenate([np.arange(chunk0, L0), np.arange(L0 + chunk1, L0 + L1)])
     expected = np.concatenate([heads, tails]).argsort().astype(np.int32)
     assert np.array_equal(idx, expected), (
         f"two-request restore_idx mismatch: got {idx.tolist()}, "

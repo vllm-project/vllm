@@ -96,9 +96,8 @@ def main() -> int:
     args = parser.parse_args()
 
     # Import inside main to keep --help fast.
-    from vllm import LLM
-
     from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+    from vllm import LLM
 
     print(
         f"Loading model {args.model} with TP={args.tp} PCP={args.pcp} "

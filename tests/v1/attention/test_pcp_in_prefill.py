@@ -114,12 +114,10 @@ def test_pcp_partial_merge_matches_single_rank(
 
     # Numerical tolerance: pure FP32 math; small accumulation error.
     assert torch.allclose(out_merged, out_ref, atol=1e-5, rtol=1e-5), (
-        f"out_merged != out_ref: max diff = "
-        f"{(out_merged - out_ref).abs().max().item()}"
+        f"out_merged != out_ref: max diff = {(out_merged - out_ref).abs().max().item()}"
     )
     assert torch.allclose(lse_merged, lse_ref, atol=1e-5, rtol=1e-5), (
-        f"lse_merged != lse_ref: max diff = "
-        f"{(lse_merged - lse_ref).abs().max().item()}"
+        f"lse_merged != lse_ref: max diff = {(lse_merged - lse_ref).abs().max().item()}"
     )
 
 

@@ -1769,9 +1769,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # imprecision is up to (2*pcp_ws-1) tokens of padding which
                 # would cause under-count in a multi-step prefill where
                 # prior context exists in cache — addressed separately.
-                global_new_q_padded = (
-                    prefill_query_lens_cpu * self.pcp_world_size
-                )
+                global_new_q_padded = prefill_query_lens_cpu * self.pcp_world_size
                 context_lens_cpu = (
                     seq_lens_cpu[reqs_start:num_reqs] - global_new_q_padded
                 ).clamp(min=0)

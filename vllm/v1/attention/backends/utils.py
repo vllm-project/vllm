@@ -941,9 +941,7 @@ def pcp_kv_allgather_and_restore(
     )
 
     key_across_cp = pcp_group.all_gather(key[:local_count].contiguous(), dim=0)
-    value_across_cp = pcp_group.all_gather(
-        value[:local_count].contiguous(), dim=0
-    )
+    value_across_cp = pcp_group.all_gather(value[:local_count].contiguous(), dim=0)
 
     # Reorder kv after pcp allgather. Note that there are duplicate decoding
     # tokens after allgather (DualChunkSwap replicates decode rows).
@@ -1137,8 +1135,7 @@ def _fused_pcp_qkv_select_kernel(
         kv_dst_idx_head = block_dst_kv_head_start_loc + kv_offset[:, None]
         kv_dst_idx_tail = block_dst_kv_tail_start_loc + kv_offset[:, None]
         k_val = tl.load(
-            k_ptr + kv_src_idx * k_stride_B + head_id * k_stride_H
-            + dim_off[None, :],
+            k_ptr + kv_src_idx * k_stride_B + head_id * k_stride_H + dim_off[None, :],
             mask=k_d_mask & kv_block_mask,
         )
         if seq_block_id < pcp_rank + 1:
@@ -1161,7 +1158,9 @@ def _fused_pcp_qkv_select_kernel(
             )
         if dim_block_id * DIM_BLOCK_SIZE < v_head_dim:
             v_val = tl.load(
-                v_ptr + kv_src_idx * v_stride_B + head_id * v_stride_H
+                v_ptr
+                + kv_src_idx * v_stride_B
+                + head_id * v_stride_H
                 + dim_off[None, :],
                 mask=v_d_mask & kv_block_mask,
             )
@@ -1299,6 +1298,7 @@ def fused_pcp_qkv_select(
     masked-OOB-pointer pattern trips cudaErrorIllegalAddress).
     """
     import os
+
     if os.environ.get("VLLM_PCP_QKV_SELECT_BACKEND", "triton") == "torch":
         return _pcp_qkv_select_torch_fallback(
             q, k, v, query_start_loc, pcp_world_size, pcp_rank

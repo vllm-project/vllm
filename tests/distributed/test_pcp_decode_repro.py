@@ -35,8 +35,8 @@ import torch.distributed as dist
 
 
 def _compressed_attention(
-    q: torch.Tensor,                # [B, H, D]
-    kv_c_k_pe: torch.Tensor,        # [Sk, D]   (D == kv_lora_rank + qk_rope)
+    q: torch.Tensor,  # [B, H, D]
+    kv_c_k_pe: torch.Tensor,  # [Sk, D]   (D == kv_lora_rank + qk_rope)
     kv_lora_rank: int,
     softmax_scale: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -85,8 +85,8 @@ def _pcp_decode_under_tp1(
     # exp(lse_local - global_lse), then AllReduce-sum.
     lse_gathered = [torch.empty_like(lse_local) for _ in range(world_size)]
     dist.all_gather(lse_gathered, lse_local, group=cp_group)
-    lse_stacked = torch.stack(lse_gathered, dim=0)         # [W, B, H]
-    global_lse = torch.logsumexp(lse_stacked, dim=0)       # [B, H]
+    lse_stacked = torch.stack(lse_gathered, dim=0)  # [W, B, H]
+    global_lse = torch.logsumexp(lse_stacked, dim=0)  # [B, H]
     weights = torch.exp(lse_local - global_lse).unsqueeze(-1)
     out_weighted = out_local * weights
     dist.all_reduce(out_weighted, group=cp_group)
@@ -118,9 +118,12 @@ def _worker(env: dict[str, str]) -> None:
 
     # Post-fix path under TP=1+PCP=N.
     cp_out = _pcp_decode_under_tp1(
-        rank, world_size,
-        q_full=q_full, kv_c_k_pe_full=kv_c_k_pe_full,
-        kv_lora_rank=kv_lora_rank, softmax_scale=softmax_scale,
+        rank,
+        world_size,
+        q_full=q_full,
+        kv_c_k_pe_full=kv_c_k_pe_full,
+        kv_lora_rank=kv_lora_rank,
+        softmax_scale=softmax_scale,
         cp_group=cp_group,
     )
 

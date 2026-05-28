@@ -463,9 +463,7 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = (
-            0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
-        )
+        self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
         # Under PCP each prefill request is padded to a multiple of 2*pcp_world_size
@@ -6962,9 +6960,7 @@ class GPUModelRunner(
                 _kv_cache_shards = get_dcp_group().world_size
             except AssertionError:
                 _kv_cache_shards = 1
-            max_num_blocks_per_req = cdiv(
-                max_model_len, block_size * _kv_cache_shards
-            )
+            max_num_blocks_per_req = cdiv(max_model_len, block_size * _kv_cache_shards)
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
                 max_num_blocks_per_req = (
                     max_num_blocks_per_req
