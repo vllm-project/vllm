@@ -23,6 +23,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -40,8 +41,8 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
     BaseProcessingInfo,
-    EncDecMultiModalProcessor,
     PromptReplacement,
     PromptUpdate,
 )
@@ -57,6 +58,10 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
 
 MAX_AUDIO_CLIP_S = 40
+LID_MARKER_TEXT_ID = 9812
+ENG_LATN_IDX = 417
+PLACEHOLDER_TOKEN_ID = 1
+BOS_TOKEN_ID = 0
 
 
 class OmniASRModel(nn.Module):
@@ -74,10 +79,6 @@ class OmniASRModel(nn.Module):
         self.encoder_proj = ColumnParallelLinear(
             config.encoder_embed_dim, config.projection_dim, bias=True
         )
-        # self.text_frontend = VocabParallelEmbedding(
-        #    config.target_vocab_size + config.n_special_tokens,
-        #    config.text_config.hidden_size,
-        # )
         self.lang_embeddings = VocabParallelEmbedding(
             config.num_languages, config.text_config.hidden_size
         )
@@ -96,6 +97,7 @@ class OmniASRModel(nn.Module):
         x = self.encoder_frontend(audio)
         x = self.encoder(x)
         x, _ = self.encoder_proj(x)
+
         return x  # [batch, seq, config.projection_dim] ready for LLaMA decoder
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -425,7 +427,7 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
         return self.get_feature_extractor().get_seq_len(num_samples)
 
 
-class OmniASRMultiModalProcessor(EncDecMultiModalProcessor[OmniASRProcessingInfo]):
+class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo]):
     """
     Multi-modal processor for the OmniASR model.
 
@@ -433,20 +435,13 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor[OmniASRProcessingInfo
     and coordinate prompt updates for speech-to-text tasks.
     """
 
-    def create_encoder_prompt(
-        self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-    ) -> str | list[int]:
-        return [0]
-
     def _call_hf_processor(
         self,
         prompt,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
-    ):
+    ) -> BatchFeature:
         data = {}
 
         audios = []
@@ -463,31 +458,28 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor[OmniASRProcessingInfo
                 t = torch.tensor(a, dtype=torch.float32)
                 t = (t - t.mean()) / torch.sqrt(t.var() + 1e-7)
                 features.append(t)
-            lengths = torch.tensor([f.shape[-1] for f in features])
         else:
-            features = torch.zeros(1, 1, 16000)  # placeholder
-            lengths = torch.tensor([16000])
+            features = [torch.zeros(16000, dtype=torch.float32)]  # placeholder
 
         tokenizer = self.info.get_tokenizer()
-        encoded = tokenizer(prompt, return_tensors="pt")
-        data["input_ids"] = encoded["input_ids"]
+        if isinstance(prompt, str):
+            encoded = tokenizer(prompt, return_tensors="pt")
+            data["input_ids"] = encoded["input_ids"]
+        elif isinstance(prompt, (list, tuple)):
+            data["input_ids"] = torch.tensor([prompt], dtype=torch.long)
+        elif isinstance(prompt, torch.Tensor):
+            data["input_ids"] = prompt.unsqueeze(0) if prompt.dim() == 1 else prompt
+        else:
+            raise ValueError(f"Unexpected prompt type: {type(prompt)}")
         data["input_features"] = features
-
-        #outputs = super()._call_hf_processor(
-        #    prompt=prompt,
-        #    mm_data=mm_data,
-        #    mm_kwargs=mm_kwargs,
-        #    tok_kwargs=tok_kwargs,
-        #)
 
         return BatchFeature(data=data)
 
     def _get_mm_fields_config(
         self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
-    ):
+    ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            length=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -500,12 +492,13 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor[OmniASRProcessingInfo
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio_len = audios.get_audio_length(item_idx)
             num_tokens = self.info.get_num_audio_tokens(num_samples=audio_len)
-            return [0] * num_tokens
+            # N audio frames + 1 lid marker + 1 lang_id
+            return [PLACEHOLDER_TOKEN_ID] * (num_tokens + 2)
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[0],
+                target=[PLACEHOLDER_TOKEN_ID],
                 replacement=get_audio_replacement_omniasr,
             )
         ]
@@ -521,7 +514,7 @@ class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
-        return "<s>" * num_audios
+        return "<pad>" * num_audios
 
     def get_dummy_mm_data(
         self,
@@ -588,13 +581,30 @@ class OmniAsrForConditionalGeneration(
         if input_features is None:
             return []
         if isinstance(input_features, list):
-            results = []
+            audio_embs = []
             for feat in input_features:
                 out = self.model.forward(feat.unsqueeze(0))
-                results.append(out.squeeze(0))
-            return tuple(results)
-        encoder_out = self.model.forward(input_features)
-        return encoder_out.unbind(dim=0)
+                audio_embs.append(out.squeeze(0))
+        else:
+            encoder_out = self.model.forward(input_features)
+            audio_embs = list(encoder_out.unbind(dim=0))
+
+        if not audio_embs:
+            return []
+        device = audio_embs[0].device
+        dtype = audio_embs[0].dtype
+        lid_emb = self.language_model.model.embed_tokens(
+            torch.tensor([LID_MARKER_TEXT_ID], device=device)
+        ).to(dtype)
+        lang_emb = self.model.lang_embeddings(
+            torch.tensor([ENG_LATN_IDX], device=device)
+        ).to(dtype)
+        lid_lang_embs = torch.cat([lid_emb, lang_emb], dim=0)
+        results = []
+        for audio_emb in audio_embs:
+            combined = torch.cat([audio_emb, lid_lang_embs], dim=0)
+            results.append(combined)
+        return tuple(results)
 
     def get_language_model(self) -> nn.Module:
         return self.language_model
@@ -619,6 +629,35 @@ class OmniAsrForConditionalGeneration(
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.final_proj, hidden_states)
+
+    def _fix_rope_style(self):
+        """OmniASR's reference uses GPT-J (interleaved) RoPE; vLLM defaults to NeoX.
+        OmniASR was trained with fairseq2's RotaryEncoder, which uses
+        interleaved RoPE (rotating adjacent dim pairs: i and i+1).
+        vLLM's LlamaForCausalLM defaults to NeoX style (rotating split
+        halves: i and i+head_dim/2).
+
+        Without this fix, layer outputs diverge ~50% from reference,
+        producing garbled transcriptions despite bit-exact Q/K/V projection
+        weights.
+
+        Pattern follows vllm-omni FishSpeech precedent
+        """
+
+        for layer in self.language_model.model.layers:
+            attn = layer.self_attn
+            head_dim = attn.head_dim
+            max_position = self.config.text_config.max_position_embeddings
+            rope_params = getattr(self.config.text_config, "rope_scaling", None) or {}
+            rope_params.setdefault(
+                "rope_theta", getattr(self.config.text_config, "rope_theta", 10000.0)
+            )
+            attn.rotary_emb = get_rope(
+                head_size=head_dim,
+                max_position=max_position,
+                is_neox_style=False,
+                rope_parameters=rope_params,
+            )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def transform(inputs):
@@ -648,7 +687,9 @@ class OmniAsrForConditionalGeneration(
             return name, loaded_weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(map(transform, weights))
+        result = loader.load_weights(map(transform, weights))
+        self._fix_rope_style()
+        return result
 
     @classmethod
     def get_speech_to_text_config(
@@ -663,7 +704,7 @@ class OmniAsrForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        # TODO: Add language conditioning support.
+        # Language conditioning: hardcoded to eng_Latn (lang_id=417) for v1.
         # OmniASR uses a separate lang_embeddings layer (not text tokens).
         # Need to: map ISO 639-1 → OmniASR lang_id, pass through
         # lang_embeddings, and insert into decoder input sequence.
@@ -671,7 +712,7 @@ class OmniAsrForConditionalGeneration(
         audio = stt_params.audio
         stt_config = stt_params.stt_config
         return TokensPrompt(
-            prompt_token_ids=[0],
+            prompt_token_ids=[PLACEHOLDER_TOKEN_ID, BOS_TOKEN_ID],
             multi_modal_data={"audio": (audio, stt_config.sample_rate)},
         )
 
