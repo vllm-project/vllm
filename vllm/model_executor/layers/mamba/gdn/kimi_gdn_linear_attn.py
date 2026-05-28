@@ -41,7 +41,9 @@ from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 logger = init_logger(__name__)
 
 
-def resolve_kda_prefill_backend(backend: str, head_dim: int) -> str:
+def resolve_kda_prefill_backend(
+    backend: str, head_dim: int, lower_bound: float | None
+) -> str:
     if backend == "flashkda":
         is_installed = importlib.util.find_spec("flash_kda") is not None
         capability = current_platform.get_device_capability()
@@ -50,21 +52,27 @@ def resolve_kda_prefill_backend(backend: str, head_dim: int) -> str:
         )
         is_cuda = current_platform.is_cuda()
         platform_supported = is_cuda and current_platform.has_device_capability(90)
-        head_dim_supported = head_dim == 128
 
-        if is_installed and platform_supported and head_dim_supported:
+        if (
+            is_installed
+            and platform_supported
+            and head_dim == 128
+            and lower_bound is not None
+        ):
             logger.info_once("Using FlashKDA KDA prefill backend.")
             return "flashkda"
 
         logger.warning_once(
             "KDA prefill backend 'flashkda' requires flash_kda installed, "
-            "CUDA >=SM90, and head_dim=128. Current state: "
+            "CUDA >=SM90, head_dim=128, and lower_bound set. Current state: "
             "flash_kda_installed=%s, is_cuda=%s, capability=%s, head_dim=%d. "
+            "lower_bound=%s. "
             "Falling back to Triton/FLA.",
             is_installed,
             is_cuda,
             capability_str,
             head_dim,
+            lower_bound,
         )
 
     return "triton"
@@ -122,10 +130,12 @@ class KimiKdaPrefill(CustomOp):
             if isinstance(additional_config, dict)
             else "auto"
         )
-        active_backend = resolve_kda_prefill_backend(backend, head_dim)
-        self.kda_prefill_backend = active_backend
         self.head_dim = head_dim
         self.lower_bound = lower_bound
+        active_backend = resolve_kda_prefill_backend(
+            backend, head_dim, self.lower_bound
+        )
+        self.kda_prefill_backend = active_backend
 
         if active_backend == "flashkda":
             self._forward_method = self.forward_flashkda
