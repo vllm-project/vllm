@@ -61,7 +61,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         # key -> True (only care about presence)
         self.blocks: dict[OffloadKey, bool] = {}
 
-        # Completed jobs waiting to be retrieved by get_finished()
+        # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -120,7 +120,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Poll for finished jobs.
 
