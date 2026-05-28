@@ -359,7 +359,6 @@ def make_unquantized_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 
     return kernel
