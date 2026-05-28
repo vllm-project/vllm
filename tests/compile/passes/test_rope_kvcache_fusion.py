@@ -9,6 +9,7 @@ import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm.compilation.passes.fusion import rope_kvcache_fusion
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -394,7 +395,7 @@ def test_rope_kvcache_fusion(
     [AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN],
 )
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
-@pytest.mark.parametrize("enable_aiter_triton_rope", [True])
+@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
 @pytest.mark.parametrize("head_size", [64])
@@ -522,6 +523,46 @@ def test_rope_static_qquant_kvcache_fusion(
         # The replacement still emits static quant, so count is expected to
         # remain non-zero after fusion.
         assert static_quant_post > 0
+
+        # Negative control: without the static-Q pattern, the generic RoPE+KV
+        # pattern cannot match this rope -> static-quant -> kv graph, so the
+        # fusion above is attributable solely to RopeStaticQQuantKVCachePattern.
+        # This is a structural property independent of the rope/dtype/neox axes,
+        # so run the (extra compile) check only once on a representative combo.
+        if is_neox and enable_aiter_triton_rope and kv_cache_dtype == "auto":
+            m.setattr(
+                rope_kvcache_fusion,
+                "_supports_static_q_fp8_quant_fusion",
+                lambda: False,
+            )
+            generic_pass = RopeKVCacheFusionPass(vllm_config)
+            generic_backend = TestBackend(
+                NoOpEliminationPass(vllm_config),
+                SplitCoalescingPass(vllm_config),
+                ScatterSplitReplacementPass(vllm_config),
+                generic_pass,
+                PostCleanupPass(vllm_config),
+            )
+            # Reset dynamo so the model is recompiled through generic_backend
+            # instead of reusing the cached compilation from above.
+            torch._dynamo.reset()
+            with set_forward_context(None, vllm_config):
+                model_generic = torch.compile(model, backend=generic_backend)
+                forward_context = get_forward_context()
+                attn_metadata = model_generic.build_attn_metadata(T)
+                forward_context.slot_mapping = {
+                    model.layer_name: attn_metadata.slot_mapping
+                }
+                model_generic(qkv, pos)
+            # op_count reads the post-pass graph, so it also confirms the pass ran
+            # (a no-op pass would raise instead of silently passing on count 0).
+            assert generic_pass.matched_count == 0
+            assert (
+                generic_backend.op_count(
+                    torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
+                )
+                == 0
+            )
 
         if dtype == torch.float16:
             ATOL, RTOL = (2e-3, 2e-3)
