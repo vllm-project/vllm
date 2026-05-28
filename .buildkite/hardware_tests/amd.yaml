@@ -19,25 +19,23 @@ steps:
       --progress plain .
     - |
       docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
-        for path in /vllm-workspace /vllm-workspace/tests /vllm-workspace/src/vllm; do
-          test -d "${path}" || { echo "Missing directory: ${path}" >&2; exit 1; }
-        done
-        test -x /vllm-workspace/src/vllm/vllm-rs || { echo "Missing executable: /vllm-workspace/src/vllm/vllm-rs" >&2; exit 1; }
+        if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
+        if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
+        if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
+        if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
         command -v python3
         command -v uv
         command -v pytest
-        if ! command -v rocm-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
-          echo "No ROCm CLI found in image" >&2
+        if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
+          echo No ROCm CLI found in image >&2
           exit 1
         fi
-        python3 - <<'"'"'PY'"'"'
-      import torch
-      import vllm
-
-      print(f"torch=={torch.__version__}")
-      print(f"vllm=={vllm.__version__}")
+        python3 - <<PY
+      import torch, vllm
+      print(torch.__version__)
+      print(vllm.__version__)
       PY
-        echo "AMD image smoke OK"
+        echo AMD image smoke OK
       '
     - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
     env:
