@@ -92,7 +92,7 @@ class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     block_size_factor: int
     num_workers: int
-    offload_decode_blocks: bool
+    offload_prompt_only: bool
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
@@ -155,7 +155,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
             block_size_factor=spec.block_size_factor,
-            offload_decode_blocks=spec.offload_decode_blocks,
+            offload_prompt_only=spec.offload_prompt_only,
         )
 
 
@@ -710,7 +710,7 @@ class OffloadingConnectorScheduler:
             # prefill (prompt) blocks become eligible for store. next_stored_idx
             # never advances past this boundary, so decode blocks are never
             # queued in this or any later step.
-            if not self.config.offload_decode_blocks:
+            if self.config.offload_prompt_only:
                 num_offloadable_tokens = min(
                     num_offloadable_tokens, req.num_prompt_tokens
                 )
