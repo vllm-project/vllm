@@ -1164,12 +1164,12 @@ class FusedMoEKernelModularImpl:
         """
         can_use_prepared_input = (
             prepared_a1q is not None
+            and not dbo_enabled()
             and not self.fused_experts.expects_unquantized_inputs
             and self.prepare_finalize.supports_prepared_inputs()
         )
 
         if can_use_prepared_input:
-            assert not dbo_enabled()
             (
                 a1q,
                 a1q_scale,

@@ -173,9 +173,11 @@ class MiniMaxM2MoE(nn.Module):
             return None
 
         quant_config = self.experts.moe_quant_config
+        if quant_config is None:
+            return None
+
         if (
-            quant_config is not None
-            and quant_config.block_shape == [128, 128]
+            quant_config.block_shape == [128, 128]
             and not quant_config.per_act_token_quant
             and quant_config.a1_scale is None
             and quant_config.a1_gscale is None
@@ -214,7 +216,7 @@ class MiniMaxM2MoE(nn.Module):
                 minimax_moe_topk_sigmoid_quant_dispatch(
                     hidden_states,
                     router_logits,
-                    self.e_score_correction_bias.data,
+                    self.e_score_correction_bias,
                     self.experts.top_k,
                     block_k,
                     self._minimax_fused_topk_quant_max_tokens,
