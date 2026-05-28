@@ -386,7 +386,7 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            if self.use_pp and self.current_step < request.next_decode_eligible_step:
+            if self.current_step < request.next_decode_eligible_step:
                 # V2+PP+async: enforce `pp_size` steps between same-req decodes
                 # to match worker-side sampled-tokens broadcast slot ring cadence.
                 req_index += 1

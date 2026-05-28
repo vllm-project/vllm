@@ -90,7 +90,7 @@ class RequestState:
         prompt_len: int,
         all_token_ids: list[int],
         num_computed_tokens: int,
-        max_tokens: int = 0,
+        max_tokens: int,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
