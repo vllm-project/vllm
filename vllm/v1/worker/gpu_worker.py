@@ -18,7 +18,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
-from vllm.device_allocator import get_mem_allocator
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -172,7 +172,7 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        allocator = get_mem_allocator()
+        allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -185,7 +185,7 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        allocator = get_mem_allocator()
+        allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
@@ -200,10 +200,19 @@ class Worker(WorkerBase):
             self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if not self.vllm_config.model_config.enable_cumem_allocator:
+        if (
+            current_platform.is_cuda_alike()
+            and not self.vllm_config.model_config.enable_cumem_allocator
+        ):
             return nullcontext()
 
-        allocator = get_mem_allocator()
+        if (
+            current_platform.is_xpu()
+            and not self.vllm_config.model_config.enable_sleep_mode
+        ):
+            return nullcontext()
+
+        allocator = get_mem_allocator_instance()
         if tag == "weights":
             assert allocator.get_current_usage() == 0, (
                 "CuMem allocator can only be used for one instance per process."

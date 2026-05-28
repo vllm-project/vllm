@@ -30,7 +30,7 @@ class MemAllocator(Protocol):
     def get_current_usage(self) -> int: ...
 
 
-def get_mem_allocator() -> MemAllocator:
+def get_mem_allocator_instance() -> MemAllocator:
     if current_platform.is_cuda_alike():
         from vllm.device_allocator.cumem import CuMemAllocator
 

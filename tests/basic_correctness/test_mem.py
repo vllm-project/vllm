@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
-from vllm.device_allocator import get_mem_allocator
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
@@ -22,7 +22,7 @@ def test_python_error():
     Test if Python error occurs when there's low-level
     error happening from the C++ side.
     """
-    allocator = get_mem_allocator()
+    allocator = get_mem_allocator_instance()
     total_bytes = current_platform.mem_get_info()[1]
     alloc_bytes = int(total_bytes * 0.7)
     tensors = []
@@ -50,7 +50,7 @@ def test_basic_cumem():
     x.zero_()
 
     # some tensors from custom memory pool
-    allocator = get_mem_allocator()
+    allocator = get_mem_allocator_instance()
     with allocator.use_memory_pool():
         # custom memory pool
         y = torch.empty(shape, device=DEVICE_TYPE)
@@ -78,7 +78,7 @@ def test_basic_cumem():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 @pytest.mark.skipif(current_platform.is_xpu(), reason="CUDA graph not supported on XPU")
 def test_cumem_with_cudagraph():
-    allocator = get_mem_allocator()
+    allocator = get_mem_allocator_instance()
     with allocator.use_memory_pool():
         weight = torch.eye(1024, device=DEVICE_TYPE)
     with allocator.use_memory_pool(tag="discard"):
