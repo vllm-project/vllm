@@ -187,9 +187,26 @@ class EncoderCudaGraphManager:
         return modality in self.config.modalities
 
     def capture(self):
-        """Capture CUDA graphs for all token budgets."""
-        for token_budget in self.token_budgets:
+        """Capture CUDA graphs for all token budgets.
+
+        All budget graphs share a single CUDA graph memory pool so the
+        peak allocation is driven by the largest budget rather than the
+        sum across budgets. Capture is run largest-first so the pool is
+        sized once at its high-water-mark and all subsequent smaller
+        captures allocate in-place.
+        """
+        # Allocate one shared memory pool for every encoder graph. The
+        # torch.cuda.graph(graph, pool=...) context reuses this pool,
+        # so the N budgets overlap their working memory instead of each
+        # holding a private ~hundreds-of-MB arena.
+        self._graph_pool = torch.cuda.graph_pool_handle()
+
+        for token_budget in sorted(self.token_budgets, reverse=True):
             self._capture_budget_graph(token_budget)
+            # Return any transient allocations to the allocator between
+            # captures so the pool's peak watermark is bounded by a
+            # single graph, not the cumulative sum.
+            torch.cuda.empty_cache()
 
         logger.info(
             "Encoder CUDA graph capture complete. Captured %d budget graphs.",
@@ -222,7 +239,10 @@ class EncoderCudaGraphManager:
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
-        with torch.inference_mode(), torch.cuda.graph(graph):
+        with (
+            torch.inference_mode(),
+            torch.cuda.graph(graph, pool=getattr(self, "_graph_pool", None)),
+        ):
             output = self.model.encoder_cudagraph_forward(mm_kwargs, buffers)
             output_buffer.copy_(output)
 
