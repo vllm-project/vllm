@@ -772,9 +772,10 @@ void reshape_and_cache_flash(
 #if defined(ENABLE_NVFP4_SM100) || defined(ENABLE_NVFP4_SM120)
     // NVFP4 dispatch is compiled separately for SM100+.
     extern void reshape_and_cache_nvfp4_dispatch(
-        torch::Tensor & key, torch::Tensor & value, torch::Tensor & key_cache,
-        torch::Tensor & value_cache, torch::Tensor & slot_mapping,
-        torch::Tensor & k_scale, torch::Tensor & v_scale);
+        torch::stable::Tensor & key, torch::stable::Tensor & value,
+        torch::stable::Tensor & key_cache, torch::stable::Tensor & value_cache,
+        torch::stable::Tensor & slot_mapping, torch::stable::Tensor & k_scale,
+        torch::stable::Tensor & v_scale);
     reshape_and_cache_nvfp4_dispatch(key, value, key_cache, value_cache,
                                      slot_mapping, k_scale, v_scale);
     return;

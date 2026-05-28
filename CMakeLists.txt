@@ -910,13 +910,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    # nvfp4_kv_cache_kernels uses non-stable torch API and is called directly
-    # from cache_kernels.cu, so it belongs in _C rather than _C_stable.
     set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
@@ -950,7 +948,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
