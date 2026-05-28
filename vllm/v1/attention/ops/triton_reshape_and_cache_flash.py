@@ -607,3 +607,4 @@ def triton_reshape_and_cache_flash_diffkv(
         num_warps=num_warps,
         num_stages=num_stages,
     )
+# coverage test
