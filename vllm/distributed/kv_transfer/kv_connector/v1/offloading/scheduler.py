@@ -174,6 +174,8 @@ class RequestOffloadState:
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     req_context: ReqContext = field(init=False)
+    # upper bound on tokens to offload for this request; None means no cap
+    max_offload_tokens: int | None = None
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -188,6 +190,21 @@ class RequestOffloadState:
             req_id=self.req.request_id,
             kv_transfer_params=self.req.kv_transfer_params,
         )
+        params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_offload_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_offload_tokens = raw
+            logger.debug(
+                "Request %s: max_offload_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -683,6 +700,9 @@ class OffloadingConnectorScheduler:
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
             # with async scheduling, some tokens may be missing
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
+            max_offload_tokens = req_status.max_offload_tokens
+            if max_offload_tokens is not None:
+                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
 
             # Filter out blocks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
