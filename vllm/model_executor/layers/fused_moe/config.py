@@ -1091,7 +1091,10 @@ class FusedMoEParallelConfig:
 
     @property
     def use_mori_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "mori"
+        return self.use_all2all_kernels and self.all2all_backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+        )
 
     @property
     def use_nixl_ep_kernels(self):
@@ -1292,12 +1295,6 @@ class FusedMoEConfig:
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
-
-    # This flag is used to disable the inplace optimization
-    # in MoE kernels. If this flag is True then the kernel
-    # should not be using inplace. If the flag is false, the
-    # kernel is free to use inplace or not.
-    disable_inplace: bool = True
 
     def __post_init__(self):
         if self.dp_size > 1:
