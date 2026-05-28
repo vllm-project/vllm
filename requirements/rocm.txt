@@ -22,4 +22,4 @@ timm>=1.0.17
 # amd-quark: required for Quark quantization on ROCm 
 # To be consistent with test_quark.py
 amd-quark>=0.8.99
-tilelang>=0.1.10
+tilelang==0.1.10
