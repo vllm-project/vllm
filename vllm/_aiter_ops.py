@@ -266,15 +266,24 @@ def _rocm_aiter_topk_softmax_impl(
 ) -> None:
     from aiter import topk_softmax
 
-    topk_softmax(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        num_shared_experts,
-        shared_expert_scoring_func,
-    )
+    if rocm_aiter_ops.topk_softmax_supports_fused_sigmoid():
+        topk_softmax(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
+        )
+    else:
+        topk_softmax(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+        )
 
 
 def _rocm_aiter_topk_softmax_fake(
