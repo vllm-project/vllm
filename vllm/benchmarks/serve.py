@@ -30,7 +30,7 @@ import ssl
 import time
 import uuid
 import warnings
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -341,7 +341,10 @@ async def get_request(
     else:
         for request_index, request in enumerate(input_requests):
             # this is cumulative running ts, from which sleep is calculated later
-            delay_ts.append(request.timestamp)
+            if request.timestamp is not None:
+                delay_ts.append(request.timestamp)
+            else:
+                delay_ts.append(0.0)
             # TODO: there is no notion of RPS here, may be we can calculate
             # from the trace.
             request_rates.append(0.0)
@@ -748,11 +751,12 @@ async def benchmark(
 
     print("Starting main benchmark run...")
 
+    lora_modules_iter: Iterator[str] | None = None
     if lora_modules:
         lora_modules_list = list(lora_modules)
         if lora_assignment == "round-robin":
             # Deterministic round-robin assignment across requests.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [
                     lora_modules_list[i % len(lora_modules_list)]
                     for i in range(len(input_requests))
@@ -760,7 +764,7 @@ async def benchmark(
             )
         else:
             # For each input request, choose a LoRA module at random.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [random.choice(lora_modules_list) for _ in range(len(input_requests))]
             )
 
@@ -855,11 +859,10 @@ async def benchmark(
             request.request_id,
         )
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(iter(lora_modules))
+        if lora_modules_iter:
+            req_lora_module = next(lora_modules_iter)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        # Narrow mm_content type for RequestFuncInput
         mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
         if isinstance(mm_content, (dict, list)):
             mm_content_typed = mm_content

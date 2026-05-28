@@ -289,10 +289,11 @@ def _get_chat_content(
             for item in prompt
         )
     ):
+        prompt_dicts: list[dict[str, Any]] = prompt  # type: ignore[assignment]
         if mm_position == "first":
-            return mm_contents + prompt
+            return mm_contents + prompt_dicts
 
-        return prompt + mm_contents
+        return prompt_dicts + mm_contents
 
     text_contents = [{"type": "text", "text": prompt}]
 
@@ -303,15 +304,15 @@ def _get_chat_content(
 
 
 def _is_chat_messages(prompt: Any) -> bool:
-    return (
-        isinstance(prompt, list)
-        and prompt
-        and all(
-            isinstance(item, dict)
-            and isinstance(item.get("role"), str)
-            and isinstance(item.get("content"), (str, list))
-            for item in prompt
-        )
+    if not isinstance(prompt, list):
+        return False
+    if not prompt:
+        return False
+    return all(
+        isinstance(item, dict)
+        and isinstance(item.get("role"), str)
+        and isinstance(item.get("content"), (str, list))
+        for item in prompt
     )
 
 
@@ -321,7 +322,7 @@ def _get_chat_messages(
 ) -> list[dict[str, Any]]:
     prompt = request_func_input.prompt
     if _is_chat_messages(prompt):
-        return prompt
+        return prompt  # type: ignore[return-value]
 
     return [
         {
@@ -378,8 +379,8 @@ async def async_request_openai_chat_completions(
                     if not chunk_bytes:
                         continue
 
-                    messages = handler.add_chunk(chunk_bytes)
-                    for message in messages:
+                    message_strings = handler.add_chunk(chunk_bytes)
+                    for message in message_strings:
                         # NOTE: SSE comments (often used as pings) start with
                         # a colon. These are not JSON data payload and should
                         # be skipped.
@@ -809,11 +810,9 @@ async def async_request_vllm_pooling(
         "truncate_prompt_tokens": -1,
     }
 
-    # Merge prompt into payload only if it's a dict
     if isinstance(request_func_input.prompt, dict):
         payload = payload | request_func_input.prompt
     else:
-        # For str or list types, add as 'input' field
         payload["input"] = request_func_input.prompt
 
     _update_payload_common(payload, request_func_input)

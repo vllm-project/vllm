@@ -128,7 +128,7 @@ def _run_vllm_requests(
                 detokenize=not disable_detokenize,
             )
         )
-        if lora_requests is not None:
+        if lora_requests is not None and request.lora_request is not None:
             lora_requests.append(request.lora_request)
 
     use_beam_search = False
@@ -381,25 +381,24 @@ async def _run_vllm_async_requests(
         prompts.append(prompt)
         lora_requests.append(request.lora_request)
 
-        generators = []
-        start = time.perf_counter()
-        if do_profile:
-            await llm.start_profile()
-        for i, (prompt_item, sp, lr) in enumerate(
-            zip(prompts, sampling_params, lora_requests)
-        ):
-            gen_prompt: TextPrompt | TokensPrompt = prompt_item  # type: ignore[assignment]
-            generator = llm.generate(
-                gen_prompt, sp, lora_request=lr, request_id=f"{request_id_prefix}{i}"
-            )
-            generators.append(generator)
-        all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens:
-            pass
-        if do_profile:
-            await llm.stop_profile()
-        end = time.perf_counter()
-        return end - start, None
+    generators = []
+    start = time.perf_counter()
+    if do_profile:
+        await llm.start_profile()
+    for i, (prompt_item, sp, lr) in enumerate(
+        zip(prompts, sampling_params, lora_requests)
+    ):
+        generator = llm.generate(
+            prompt_item, sp, lora_request=lr, request_id=f"{request_id_prefix}{i}"
+        )
+        generators.append(generator)
+    all_gens = merge_async_iterators(*generators)
+    async for _i, _res in all_gens:
+        pass
+    if do_profile:
+        await llm.stop_profile()
+    end = time.perf_counter()
+    return end - start, None
 
 
 def run_hf(
