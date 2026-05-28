@@ -270,6 +270,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
             use_a16=self.use_a16,
+            source_format="compressed_tensors",
         )
 
     def apply_monolithic(
