@@ -187,8 +187,6 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         ),
     )
 
-    assert mrv2.GPUModelRunner.sample_tokens(runner, None) in (
-        EMPTY_MODEL_RUNNER_OUTPUT,
-        None,
-    )
+    output = mrv2.GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["postprocess", "eplb"]
