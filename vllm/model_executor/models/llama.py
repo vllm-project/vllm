@@ -599,3 +599,4 @@ class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
     # This class sets the correct attention type and pooling type
     # through LlamaBidirectionalConfig.
     pass
+# coverage test
