@@ -142,7 +142,6 @@ def batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -195,7 +194,6 @@ def naive_batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -631,7 +629,6 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-        inplace=False,
     )
 
 
