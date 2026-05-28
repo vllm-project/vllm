@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pipeline Parallelism utils for V2 Model Runner."""
 
+from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,13 +69,13 @@ class PPHandler:
         self.main_stream = torch.cuda.current_stream(device)
         self.broadcast_stream = torch.cuda.Stream(device)
 
-        # On non-last ranks, slots[k] holds step (curr_step - pp_size + k)'s
-        # pending postprocess after that step's `receive`. None means no
-        # postprocess is pending for that slot (e.g. broadcast was skipped).
-        self.slots: list[PendingRecv | None] = (
-            [] if self.is_last_rank else [None] * get_pp_group().world_size
+        # On non-last ranks, a FIFO with one entry per in-flight step: the entry
+        # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded
+        # with pp_size None placeholders so the first pp_size consumes are no-ops.
+        # None means no postprocess is pending for that step (broadcast skipped).
+        self.queue: deque[PendingRecv | None] = (
+            deque() if self.is_last_rank else deque([None] * get_pp_group().world_size)
         )
-        self.slot_index = -1
 
         # Per req-index generation counter, incremented every time a request
         # index is freed in RequestStats. Used for invalidating freed req data
@@ -90,17 +91,17 @@ class PPHandler:
         self.req_idx_gen_np[req_idx] += 1
 
     def get_prev_step_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
-        """Advance to this step's slot and wait for its recv event, then
-        filter out entries whose request was freed since `receive`.
+        """Consume the entry from pp_size steps ago and wait for its recv event,
+        then filter out entries whose request was freed since `receive`.
         """
-        if not self.slots:
+        if not self.queue:
             return None
-        self.slot_index = (self.slot_index + 1) % len(self.slots)
-        slot = self.slots[self.slot_index]
+        slot = self.queue.popleft()
+        # Reserve this step's slot; `receive` overwrites it if applicable.
+        self.queue.append(None)
         if slot is None:
             return None
         self.main_stream.wait_event(slot.event)
-        self.slots[self.slot_index] = None
 
         # Skip indices whose request has been freed (and possibly reassigned)
         # since this `PendingRecv` was created.
@@ -128,7 +129,7 @@ class PPHandler:
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch, req_states)
         if need_sampled_mask is None:
-            self.slots[self.slot_index] = None
+            # Leave this step's reserved slot as None.
             return False
 
         # All requests decode next iff every request in the batch needs its
@@ -173,7 +174,7 @@ class PPHandler:
             sampled_tokens.record_stream(self.main_stream)
             combined.record_stream(self.main_stream)
             event = self.broadcast_stream.record_event()
-        self.slots[self.slot_index] = PendingRecv(
+        self.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
             num_sampled,
