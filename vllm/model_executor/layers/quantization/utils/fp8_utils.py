@@ -38,6 +38,21 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+_SM12X_TUNED_CONFIG_DEVICE_ALIASES = {
+    "NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition": (
+        "NVIDIA_RTX_PRO_6000_Blackwell_Workstation_Edition",
+    ),
+    "NVIDIA_RTX_PRO_6000_Blackwell_Server_Edition": (
+        "NVIDIA_RTX_PRO_6000_Blackwell_Workstation_Edition",
+    ),
+}
+
+
+def _tuned_config_device_names() -> tuple[str, ...]:
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    return (device_name, *_SM12X_TUNED_CONFIG_DEVICE_ALIASES.get(device_name, ()))
+
+
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
     if isinstance(x, torch.Tensor):
         x = x.dtype
@@ -808,27 +823,30 @@ def get_w8a8_block_fp8_configs(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = current_platform.get_device_name().replace(" ", "_")
-    json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
-
-    config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
-    )
-    if os.path.exists(config_file_path):
-        with open(config_file_path) as f:
-            logger.info(
-                "Using configuration from %s for W8A8 Block FP8 kernel.",
-                config_file_path,
-            )
-            # If a configuration has been found, return it
-            return {int(key): val for key, val in json.load(f).items()}
+    config_file_paths = [
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "configs",
+            f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json",  # noqa: E501
+        )
+        for device_name in _tuned_config_device_names()
+    ]
+    for config_file_path in config_file_paths:
+        if os.path.exists(config_file_path):
+            with open(config_file_path) as f:
+                logger.info(
+                    "Using configuration from %s for W8A8 Block FP8 kernel.",
+                    config_file_path,
+                )
+                # If a configuration has been found, return it
+                return {int(key): val for key, val in json.load(f).items()}
 
     # If no optimized configuration is available, we will use the default
     # configuration
     logger.warning(
         "Using default W8A8 Block FP8 kernel config. Performance might "
-        "be sub-optimal! Config file not found at %s",
-        config_file_path,
+        "be sub-optimal! Config files not found at %s",
+        config_file_paths,
     )
     return None
 
