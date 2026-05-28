@@ -80,13 +80,13 @@
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
-/tests/evals @mgoin @vadiklyutiy
-/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
+/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
-/tests/models @DarkLight1337 @ywang96
+/tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
-/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye
+/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
@@ -153,9 +153,7 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
 
 # DeepseekV4-specific files
-/vllm/v1/attention/ops/deepseek_v4_ops @zyongye
-/vllm/model_executor/layers/deepseek_compressor.py @zyongye
-/vllm/model_executor/layers/deepseek_v4_attention.py @zyongye
+/vllm/models/deepseek_v4 @zyongye
 /vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
@@ -172,21 +170,21 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa
-/docker/Dockerfile.rocm* @gshtras @tjtanaa
-/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
-/csrc/rocm @gshtras @tjtanaa
-/requirements/*rocm* @tjtanaa
-/tests/**/*rocm* @tjtanaa
+/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
+/vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd
+/requirements/*rocm* @tjtanaa @AndreasKaratzas
+/tests/**/*rocm* @tjtanaa @AndreasKaratzas
 /docs/**/*rocm* @tjtanaa
 /vllm/**/*quark* @tjtanaa
-/tests/**/*quark* @tjtanaa
+/tests/**/*quark* @tjtanaa @AndreasKaratzas
 /docs/**/*quark* @tjtanaa
-/vllm/**/*aiter* @tjtanaa
-/tests/**/*aiter* @tjtanaa
+/vllm/**/*aiter* @tjtanaa @AndreasKaratzas
+/tests/**/*aiter* @tjtanaa @AndreasKaratzas
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche
