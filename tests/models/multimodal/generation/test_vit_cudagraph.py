@@ -10,8 +10,7 @@ from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, VIDEO_ASSETS
-
-from ....utils import create_new_process_for_each_test, multi_gpu_marks, dummy_hf_overrides
+from ....utils import dummy_hf_overrides
 from .vlm_utils.builders import sample_frames_with_video_metadata
 
 
@@ -64,10 +63,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         max_tokens=32,
         max_num_seqs=2,
         vllm_runner_kwargs={
-            "distributed_executor_backend": "mp",
-            "tensor_parallel_size": 4,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Llama4ForConditionalGeneration",
+            ),
         },
-        marks=[pytest.mark.core_model, *multi_gpu_marks(num_gpus=4)],
+        marks=[pytest.mark.core_model],
     ),
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",

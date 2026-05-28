@@ -631,12 +631,12 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
                 (image_size[0] // tile_size, image_size[1] // tile_size)
                 for image_size in best_fit_sizes
             ]
-            chunks_per_image = [
+            patches_per_image = [
                 1 if r_h * r_w == 1 else 1 + r_h * r_w for (r_h, r_w) in aspect_ratios
             ]
 
             processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
-            processed_outputs["patches_per_image"] = torch.tensor(chunks_per_image)
+            processed_outputs["patches_per_image"] = torch.tensor(patches_per_image)
 
         return processed_outputs
 
@@ -645,10 +645,10 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        chunks_per_image = hf_inputs.get("patches_per_image", torch.empty(0))
+        patches_per_image = hf_inputs.get("patches_per_image", torch.empty(0))
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image", chunks_per_image
+                "image", patches_per_image
             ),
             patches_per_image=MultiModalFieldConfig.batched("image"),
             aspect_ratios=MultiModalFieldConfig.batched("image"),
@@ -895,16 +895,16 @@ class Llama4ForConditionalGeneration(
         indices: list[int],
     ) -> dict[str, Any]:
         pixel_values = mm_kwargs["pixel_values"]
-        chunks_per_image = mm_kwargs["patches_per_image"]
+        patches_per_image = mm_kwargs["patches_per_image"]
 
         if len(indices) == 0:
             return {
                 "pixel_values": pixel_values[:0],
-                "patches_per_image": chunks_per_image[:0],
+                "patches_per_image": patches_per_image[:0],
             }
 
         cum_chunks = [0]
-        for num_chunks in chunks_per_image.tolist():
+        for num_chunks in patches_per_image.tolist():
             cum_chunks.append(cum_chunks[-1] + num_chunks)
 
         selected_pixel_values = torch.cat(
@@ -914,7 +914,7 @@ class Llama4ForConditionalGeneration(
 
         return {
             "pixel_values": selected_pixel_values,
-            "patches_per_image": chunks_per_image[indices],
+            "patches_per_image": patches_per_image[indices],
         }
 
     def prepare_encoder_cudagraph_capture_inputs(
@@ -987,21 +987,22 @@ class Llama4ForConditionalGeneration(
         if pixel_values is None:
             return None
 
-        chunks_per_image = kwargs.pop("patches_per_image")
+        patches_per_image = kwargs.pop("patches_per_image")
         aspect_ratios = kwargs.pop("aspect_ratios")
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
             pixel_values=pixel_values,
-            patches_per_image=chunks_per_image,
+            patches_per_image=patches_per_image,
             aspect_ratios=aspect_ratios,
         )
 
     def _process_image_input(
         self, image_input: Llama4ImagePatchInputs
     ) -> MultiModalEmbeddings:
+        assert self.vision_model and self.multi_modal_projector
         pixel_values = image_input["pixel_values"]
-        chunks_per_image = image_input["patches_per_image"].tolist()
+        patches_per_image = image_input["patches_per_image"].tolist()
 
         vision_embeddings_flat = self.encode_image_chunks(
             pixel_values,
@@ -1010,7 +1011,7 @@ class Llama4ForConditionalGeneration(
 
         return [
             img.flatten(0, 1)
-            for img in vision_embeddings_flat.split(chunks_per_image, dim=0)
+            for img in vision_embeddings_flat.split(patches_per_image, dim=0)
         ]
 
     def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
