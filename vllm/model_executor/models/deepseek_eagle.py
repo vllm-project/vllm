@@ -140,7 +140,8 @@ class DeepseekV2Model(nn.Module):
                     param_name == "fused_qkv_a_proj"
                 ) and name_mapped not in params_dict:
                     continue
-                # Skip loading extra bias for GPTQ models as well as any layer not in params_dict.
+                # Skip loading extra bias for GPTQ models
+                # as well as any layer not in params_dict.
                 if name_mapped not in params_dict:
                     continue
 
