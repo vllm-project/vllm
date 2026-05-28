@@ -113,9 +113,6 @@ class TrtLlmMxfp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return False

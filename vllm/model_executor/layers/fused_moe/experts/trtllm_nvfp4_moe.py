@@ -157,8 +157,27 @@ class TrtLlmNvFp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return False
+    def _get_chunk_size(self) -> int:
+        MAX_GRID_Y = 65535
+        MAX_TILE_TOKENS_DIM = 128
+
+        def _calc_max_supported_tokens(top_k: int, num_experts: int) -> int:
+            """Calculates the max number of supported tokens, so the CUDA grid.Y limit
+            won't be reached.
+            Based on getMaxNumCtasInBatchDim function in flashinfer's TRTLLM MoE runner:
+            https://github.com/flashinfer-ai/flashinfer/blob/719ee23fd82cb220d51ad118ca60198718f6c9d1/include/flashinfer/trtllm/fused_moe/runner.h#L97
+            Which given numTokens, topK, numExperts, tileTokensDim calculates maxNumCtas
+            which is used as the CUDA grid.Y dimension, which we want to
+            be <= MAX_GRID_Y. Solving for numTokens gives the formula below.
+            """
+            return (
+                num_experts + (MAX_GRID_Y - num_experts + 1) * MAX_TILE_TOKENS_DIM - 1
+            ) // top_k
+
+        # Using 305k or more causes IMA error in the kernel, so limit to 300k.
+        return min(
+            300000, _calc_max_supported_tokens(self.topk, self.moe_config.num_experts)
+        )
 
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
@@ -196,7 +215,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
-    def apply(
+    def _invoke_kernel(
         self,
         output: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -206,18 +225,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         topk_ids: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
+        a1q_scale: torch.Tensor,
     ):
         import flashinfer
 
-        assert self._supports_activation(activation)
-        assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
@@ -258,6 +269,57 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             activation_type=activation_to_flashinfer_int(activation),
             output=output,
         )
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        assert self._supports_activation(activation)
+        assert a1q_scale is not None
+
+        M = hidden_states.shape[0]
+        chunk_size = self._get_chunk_size()
+
+        if chunk_size >= M:
+            self._invoke_kernel(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                activation,
+                global_num_experts,
+                a1q_scale,
+            )
+        else:
+            for start in range(0, M, chunk_size):
+                end = min(start + chunk_size, M)
+                self._invoke_kernel(
+                    output[start:end],
+                    hidden_states[start:end],
+                    w1,
+                    w2,
+                    topk_weights[start:end],
+                    topk_ids[start:end],
+                    activation,
+                    global_num_experts,
+                    a1q_scale[start:end],
+                )
 
 
 class TrtLlmNvFp4ExpertsMonolithic(

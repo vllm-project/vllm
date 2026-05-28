@@ -127,7 +127,6 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(

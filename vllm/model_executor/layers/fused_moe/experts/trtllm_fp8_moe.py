@@ -88,9 +88,6 @@ class TrtLlmFp8ExpertsBase:
             or moe_parallel_config.use_ag_rs_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
-    def supports_chunking(self) -> bool:
-        return False
-
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     """
