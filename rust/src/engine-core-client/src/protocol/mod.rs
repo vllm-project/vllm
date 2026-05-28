@@ -36,6 +36,14 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
+fn default_top_p() -> f32 {
+    1.0
+}
+
+fn default_repetition_penalty() -> f32 {
+    1.0
+}
+
 mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
@@ -65,6 +73,24 @@ pub enum EngineCoreRequestType {
 }
 
 impl EngineCoreRequestType {
+    /// Decode the single-byte request type frame used on the engine input
+    /// socket. Returns `None` for unrecognized values.
+    pub fn from_frame(frame: &[u8]) -> Option<Self> {
+        let [value] = frame else {
+            return None;
+        };
+
+        match value {
+            0 => Some(Self::Add),
+            1 => Some(Self::Abort),
+            2 => Some(Self::StartDpWave),
+            3 => Some(Self::Utility),
+            _ => None,
+        }
+    }
+
+    /// Encode the request type as the single-byte frame used on the engine
+    /// input socket.
     pub fn to_frame(self) -> Bytes {
         Bytes::from_static(match self {
             Self::Add => b"\x00",
@@ -200,14 +226,17 @@ pub struct EngineCoreSamplingParams {
     /// greedy sampling.
     pub temperature: f32,
     /// Cumulative probability threshold for nucleus sampling.
+    #[serde(default = "default_top_p")]
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
+    #[serde(default)]
     pub top_k: u32,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
     /// Maximum number of tokens to generate per output sequence.
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
+    #[serde(default)]
     pub min_tokens: u32,
     /// Number of log probabilities to return per generated token.
     ///
@@ -218,12 +247,14 @@ pub struct EngineCoreSamplingParams {
     /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
     pub prompt_logprobs: Option<i32>,
     /// Minimum probability threshold for token sampling.
+    #[serde(default)]
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.
     pub frequency_penalty: f32,
     /// Presence penalty applied by the sampler.
     pub presence_penalty: f32,
     /// Repetition penalty applied by the sampler.
+    #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
     /// Token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
