@@ -36,7 +36,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.common.ops import fused_mtp_input_rmsnorm
+from vllm.models.deepseek_v4.common.ops import (
+    fused_mtp_input_rmsnorm,
+    mtp_shared_head_rmsnorm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -251,9 +254,12 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        hidden_states = mtp_shared_head_rmsnorm(
+            hidden_states,
+            mtp_layer.shared_head.norm.weight.data,
+            mtp_layer.shared_head.norm.variance_epsilon,
         )
+        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
         return logits
 
 

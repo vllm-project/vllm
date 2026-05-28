@@ -97,6 +97,59 @@ def _fused_mtp_input_rmsnorm_kernel(
         )
 
 
+@triton.jit
+def _mtp_shared_head_rmsnorm_kernel(
+    x_ptr,
+    weight_ptr,
+    out_ptr,
+    eps,
+    HIDDEN: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < HIDDEN
+    x = tl.load(x_ptr + token_idx * HIDDEN + block, mask=mask, other=0.0)
+    _rmsnorm_row(
+        x,
+        weight_ptr,
+        out_ptr + token_idx * HIDDEN,
+        block,
+        mask,
+        eps,
+        HIDDEN,
+    )
+
+
+def mtp_shared_head_rmsnorm(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """RMSNorm for MTP's SharedHead.norm, on (T, H) bf16 input.
+
+    Uses the same ``_rmsnorm_row`` body as ``fused_mtp_input_rmsnorm`` so the
+    MTP draft path runs one consistent RMSNorm implementation end to end.
+    """
+    assert hidden_states.ndim == 2
+    assert hidden_states.is_contiguous()
+    assert weight.is_contiguous()
+    num_tokens, hidden = hidden_states.shape
+    out = torch.empty_like(hidden_states)
+    if num_tokens == 0:
+        return out
+    block_size = triton.next_power_of_2(hidden)
+    _mtp_shared_head_rmsnorm_kernel[(num_tokens,)](
+        hidden_states,
+        weight,
+        out,
+        eps,
+        HIDDEN=hidden,
+        BLOCK_SIZE=block_size,
+    )
+    return out
+
+
 def fused_mtp_input_rmsnorm(
     inputs_embeds: torch.Tensor,
     positions: torch.Tensor,
