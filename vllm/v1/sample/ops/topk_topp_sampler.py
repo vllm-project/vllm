@@ -291,7 +291,8 @@ class TopKTopPSampler(nn.Module):
         )
         # The custom XPU sampler kernel consumes RNG values internally, so advance
         # the default generator's offset to keep future draws deterministic.
-        offset += logits.numel()
+        # pytorch: offset must be multiple of 4
+        offset = (offset + logits.numel() + 3) // 4 * 4
         state.view(torch.int64)[1] = offset
         generator.set_state(state)
         return random_sampled, logits_to_return
