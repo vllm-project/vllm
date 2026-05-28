@@ -118,6 +118,5 @@ def make_eep_staged_quant_method(
         mk.FusedMoEKernel(
             prepare_finalize,
             experts,
-            inplace=moe_kernel.inplace,
         ),
     )
