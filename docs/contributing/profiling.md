@@ -136,6 +136,7 @@ To profile the server, you will want to prepend your `vllm serve` command with `
 nsys profile \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
+    --trace=cuda,nvtx \
     --capture-range=cudaProfilerApi \
     --capture-range-end repeat \
     vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
@@ -151,6 +152,38 @@ vllm bench serve \
 ```
 
 With `--profile`, vLLM will capture a profile for each run of `vllm bench serve`. Once the server is killed, the profiles will all be saved.
+
+#### Stage-level NVTX scopes (optional)
+
+For high-level serving phases in the timeline, enable vLLM's env-gated NVTX
+scopes:
+
+- `scheduler_step`
+- `prefill_batch`
+- `decode_batch`
+- `mixed_batch`
+- `empty_batch`
+- `sampling`
+
+```bash
+# server
+VLLM_NVTX_SCOPES_FOR_PROFILING=1 \
+nsys profile \
+    --trace-fork-before-exec=true \
+    --cuda-graph-trace=node \
+    --trace=cuda,nvtx \
+    --capture-range=cudaProfilerApi \
+    --capture-range-end repeat \
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
+```
+
+Use the same client flow shown above (`vllm bench serve --profile ...`) to drive
+`/start_profile` and `/stop_profile`.
+
+!!! note
+    In Nsight Systems, `--nvtx-capture` is only applicable when
+    `--capture-range=nvtx` is set. The command above uses vLLM's existing
+    `cudaProfilerApi` capture workflow for consistency with `/start_profile`.
 
 #### Analysis
 
