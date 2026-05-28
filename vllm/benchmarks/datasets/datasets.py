@@ -81,7 +81,7 @@ class SampleRequest:
 
     prompt: str | list[str] | list[dict]
     prompt_len: int
-    expected_output_len: int | None
+    expected_output_len: int = 0
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
@@ -626,7 +626,7 @@ class RandomDataset(BenchmarkDataset):
         # Generate prefix once
         prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
 
-        requests = []
+        requests: list[SampleRequest] = []
         token_mismatch_total = 0
         for i in range(num_requests):
             prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
@@ -663,14 +663,8 @@ class RandomDataset(BenchmarkDataset):
                 batch = requests[i : i + batchsize]
                 batch_requests.append(
                     SampleRequest(
-                        prompt=[
-                            req.prompt
-                            if isinstance(req.prompt, str)
-                            else str(req.prompt)
-                            for req in batch
-                        ],
+                        prompt=[req.prompt for req in batch],  # type: ignore[arg-type]
                         prompt_len=sum(req.prompt_len for req in batch),
-                        expected_output_len=0,
                         request_id=request_id_prefix + str(i // batchsize),
                     )
                 )
@@ -2537,23 +2531,23 @@ class CustomDataset(BenchmarkDataset):
 
             if tokenizer is None:
                 new_output_len = 1
+            elif output_len is None or output_len == -1:
+                # check that the request has an 'output_tokens' field
+                if "output_tokens" not in item:
+                    raise ValueError(
+                        "If no output length is provided the "
+                        "custom dataset must contain an 'output_tokens' field."
+                    )
+                # Use number of output tokens from the request data
+                try:
+                    new_output_len = int(item["output_tokens"])
+                except (ValueError, TypeError) as e:
+                    raise ValueError(
+                        f"Invalid value for 'output_tokens' in custom dataset: "
+                        f"'{item['output_tokens']}'. Must be an integer."
+                    ) from e
             else:
                 new_output_len = output_len
-                if output_len is None or output_len == -1:
-                    # check that the request has an 'output_tokens' field
-                    if "output_tokens" not in item:
-                        raise ValueError(
-                            "If no output length is provided the "
-                            "custom dataset must contain an 'output_tokens' field."
-                        )
-                    # Use number of output tokens from the request data
-                    try:
-                        new_output_len = int(item["output_tokens"])
-                    except (ValueError, TypeError) as e:
-                        raise ValueError(
-                            f"Invalid value for 'output_tokens' in custom dataset: "
-                            f"'{item['output_tokens']}'. Must be an integer."
-                        ) from e
 
             if tokenizer is None:
                 prompt_len = 1
@@ -2829,7 +2823,7 @@ class CustomImageDataset(CustomDataset):
                     SampleRequest(
                         prompt=prompt,
                         prompt_len=prompt_len,
-                        expected_output_len=output_len,
+                        expected_output_len=output_len or 0,
                         multi_modal_data=None,
                         request_id=request_id_prefix + str(i),
                     )
@@ -2855,7 +2849,7 @@ class CustomImageDataset(CustomDataset):
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len,
+                    expected_output_len=output_len or 0,
                     multi_modal_data=mm_content,
                     request_id=request_id_prefix + str(i),
                 )
@@ -2944,7 +2938,6 @@ class CustomAudioDataset(CustomDataset):
                 prompt_len = (
                     len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
                 )
-                new_output_len = output_len
                 if output_len is None or output_len == -1:
                     if "output_tokens" not in item:
                         raise ValueError(
@@ -2952,6 +2945,8 @@ class CustomAudioDataset(CustomDataset):
                             "custom dataset must contain an 'output_tokens' field."
                         )
                     new_output_len = int(item["output_tokens"])
+                else:
+                    new_output_len = output_len
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -4167,8 +4162,6 @@ class MLPerfDataset(HuggingFaceDataset):
         output_len: int | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
-        # Force dynamic output length based on reference completion.
-        dynamic_output = output_len is None
         assert self.data is not None, "Dataset must be loaded before sampling"
         sampled_requests: list[SampleRequest] = []
         ind = 0
@@ -4198,10 +4191,10 @@ class MLPerfDataset(HuggingFaceDataset):
             ref_out_len = len(
                 tokenizer(reference_answer, add_special_tokens=False).input_ids
             )
-            expected_output_len = ref_out_len if dynamic_output else output_len
+            expected_output_len = ref_out_len if output_len is None else output_len
 
             # Validate sequence lengths.
-            if not is_valid_sequence(prompt_len, expected_output_len or 0):
+            if not is_valid_sequence(prompt_len, expected_output_len):
                 continue
 
             sampled_requests.append(

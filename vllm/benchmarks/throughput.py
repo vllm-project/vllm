@@ -61,7 +61,7 @@ def run_vllm(
     all_requests = list(warmup_requests or []) + requests
     assert all(
         llm.llm_engine.model_config.max_model_len
-        >= (request.prompt_len + (request.expected_output_len or 0))
+        >= (request.prompt_len + request.expected_output_len)
         for request in all_requests
     ), (
         "Please ensure that max_model_len is greater than the sum of"
@@ -219,7 +219,7 @@ def run_vllm_chat(
     all_requests = list(warmup_requests or []) + requests
     assert all(
         llm.llm_engine.model_config.max_model_len
-        >= (request.prompt_len + (request.expected_output_len or 0))
+        >= (request.prompt_len + request.expected_output_len)
         for request in all_requests
     ), (
         "Please ensure that max_model_len is greater than the sum of "
@@ -313,7 +313,7 @@ async def run_vllm_async(
         all_requests = list(warmup_requests or []) + requests
         assert all(
             model_config.max_model_len
-            >= (request.prompt_len + (request.expected_output_len or 0))
+            >= (request.prompt_len + request.expected_output_len)
             for request in all_requests
         ), (
             "Please ensure that max_model_len is greater than the sum of"
@@ -464,14 +464,14 @@ def _run_hf_requests(
         assert isinstance(prompt, str), "Prompt must be a string for HF backend"
         batch.append(prompt)
         max_prompt_len = max(max_prompt_len, prompt_len)
-        max_output_len = max(max_output_len, output_len or 0)
+        max_output_len = max(max_output_len, output_len)
         if len(batch) < max_batch_size and i != len(requests) - 1:
             # Check if we can add more requests to the batch.
             next_prompt_len = requests[i + 1].prompt_len
             next_output_len = requests[i + 1].expected_output_len
             if (
                 max(max_prompt_len, next_prompt_len)
-                + max(max_output_len, next_output_len or 0)
+                + max(max_output_len, next_output_len)
             ) <= 2048:
                 # We can add more requests to the batch.
                 continue

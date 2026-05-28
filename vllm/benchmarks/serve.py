@@ -698,7 +698,7 @@ async def benchmark(
         prompt=test_prompt,
         api_url=api_url,
         prompt_len=test_prompt_len,
-        output_len=test_output_len or 0,
+        output_len=test_output_len,
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
@@ -776,7 +776,7 @@ async def benchmark(
             prompt=test_prompt,
             api_url=base_url + "/start_profile",
             prompt_len=test_prompt_len,
-            output_len=test_output_len or 0,
+            output_len=test_output_len,
             logprobs=logprobs,
             multi_modal_content=test_mm_content,
             ignore_eos=ignore_eos,
@@ -1141,7 +1141,7 @@ async def benchmark(
             prompt=test_prompt,
             api_url=base_url + "/stop_profile",
             prompt_len=test_prompt_len,
-            output_len=test_output_len or 0,
+            output_len=test_output_len,
             logprobs=logprobs,
         )
         profile_output = await request_func(
