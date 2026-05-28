@@ -10,7 +10,6 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
-    AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
@@ -66,13 +65,8 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-) -> tuple[
-    dict[str, type[AttentionBackend]],
-    list[list[AttentionGroup]],
-    AttentionCGSupportInfo,
-    list[int],
-]:
-    attn_backends: dict[str, type[AttentionBackend]] = {}
+) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
+    # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
 
     # Add KV-sharing layers to their target's kv cache group so they are
@@ -97,7 +91,6 @@ def init_attn_backend(
 
         for layer_name in layer_names:
             attn_backend = attn_layers[layer_name].get_attn_backend()
-            attn_backends[layer_name] = attn_backend
 
             layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
             if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -123,7 +116,6 @@ def init_attn_backend(
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
-        kv_cache_group_spec = kv_cache_config.kv_cache_groups[kv_cache_group_id]
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[kv_cache_group_id]
@@ -144,21 +136,16 @@ def init_attn_backend(
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
-                cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec),
+                cast(AttentionSpec, group.kv_cache_spec),
             )
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
 
-    return (
-        attn_backends,
-        attn_groups,
-        AttentionCGSupportInfo(
-            min_cg_support=min_cg_support,
-            min_cg_attn_backend=min_cg_attn_backend,
-        ),
-        kernel_block_sizes,
+    attn_cg_support_info = AttentionCGSupportInfo(
+        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
     )
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def _allocate_and_reshape_kv_cache(
@@ -222,10 +209,10 @@ def _allocate_and_reshape_kv_cache(
 
 
 def init_kv_cache(
-    runner_kv_caches: list[torch.Tensor],
+    runner_kv_caches: list[torch.Tensor | list[torch.Tensor]],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, type[AttentionBackend]],
+    attn_groups: list[list[AttentionGroup]],
     device: torch.device,
     cache_dtype: str,
     kernel_block_sizes: list[int] | None = None,
