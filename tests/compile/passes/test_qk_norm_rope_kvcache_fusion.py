@@ -242,6 +242,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
@@ -257,18 +258,13 @@ def test_qk_norm_rope_kvcache_fusion(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     rms_norm_eps: float,
+    custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
-
-    # Note: `+rms_norm` toggles between RMSNorm.forward_custom and
-    # forward_native, but both paths now dispatch through `ir.ops.rms_norm`
-    # (post #33825), so the graph is identical either way.  We always enable
-    # it here to exercise the "custom op on" flavor.
-    custom_ops: list[str] = ["+rotary_embedding", "+rms_norm"]
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
@@ -278,7 +274,7 @@ def test_qk_norm_rope_kvcache_fusion(
         ),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=custom_ops,
+            custom_ops=[custom_op],
             pass_config=PassConfig(
                 fuse_qk_norm_rope_kvcache=True,
                 eliminate_noops=True,
