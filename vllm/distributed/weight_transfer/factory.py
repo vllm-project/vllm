@@ -126,3 +126,9 @@ WeightTransferEngineFactory.register_engine(
     "vllm.distributed.weight_transfer.rdt_engine",
     "RDTWeightTransferEngine",
 )
+
+WeightTransferEngineFactory.register_engine(
+    "sharded_rdt",
+    "vllm.distributed.weight_transfer.sharded_rdt_engine",
+    "ShardedRDTWeightTransferEngine",
+)

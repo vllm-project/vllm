@@ -327,6 +327,11 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     3. Runs quantization processing if applicable
     4. Copies processed values back to original tensor storage
     """
+    # Pre-replay hook: optional callback used by weight transfer engines to
+    # batch-fetch the slices the buffered loaders will read on replay.
+    if info.pre_replay_hook is not None:
+        info.pre_replay_hook(info)
+
     # Materialize layer tensors onto device
     materialize_layer(layer, info)
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from inspect import BoundArguments
 
@@ -28,6 +29,12 @@ class LayerReloadingInfo:
 
     # kernel formatted tensors, copied into by `_layerwise_process` when reloading
     kernel_tensors: LayerTensors | None = None
+
+    # Optional callback fired at the top of `_layerwise_process`, before
+    # buffered loaders are replayed onto materialized params. Lets a weight
+    # transfer engine (e.g. the sharded RDT engine) prefetch slice tensors
+    # in one batched RPC per layer.
+    pre_replay_hook: Callable[["LayerReloadingInfo"], None] | None = None
 
     def reset(self):
         self.__init__(  # type: ignore[misc]
