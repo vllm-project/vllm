@@ -119,18 +119,8 @@ def register_model_loader(load_format: str):
     return _wrapper
 
 
-def has_model_loader(load_format: str) -> bool:
-    from vllm.plugins import load_general_plugins
-
-    load_general_plugins()
-    return load_format in _LOAD_FORMAT_TO_MODEL_LOADER
-
-
 def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     """Get a model loader based on the load format."""
-    from vllm.plugins import load_general_plugins
-
-    load_general_plugins()
     load_format = load_config.load_format
     if load_format not in _LOAD_FORMAT_TO_MODEL_LOADER:
         raise ValueError(f"Load format `{load_format}` is not supported")
@@ -155,7 +145,6 @@ def get_model(
 __all__ = [
     "get_model",
     "get_model_loader",
-    "has_model_loader",
     "get_architecture_class_name",
     "get_model_architecture",
     "get_model_cls",
