@@ -81,6 +81,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -120,6 +121,39 @@ from .vision import (
 )
 
 logger = init_logger(__name__)
+
+
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src)
+    if n < dst.shape[0]:
+        dst[n:] = src[-1]
+
+
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
 
 # === Vision Inputs === #
 
@@ -641,7 +675,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     dim=self.hidden_size,
                     num_heads=self.num_heads,
                     mlp_hidden_dim=vision_config.intermediate_size,
-                    act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                    act_fn=get_act_and_mul_fn(
+                        vision_config.hidden_act,
+                        compile_native=not current_platform.is_rocm(),
+                    ),
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
@@ -791,6 +828,38 @@ class Qwen2_5_VisionTransformer(nn.Module):
         inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
+
+    def get_encoder_cudagraph_max_window_seqs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> int:
+        # token_budget is an upper bound on the total number of merged vision
+        # tokens replayed by this encoder CUDA graph. cu_window_seqlens, however,
+        # is sized by the number of window-attention sequences (non-empty local
+        # windows), not by the number of tokens. Using max_num_batched_tokens as
+        # this sequence count can over-pad cu_window_seqlens and make FlashAttention
+        # launch thousands of empty CTAs during replay.
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
+        max_sequence_units = max(max_batch_size, max_frames_per_batch)
+
+        # Each local window covers vit_merger_window_size tokens along one merged
+        # spatial axis. The largest number of non-empty windows for a fixed token
+        # budget comes from a thin strip that advances along only one axis, so
+        # ceil(token_budget / window_side) is a safe geometry-driven bound. Multiple
+        # images or video frames can fragment that strip at item/frame boundaries,
+        # so add max_sequence_units to cover one extra partial window per sequence.
+        max_strip_windows = (
+            token_budget + vit_merger_window_size - 1
+        ) // vit_merger_window_size
+
+        # A non-empty window must contain at least one merged vision token, so the
+        # number of window sequences can never exceed token_budget. This final
+        # clamp keeps the bound tight for tiny budgets while remaining safe.
+        return min(token_budget, max_sequence_units + max_strip_windows)
 
     def prepare_encoder_metadata(
         self,
@@ -1636,6 +1705,11 @@ class Qwen2_5_VLForConditionalGeneration(
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+        cu_seqlens_padding = (
+            _pad_flashinfer_cu_seqlens_buffer
+            if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+            else _pad_cumulative_seqlens_buffer
+        )
         return EncoderCudaGraphConfig(
             modalities=modalities,
             input_key_by_modality={
@@ -1654,6 +1728,10 @@ class Qwen2_5_VLForConditionalGeneration(
                 "sequence_lengths_full",
                 "sequence_lengths_window",
             ],
+            padding_logics={
+                "cu_seqlens": cu_seqlens_padding,
+                "cu_window_seqlens": cu_seqlens_padding,
+            },
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -1787,9 +1865,8 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        max_window_seqs_per_batch = min(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
+        max_window_seqs_per_batch = self.visual.get_encoder_cudagraph_max_window_seqs(
+            token_budget, max_batch_size, max_frames_per_batch
         )
         # Use ceil here (not floor) so total captured capacity is never smaller
         # than token_budget when token_budget is not divisible by max_batch_size
@@ -1884,23 +1961,21 @@ class Qwen2_5_VLForConditionalGeneration(
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
+        # Keep replay metadata sized to the actual batch. The captured buffers
+        # may be larger, but EncoderCudaGraphManager fills the remaining
+        # cu*_seqlens entries with the last cumulative offset to represent empty
+        # sequences. Padding cu_window_seqlens here would require a static upper
+        # bound and can over-pad window attention into many empty FlashAttention
+        # CTAs.
         if modality == "image":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         elif modality == "video":
             buffers = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         else:
             raise AssertionError("This line should be unreachable.")

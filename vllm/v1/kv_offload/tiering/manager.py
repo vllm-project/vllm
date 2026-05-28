@@ -113,7 +113,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     Key internal state:
       - Minimal state tracking; relies on secondary tiers to report completion
-        via get_finished()
+        via get_finished_jobs()
       - Secondary tiers return JobResult objects containing all necessary
         information
       - job_id_counter: monotonically increasing counter for job IDs
@@ -182,14 +182,14 @@ class TieringOffloadingManager(OffloadingManager):
         Unconditionally poll all secondary tiers for completed jobs.
 
         This method:
-        1. Calls get_finished() on each secondary tier
+        1. Calls get_finished_jobs() on each secondary tier
         2. For completed stores (primary→secondary): calls primary.complete_read()
            to decrement ref_cnt
         3. For completed loads (secondary→primary): calls primary.complete_write()
            to make blocks available
         """
         for i, tier in enumerate(self.secondary_tiers):
-            for completed_job in tier.get_finished():
+            for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
                 job_metadata = self._transfer_jobs.pop(job_id, None)
                 assert job_metadata is not None, (
@@ -464,7 +464,7 @@ class TieringOffloadingManager(OffloadingManager):
             tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
-        # tracked via get_finished() / _maybe_process_finished_jobs().
+        # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         """

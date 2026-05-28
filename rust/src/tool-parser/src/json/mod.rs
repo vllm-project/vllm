@@ -20,7 +20,7 @@ use winnow::token::literal;
 use super::utils::{
     JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, take_json_object,
 };
-use super::{Result, ToolCallDelta, ToolParseResult};
+use super::{Result, ToolCallDelta, ToolParserOutput};
 
 type JsonToolInput<'i> = Partial<&'i str>;
 
@@ -80,27 +80,24 @@ impl JsonToolCallParser {
         }
     }
 
-    /// Push one decoded text chunk through the JSON tool-call parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_json_tool_call_event(input, &mut self.mode, config)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match &self.mode {
-            JsonToolCallMode::Text => result.normal_text.push_str(&self.buffer),
+            JsonToolCallMode::Text => output.normal_text.push_str(&self.buffer),
             JsonToolCallMode::Header | JsonToolCallMode::Arguments { .. } => {
                 return Err(parsing_failed!(
                     "incomplete {} tool call",
@@ -108,19 +105,19 @@ impl JsonToolCallParser {
                 ));
             }
         }
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
     }
 
     /// Apply one parsed JSON tool-call event to parser state and output.
     fn apply_event(
         &mut self,
         event: JsonToolCallEvent,
-        result: &mut ToolParseResult,
+        output: &mut ToolParserOutput,
     ) -> Result<()> {
         match event {
             JsonToolCallEvent::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             JsonToolCallEvent::ToolCallStart => self.mode = JsonToolCallMode::Header,
             JsonToolCallEvent::ToolCallHeader { function_name } => {
@@ -130,7 +127,7 @@ impl JsonToolCallParser {
                 self.mode = JsonToolCallMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -143,7 +140,7 @@ impl JsonToolCallParser {
                         self.config.parser_name
                     ));
                 };
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -161,12 +158,11 @@ impl JsonToolCallParser {
         Ok(())
     }
 
-    /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.mode = JsonToolCallMode::Text;
         self.active_tool_index = None;
         self.emitted_tool_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 }
 
@@ -336,7 +332,7 @@ mod tests {
     use expect_test::expect;
 
     use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-    use crate::ToolParseResult;
+    use crate::ToolParserOutput;
 
     const DELIMITED_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
         parser_name: "Delimited JSON",
@@ -356,13 +352,13 @@ mod tests {
         format!("<tool_calls>{}</tool_calls>", tool_calls.join(" <\n"))
     }
 
-    fn collect_chunks(parser: &mut JsonToolCallParser, chunks: &[&str]) -> ToolParseResult {
-        let mut result = ToolParseResult::default();
+    fn collect_chunks(parser: &mut JsonToolCallParser, chunks: &[&str]) -> ToolParserOutput {
+        let mut output = ToolParserOutput::default();
         for chunk in chunks {
-            result.append(parser.push(chunk).unwrap());
+            parser.parse_into(chunk, &mut output).unwrap();
         }
-        result.append(parser.finish().unwrap());
-        result.coalesce_calls()
+        output.append(parser.finish().unwrap());
+        output.coalesce_calls()
     }
 
     #[test]
@@ -373,10 +369,10 @@ mod tests {
         ]);
         let mut parser = JsonToolCallParser::new(DELIMITED_CONFIG);
 
-        let result = collect_chunks(&mut parser, &[&input]);
+        let output = collect_chunks(&mut parser, &[&input]);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -396,7 +392,7 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -409,10 +405,10 @@ mod tests {
             "</tool_calls>",
         ];
 
-        let result = collect_chunks(&mut parser, &chunks);
+        let output = collect_chunks(&mut parser, &chunks);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -432,7 +428,7 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -444,10 +440,10 @@ mod tests {
             "</tool_calls> trailing text",
         ];
 
-        let result = collect_chunks(&mut parser, &chunks);
+        let output = collect_chunks(&mut parser, &chunks);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: " trailing text",
                 calls: [
                     ToolCallDelta {
@@ -460,6 +456,6 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 }
