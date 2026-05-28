@@ -34,9 +34,11 @@ class AsyncScheduler(Scheduler):
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
-            # Set the next step index in which this request is eligible to be
-            # scheduled for decode (for PP microbatching).
-            request.next_decode_eligible_step = self.current_step + self.pp_size
+
+            if self.use_v2_model_runner:
+                # Set the next step index in which this request is eligible to be
+                # scheduled for decode (for PP microbatching).
+                request.next_decode_eligible_step = self.current_step + self.pp_size
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]

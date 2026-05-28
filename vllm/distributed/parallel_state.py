@@ -410,11 +410,10 @@ class GroupCoordinator:
         )
 
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
-        """Create a new device-side ProcessGroup with the same per-rank
-        membership as this coordinator's `device_group`, but backed by a
-        distinct communicator. This is a collective call: every world rank
-        must invoke it. Useful when a caller wants to issue ops that can
-        run concurrently with ops on `device_group`.
+        """Create a new device-side ProcessGroup with the same per-rank membership
+        as this coordinator's `device_group`, but backed by a distinct communicator.
+        This is a collective call: every world rank must invoke it. Used where we
+        want to issue ops that can run concurrently with ops on `device_group`.
         """
         sibling: ProcessGroup | None = None
         for ranks in self.group_ranks:

@@ -50,7 +50,7 @@ def compute_need_sampled_mask(
 class PPHandler:
     """Runs the PP sampled-token broadcast/recv on a side stream so the
     default stream isn't gated by the matching peer call. Step T's recv is
-    consumed at step T+pp_size via `advance_and_wait`.
+    consumed at step T+pp_size via `get_prev_step_sampled_outputs`.
 
     Uses a dedicated NCCL communicator (sibling of the PP `device_group`)
     for the broadcast so it does not serialize on the wire with the
