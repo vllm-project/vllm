@@ -101,6 +101,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     granite4_vision="Granite4VisionConfig",
+    hyperclovax="HyperCLOVAXConfig",
     hyperclovax_vlm="HCXVisionConfig",
     hunyuan_vl="HunYuanVLConfig",
     hy_v3="HYV3Config",
@@ -429,9 +430,9 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         if "rope_type" not in rope_parameters and "type" in rope_parameters:
             rope_parameters["rope_type"] = rope_parameters["type"]
             logger.info("Replacing legacy 'type' key with 'rope_type'")
-        # Case 3: No rope_type field at all - cannot determine RoPE type, raise error
+        # Case 3: No rope_type field present - nothing to patch
         if "rope_type" not in rope_parameters:
-            raise ValueError("rope_parameters should have a 'rope_type' key")
+            return
         # Patch legacy rope_type values with warning
         if rope_parameters["rope_type"] == "su":
             rope_parameters["rope_type"] = "longrope"

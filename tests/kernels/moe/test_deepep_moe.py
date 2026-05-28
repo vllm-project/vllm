@@ -185,7 +185,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
