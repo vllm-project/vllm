@@ -97,9 +97,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if weight_files:
                     return model_name_or_path, weight_files, pattern
         else:
-            repo_files = hf_api().list_repo_files(
-                repo_id=model_name_or_path
-            )
+            repo_files = hf_api().list_repo_files(repo_id=model_name_or_path)
             for pattern in allowed_patterns:
                 matching_files = fnmatch.filter(repo_files, pattern)
                 if matching_files:
