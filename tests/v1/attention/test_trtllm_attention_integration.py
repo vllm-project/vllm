@@ -187,11 +187,11 @@ def _create_nvfp4_hnd_kv_cache(
     common_attn_metadata,
     kv_scale_val,
 ):
-    """Create an nvfp4 KV cache with interleaved K+V layout.
+    """Create an nvfp4 KV cache with 2H head layout.
 
     The returned tensor is dtype ``uint8`` with logical shape
-    ``(num_blocks, num_kv_heads, block_size, 2 * full_dim)`` matching the
-    standardized ``[B, H, N, C]`` layout where
+    ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)`` where K occupies
+    the first H heads and V occupies the next H heads, and
     ``full_dim = head_size // 2 + head_size // 16`` packs FP4 data and
     FP8 block scales per head.
     """
@@ -209,12 +209,12 @@ def _create_nvfp4_hnd_kv_cache(
 
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     nvfp4_cache = torch.zeros(
-        (num_blocks, num_kv_heads, block_size, 2 * full_dim),
+        (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=device,
     )
-    k_cache = nvfp4_cache[:, :, :, :full_dim]
-    v_cache = nvfp4_cache[:, :, :, full_dim:]
+    k_cache = nvfp4_cache[:, :num_kv_heads]
+    v_cache = nvfp4_cache[:, num_kv_heads:]
 
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
