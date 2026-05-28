@@ -456,6 +456,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    cpu_distributed_timeout_seconds: int | None = (
+        ParallelConfig.cpu_distributed_timeout_seconds
+    )
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
@@ -473,6 +476,7 @@ class EngineArgs:
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
+    data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
@@ -708,7 +712,7 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
+    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -743,15 +747,20 @@ class EngineArgs:
         load_general_plugins()
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
-            model_id = self.model
-            self.model = get_model_path(self.model, self.revision)
-            if model_id is not self.model:
-                logger.info(
-                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                    model_id,
-                    self.model,
-                )
-            if self.tokenizer is not None:
+            # Skip cloud storage URIs (s3://, gs://, az://) — they are not
+            # HF repo IDs and will be resolved later by
+            # ModelConfig.maybe_pull_model_tokenizer_for_runai().
+            if not is_cloud_storage(self.model):
+                model_id = self.model
+                self.model = get_model_path(self.model, self.revision)
+                if model_id is not self.model:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace model_id "
+                        "[%s] to model_path [%s]",
+                        model_id,
+                        self.model,
+                    )
+            if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:
@@ -951,6 +960,10 @@ class EngineArgs:
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
         )
+        parallel_group.add_argument(
+            "--cpu-distributed-timeout-seconds",
+            **parallel_kwargs["cpu_distributed_timeout_seconds"],
+        )
         parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
         parallel_group.add_argument(
             "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
@@ -1035,6 +1048,15 @@ class EngineArgs:
             "--data-parallel-external-lb",
             "-dpe",
             **parallel_kwargs["data_parallel_external_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-multi-port-external-lb",
+            "-dpm",
+            action="store_true",
+            default=False,
+            help="Run a node-local supervisor that launches one external-LB API "
+            "server per local data parallel rank and exposes aggregated health on "
+            "a supervisor port.",
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
@@ -1510,7 +1532,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton"],
+            choices=["flashinfer", "triton", "cutedsl"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -1950,6 +1972,7 @@ class EngineArgs:
             nnodes=self.nnodes,
             node_rank=self.node_rank,
             distributed_timeout_seconds=self.distributed_timeout_seconds,
+            cpu_distributed_timeout_seconds=self.cpu_distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -2421,6 +2444,39 @@ class EngineArgs:
             self.reasoning_config = ReasoningConfig()
         self.reasoning_config.reasoning_parser = self.reasoning_parser
 
+    @staticmethod
+    def _get_min_mm_batched_tokens(
+        model_config: ModelConfig,
+    ) -> tuple[int, str] | None:
+        """Get the minimum max_num_batched_tokens needed for a multimodal
+        prefix-LM model to process at least one item of any supported modality.
+
+        Returns (token_count, modality_name) for the most expensive modality,
+        or None if the value cannot be determined at this stage.
+        """
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            # get_processing_info returns the model's multimodal processing
+            # metadata (supported modalities, token limits) without loading
+            # model weights or generating dummy data.
+            info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+            mm_counts = {modality: 1 for modality in info.supported_mm_limits}
+            # get_mm_max_tokens_per_item returns pre-computed per-item token
+            # ceilings for models that override it (e.g., Gemma4), or None
+            # for models that rely on dummy-input profiling. When None is
+            # returned we bail out — no dummy generation is triggered here.
+            max_tokens = info.get_mm_max_tokens_per_item(
+                seq_len=model_config.max_model_len,
+                mm_counts=mm_counts,
+            )
+            if max_tokens is not None:
+                modality = max(max_tokens, key=max_tokens.__getitem__)
+                return (max_tokens[modality], modality)
+        except Exception as e:
+            logger.warning("Failed to determine min multimodal batched tokens: %s", e)
+        return None
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
@@ -2470,6 +2526,23 @@ class EngineArgs:
                     model_config.max_model_len,
                     self.max_num_batched_tokens,
                 )
+
+            # For multimodal prefix-LM models (e.g., Gemma 4) that disable
+            # chunked MM input, a single multimodal item must fit in one batch.
+            # Raise the floor to accommodate the largest per-item token count.
+            if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
+                result = self._get_min_mm_batched_tokens(model_config)
+                if result is not None and result[0] > self.max_num_batched_tokens:
+                    mm_min, modality = result
+                    logger.info(
+                        "Raising max_num_batched_tokens from %d to %d to "
+                        "accommodate '%s' input for prefix-LM model %s.",
+                        self.max_num_batched_tokens,
+                        mm_min,
+                        modality,
+                        model_config.model,
+                    )
+                    self.max_num_batched_tokens = mm_min
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
