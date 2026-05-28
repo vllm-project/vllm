@@ -35,7 +35,7 @@ import inspect
 
 
 def test_attn_gemm_parallel_execute_guards_quant_method_dispatch():
-    from vllm.models.deepseek_v4.nvidia.ops.attention import (
+    from vllm.models.deepseek_v4.attention import (
         DeepseekV4MultiHeadLatentAttentionWrapper,
     )
 

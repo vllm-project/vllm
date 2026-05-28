@@ -101,7 +101,7 @@ def test_indexer_passes_quant_config_to_weights_proj_and_wq_b(
         def __init__(self, *args, **kwargs):
             captured.append(kwargs)
 
-    attn_mod = "vllm.models.deepseek_v4.nvidia.ops.attention"
+    attn_mod = "vllm.models.deepseek_v4.attention"
     with (
         patch(f"{attn_mod}.ReplicatedLinear", FakeReplicatedLinear),
         patch(f"{attn_mod}.DeepseekV4IndexerCache", MagicMock()),
@@ -110,7 +110,7 @@ def test_indexer_passes_quant_config_to_weights_proj_and_wq_b(
         patch(f"{attn_mod}.get_max_prefill_buffer_size", return_value=4096),
         patch("torch.cuda.Event", MagicMock()),
     ):
-        from vllm.models.deepseek_v4.nvidia.ops.attention import (
+        from vllm.models.deepseek_v4.attention import (
             DeepseekV4Indexer,
         )
 
