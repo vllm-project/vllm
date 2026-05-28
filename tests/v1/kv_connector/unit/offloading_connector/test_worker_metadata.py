@@ -4,8 +4,8 @@
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    DirectionalTransferStats,
     OffloadingWorkerMetadata,
-    TransferMetricStats,
     TransferStats,
 )
 
@@ -37,12 +37,12 @@ def test_aggregate_multiple_workers():
 def test_aggregate_transfer_stats():
     meta1 = OffloadingWorkerMetadata(
         transfer_stats=TransferStats(
-            load=TransferMetricStats(bytes=10, time=0.5, sizes=[10])
+            load=DirectionalTransferStats(bytes=10, time=0.5, sizes=[10])
         )
     )
     meta2 = OffloadingWorkerMetadata(
         transfer_stats=TransferStats(
-            load=TransferMetricStats(bytes=20, time=1.0, sizes=[20, 30])
+            load=DirectionalTransferStats(bytes=20, time=1.0, sizes=[20, 30])
         )
     )
 

@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadingMetricMetadata, OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -45,13 +45,6 @@ class OffloadingSpecFactory:
             spec_cls = getattr(spec_module, spec_name)
         assert issubclass(spec_cls, OffloadingSpec)
         return spec_cls
-
-    @classmethod
-    def get_metric_definitions(
-        cls, config: "VllmConfig"
-    ) -> dict[str, OffloadingMetricMetadata]:
-        spec_cls = cls.get_spec_cls(config)
-        return spec_cls.get_metric_definitions(config)
 
     @classmethod
     def create_spec(

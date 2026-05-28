@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING, Literal
 from typing_extensions import override
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingCounterMetadata,
@@ -30,16 +33,24 @@ _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
     "arc": ARCCachePolicy,
 }
-_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
-_CPU_OFFLOADING_METRIC_DEFINITIONS: dict[str, OffloadingMetricMetadata] = {
-    _STORES_SKIPPED: OffloadingCounterMetadata(
-        documentation=(
-            "Number of KV offload stores skipped because the reuse "
-            "threshold was not reached."
-        ),
-    )
-}
+# metrics
+METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+
+
+def _build_metric_definitions(
+    store_threshold: int,
+) -> dict[str, OffloadingMetricMetadata]:
+    if store_threshold < 2:
+        return {}
+    return {
+        METRIC_STORES_SKIPPED: OffloadingCounterMetadata(
+            documentation=(
+                "Number of KV offload stores skipped because the reuse "
+                "threshold was not reached."
+            ),
+        )
+    }
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -60,9 +71,7 @@ class CPUOffloadingManager(OffloadingManager):
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
         store_threshold = int(extra_config.get("store_threshold", 0))
-        if store_threshold < 2:
-            return {}
-        return dict(_CPU_OFFLOADING_METRIC_DEFINITIONS)
+        return _build_metric_definitions(store_threshold)
 
     def __init__(
         self,
@@ -86,7 +95,8 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
-        self.stores_skipped: int = 0
+        self.metric_definitions = _build_metric_definitions(store_threshold)
+        self.stores_skipped_in_current_batch: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -185,7 +195,7 @@ class CPUOffloadingManager(OffloadingManager):
         if self.counts is not None:
             num_keys = len(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
-            self.stores_skipped += num_keys - len(keys)
+            self.stores_skipped_in_current_batch += num_keys - len(keys)
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
@@ -286,16 +296,12 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     def get_stats(self) -> KVConnectorStats | None:
-        if not self.stores_skipped:
+        if not self.metric_definitions:
             return None
 
-        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-            OffloadingConnectorStats,
+        stats = OffloadingConnectorStats(metric_metadata=self.metric_definitions)
+        stats.increase_counter(
+            METRIC_STORES_SKIPPED, self.stores_skipped_in_current_batch
         )
-
-        stats = OffloadingConnectorStats(
-            metric_metadata=_CPU_OFFLOADING_METRIC_DEFINITIONS
-        )
-        stats.set_counter(_STORES_SKIPPED, self.stores_skipped)
-        self.stores_skipped = 0
+        self.stores_skipped_in_current_batch = 0
         return stats

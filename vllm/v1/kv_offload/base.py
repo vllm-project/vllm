@@ -479,13 +479,6 @@ class OffloadingSpec(ABC):
             assert offloaded_block_size_int % gpu_block_size == 0
             self.block_size_factor = offloaded_block_size_int // gpu_block_size
 
-    @classmethod
-    def get_metric_definitions(
-        cls, vllm_config: "VllmConfig"
-    ) -> dict[str, OffloadingMetricMetadata]:
-        """Return Prometheus metric definitions emitted by this spec."""
-        return cls.get_manager_cls().get_metric_definitions(vllm_config)
-
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
         """

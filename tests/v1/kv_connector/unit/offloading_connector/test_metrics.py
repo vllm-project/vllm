@@ -93,6 +93,10 @@ def _metric_metadata():
     }
 
 
+def _connector_metric_metadata():
+    return OffloadingConnector.get_metric_definitions(_FakeVllmConfig())  # type: ignore[arg-type]
+
+
 def test_build_kv_connector_stats_with_none():
     """Test that build_kv_connector_stats returns empty stats when given None."""
     stats = OffloadingConnector.build_kv_connector_stats(data=None)
@@ -265,6 +269,7 @@ def test_reset():
 def test_prom_metrics_observes_manager_counter():
     prom_metrics = OffloadPromMetrics(
         vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        connector_metric_metadata=_connector_metric_metadata(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -286,6 +291,7 @@ def test_prom_metrics_observes_manager_counter():
 def test_prom_metrics_observes_flat_transfer_metrics_and_legacy_metrics():
     prom_metrics = OffloadPromMetrics(
         vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        connector_metric_metadata=_connector_metric_metadata(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,
@@ -340,6 +346,7 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
     ):
         prom_metrics = OffloadPromMetrics(
             vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+            connector_metric_metadata=_connector_metric_metadata(),
             metric_types={
                 Gauge: _FakeMetric,
                 Counter: _FakeMetric,
@@ -367,6 +374,7 @@ def test_prom_metrics_observes_manager_gauge_and_histogram():
 def test_prom_metrics_uses_configured_manager_metrics():
     prom_metrics = OffloadPromMetrics(
         vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        connector_metric_metadata=_connector_metric_metadata(),
         metric_types={
             Gauge: _FakeMetric,
             Counter: _FakeMetric,

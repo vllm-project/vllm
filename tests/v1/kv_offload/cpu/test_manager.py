@@ -166,7 +166,9 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[STORES_SKIPPED] == 3
-    assert manager.get_stats() is None
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[STORES_SKIPPED] == 0
 
 
 def test_cpu_manager():

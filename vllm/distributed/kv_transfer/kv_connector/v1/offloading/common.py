@@ -12,20 +12,22 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 ReqId = str
 
 
-class TransferMetricStats(NamedTuple):
+class DirectionalTransferStats(NamedTuple):
     bytes: int = 0
     time: float = 0.0
     sizes: list[int | float] = []
 
-    def aggregate(self, other: "TransferMetricStats") -> "TransferMetricStats":
-        return TransferMetricStats(
+    def aggregate(
+        self, other: "DirectionalTransferStats"
+    ) -> "DirectionalTransferStats":
+        return DirectionalTransferStats(
             bytes=self.bytes + other.bytes,
             time=self.time + other.time,
             sizes=[*self.sizes, *other.sizes],
         )
 
-    def record(self, num_bytes: int, time: float) -> "TransferMetricStats":
-        return TransferMetricStats(
+    def record(self, num_bytes: int, time: float) -> "DirectionalTransferStats":
+        return DirectionalTransferStats(
             bytes=self.bytes + num_bytes,
             time=self.time + time,
             sizes=[*self.sizes, num_bytes],
@@ -36,8 +38,8 @@ class TransferMetricStats(NamedTuple):
 
 
 class TransferStats(NamedTuple):
-    load: TransferMetricStats = TransferMetricStats()
-    store: TransferMetricStats = TransferMetricStats()
+    load: DirectionalTransferStats = DirectionalTransferStats()
+    store: DirectionalTransferStats = DirectionalTransferStats()
 
     def aggregate(self, other: "TransferStats") -> "TransferStats":
         return TransferStats(

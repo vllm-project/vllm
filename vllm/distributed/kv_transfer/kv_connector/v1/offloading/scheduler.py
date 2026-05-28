@@ -15,7 +15,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    _CONNECTOR_METRIC_DEFINITIONS,
     LOAD_BYTES,
     LOAD_SIZE,
     LOAD_TIME,
@@ -37,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     OffloadingManager,
+    OffloadingMetricMetadata,
     OffloadingSpec,
     OffloadKey,
     OffloadPolicy,
@@ -269,16 +269,18 @@ def _create_req_context(req: Request) -> ReqContext:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, spec: OffloadingSpec):
+    def __init__(
+        self,
+        spec: OffloadingSpec,
+        connector_metric_metadata: dict[str, OffloadingMetricMetadata],
+    ):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
         self._offloading_metric_metadata = {
-            **_CONNECTOR_METRIC_DEFINITIONS,
+            **connector_metric_metadata,
             **type(self.manager).get_metric_definitions(spec.vllm_config),
         }
-        self._connector_stats = OffloadingConnectorStats(
-            metric_metadata=self._offloading_metric_metadata
-        )
+        self._connector_stats: OffloadingConnectorStats | None = None
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
@@ -970,20 +972,29 @@ class OffloadingConnectorScheduler:
             assert meta is None
             meta = OffloadingWorkerMetadata()
         if not meta.transfer_stats.is_empty():
+            assert self._connector_stats is None
             transfer_stats = OffloadingConnectorStats(
                 metric_metadata=self._offloading_metric_metadata
             )
             if not meta.transfer_stats.load.is_empty():
-                transfer_stats.set_counter(LOAD_BYTES, meta.transfer_stats.load.bytes)
-                transfer_stats.set_counter(LOAD_TIME, meta.transfer_stats.load.time)
+                transfer_stats.increase_counter(
+                    LOAD_BYTES, meta.transfer_stats.load.bytes
+                )
+                transfer_stats.increase_counter(
+                    LOAD_TIME, meta.transfer_stats.load.time
+                )
                 for size in meta.transfer_stats.load.sizes:
                     transfer_stats.observe_histogram(LOAD_SIZE, size)
             if not meta.transfer_stats.store.is_empty():
-                transfer_stats.set_counter(STORE_BYTES, meta.transfer_stats.store.bytes)
-                transfer_stats.set_counter(STORE_TIME, meta.transfer_stats.store.time)
+                transfer_stats.increase_counter(
+                    STORE_BYTES, meta.transfer_stats.store.bytes
+                )
+                transfer_stats.increase_counter(
+                    STORE_TIME, meta.transfer_stats.store.time
+                )
                 for size in meta.transfer_stats.store.sizes:
                     transfer_stats.observe_histogram(STORE_SIZE, size)
-            self._connector_stats.aggregate(transfer_stats)
+            self._connector_stats = transfer_stats
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -1023,12 +1034,8 @@ class OffloadingConnectorScheduler:
                 del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        stats = None
-        if not self._connector_stats.is_empty():
-            stats = self._connector_stats
-            self._connector_stats = OffloadingConnectorStats(
-                metric_metadata=self._offloading_metric_metadata
-            )
+        stats = self._connector_stats
+        self._connector_stats = None
 
         manager_stats = self.manager.get_stats()
         if manager_stats is not None:

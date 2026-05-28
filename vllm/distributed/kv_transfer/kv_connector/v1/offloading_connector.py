@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
+    get_connector_metric_definitions,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
@@ -38,6 +39,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_offload.base import OffloadingMetricMetadata
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -61,7 +63,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = OffloadingConnectorScheduler(spec)
+            self.connector_scheduler = OffloadingConnectorScheduler(
+                spec, self.get_metric_definitions(vllm_config)
+            )
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec)
 
@@ -199,6 +203,12 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
+    def get_metric_definitions(
+        cls, vllm_config: VllmConfig
+    ) -> dict[str, OffloadingMetricMetadata]:
+        return get_connector_metric_definitions()
+
+    @classmethod
     def build_prom_metrics(
         cls,
         vllm_config: VllmConfig,
@@ -207,5 +217,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         return OffloadPromMetrics(
-            vllm_config, metric_types, labelnames, per_engine_labelvalues
+            vllm_config,
+            cls.get_metric_definitions(vllm_config),
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
         )
