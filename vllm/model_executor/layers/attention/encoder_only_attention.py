@@ -69,17 +69,22 @@ class EncoderOnlyAttention(Attention):
         else:
             kv_cache_dtype = "auto"
 
+        if attn_type is None:
+            attn_type = AttentionType.ENCODER_ONLY
+
         underlying_attn_backend = get_attn_backend(
             head_size,
             dtype,
             kv_cache_dtype,
-            attn_type=AttentionType.ENCODER_ONLY,
+            attn_type=attn_type,
         )
 
         attn_backend = create_encoder_only_attention_backend(underlying_attn_backend)
 
-        if attn_type is not None:
-            assert attn_type == AttentionType.ENCODER_ONLY, (
+        if attn_type != AttentionType.ENCODER_ONLY and kwargs.pop(
+            "raise_on_invalid_attn_type", True
+        ):
+            raise ValueError(
                 "EncoderOnlyAttention only supports AttentionType.ENCODER_ONLY"
             )
 
@@ -89,10 +94,14 @@ class EncoderOnlyAttention(Attention):
             scale=scale,
             cache_config=cache_config,
             attn_backend=attn_backend,
-            attn_type=AttentionType.ENCODER_ONLY,
+            attn_type=attn_type,
             **kwargs,
         )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        # Does not need KV cache
-        return None
+        # Encoder-only attention does not need KV cache; other attn_types
+        # (e.g. DECODER, used by recurrent PrefixLM models like HRM-Text)
+        # fall through to the base Attention spec.
+        if self.attn_type == AttentionType.ENCODER_ONLY:
+            return None
+        return super().get_kv_cache_spec(vllm_config)

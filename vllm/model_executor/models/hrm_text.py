@@ -10,21 +10,19 @@ The model performs a hierarchical recurrent forward over two transformer
 stacks (``H`` slow, ``L`` fast) inside nested loops. Each recurrence step
 gets its own KV cache slot via a unique vLLM-visible layer index. The
 PrefixLM attention pattern (prompt bidirectional, response causal) is
-realized by wrapping the attention backend's metadata builder so that
-``causal=False`` is set on every build; see ``_create_hrm_attention_backend``
-for why this is correct for both prefill and decode rows.
+realized by reusing ``EncoderOnlyAttention`` (which sets ``causal=False``
+unconditionally on every metadata build) but with ``attn_type=DECODER``
+so the KV cache is allocated; see ``HrmTextAttention`` for usage.
 
 The on-disk ``attn.gqkv_proj.weight`` (rows concatenated as
-``[gate | q | k | v]``) is split at load time into a separate
-``gate_proj`` (``ColumnParallelLinear``) and ``qkv_proj``
-(``QKVParallelLinear``); see ``HrmTextForCausalLM.load_weights``. This
-keeps the model TP-friendly without diverging from HF's fused on-disk
-schema.
+``[gate | q | k | v]``) is loaded by a single
+``MergedColumnParallelLinear`` with four equal-sized output partitions;
+its weight loader auto-splits the fused tensor along the output dim by
+``output_sizes`` (the same path used by Phi-3's fused gate_up_proj).
 """
 
-import functools
 from collections.abc import Iterable
-from copy import copy
+from typing import Literal
 
 import torch
 from torch import nn
@@ -34,12 +32,12 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
-    QKVParallelLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -50,68 +48,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadata,
-    AttentionType,
-    CommonAttentionMetadata,
-    subclass_attention_backend,
-)
-from vllm.v1.attention.selector import get_attn_backend
+from vllm.v1.attention.backend import AttentionType
 
-from .utils import AutoWeightsLoader, maybe_prefix
-
-
-@functools.lru_cache
-def _create_hrm_attention_backend(
-    underlying_attn_backend: type[AttentionBackend],
-) -> type[AttentionBackend]:
-    """Wrap an attention backend so its builder unconditionally sets
-    ``causal=False`` on every build.
-
-    Mirrors ``EncoderOnlyAttention``'s subclass-the-backend pattern but
-    keeps the KV cache (HRM-Text needs it for the recurrent forward).
-
-    Why unconditional rather than gated on ``is_prefilling.all()``:
-
-      vLLM v1 schedules continuous batching. Even with
-      ``enable_chunked_prefill=False`` a single attention build can see a
-      *mixed* batch — some requests already in decode, others entering
-      prefill on this step. Gating on ``is_prefilling.all()`` keeps
-      ``causal=True`` in that mixed case, which silently runs the
-      newly-prefilling requests as pure causal. That diverges from
-      HRM-Text's PrefixLM training distribution and tanks accuracy.
-
-      Unconditional ``causal=False`` is correct because:
-        - Prefill rows have ``query_len = N``, where ``causal=False``
-          makes the prompt bidirectional (matches HF main +
-          ``token_type_ids=1``).
-        - Decode rows have ``query_len = 1``, where ``causal=True`` and
-          ``causal=False`` are identical (a single query has no future
-          tokens to mask).
-
-      FlashAttention's varlen kernels apply ``causal`` per sub-sequence
-      via ``cu_seqlens_q``, so a single global flag is sufficient — no
-      cross-prompt contamination.
-    """
-    underlying_builder = underlying_attn_backend.get_builder_cls()
-
-    class HrmAttentionBuilder(underlying_builder):  # type: ignore[misc,valid-type]
-        def build(
-            self,
-            common_prefix_len: int,
-            common_attn_metadata: CommonAttentionMetadata,
-            fast_build: bool = False,
-        ) -> AttentionMetadata:
-            new_md = copy(common_attn_metadata)
-            new_md.causal = False
-            return super().build(common_prefix_len, new_md, fast_build)
-
-    return subclass_attention_backend(
-        name_prefix="HrmAttention_",
-        attention_backend_cls=underlying_attn_backend,
-        builder_cls=HrmAttentionBuilder,
-    )
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class HrmTextMLP(nn.Module):
@@ -158,22 +97,29 @@ class HrmTextAttention(nn.Module):
     HF transformers writes a single fused ``attn.gqkv_proj.weight`` on
     disk (per ``transformers/conversion_mapping.py`` ``"hrm_text"``
     mapping; rows are concatenated as ``[gate | q | k | v]`` along
-    ``dim=0``). To stay TP-friendly we keep the gate as a separate
-    ``ColumnParallelLinear`` and use a standard ``QKVParallelLinear``
-    for q/k/v; the on-disk fused tensor is split into the two halves at
-    load time by ``HrmTextForCausalLM.load_weights``.
+    ``dim=0``). We mirror that on the model side with a single
+    ``MergedColumnParallelLinear`` whose four equal output partitions
+    are sharded along the head axis under TP; its weight loader
+    auto-splits the fused tensor (same path used by Phi-3's fused
+    gate_up_proj). HF's runtime config currently hardcodes MHA
+    (``num_key_value_groups=1``); GQA would require ``QKVParallelLinear``
+    semantics for q/k/v shard replication and is left for a follow-up
+    if/when HF adds it.
 
     Holds:
-      - parameters: gate_proj, qkv_proj, o_proj, rotary_emb (shared
-        across cycles).
+      - parameters: gqkv_proj, o_proj, rotary_emb (shared across cycles).
       - ``attn_per_step``: a ``nn.ModuleDict`` keyed by recurrence step
-        (as a string), each value a vLLM ``Attention``. The L stack
-        steps are ``[h*(L_cycles+1)+l]`` and the H stack steps are
-        ``[h*(L_cycles+1)+L_cycles]``; the two ranges are disjoint so
-        each ``Attention`` registers a unique vLLM ``layer_name``
-        (``model.{H,L}_module.layers.{global_idx}.attn``) and gets its
-        own KV cache slot. The global layer index per recurrence step is
-        ``step * num_layers_per_stack + layer_idx_in_stack``, matching
+        (as a string), each value an ``EncoderOnlyAttention`` (with
+        ``attn_type=DECODER`` so the KV cache is allocated; the
+        ``EncoderOnlyAttention`` wrapper sets ``causal=False`` on every
+        metadata build). The L stack steps are
+        ``[high_cycle_idx*(L_cycles+1)+low_cycle_idx]`` and the H stack
+        steps are ``[high_cycle_idx*(L_cycles+1)+L_cycles]``; the two
+        ranges are disjoint so each instance registers a unique vLLM
+        ``layer_name``
+        (``model.{H,L}_module.layers.{global_idx}.self_attn``) and gets
+        its own KV cache slot. The global layer index per recurrence step
+        is ``step * num_layers_per_stack + layer_idx_in_stack``, matching
         the HF transformers ``cycle_offset`` formula in
         ``modeling_hrm_text.py``.
     """
@@ -182,7 +128,7 @@ class HrmTextAttention(nn.Module):
         self,
         config: PretrainedConfig,
         layer_idx_in_stack: int,
-        stack_kind: str,  # "L" or "H"
+        stack_kind: Literal["L", "H"],
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -210,24 +156,19 @@ class HrmTextAttention(nn.Module):
 
         bias = getattr(config, "attention_bias", False)
 
-        # gate_proj: separate from QKV so it shards cleanly under TP.
-        # The on-disk gqkv_proj.weight is split into gate_proj.weight and
-        # qkv_proj.weight at load time (see HrmTextForCausalLM.load_weights).
-        self.gate_proj = ColumnParallelLinear(
+        # gqkv_proj: 4-way fused [gate | q | k | v] matching the on-disk
+        # `attn.gqkv_proj.weight` row layout. MergedColumnParallelLinear's
+        # weight_loader auto-splits the fused disk tensor along the output
+        # dim by `output_sizes` (Phi-3's fused gate_up_proj path). MHA
+        # only: GQA (num_kv_heads != num_heads) would need
+        # QKVParallelLinear semantics for q/k/v shard replication.
+        per_head_size = self.total_num_heads * self.head_dim
+        self.gqkv_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.total_num_heads * self.head_dim,
+            output_sizes=[per_head_size] * 4,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
-        )
-        self.qkv_proj = QKVParallelLinear(
-            hidden_size=self.hidden_size,
-            head_size=self.head_dim,
-            total_num_heads=self.total_num_heads,
-            total_num_kv_heads=self.total_num_kv_heads,
-            bias=bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.gqkv_proj",
         )
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -237,59 +178,45 @@ class HrmTextAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        rope_parameters = getattr(config, "rope_parameters", None)
-        if rope_parameters is None:
-            rope_parameters = {
-                "rope_type": "default",
-                "rope_theta": getattr(config, "rope_theta", 10000.0),
-            }
         # vllm get_rope accepts ``rope_parameters`` directly, matching
         # the dict-shaped HF config field.
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
         )
-
-        # Build one wrapped backend (lru_cached, so all layers/steps share it).
-        dtype = torch.get_default_dtype()
-        kv_cache_dtype = (
-            cache_config.cache_dtype if cache_config is not None else "auto"
-        )
-        underlying = get_attn_backend(
-            self.head_dim,
-            dtype,
-            kv_cache_dtype,
-            attn_type=AttentionType.DECODER,
-        )
-        wrapped_backend = _create_hrm_attention_backend(underlying)
 
         # Create one Attention instance per recurrence step actually used
         # by this stack. L runs at steps {h*(L+1)+l : 0 <= l < L_cycles},
         # H at steps {h*(L+1)+L : 0 <= h < H_cycles}; the sets are
         # disjoint, so one global index per (step, layer_in_stack) gives
         # each Attention its own ``layer_name`` and KV cache slot.
-        if stack_kind not in ("L", "H"):
-            raise ValueError(f"stack_kind must be 'L' or 'H', got {stack_kind!r}")
         H_cycles = config.H_cycles
         L_cycles = config.L_cycles
         num_layers_per_stack = config.num_layers_per_stack
         if stack_kind == "L":
             steps_used = [
-                h * (L_cycles + 1) + l_step
-                for h in range(H_cycles)
-                for l_step in range(L_cycles)
+                high_cycle_idx * (L_cycles + 1) + low_cycle_idx
+                for high_cycle_idx in range(H_cycles)
+                for low_cycle_idx in range(L_cycles)
             ]
         else:  # "H"
-            steps_used = [h * (L_cycles + 1) + L_cycles for h in range(H_cycles)]
+            steps_used = [
+                high_cycle_idx * (L_cycles + 1) + L_cycles
+                for high_cycle_idx in range(H_cycles)
+            ]
 
+        # `EncoderOnlyAttention` already wraps the attention backend so
+        # `causal=False` is set on every metadata build (PrefixLM
+        # bidirectional prefill); passing `attn_type=DECODER` keeps the
+        # KV cache allocation needed by the recurrent forward.
         self.attn_per_step = nn.ModuleDict()
         for step in steps_used:
             global_idx = step * num_layers_per_stack + layer_idx_in_stack
             unique_prefix = prefix.replace(
                 f"layers.{layer_idx_in_stack}", f"layers.{global_idx}"
             )
-            self.attn_per_step[str(step)] = Attention(
+            self.attn_per_step[str(step)] = EncoderOnlyAttention(
                 num_heads=self.num_heads,
                 head_size=self.head_dim,
                 scale=self.scaling,
@@ -297,8 +224,8 @@ class HrmTextAttention(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 attn_type=AttentionType.DECODER,
-                attn_backend=wrapped_backend,
                 prefix=f"{unique_prefix}.attn",
+                raise_on_invalid_attn_type=False,
             )
 
     def forward(
@@ -307,9 +234,10 @@ class HrmTextAttention(nn.Module):
         hidden_states: torch.Tensor,
         current_step: int,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        g, _ = self.gate_proj(hidden_states)
+        gqkv, _ = self.gqkv_proj(hidden_states)
+        g, q, k, v = gqkv.split(
+            [self.q_size, self.q_size, self.kv_size, self.kv_size], dim=-1
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_out = self.attn_per_step[str(current_step)](q, k, v)
         # Sigmoid gate. Shapes: attn_out is (..., q_size); g is (..., q_size).
@@ -330,18 +258,18 @@ class HrmTextDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Named `attn` (not `self_attn`) to match HF's on-disk weight schema:
-        # transformers/conversion_mapping.py renames `attn.o_proj` -> `self_attn.o_proj`
-        # and splits `attn.gqkv_proj` into 4 separate self_attn projections at
-        # load-into-HF-model time. We keep the on-disk name to make vLLM's
-        # AutoWeightsLoader work without a custom WeightsMapper.
-        self.attn = HrmTextAttention(
+        # Attribute name `self_attn` matches HF's model class. The on-disk
+        # `attn.{gqkv_proj,o_proj}.weight` keys are renamed to
+        # `self_attn.{gqkv_proj,o_proj}.weight` by the `WeightsMapper` in
+        # `HrmTextForCausalLM` so vLLM's standard `AutoWeightsLoader`
+        # handles the rest.
+        self.self_attn = HrmTextAttention(
             config=config,
             layer_idx_in_stack=layer_idx_in_stack,
             stack_kind=stack_kind,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = HrmTextMLP(
             hidden_size=config.hidden_size,
@@ -367,7 +295,7 @@ class HrmTextDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.attn(
+        hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             current_step=current_step,
@@ -432,15 +360,21 @@ class HrmTextModel(nn.Module):
     Forward (matches HF main exactly,
     src/transformers/models/hrm_text/modeling_hrm_text.py:495-547):
 
-        z_H = embed(input_ids) * embedding_scale
-        z_L = z_L_init.expand_as(z_H)
-        for h in range(H_cycles):
-            for l_step in range(L_cycles):
-                z_L = L_module(z_L + z_H,
-                               current_step=h * (L_cycles + 1) + l_step)
-            z_H = H_module(z_H + z_L,
-                           current_step=h * (L_cycles + 1) + L_cycles)
-        return z_H
+        hidden_states_high_cycle = embed(input_ids) * embedding_scale
+        hidden_states_low_cycle = z_L_init.expand_as(hidden_states_high_cycle)
+        for high_cycle_idx in range(H_cycles):
+            for low_cycle_idx in range(L_cycles):
+                step = high_cycle_idx * (L_cycles + 1) + low_cycle_idx
+                hidden_states_low_cycle = L_module(
+                    hidden_states_low_cycle + hidden_states_high_cycle,
+                    current_step=step,
+                )
+            step = high_cycle_idx * (L_cycles + 1) + L_cycles
+            hidden_states_high_cycle = H_module(
+                hidden_states_high_cycle + hidden_states_low_cycle,
+                current_step=step,
+            )
+        return hidden_states_high_cycle
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -498,27 +432,30 @@ class HrmTextModel(nn.Module):
             assert input_ids is not None
             inputs_embeds = self.embed_input_ids(input_ids)
 
-        z_H = inputs_embeds
-        z_L = self.z_L_init.to(dtype=z_H.dtype, device=z_H.device).expand_as(z_H)
+        hidden_states_high_cycle = inputs_embeds
+        hidden_states_low_cycle = self.z_L_init.to(
+            dtype=hidden_states_high_cycle.dtype,
+            device=hidden_states_high_cycle.device,
+        ).expand_as(hidden_states_high_cycle)
 
         H_cycles = self.config.H_cycles
         L_cycles = self.config.L_cycles
-        for h in range(H_cycles):
-            for l_step in range(L_cycles):
-                step = h * (L_cycles + 1) + l_step
-                z_L = self.L_module(
+        for high_cycle_idx in range(H_cycles):
+            for low_cycle_idx in range(L_cycles):
+                step = high_cycle_idx * (L_cycles + 1) + low_cycle_idx
+                hidden_states_low_cycle = self.L_module(
                     positions=positions,
-                    hidden_states=z_L + z_H,
+                    hidden_states=hidden_states_low_cycle + hidden_states_high_cycle,
                     current_step_base=step,
                 )
-            step = h * (L_cycles + 1) + L_cycles
-            z_H = self.H_module(
+            step = high_cycle_idx * (L_cycles + 1) + L_cycles
+            hidden_states_high_cycle = self.H_module(
                 positions=positions,
-                hidden_states=z_H + z_L,
+                hidden_states=hidden_states_high_cycle + hidden_states_low_cycle,
                 current_step_base=step,
             )
 
-        return z_H
+        return hidden_states_high_cycle
 
 
 class HrmTextForCausalLM(nn.Module):
@@ -527,10 +464,15 @@ class HrmTextForCausalLM(nn.Module):
     Reference: src/transformers/models/hrm_text/modeling_hrm_text.py
     """
 
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
+    # On-disk weight key remap: HF stores attention weights as
+    # `attn.{gqkv_proj,o_proj}.weight`; our model uses `self_attn.*`
+    # (matching HF's runtime model class). Both `gqkv_proj` (4-way fused
+    # gate/q/k/v) and `mlp.gate_up_proj` (2-way fused gate/up) are loaded
+    # directly via MergedColumnParallelLinear's fused-on-disk path; no
+    # packed_modules_mapping entries are needed.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".attn.": ".self_attn."},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -582,46 +524,7 @@ class HrmTextForCausalLM(nn.Module):
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
-    def _split_disk_gqkv(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        """Split each on-disk ``attn.gqkv_proj.weight`` into the
-        ``attn.gate_proj.weight`` (first ``num_heads * head_dim`` rows)
-        and ``attn.qkv_proj.weight`` (remaining rows packed
-        ``[q | k | v]``) that our model expects. Other weights pass
-        through unchanged.
-
-        The on-disk packing comes from ``transformers/conversion_mapping.py``
-        ``"hrm_text"`` mapping, which concatenates rows as
-        ``[gate | q | k | v]``. We keep ``[q | k | v]`` as a single
-        ``QKVParallelLinear``-shaped tensor so vLLM's standard QKV
-        weight loader handles TP partitioning.
-        """
-        head_dim = getattr(
-            self.config,
-            "head_dim",
-            self.config.hidden_size // self.config.num_attention_heads,
-        )
-        gate_rows = self.config.num_attention_heads * head_dim
-        for name, weight in weights:
-            if name.endswith(".attn.gqkv_proj.weight"):
-                base = name[: -len(".gqkv_proj.weight")]
-                yield f"{base}.gate_proj.weight", weight[:gate_rows]
-                yield f"{base}.qkv_proj.weight", weight[gate_rows:]
-            else:
-                yield name, weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load HF main HRM-Text weights.
-
-        HF transformers writes a fused ``attn.gqkv_proj.weight`` per
-        layer (rows concatenated as ``[gate | q | k | v]`` along
-        ``dim=0``). ``_split_disk_gqkv`` splits that into the
-        ``gate_proj.weight`` and ``qkv_proj.weight`` tensors our
-        ``HrmTextAttention`` expects before handing them to
-        ``AutoWeightsLoader``; the ``packed_modules_mapping`` then takes
-        care of the standard ``q/k/v`` and ``mlp.gate/up`` fusion.
-        """
         skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(self._split_disk_gqkv(weights))
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
