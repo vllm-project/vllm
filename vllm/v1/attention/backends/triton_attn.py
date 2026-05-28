@@ -464,6 +464,22 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        # An FP8 KV cache lowers to a native fp8e4nv cast, which only exists on
+        # SM89+. On older GPUs the Triton path otherwise dies deep in inductor
+        # autotuning ("type fp8e4nv not supported in this architecture"); fail
+        # early with an actionable message instead.
+        if is_quantized_kv_cache(self.kv_cache_dtype) and not (
+            current_platform.has_device_capability(89)
+        ):
+            cap = current_platform.get_device_capability()
+            suggested = "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+            raise ValueError(
+                f"FP8 KV cache is not supported by the Triton attention backend "
+                f"on {current_platform.get_device_name()} (compute capability "
+                f"{cap.as_version_str() if cap is not None else 'unknown'}); "
+                f"native FP8 (fp8e4nv) requires SM89+. Re-run with "
+                f"--kv-cache-dtype {suggested}."
+            )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
