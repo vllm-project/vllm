@@ -13,7 +13,7 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 2
 
-  - label: ":smoking: Non-root smoke tests"
+  - label: ":docker: :smoking: Non-root smoke tests"
     key: image-smoke-test
     depends_on:
       - image-build
