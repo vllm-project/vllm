@@ -147,11 +147,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
-        """Although TritonExperts.activation() at lines 153-159 does thread
-        gemm1_clamp_limit through swiglu_limit_func when taking the slow path,
-        the silu_and_mul_per_block_quant fused fast path in apply() at lines
-        323-334 (SILU + FP8 block_shape=[128,128] + no LoRA + no DeepGemm
-        E8M0) bypasses activation() entirely and drops clamp silently.
+        """Although TritonExperts.activation() does thread gemm1_clamp_limit
+        through swiglu_limit_func when taking the slow path, the
+        silu_and_mul_per_block_quant fused fast path in apply() (SILU + FP8
+        block_shape=[128,128] + no LoRA + no DeepGemm E8M0) bypasses
+        activation() entirely and drops clamp silently.
         Declaring False for all activations until that fast path is fixed
         (separate follow-up PR).
         """

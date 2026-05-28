@@ -198,9 +198,9 @@ def test_filter_rejects_when_backend_lacks_clamp_support():
 
 
 def test_filter_passes_when_swiglu_limit_zero_regardless_of_backend():
-    """`swiglu_limit=0.0` is treated as no clamp (matches utils.py:447
-    `swiglu_limit_func` guard `if swiglu_limit > 0`); filter never
-    trips even against an unsupporting backend."""
+    """`swiglu_limit=0.0` is treated as no clamp (matches the
+    `swiglu_limit_func` guard `if swiglu_limit > 0` in utils.py); filter
+    never trips even against an unsupporting backend."""
     config = _make_mock_config(swiglu_limit=0.0)
     supported, reason = FusedMoEExperts.is_supported_config(
         _RejectingDummy, config, None, None, FusedMoEActivationFormat.Standard
