@@ -48,6 +48,7 @@ from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
     from datasets import load_dataset
@@ -59,6 +60,11 @@ try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +84,7 @@ class SampleRequest:
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+    timestamp: float | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -438,6 +445,27 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     raise ValueError(
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
+    )
+
+
+def process_audio(audio: Any) -> tuple:
+    """
+    Process a single audio input and return a (array, sample_rate) tuple.
+
+    Supports:
+    1. String: treated as a file path, loaded with soundfile.
+    2. Dict with 'array' and 'sampling_rate' keys: HuggingFace audio format.
+    3. Tuple (array, sr): passed through directly.
+    """
+    if isinstance(audio, str):
+        return sf.read(audio)
+    if isinstance(audio, dict) and "array" in audio and "sampling_rate" in audio:
+        return audio["array"], audio["sampling_rate"]
+    if isinstance(audio, tuple) and len(audio) == 2:
+        return audio
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a file path string, "
+        "a dict with 'array' and 'sampling_rate', or a (array, sr) tuple."
     )
 
 
@@ -1192,16 +1220,19 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         vocab_size = tokenizer.vocab_size
-        # Can't use tokenizer.all_special_ids since
-        # it returns ONLY ids from special_tokens_map.json
-        # We want to exclude placeholder tokens and all
-        # tokens that indicate start/end of image as it
-        # may break prompt replacement logic.
-        prohibited_tokens = list(
-            tok_id
-            for tok_id, token in tokenizer.added_tokens_decoder.items()
-            if token.special
-        )
+        if is_mistral_tokenizer(tokenizer):
+            prohibited_tokens = tokenizer.all_special_ids
+        else:
+            # Can't use tokenizer.all_special_ids since
+            # it returns ONLY ids from special_tokens_map.json
+            # We want to exclude placeholder tokens and all
+            # tokens that indicate start/end of image as it
+            # may break prompt replacement logic.
+            prohibited_tokens = list(
+                tok_id
+                for tok_id, token in tokenizer.added_tokens_decoder.items()
+                if token.special
+            )
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
         logger.debug(
@@ -1373,6 +1404,168 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
+class TimedTrace(BenchmarkDataset):
+    """
+    Implements a base class to replay various timed traces.
+    Loads data from a JSON file and generates sample requests
+    based on the timing information in the traces.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+
+        # Set parameters with defaults from timed_trace_group arguments
+        self.chunk_size = int(kwargs.get("timed_trace_chunk_hash_size", 16))
+        self.sec_multiplier = float(kwargs.get("timed_trace_sec_multiplier", 1))
+        self.label_ts = str(kwargs.get("timed_trace_label_timestamp"))
+        self.label_input_length = str(kwargs.get("timed_trace_label_input_length"))
+        self.label_output_length = str(kwargs.get("timed_trace_label_output_length"))
+        self.label_hash_ids = str(kwargs.get("timed_trace_label_hash_ids"))
+        print(
+            f"timed-trace: chunk_size: {self.chunk_size}, "
+            f"sec_multiplier: {self.sec_multiplier}, "
+            f'label_ts: "{self.label_ts}", '
+            f'label_input_length: "{self.label_input_length}", '
+            f'label_output_length: "{self.label_output_length}", '
+            f'label_hash_ids: "{self.label_hash_ids}"'
+        )
+        self._expanded_generated_prompts = {}
+        self.load_data()
+
+    def load_data(self) -> None:
+        # check if the file is there
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # load and we will do transformation once we have the Tokenizer available
+        # this is jsonl data format
+        with open(self.dataset_path) as f:
+            self.data = f.readlines()
+
+    def _sample_token(
+        self, num_tokens: int, tokenizer: TokenizerLike, seed: int | None = None
+    ) -> list[int]:
+        # Initialize vocab only if it doesn't exist yet
+        if not hasattr(self, "vocab"):
+            self.vocab = tokenizer.get_vocab()
+            # Remove the special tokens.
+            self.vocab = {
+                k: v
+                for k, v in self.vocab.items()
+                if v not in tokenizer.all_special_ids
+            }
+            # Create a sorted list of vocab values for deterministic sampling
+            self.vocab_values_sorted = sorted(self.vocab.values())
+
+        # Use the provided seed if given, otherwise use global random state
+        if seed is not None:
+            rng = random.Random(seed)
+            sampled_token_ids = rng.choices(self.vocab_values_sorted, k=num_tokens)
+        else:
+            sampled_token_ids = random.choices(self.vocab_values_sorted, k=num_tokens)
+
+        return sampled_token_ids
+
+    def _expand_prompt(
+        self,
+        chunked_hashes: list[int],
+        target_input_size: int,
+        tokenizer: TokenizerLike,
+    ) -> list[int]:
+        raw_tokenized_prompt = []
+        for h in chunked_hashes:
+            # Calculate how many tokens to expand for this chunk
+            expanded_size = (
+                self.chunk_size
+                if target_input_size >= self.chunk_size
+                else target_input_size
+            )
+
+            # Cache key includes size for partial chunks at the end
+            key = f"{h}:{expanded_size}"
+
+            if key not in self._expanded_generated_prompts:
+                # Convert key to a deterministic seed
+                key_seed = hash(key) & 0xFFFFFFFF  # Convert to 32-bit int
+                self._expanded_generated_prompts[key] = self._sample_token(
+                    expanded_size, tokenizer, seed=key_seed
+                )
+            # once inserted get the tokenized prompt and append to the list
+            raw_tokenized_prompt.extend(self._expanded_generated_prompts[key])
+            target_input_size -= expanded_size
+
+            if target_input_size <= 0:
+                break
+
+        return raw_tokenized_prompt
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        assert tokenizer is not None, "Tokenizer must be provided, now is Null"
+
+        for ind, entry in enumerate(self.data):
+            if len(samples) >= num_requests:
+                break
+
+            # now we create the SampleRequest with timing info
+            entry = json.loads(entry.strip())
+            input_length = entry.get(self.label_input_length)
+            if input_length is None:
+                raise ValueError(
+                    f"Input length field '{self.label_input_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-input-length to specify the correct "
+                    f"field name."
+                )
+            new_output_len = entry.get(self.label_output_length)
+            if new_output_len is None:
+                raise ValueError(
+                    f"Output length field '{self.label_output_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-output-length to specify the correct "
+                    f"field name."
+                )
+            prompt_ids = self._expand_prompt(
+                entry.get(self.label_hash_ids, []), input_length, tokenizer
+            )
+            prompt = tokenizer.decode(prompt_ids)
+
+            # Get timestamp with proper error handling
+            ts_value = entry.get(self.label_ts)
+            if ts_value is None:
+                raise ValueError(
+                    f"Timestamp field '{self.label_ts}' not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-timestamp to specify the correct field name."
+                )
+            timestamp = float(ts_value) * self.sec_multiplier
+
+            prompt_len = len(prompt_ids)
+
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=None,
+                    multi_modal_data=None,
+                    request_id=request_id_prefix + str(ind),
+                    timestamp=timestamp,
+                )
+            )
+        return samples
+
+
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--trust-remote-code",
@@ -1399,10 +1592,13 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random-rerank",
             "hf",
             "custom",
+            "custom_audio",
+            "custom_image",
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
             "speed_bench",
+            "timed_trace",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1491,6 +1687,53 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+
+    timed_trace_group = parser.add_argument_group("timed-trace dataset options")
+    timed_trace_group.add_argument(
+        "--timed-trace-chunk-hash-size",
+        type=int,
+        default=16,
+        help=(
+            "Each hash tokens, if present, represent how many token "
+            "hashes. For example in the Moonshot traces it is 512, while "
+            "the Qwen/Alibaba has 16."
+        ),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-sec-multiplier",
+        type=float,
+        default=1,
+        help=(
+            "What multiplier to use when converting timestamps to "
+            "seconds. We will multiply timestamps by this. For example"
+            "if the timestamps are in milliseconds, then pass 0.001."
+            "If they are already in seconds, then the default 1 is sufficient."
+        ),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-timestamp",
+        type=str,
+        default="timestamp",
+        help="What json label to use to index the timestamp in the trace.",
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-input-length",
+        type=str,
+        default="input_length",
+        help=("What json label to use to index the input length field in the trace."),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-output-length",
+        type=str,
+        default="output_length",
+        help=("What json label to use to index the output length field in the trace."),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-hash-ids",
+        type=str,
+        default="hash_ids",
+        help=("What json label to use to index the hash ids for the input prompts."),
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
@@ -1816,8 +2059,28 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
         )
 
-    elif args.dataset_name == "custom_mm":
-        dataset = CustomMMDataset(
+    elif args.dataset_name in ("custom_image", "custom_mm"):
+        if args.dataset_name == "custom_mm":
+            logger.warning(
+                "Dataset name 'custom_mm' is deprecated and will be removed in v0.24. "
+                "Use '--dataset-name custom_image' instead."
+            )
+        dataset = CustomImageDataset(
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
+        )
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            enable_multimodal_chat=args.enable_multimodal_chat,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+
+    elif args.dataset_name == "custom_audio":
+        dataset = CustomAudioDataset(
             dataset_path=args.dataset_path,
             disable_shuffle=args.disable_shuffle,
             random_seed=args.seed,
@@ -1892,6 +2155,19 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
         ):
             dataset_class = MTBenchDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
+        elif (
+            args.dataset_path in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = HumanEvalDataset
+            args.hf_split = args.hf_split if args.hf_split else "test"
+        elif (
+            args.dataset_path in GSM8KDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in GSM8KDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = GSM8KDataset
+            args.hf_subset = args.hf_subset if args.hf_subset else "main"
+            args.hf_split = args.hf_split if args.hf_split else "test"
         elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
@@ -1988,6 +2264,14 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
             skip_chat_template=args.skip_chat_template,
             **hf_kwargs,
+        )
+
+    elif args.dataset_name == "timed_trace":
+        dataloader = TimedTrace(**vars(args))
+        input_requests = dataloader.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -2249,9 +2533,9 @@ class CustomDataset(BenchmarkDataset):
         return sampled_requests
 
 
-class CustomMMDataset(CustomDataset):
+class CustomImageDataset(CustomDataset):
     """
-    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
+    Implements the Custom image dataset. Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {
@@ -2262,14 +2546,151 @@ class CustomMMDataset(CustomDataset):
         "prompt": "Which country has the most pokemons based on the given graphs?",
         "image_files": ["path/to/image.png"],
     }
+    {
+        "content": [
+            {"type": "text", "text": "Compare these images: "},
+            {"type": "image", "image": "path/to/image1.png"},
+            {"type": "text", "text": " and "},
+            {"type": "image_url", "image_url": {"url": "path/to/image2.png"}},
+        ],
+    }
     ```
-
-    NOTE: Only the first image file in "image_files" is used for each sample request.
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
 
     IS_MULTIMODAL = True
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        self.data: list[dict] = []
+
+        if not self.dataset_path.endswith(".jsonl"):
+            raise NotImplementedError(
+                "Only JSONL format is supported for CustomImageDataset."
+            )
+
+        with open(self.dataset_path, encoding="utf-8") as f:
+            for line_number, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise ValueError(
+                        f"Invalid JSON in custom image dataset line {line_number}: {e}"
+                    ) from e
+
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Each custom image dataset line must contain a JSON object. "
+                        f"Found {type(item)} on line {line_number}."
+                    )
+
+                has_legacy_fields = "prompt" in item and "image_files" in item
+                has_interleaved_content = "content" in item
+                if not has_legacy_fields and not has_interleaved_content:
+                    raise ValueError(
+                        "Each custom image dataset line must contain either "
+                        "'prompt' and 'image_files' fields, or a 'content' field. "
+                        f"Invalid line: {line_number}."
+                    )
+
+                self.data.append(item)
+
+        random.seed(self.random_seed)
+        if not getattr(self, "disable_shuffle", False):
+            random.shuffle(self.data)
+
+    @staticmethod
+    def _validate_content_parts(content: Any) -> list[dict[str, Any]]:
+        if not isinstance(content, list):
+            raise ValueError(
+                "'content' must be a list of text and image content dictionaries."
+            )
+
+        if not content:
+            raise ValueError("'content' must contain at least one item.")
+
+        parts: list[dict[str, Any]] = []
+        for part in content:
+            if not isinstance(part, dict):
+                raise ValueError(
+                    f"Each item in 'content' must be a dictionary. Found {type(part)}."
+                )
+            parts.append(part)
+
+        return parts
+
+    @classmethod
+    def _process_content_part(cls, part: dict[str, Any]) -> dict[str, Any]:
+        content_type = part.get("type")
+        if content_type == "text":
+            text = part.get("text")
+            if not isinstance(text, str):
+                raise ValueError("Text content parts must contain a string 'text'.")
+            return {"type": "text", "text": text}
+
+        if content_type == "image":
+            if "image" not in part:
+                raise ValueError("Image content parts must contain an 'image' field.")
+            return dict(process_image(part["image"]))
+
+        if content_type == "image_url":
+            image_url = part.get("image_url")
+            if isinstance(image_url, str):
+                return dict(process_image(image_url))
+
+            if isinstance(image_url, dict):
+                url = image_url.get("url")
+                if not isinstance(url, str):
+                    raise ValueError(
+                        "Image URL content parts must contain a string 'image_url.url'."
+                    )
+
+                processed_part = dict(process_image(url))
+                processed_image_url = dict(processed_part["image_url"])
+                processed_image_url.update(
+                    {key: value for key, value in image_url.items() if key != "url"}
+                )
+                processed_part["image_url"] = processed_image_url
+                return processed_part
+
+            raise ValueError(
+                "Image URL content parts must contain an 'image_url' string "
+                "or dictionary."
+            )
+
+        raise ValueError(
+            "Content parts must have type 'text', 'image', or 'image_url'. "
+            f"Found: {content_type!r}."
+        )
+
+    @classmethod
+    def _process_interleaved_content(cls, content: Any) -> list[dict[str, Any]]:
+        return [
+            cls._process_content_part(part)
+            for part in cls._validate_content_parts(content)
+        ]
+
+    @staticmethod
+    def _get_text_from_content(content: list[dict[str, Any]]) -> str:
+        return "".join(part["text"] for part in content if part.get("type") == "text")
+
+    @staticmethod
+    def _process_image_files(images: Any) -> dict[str, Any] | list[dict[str, Any]]:
+        if not isinstance(images, list) or not images:
+            raise ValueError("'image_files' must be a non-empty list.")
+
+        mm_content = [dict(process_image(image)) for image in images]
+        if len(mm_content) == 1:
+            return mm_content[0]
+
+        return mm_content
 
     def sample(
         self,
@@ -2295,17 +2716,33 @@ class CustomMMDataset(CustomDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
+
+            if "content" in item:
+                content = self._process_interleaved_content(item["content"])
+                text_prompt = self._get_text_from_content(content)
+                prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt = (
+                    [{"role": "user", "content": content}]
+                    if enable_multimodal_chat
+                    else content
+                )
+                sampled_requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                        multi_modal_data=None,
+                        request_id=request_id_prefix + str(i),
+                    )
+                )
+                continue
+
             prompt = item["prompt"]
+            if not isinstance(prompt, str):
+                raise ValueError("'prompt' must be a string.")
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
-                )
-            mm_content = process_image(images[0])
+            mm_content = self._process_image_files(item["image_files"])
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -2325,6 +2762,104 @@ class CustomMMDataset(CustomDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
 
+        return sampled_requests
+
+
+class CustomAudioDataset(CustomDataset):
+    """
+    Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
+    {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
+
+    Supports both:
+    - Dedicated ASR models (e.g. Whisper) via openai-audio & /v1/audio/transcriptions
+    - Chat-based audio models (e.g. Qwen2-Audio) via openai-chat & /v1/chat/completions
+    """
+
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        skip_chat_template: bool = False,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        self.num_available_samples = len(self.data)
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
+        sampled_requests = []
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item.get("prompt", "")
+            if tokenizer is None:
+                prompt_len = 1
+                new_output_len = output_len if output_len not in (None, -1) else 256
+                mm_content = None
+            else:
+                use_chat_template = (
+                    not skip_chat_template
+                    and hasattr(tokenizer, "chat_template")
+                    and tokenizer.chat_template is not None
+                )
+                if enable_multimodal_chat:
+                    # Chat-based audio models (e.g., Qwen2-Audio):
+                    # encode audio as base64; serve.py assembles the chat message
+                    # as: {"role": "user", "content": [
+                    #     {"type": "text", "text": prompt},
+                    #     {"type": "input_audio", "input_audio": {...}}
+                    # ]}
+                    y, sr = process_audio(item["audio"])
+                    buf = io.BytesIO()
+                    sf.write(buf, y, sr, format="WAV")
+                    audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    mm_content = {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    }
+                    # prompt stays as plain string; serve.py handles wrapping
+                else:
+                    # Whisper-style models: load audio array locally
+                    y, sr = process_audio(item["audio"])
+                    mm_content = {"audio": (y, sr)}
+                    if use_chat_template:
+                        # ASR models with a chat template but not multimodal chat
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": prompt}],
+                            add_generation_prompt=True,
+                            tokenize=False,
+                        )
+                    # else: plain prompt for Whisper-style models
+                prompt_len = (
+                    len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
+                )
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    new_output_len = int(item["output_tokens"])
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
         return sampled_requests
 
 
@@ -2952,6 +3487,126 @@ class MTBenchDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# HumanEval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class HumanEvalDataset(HuggingFaceDataset):
+    """
+    HumanEvalDataset Dataset.
+    https://huggingface.co/datasets/openai/openai_humaneval
+
+    We create a single turn dataset for HumanEval.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/openai_humaneval",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# GSM8K Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class GSM8KDataset(HuggingFaceDataset):
+    """
+    GSM8K Dataset.
+    https://huggingface.co/datasets/openai/gsm8k
+
+    We create a single turn dataset for GSM8K.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/gsm8k",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["question"]
 
             # apply template
             if not skip_chat_template:

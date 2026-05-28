@@ -342,7 +342,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -1745,7 +1745,7 @@ class MooncakeConnectorWorker:
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
-            is_kv_layout_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
+            is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
         )
 
     def _get_sender_transfer_plan(
