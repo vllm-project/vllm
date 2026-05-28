@@ -75,9 +75,8 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return (
             not moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.enable_eplb
-            and moe_parallel_config.dp_size <= 1
-        )
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_routing_method(
