@@ -21,29 +21,43 @@ inline int32_t vedic_dot8(const int8_t* a, const int8_t* b) {
 torch::Tensor vedic_4bit_matmul(
     torch::Tensor A, torch::Tensor B_packed, float B_scale)
 {
-    int M = A.size(0), K = A.size(1), N = B_packed.size(0), K8 = K / 8;
+    // Validate dimensions
+    TORCH_CHECK(A.dim() == 2, "A must be 2D [M, K]");
+    TORCH_CHECK(B_packed.dim() == 2, "B_packed must be 2D [N, K/8]");
+    TORCH_CHECK(A.size(1) % 8 == 0, "K (A.size(1)) must be divisible by 8, got ", A.size(1));
+    TORCH_CHECK(B_packed.size(1) == A.size(1) / 8,
+        "B_packed.size(1) must equal K/8. Expected ", A.size(1) / 8, ", got ", B_packed.size(1));
+
+    int64_t M = A.size(0), K = A.size(1), N = B_packed.size(0), K8 = K / 8;
+
+    // Safe allocation with overflow check
+    int64_t B_unpacked_size = N * K;
+    TORCH_CHECK(B_unpacked_size / K == N, "Integer overflow: N * K exceeds int64_t range");
+    int8_t* B_unpacked = new (std::nothrow) int8_t[B_unpacked_size];
+    TORCH_CHECK(B_unpacked != nullptr, "Failed to allocate memory for B_unpacked (", B_unpacked_size, " bytes)");
+
     auto C = torch::empty({M, N}, A.options());
     auto A_acc = A.accessor<float,2>();
     auto B_acc = B_packed.accessor<int32_t,2>();
     auto C_acc = C.accessor<float,2>();
 
-    int8_t* B_unpacked = new int8_t[N * K];
-    for (int n = 0; n < N; n++)
-        for (int k8 = 0; k8 < K8; k8++)
+    for (int64_t n = 0; n < N; n++)
+        for (int64_t k8 = 0; k8 < K8; k8++)
             unpack8(B_acc[n][k8], &B_unpacked[n * K + k8 * 8]);
 
     int8_t* A_quant = new int8_t[K];
-    for (int m = 0; m < M; m++) {
-        for (int k = 0; k < K; k++)
+    for (int64_t m = 0; m < M; m++) {
+        for (int64_t k = 0; k < K; k++)
             A_quant[k] = (int8_t)std::clamp((int)std::round(A_acc[m][k]), -128, 127);
-        for (int n = 0; n < N; n++) {
+        for (int64_t n = 0; n < N; n++) {
             int32_t sum = 0;
-            for (int k8 = 0; k8 < K8; k8++)
+            for (int64_t k8 = 0; k8 < K8; k8++)
                 sum += vedic_dot8(&A_quant[k8*8], &B_unpacked[n*K + k8*8]);
             C_acc[m][n] = (float)sum * B_scale;
         }
     }
-    delete[] B_unpacked; delete[] A_quant;
+    delete[] B_unpacked;
+    delete[] A_quant;
     return C;
 }
 
