@@ -90,9 +90,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx12x, on_mi3xx
+        from vllm.platforms.rocm import on_mi3xx, on_rdna4
 
-        return on_mi3xx() or on_gfx12x()
+        return on_mi3xx() or on_rdna4()
     return False
 
 
@@ -139,7 +139,7 @@ def arch_only(*arch_preds: Callable[[], bool]) -> Callable[[Callable], Callable]
     of the supplied arch predicates returns True; otherwise return False.
 
     Predicates are zero-arg callables from `vllm.platforms.rocm`
-    (e.g. `on_mi3xx`, `on_gfx950`, `on_gfx12x`). They are imported lazily at
+    (e.g. `on_mi3xx`, `on_gfx950`, `on_rdna4`). They are imported lazily at
     call site to avoid pulling `vllm.platforms.rocm` into the import graph of
     code that doesn't need it.
     """
@@ -1343,7 +1343,7 @@ class rocm_aiter_ops:
     Check Functions:
         All check functions (is_*_enabled) are decorated with @if_aiter_supported,
         which verifies: (1) platform is ROCm, (2) device arch is gfx9 (mi3xx)
-        OR gfx12 (RDNA4), and (3) aiter library is installed. The check
+        OR gfx120x (RDNA4), and (3) aiter library is installed. The check
         function then also verifies the corresponding environment variable.
 
         Gates that depend on arch-specific machinery (CK a8w8, MFMA-based
@@ -1355,7 +1355,7 @@ class rocm_aiter_ops:
         i.e.                                             ___
         is_enabled() == current_platform.is_rocm() and      |     checked by
                         (current_platform.is_on_gfx9()      | @if_aiter_supported
-                        or is_on_gfx12())          and      |
+                        or is_on_rdna4())          and      |
                         IS_AITER_FOUND and   _______________|
                         any(p() for p in preds)  ---> @arch_only(*preds)
                         cls._AITER_ENABLED   -----> Check by the logic in `is_enabled()`
@@ -2372,12 +2372,6 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
-        # Shapes that have a tuned per-(N,K) Triton blockscale config under
-        # aiter/ops/triton/configs/gemm/gfx1201-GEMM-A8W8_BLOCKSCALE-N=*-K=*.json
-        # plus the original mi3xx-tuned entries. Adding shapes here lets
-        # AiterFp8BlockScaledMMKernel.use_triton flip True for them, which
-        # routes the layer through `triton_gemm_a8w8_blockscale` (pure Triton,
-        # works on gfx12) instead of the CK fallback.
         return (n, k) in {
             (512, 7168),
             (1024, 8192),
