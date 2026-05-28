@@ -180,14 +180,14 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        from diskcache import Cache
+        from diskcache import Cache, JSONDisk
 
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "
             "not be used with untrusted clients."
         )
-        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0)
+        cache = Cache(cache_dir, eviction_policy="none", cull_limit=0, disk=JSONDisk)
         outlines_version = importlib.metadata.version("outlines_core")
 
         cached_version = cache.get("__version__", None)
