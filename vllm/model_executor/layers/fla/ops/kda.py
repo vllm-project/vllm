@@ -1273,12 +1273,19 @@ def chunk_kda(
     ],
     key=["H", "D"],
 )
+@triton.heuristics(
+    {
+        "HAS_BIAS": lambda args: args["g_bias"] is not None,
+        "USE_LOWER_BOUND": lambda args: args["lower_bound"] is not None,
+    }
+)
 @triton.jit
 def kda_gate_fwd_kernel(
     g,
     A,
     y,
     g_bias,
+    lower_bound,
     beta: tl.constexpr,
     threshold: tl.constexpr,
     T,
@@ -1287,12 +1294,13 @@ def kda_gate_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    USE_LOWER_BOUND: tl.constexpr,
 ):
     i_t, i_h = tl.program_id(0), tl.program_id(1)
     n_t = i_t * BT
 
     b_a = tl.load(A + i_h).to(tl.float32)
-    b_a = -tl.exp(b_a)
+    b_a = tl.exp(b_a)
 
     stride_row = H * D
     stride_col = 1
@@ -1325,13 +1333,16 @@ def kda_gate_fwd_kernel(
         )
         b_g = b_g + b_bias[None, :]
 
-    # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
-    # When beta * x > threshold, use linear approximation x
-    # Use threshold to switch to linear when beta*x > threshold
-    g_scaled = b_g * beta
-    use_linear = g_scaled > threshold
-    sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
-    b_y = b_a * sp
+    if USE_LOWER_BOUND:
+        b_y = lower_bound * tl.sigmoid(b_a * b_g)
+    else:
+        # softplus(x, beta) = (1/beta) * log(1 + exp(beta * x))
+        # When beta * x > threshold, use linear approximation x
+        # Use threshold to switch to linear when beta*x > threshold
+        g_scaled = b_g * beta
+        use_linear = g_scaled > threshold
+        sp = tl.where(use_linear, b_g, (1.0 / beta) * log(1.0 + tl.exp(g_scaled)))
+        b_y = -b_a * sp
 
     tl.store(y_ptr, b_y.to(y.dtype.element_ty), boundary_check=(0, 1))
 
@@ -1343,13 +1354,22 @@ def fused_kda_gate(
     g_bias: torch.Tensor | None = None,
     beta: float = 1.0,
     threshold: float = 20.0,
+    lower_bound: float | None = None,
 ) -> torch.Tensor:
     """
-    Forward pass for KDA gate:
+    Forward pass for KDA gate.
+
+    If lower_bound is present:
+        g = lower_bound * sigmoid(exp(A) * (g + g_bias))
+    else:
+        g = -exp(A) * softplus(g + g_bias, beta)
+
+    Arguments:
       input g: [..., H*D]
       param A: [H] or [1, 1, H, 1]
       beta: softplus beta parameter
       threshold: softplus threshold parameter
+      lower_bound: optional lower_bound parameter
       return  : [..., H, D]
     """
     orig_shape = g.shape[:-1]
@@ -1370,13 +1390,13 @@ def fused_kda_gate(
         A,
         y,
         g_bias,
+        lower_bound,
         beta,
         threshold,
         T,
         H,
         head_k_dim,
         BD=next_power_of_2(head_k_dim),
-        HAS_BIAS=g_bias is not None,
     )
 
     y = y.view(*orig_shape, H, head_k_dim)

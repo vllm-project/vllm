@@ -40,8 +40,6 @@ from ..ops.causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 
 logger = init_logger(__name__)
 
-FLASHKDA_LOWER_BOUND = -5.0
-
 
 def resolve_kda_prefill_backend(backend: str, head_dim: int) -> str:
     if backend == "flashkda":
@@ -115,7 +113,7 @@ direct_register_custom_op(
 
 @CustomOp.register("kimi_kda_prefill")
 class KimiKdaPrefill(CustomOp):
-    def __init__(self, head_dim: int) -> None:
+    def __init__(self, head_dim: int, lower_bound: float | None) -> None:
         super().__init__()
         vllm_config = get_current_vllm_config()
         additional_config = vllm_config.additional_config
@@ -127,6 +125,7 @@ class KimiKdaPrefill(CustomOp):
         active_backend = resolve_kda_prefill_backend(backend, head_dim)
         self.kda_prefill_backend = active_backend
         self.head_dim = head_dim
+        self.lower_bound = lower_bound
 
         if active_backend == "flashkda":
             self._forward_method = self.forward_flashkda
@@ -150,6 +149,7 @@ class KimiKdaPrefill(CustomOp):
             A_log,
             self.head_dim,
             g_bias=dt_bias,
+            lower_bound=self.lower_bound,
         ).unsqueeze(0)
         beta = beta.float().sigmoid()
         return chunk_kda(
@@ -194,7 +194,7 @@ class KimiKdaPrefill(CustomOp):
             out,
             A_log.reshape(-1),
             dt_bias.view(-1, self.head_dim),
-            FLASHKDA_LOWER_BOUND,
+            self.lower_bound,
             initial_state=initial_state,
             final_state=final_state,
             cu_seqlens=cu_seqlens,
@@ -346,7 +346,10 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.kda_prefill = KimiKdaPrefill(head_dim=self.head_dim)
+        self.lower_bound = kda_config.get("lower_bound", None)
+        self.kda_prefill = KimiKdaPrefill(
+            head_dim=self.head_dim, lower_bound=self.lower_bound
+        )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -547,6 +550,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.A_log,
                 self.head_dim,
                 g_bias=self.dt_bias,
+                lower_bound=self.lower_bound,
             ).unsqueeze(0)
             (
                 core_attn_out_non_spec,
