@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -2362,3 +2362,24 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def test_num_gpu_blocks_override_rejects_non_positive():
+    """CacheConfig must reject non-positive num_gpu_blocks_override values."""
+    from pydantic import ValidationError
+
+    # 0 should be rejected
+    with pytest.raises(ValidationError, match="greater than"):
+        CacheConfig(num_gpu_blocks_override=0)
+
+    # Negative should be rejected
+    with pytest.raises(ValidationError, match="greater than"):
+        CacheConfig(num_gpu_blocks_override=-1)
+
+    # None (no override) should be accepted
+    cfg = CacheConfig(num_gpu_blocks_override=None)
+    assert cfg.num_gpu_blocks_override is None
+
+    # Positive values should be accepted
+    cfg = CacheConfig(num_gpu_blocks_override=16)
+    assert cfg.num_gpu_blocks_override == 16
