@@ -1717,13 +1717,13 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    total_num_heads = self.num_heads * self.dcp_world_size
+                    num_heads_in_dcp = self.num_heads * self.dcp_world_size
                     buffer_shape = (
                         num_decode_tokens,
-                        total_num_heads,
+                        num_heads_in_dcp,
                         self.head_size,
                     )
-                    lse_shape = (num_decode_tokens, total_num_heads)
+                    lse_shape = (num_decode_tokens, num_heads_in_dcp)
                     output_tmp, lse = current_workspace_manager().get_simultaneous(
                         (buffer_shape, query.dtype),
                         (lse_shape, torch.float32),
