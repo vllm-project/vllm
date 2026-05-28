@@ -241,11 +241,23 @@ class TestIsReasoningEnd:
     )
     def test_is_reasoning_end(self, tokenizer, parser_cls):
         parser = parser_cls(tokenizer)
+        start_id = tokenizer.convert_tokens_to_ids("<|START_THINKING|>")
         end_id = tokenizer.convert_tokens_to_ids("<|END_THINKING|>")
+        chatbot_id = tokenizer.convert_tokens_to_ids("<|CHATBOT_TOKEN|>")
+        content_ids = [99, 100]
 
+        # Generation-only tokens have no chatbot marker, so the whole sequence
+        # is considered.
         assert parser.is_reasoning_end([end_id])
-        assert parser.is_reasoning_end([99, 100, end_id])
-        assert not parser.is_reasoning_end([99, 100])
+        assert parser.is_reasoning_end([start_id, *content_ids, end_id])
+        assert not parser.is_reasoning_end([start_id, *content_ids])
+
+        # Full prompt/history tokens are scoped to the latest chatbot marker,
+        # so stray thinking tokens from the preamble or previous turns are ignored.
+        assert not parser.is_reasoning_end([start_id, end_id, chatbot_id, *content_ids])
+        assert parser.is_reasoning_end(
+            [start_id, end_id, chatbot_id, start_id, *content_ids, end_id]
+        )
 
 
 SCHEMA_A = {"type": "object", "properties": {"a": {"type": "string"}}}
