@@ -124,6 +124,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_DSV32_INDEXER_FUSION: bool = False
+    VLLM_ROCM_DSV32_INDEXER_FUSION_MAX_LAYERS: int = -1
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -1172,6 +1174,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
+    ),
+    # DSv3.2: fuse Indexer k_norm/RoPE/quant/cache into a single AITER kernel.
+    "VLLM_ROCM_USE_AITER_DSV32_INDEXER_FUSION": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_DSV32_INDEXER_FUSION", "False").lower()
+        in ("true", "1")
+    ),
+    # Bisection knob: only apply the fusion to layers with index < this value.
+    # -1 (default) = unlimited.
+    "VLLM_ROCM_DSV32_INDEXER_FUSION_MAX_LAYERS": lambda: int(
+        os.getenv("VLLM_ROCM_DSV32_INDEXER_FUSION_MAX_LAYERS", "-1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
