@@ -1,6 +1,6 @@
 tb run \
     --agent-import-path terminal_agents.CmdQwenTerminalAgent:CmdQwenTerminalAgent \
-    --model Qwen/Qwen3-4B \
+    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
     --dataset-name terminal-bench-core \
     --dataset-version 0.1.1 \
     --n-concurrent 1 \
