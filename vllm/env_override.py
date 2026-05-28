@@ -779,28 +779,54 @@ _patch_cpp_indirect_assert_if_needed()
 # a multi-minute hang that eventually exhausts the Python recursion limit.
 #
 # Fix: replace `OperatorIssue.operator_str` with a bounded version that
-# represents each arg by its type and id, instead of calling its `__str__`.
-# This keeps the diagnostic message useful (target + arg types are still
-# logged) while making the call O(num_args) instead of O(2^depth).
+# never calls `__str__` on opaque IR-like arguments. Primitives and a
+# handful of cheap torch metadata types (`torch.dtype`, `torch.device`,
+# `torch.Size`) are still rendered by value so the diagnostic stays
+# useful for the common cases (e.g. `group_name="tp"`, shapes, dtypes).
+# Anything else falls back to `type@id`. This makes the call O(num_args)
+# instead of O(2^depth), regardless of IR shape.
 #
 # Upstream PyTorch should add depth/cycle protection to `IRNode.__str__`;
 # this workaround can be removed once that lands.
 
 
-def _apply_inductor_operator_str_patch():
+def _apply_inductor_operator_str_patch(operator_issue_cls):
     """Bound IR stringification inside Inductor's OperatorIssue.operator_str.
+
+    Replaces `operator_issue_cls.operator_str` with a version that never
+    calls `__str__`/`__repr__` on opaque arguments, so a deep DAG-shaped
+    IR can no longer turn the diagnostic log into a multi-minute hang.
 
     Idempotent: marks the class with `_vllm_safe_operator_str_patched`
     after the first apply.
     """
     import textwrap
 
-    import torch._inductor.exc as _iexc
-
-    if getattr(_iexc.OperatorIssue, "_vllm_safe_operator_str_patched", False):
+    if getattr(operator_issue_cls, "_vllm_safe_operator_str_patched", False):
         return
 
+    # Types that are guaranteed to have a cheap, bounded `repr()` and
+    # whose values are useful in fallback diagnostics. Everything else is
+    # represented by `{module}.{name}@{id:#x}` so we never trigger an
+    # unbounded `IRNode.__str__` recursion.
+    _safe_repr_types = (
+        int,
+        float,
+        bool,
+        str,
+        type(None),
+        torch.dtype,
+        torch.device,
+        torch.Size,
+    )
+
     def _safe_arg_repr(a):
+        if isinstance(a, _safe_repr_types):
+            return repr(a)
+        if isinstance(a, (tuple, list)) and all(
+            isinstance(x, _safe_repr_types) for x in a
+        ):
+            return repr(a)
         try:
             return f"{type(a).__module__}.{type(a).__name__}@{id(a):#x}"
         except Exception:
@@ -819,8 +845,15 @@ def _apply_inductor_operator_str_patch():
             )
         return textwrap.indent("\n".join(lines), "  ")
 
-    _iexc.OperatorIssue.operator_str = _patched_operator_str
-    _iexc.OperatorIssue._vllm_safe_operator_str_patched = True  # type: ignore[attr-defined]
+    operator_issue_cls.operator_str = _patched_operator_str
+    operator_issue_cls._vllm_safe_operator_str_patched = True  # type: ignore[attr-defined]
 
 
-_apply_inductor_operator_str_patch()
+def _patch_inductor_operator_str():
+    """Apply the bounded `OperatorIssue.operator_str` workaround on import."""
+    import torch._inductor.exc as _iexc
+
+    _apply_inductor_operator_str_patch(_iexc.OperatorIssue)
+
+
+_patch_inductor_operator_str()
