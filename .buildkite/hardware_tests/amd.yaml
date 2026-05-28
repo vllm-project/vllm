@@ -19,9 +19,10 @@ steps:
       --progress plain .
     - |
       docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
-        test -d /vllm-workspace
-        test -d /vllm-workspace/tests
-        test -x /vllm-workspace/vllm/vllm-rs
+        for path in /vllm-workspace /vllm-workspace/tests /vllm-workspace/src/vllm; do
+          test -d "${path}" || { echo "Missing directory: ${path}" >&2; exit 1; }
+        done
+        test -x /vllm-workspace/src/vllm/vllm-rs || { echo "Missing executable: /vllm-workspace/src/vllm/vllm-rs" >&2; exit 1; }
         command -v python3
         command -v uv
         command -v pytest
