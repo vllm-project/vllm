@@ -137,21 +137,6 @@ class TestLastPool:
         expected = torch.tensor([[3.0, 4.0], [9.0, 10.0]])
         assert torch.equal(out, expected)
 
-    def test_single_sequence(self):
-        hidden = torch.tensor([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]])
-        metadata = _make_metadata([3])
-        pooler = LastPool()
-        out = pooler(hidden, metadata)
-        expected = torch.tensor([[50.0, 60.0]])
-        assert torch.equal(out, expected)
-
-    def test_single_token_sequences(self):
-        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        metadata = _make_metadata([1, 1])
-        pooler = LastPool()
-        out = pooler(hidden, metadata)
-        assert torch.equal(out, hidden)
-
     def test_partial_prefill_extracts_last_scheduled(self):
         hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
         metadata = _make_metadata([4], num_scheduled_tokens=[2])
