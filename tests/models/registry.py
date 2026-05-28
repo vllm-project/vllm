@@ -846,6 +846,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
+    "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Nano",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        is_available_online=False,
+    ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
         extras={"fork": "Isotr0py/deepseek-vl2-tiny"},
