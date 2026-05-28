@@ -836,6 +836,11 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
+
+        # Per-block physical stride per layer (bytes). Read from each
+        # registered tensor's stride(0) so it stays correct under layouts
+        # that interleave layers within a block (BLHNC/BHLNC).
+        self.block_stride_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
@@ -890,8 +895,13 @@ class NixlConnectorWorker:
                     self.block_len_per_layer.append(
                         physical_page_size // self._physical_blocks_per_logical_kv_block
                     )
+                    # Mamba allocates per-layer, so stride == transfer length.
+                    self.block_stride_per_layer.append(self.block_len_per_layer[-1])
                 else:
                     self.block_len_per_layer.append(physical_page_size)
+                    self.block_stride_per_layer.append(
+                        cache.stride(0) * cache.element_size()
+                    )
 
                 if cache.shape[0] != num_blocks:
                     raise AssertionError(
@@ -926,6 +936,7 @@ class NixlConnectorWorker:
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
+        assert len(self.block_stride_per_layer) == len(seen_base_addresses)
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
@@ -974,6 +985,7 @@ class NixlConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
+            block_strides=self.block_stride_per_layer,
             kv_cache_layout=self.kv_cache_layout
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
@@ -1093,7 +1105,7 @@ class NixlConnectorWorker:
                 )
                 // block_size_ratio
             )
-            page_stride = self.block_len_per_layer[i] // block_size_ratio
+            page_stride = self.block_stride_per_layer[i] // block_size_ratio
             for block_id in range(num_blocks):
                 block_offset = block_id * page_stride
                 addr = base_addr + block_offset
@@ -1128,7 +1140,7 @@ class NixlConnectorWorker:
             local_block_len = local_block_len // num_attn_reads
             rank_offset = plan.rank_offset_factor * remote_kv_block_len
 
-            page_size = nixl_agent_meta.block_lens[i]
+            page_size = nixl_agent_meta.block_strides[i]
             for block_id in range(num_blocks):
                 block_offset = block_id * page_size
                 # For each block, grab the kv heads chunk belonging to current local
