@@ -779,8 +779,8 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
     runner.scheduler.reset_prefix_cache()
 
     # Manager returns REQUEST_LEVEL for the next request.
-    runner.manager.get_request_offloading_context.return_value = (
-        RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(
+        policy=OffloadPolicy.REQUEST_LEVEL
     )
 
     # New request with 2 offloaded blocks; first matches what's in CPU.

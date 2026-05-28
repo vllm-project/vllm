@@ -485,9 +485,7 @@ class OffloadingConnectorScheduler:
         else:
             is_new_request = True
             req_context = _create_req_context(request)
-            offloading_context = self.manager.get_request_offloading_context(
-                req_context
-            )
+            offloading_context = self.manager.on_new_request(req_context)
             req_status = RequestOffloadState(
                 config=self.config,
                 req=request,

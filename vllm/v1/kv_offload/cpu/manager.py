@@ -95,9 +95,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     # --- OffloadingManager interface ---
 
-    def get_request_offloading_context(
-        self, req_context: ReqContext
-    ) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:

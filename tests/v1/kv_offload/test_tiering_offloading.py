@@ -414,24 +414,24 @@ class TestTieringOffloadingManager:
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
 
-    def test_get_request_offloading_context_lifecycle(self, manager_setup):
+    def test_on_new_request_lifecycle(self, manager_setup):
         """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
         and is cleaned up on on_request_finished."""
         # Default: all tiers return BLOCK_LEVEL
         ctx = ReqContext(req_id="req_policy_lifecycle")
-        result = self.manager.get_request_offloading_context(ctx)
+        result = self.manager.on_new_request(ctx)
         assert result.policy == OffloadPolicy.BLOCK_LEVEL
         self.manager.on_request_finished(ctx)
 
         # Escalate: tier1 requests REQUEST_LEVEL
-        self.secondary_tier1.get_request_offloading_context = (
+        self.secondary_tier1.on_new_request = (
             lambda req_context: RequestOffloadingContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             )
         )
 
         ctx = ReqContext(req_id="req_policy_lifecycle_2")
-        result = self.manager.get_request_offloading_context(ctx)
+        result = self.manager.on_new_request(ctx)
         assert result.policy == OffloadPolicy.REQUEST_LEVEL
         assert ctx.req_id in self.manager._request_level_tiers
 
@@ -453,14 +453,14 @@ class TestTieringOffloadingManager:
         list(self.manager.take_events())
 
         # Make tier1 request-level, tier2 stays block-level
-        self.secondary_tier1.get_request_offloading_context = (
+        self.secondary_tier1.on_new_request = (
             lambda req_context: RequestOffloadingContext(
                 policy=OffloadPolicy.REQUEST_LEVEL
             )
         )
 
         ctx = ReqContext(req_id="req_cascade")
-        self.manager.get_request_offloading_context(ctx)
+        self.manager.on_new_request(ctx)
 
         # Spy on submit_store
         self.secondary_tier1.submit_store = MagicMock(

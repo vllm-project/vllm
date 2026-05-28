@@ -162,7 +162,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step: bool = False
 
         # Per-request set of secondary tiers that requested REQUEST_LEVEL
-        # policy. Populated in get_request_offloading_context(),
+        # policy. Populated in on_new_request(),
         # cleaned up in on_request_finished().
         self._request_level_tiers: defaultdict[str, set[SecondaryTierManager]] = (
             defaultdict(set)
@@ -528,9 +528,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished() / _maybe_process_finished_jobs().
 
-    def get_request_offloading_context(
-        self, req_context: ReqContext
-    ) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """
         Query each secondary tier for its offload policy preference.
 
@@ -538,7 +536,7 @@ class TieringOffloadingManager(OffloadingManager):
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
         for tier in self.secondary_tiers:
-            tier_ctx = tier.get_request_offloading_context(req_context)
+            tier_ctx = tier.on_new_request(req_context)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
                 self._request_level_tiers[req_context.req_id].add(tier)
 

@@ -225,9 +225,7 @@ class OffloadingManager(ABC):
         return
 
     @abstractmethod
-    def get_request_offloading_context(
-        self, req_context: ReqContext
-    ) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """
         Called when a new request is first seen by the scheduler.
 

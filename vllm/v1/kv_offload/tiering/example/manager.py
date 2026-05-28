@@ -132,9 +132,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         self.completed_jobs = []
         return result
 
-    def get_request_offloading_context(
-        self, req_context: ReqContext
-    ) -> RequestOffloadingContext:
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
     def get_num_blocks(self) -> int:
