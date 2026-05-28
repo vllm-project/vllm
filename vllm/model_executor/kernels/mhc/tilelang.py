@@ -662,3 +662,4 @@ direct_register_custom_op(
     op_func=_hc_head_fused_kernel_tilelang,
     mutates_args=["out"],
 )
+# coverage test
