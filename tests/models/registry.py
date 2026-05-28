@@ -328,11 +328,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
     "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
-    "HrmTextForCausalLM": _HfExamplesInfo(
-        "sapientinc/HRM-Text-1B",
-        # HrmText shipped in transformers 5.9.0 (released 2026-05-20).
-        min_transformers_version="5.9.0",
-    ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
