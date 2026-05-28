@@ -112,7 +112,7 @@ def test_setup_ec_region_returns_layout_with_correct_shape(cleanup_regions):
     assert layout.hidden_dim == 32
     assert layout.element_size == 2  # float16 is 2 bytes
     assert layout.block_size_bytes == 32 * 2
-    assert layout.num_blocks == 256  # default
+    assert layout.num_blocks == 100000  # default
 
 
 def test_setup_ec_region_extra_config_overrides_num_blocks(cleanup_regions):

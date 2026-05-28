@@ -124,6 +124,32 @@ def assert_not_in_log(haystack: str, needle: str, *, where: str) -> None:
     print(f"  ✓ absent {needle!r} from {where}")
 
 
+def wait_for_in_log(
+    path: Path,
+    start: int,
+    needle: str,
+    *,
+    timeout_s: float = 10.0,
+    poll_s: float = 0.5,
+) -> str:
+    """Poll the log file until *needle* appears in the slice [start:], or timeout.
+
+    Returns the slice as of the last read — caller should still assert_in_log on
+    the result so the error message shows what was actually present.
+    The watchdog may restart a dead ``oc logs -f`` stream and replay the full pod
+    log in append mode; this retry loop rides out that recovery window.
+    """
+    deadline = time.monotonic() + timeout_s
+    sl = ""
+    while True:
+        sl = log_slice(path, start)
+        if needle in sl:
+            return sl
+        if time.monotonic() >= deadline:
+            return sl
+        time.sleep(poll_s)
+
+
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
@@ -590,7 +616,16 @@ def test_producer_restart(
         if not (resp_b["choices"][0]["token_ids"] or []):
             raise AssertionError("post-restart EC request returned empty body")
         psl = log_slice(h.producer.log_path, pmark)
-        csl = log_slice(h.consumer.log_path, cmark)
+        # The consumer's oc logs -f stream may die briefly during the
+        # peer eviction triggered by the producer restart.  Use wait_for_in_log
+        # so the watchdog (1s interval) has time to restart the stream and
+        # replay the pod log before we assert.
+        csl = wait_for_in_log(
+            h.consumer.log_path,
+            cmark,
+            f"consumer XferAck ok=True mm_hash={hash_b}",
+            timeout_s=12.0,
+        )
         assert_in_log(
             psl,
             f"producer XferReq mm_hash={hash_b}",

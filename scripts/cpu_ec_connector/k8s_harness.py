@@ -267,6 +267,7 @@ class K8sHarness:
 
         self._wait_vllm_ready(self.producer, HEALTH_TIMEOUT_S)
         self._start_port_forward("producer")
+        self._wait_port_forward_ready(self.producer.http_port)
         print(f"  ✓ producer healthy on {self.producer.http_port}")
 
     # ------------------------------------------------------------------
@@ -340,9 +341,9 @@ class K8sHarness:
             ]
         )
 
-    def _start_log_stream(self, role: str) -> None:
+    def _start_log_stream(self, role: str, *, truncate: bool = True) -> None:
         spec = self.producer if role == "producer" else self.consumer
-        log_fh = spec.log_path.open("wb", buffering=0)
+        log_fh = spec.log_path.open("wb" if truncate else "ab", buffering=0)
         proc = subprocess.Popen(
             [
                 "oc",
@@ -382,7 +383,7 @@ class K8sHarness:
 
     def _start_pf_watchdog(self) -> None:
         def _watchdog() -> None:
-            while not self._pf_watchdog_stop.wait(5.0):
+            while not self._pf_watchdog_stop.wait(1.0):
                 for role, attr in (
                     ("producer", "_producer_pf"),
                     ("consumer", "_consumer_pf"),
@@ -394,6 +395,18 @@ class K8sHarness:
                             file=sys.stderr,
                         )
                         self._start_port_forward(role)
+
+                for role, attr in (
+                    ("producer", "_producer_logs"),
+                    ("consumer", "_consumer_logs"),
+                ):
+                    proc = getattr(self, attr)
+                    if proc is not None and proc.poll() is not None:
+                        print(
+                            f"[watchdog] log stream for {role} died; restarting",
+                            file=sys.stderr,
+                        )
+                        self._start_log_stream(role, truncate=False)
 
         self._pf_watchdog_t = threading.Thread(
             target=_watchdog, daemon=True, name="pf-watchdog"
@@ -424,6 +437,21 @@ class K8sHarness:
                 return
             time.sleep(5)
         raise TimeoutError(f"{spec.role} did not become healthy within {timeout_s}s")
+
+    def _wait_port_forward_ready(self, port: int, timeout_s: int = 30) -> None:
+        """Poll localhost:port/health until the oc port-forward tunnel is up."""
+        import urllib.request
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                urllib.request.urlopen(f"http://localhost:{port}/health", timeout=2)
+                return
+            except Exception:
+                time.sleep(0.5)
+        raise TimeoutError(
+            f"port-forward on localhost:{port} did not become ready within {timeout_s}s"
+        )
 
     def _stop_background_procs(self) -> None:
         procs = [

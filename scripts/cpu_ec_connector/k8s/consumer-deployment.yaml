@@ -63,8 +63,7 @@ spec:
 
             echo "[start] vllm server (consumer)"
             cd /vllm-workspace
-            source venv-vllm/bin/activate
-            exec python -m vllm.entrypoints.cli.main serve \
+            exec venv-vllm/bin/python -m vllm.entrypoints.cli.main serve \
               "$VLLM_MODEL" \
               --port="$VLLM_PORT" \
               --dtype=bfloat16 \
