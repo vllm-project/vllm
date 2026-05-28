@@ -75,8 +75,4 @@ void shuffle_rows(const torch::Tensor& input_tensor,
 // Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
 void dsv3_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
                       const torch::Tensor& mat_b);
-
-// BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+)
-void fp32_router_gemm(torch::Tensor& output, const torch::Tensor& mat_a,
-                      const torch::Tensor& mat_b);
 #endif

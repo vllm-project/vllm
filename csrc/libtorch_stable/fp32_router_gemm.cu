@@ -5,8 +5,6 @@
 // Supports bf16 or fp32 activation; weight is always fp32.
 // Adapted from dsv3_router_gemm_float_out.cu.
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
