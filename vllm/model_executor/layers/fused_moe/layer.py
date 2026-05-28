@@ -709,6 +709,28 @@ class FusedMoE(PluggableLayer):
                     expert_data = expert_data.narrow(dim, 0, loaded_weight.shape[dim])
         return expert_data
 
+    def _moe_checkpoint_shard_stride(
+        self,
+        shard_dim: int,
+        loaded_weight: torch.Tensor,
+        shard_size: int,
+    ) -> int | None:
+        """Return the real checkpoint TP stride when the param shard is padded.
+
+        The checkpoint keeps the unpadded full expert tensor, so padded
+        ``shard_size`` cannot be used as the checkpoint indexing stride.
+        """
+        moe_cfg = self.moe_config
+        i_unpadded = getattr(moe_cfg, "intermediate_size_per_partition_unpadded", None)
+        i_padded = getattr(moe_cfg, "intermediate_size_per_partition", None)
+        if i_unpadded is None or i_padded is None or i_unpadded >= i_padded:
+            return None
+        full_ckpt = loaded_weight.shape[shard_dim]
+        if full_ckpt % self.tp_size != 0:
+            return None
+        ckpt_stride = full_ckpt // self.tp_size
+        return ckpt_stride if ckpt_stride < shard_size else None
+
     def _load_w13(
         self,
         expert_data: torch.Tensor,
@@ -727,16 +749,15 @@ class FusedMoE(PluggableLayer):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            # Handle padding: loaded_weight might be smaller than shard_size on last
-            # TP rank
-            start_offset = shard_size * tp_rank
+            ckpt_stride = self._moe_checkpoint_shard_stride(
+                shard_dim, loaded_weight, shard_size
+            )
+            stride = ckpt_stride if ckpt_stride is not None else shard_size
+            start_offset = stride * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
                 return
-            narrow_size = min(shard_size, available)
+            narrow_size = min(stride, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
@@ -770,16 +791,15 @@ class FusedMoE(PluggableLayer):
         # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
         # and we're not loading the full weight
         if not load_full and loaded_weight.ndim > 0:
-            # Handle padding: loaded_weight might be smaller than shard_size on last
-            # TP rank
-            start_offset = shard_size * tp_rank
+            ckpt_stride = self._moe_checkpoint_shard_stride(
+                shard_dim, loaded_weight, shard_size
+            )
+            stride = ckpt_stride if ckpt_stride is not None else shard_size
+            start_offset = stride * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
-                # If there is no available weight to load for this TP rank
-                # (can happen on last TP rank with padding), we can skip
-                # loading and return early
                 return
-            narrow_size = min(shard_size, available)
+            narrow_size = min(stride, available)
             loaded_weight = loaded_weight.narrow(shard_dim, start_offset, narrow_size)
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)

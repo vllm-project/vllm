@@ -53,6 +53,41 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
 LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 
 
+def _moe_padded_shard_numel(
+    layer: torch.nn.Module,
+    param_name: str,
+    copied_numel: int,
+) -> int | None:
+    """Convert unpadded FusedMoE weight copy counts to padded param counts."""
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    if not isinstance(layer, FusedMoE):
+        return None
+    if param_name not in ("w13_weight", "w2_weight"):
+        return None
+
+    moe_cfg = layer.moe_config
+
+    hidden_padded = moe_cfg.hidden_dim
+    i_padded = moe_cfg.intermediate_size_per_partition
+
+    hidden_unpadded = moe_cfg.hidden_dim_unpadded or hidden_padded
+    i_unpadded = moe_cfg.intermediate_size_per_partition_unpadded or i_padded
+
+    has_padding = i_unpadded < i_padded or hidden_unpadded < hidden_padded
+    if not has_padding:
+        return None
+
+    padded_shard_numel = i_padded * hidden_padded
+    unpadded_shard_numel = i_unpadded * hidden_unpadded
+    if copied_numel == 0:
+        return int(padded_shard_numel)
+    if copied_numel > unpadded_shard_numel:
+        return None
+
+    return int(copied_numel * padded_shard_numel // unpadded_shard_numel)
+
+
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     """
     Get information related to restoring and layerwise processing. If no previous
@@ -173,7 +208,11 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
 
         # Buffer loaded weights, track loading progress
         info.loaded_weights.append((param_name, bound_args))
-        num_loaded, ret = get_numel_loaded(original_loader, bound_args)
+        counter_numel, ret = get_numel_loaded(original_loader, bound_args)
+
+        num_loaded = _moe_padded_shard_numel(layer, param_name, counter_numel)
+        if num_loaded is None:
+            num_loaded = counter_numel
         info.load_numel += num_loaded
 
         logger.debug(
