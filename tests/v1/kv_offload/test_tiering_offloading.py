@@ -184,7 +184,7 @@ class TestTieringOffloadingManager:
 
         # End of step 1: _maybe_process_finished_jobs() was already called by
         # prepare_store() above (setting the per-step flag), so take_events()
-        # does NOT poll get_finished() again — cascade completions remain
+        # does NOT poll get_finished_jobs() again — cascade completions remain
         # unprocessed until the next step.
         list(self.manager.take_events())
 
