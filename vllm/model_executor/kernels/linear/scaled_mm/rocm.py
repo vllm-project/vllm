@@ -79,15 +79,14 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import get_cdna_version, on_gfx12x, on_gfx1250
+        from vllm.platforms.rocm import get_cdna_version, on_gfx1250, on_rdna4
 
         # wvSplitKQ (skinny GEMM) is excluded from the gfx1250 build.
         if on_gfx1250():
             return False, "wvSplitKQ (skinny GEMM) is not built on gfx1250"
 
-        # Restore RDNA4 (gfx12x) dropped by the get_cdna_version()>2 refactor.
-        if get_cdna_version() <= 2 and not on_gfx12x():
-            return False, "requires CDNA3+ (gfx942/gfx950) or RDNA4 (gfx12x)"
+        if get_cdna_version() <= 2 and not on_rdna4():
+            return False, "requires CDNA3+ (gfx942/gfx950) or RDNA4"
 
         if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
             return False, "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."

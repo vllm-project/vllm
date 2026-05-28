@@ -218,6 +218,7 @@ _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
 _ON_RDNA = _ON_GFX1X and not _ON_CDNA
+_ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -313,6 +314,10 @@ def on_gfx12x() -> bool:
 
 def on_gfx1250() -> bool:
     return _ON_GFX1250
+
+
+def on_rdna4() -> bool:
+    return _ON_RDNA4
 
 
 def on_mi3xx() -> bool:
@@ -458,7 +463,7 @@ def _get_backend_priorities(
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
-        if on_gfx12x():
+        if on_rdna4():
             backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
         else:
             backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
@@ -909,7 +914,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_cdna() or on_gfx12x()
+        return on_cdna() or on_rdna4()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
