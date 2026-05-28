@@ -29,41 +29,29 @@ except Exception:
 logger = init_logger(__name__)
 
 
-def _expandable_segments_enabled() -> bool:
-    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
-    return "expandable_segments:True" in conf
-
-
 @contextmanager
-def _disable_expandable_segments_for_cuda_ipc(enabled: bool):
+def _disable_expandable_segments_for_cuda_ipc(active: bool):
+    # Custom allreduce shares CUDA graph buffers across TP ranks via
+    # cudaIpcGetMemHandle, which rejects pointers backed by PyTorch's
+    # expandable_segments (CUDA VMM) allocator with "invalid argument"
+    # (https://github.com/vllm-project/vllm/issues/42609). Temporarily disable
+    # expandable_segments so graph buffers use the legacy allocator, mirroring
+    # CuMemAllocator's handling of the sleep-mode pool (see #40812).
+    conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     should_disable = (
-        enabled and current_platform.is_cuda() and _expandable_segments_enabled()
+        active and current_platform.is_cuda() and "expandable_segments:True" in conf
     )
-    set_allocator_settings = getattr(
-        torch.cuda.memory, "_set_allocator_settings", None
-    )
-
-    if should_disable and set_allocator_settings is None:
-        logger.warning_once(
-            "PYTORCH_CUDA_ALLOC_CONF enables expandable_segments, but this "
-            "PyTorch build does not expose _set_allocator_settings. Custom "
-            "allreduce CUDA graph IPC registration may fail."
-        )
-        should_disable = False
-
     if should_disable:
         logger.info_once(
-            "Temporarily disabling PyTorch expandable_segments during custom "
-            "allreduce CUDA graph capture so graph buffers remain CUDA IPC "
-            "compatible."
+            "Temporarily disabling expandable_segments during custom allreduce "
+            "CUDA graph capture for CUDA IPC compatibility."
         )
-        set_allocator_settings("expandable_segments:False")
-
+        torch.cuda.memory._set_allocator_settings("expandable_segments:False")
     try:
         yield
     finally:
         if should_disable:
-            set_allocator_settings("expandable_segments:True")
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
