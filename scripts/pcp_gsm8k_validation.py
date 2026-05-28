@@ -84,6 +84,11 @@ def main() -> int:
         "--seed", type=int, default=0, help="Sampling seed for determinism"
     )
     parser.add_argument(
+        "--enable-expert-parallel",
+        action="store_true",
+        help="Shard MoE experts across the (DP * PCP * TP) ranks.",
+    )
+    parser.add_argument(
         "--result-json",
         default=None,
         help="Optional path to write the eval result dict as JSON",
@@ -119,6 +124,8 @@ def main() -> int:
         llm_kwargs["kv_cache_dtype"] = args.kv_cache_dtype
     if args.attention_backend:
         llm_kwargs["attention_backend"] = args.attention_backend
+    if args.enable_expert_parallel:
+        llm_kwargs["enable_expert_parallel"] = True
 
     t0 = time.perf_counter()
     llm = LLM(**llm_kwargs)
