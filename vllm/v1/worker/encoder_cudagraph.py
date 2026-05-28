@@ -45,7 +45,9 @@ class BudgetGraphMetadata:
     # The input tensor updated before replay (e.g. pixel_values)
     input_buffer: torch.Tensor
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
-    # Before replay the manager zeros then slice-copies new data into these.
+    # Before replay the manager updates these in-place. By default buffers are
+    # zeroed before slice-copying the actual values; model-specific padding
+    # behavior is provided by EncoderCudaGraphConfig.padding_logics.
     metadata_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
@@ -259,6 +261,14 @@ class EncoderCudaGraphManager:
         """Get per-item output token counts as plain ints."""
         return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
 
+    @staticmethod
+    def _copy_padded_buffer(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+    ) -> None:
+        dst.zero_()
+        dst[: src.shape[0]].copy_(src)
+
     def _run_budget_graph(
         self,
         mm_kwargs: dict[str, Any],
@@ -302,9 +312,10 @@ class EncoderCudaGraphManager:
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                n = src.shape[0]
-                buf.zero_()
-                buf[:n].copy_(src)
+                padding_logic = self.config.padding_logics.get(
+                    key, self._copy_padded_buffer
+                )
+                padding_logic(buf, src)
 
         graph_meta.graph.replay()
 
