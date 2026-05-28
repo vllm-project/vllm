@@ -83,7 +83,7 @@ def register_quantization_config(quantization: str):
 
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
-            logger.warning(
+            logger.debug(
                 "The quantization method '%s' already exists and will be "
                 "overwritten by the quantization config %s.",
                 quantization,
