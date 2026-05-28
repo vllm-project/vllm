@@ -143,4 +143,215 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& expert_offsets,
                             const torch::stable::Tensor& sf_offsets);
 
+// AWQ ops
+torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
+                               torch::stable::Tensor _kernel,
+                               torch::stable::Tensor _scaling_factors,
+                               torch::stable::Tensor _zeros,
+                               int64_t split_k_iters);
+
+torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
+                                     torch::stable::Tensor _scaling_factors,
+                                     torch::stable::Tensor _zeros,
+                                     int64_t split_k_iters, int64_t thx,
+                                     int64_t thy);
+
+// DSV3 fused A GEMM: conditionally compiled so declaration and impl
+// registration are in the source file (dsv3_fused_a_gemm.cu)
+
+// AllSpark ops: declarations are in the source files
+// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
+
 #endif
+
+// Attention kernels (shared CUDA/ROCm)
+void merge_attn_states(
+    torch::stable::Tensor& output,
+    std::optional<torch::stable::Tensor> output_lse,
+    const torch::stable::Tensor& prefix_output,
+    const torch::stable::Tensor& prefix_lse,
+    const torch::stable::Tensor& suffix_output,
+    const torch::stable::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::stable::Tensor>& output_scale = std::nullopt);
+
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);
+
+// Layernorm kernels (shared CUDA/ROCm)
+void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
+              torch::stable::Tensor& weight, double epsilon);
+
+void fused_add_rms_norm(torch::stable::Tensor& input,
+                        torch::stable::Tensor& residual,
+                        torch::stable::Tensor& weight, double epsilon);
+
+// Layernorm-quant kernels (shared CUDA/ROCm)
+void rms_norm_static_fp8_quant(torch::stable::Tensor& out,
+                               torch::stable::Tensor& input,
+                               torch::stable::Tensor& weight,
+                               torch::stable::Tensor& scale, double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(torch::stable::Tensor& out,
+                                         torch::stable::Tensor& input,
+                                         torch::stable::Tensor& residual,
+                                         torch::stable::Tensor& weight,
+                                         torch::stable::Tensor& scale,
+                                         double epsilon);
+
+// Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+void rms_norm_dynamic_per_token_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& weight, torch::stable::Tensor& scales,
+    double const var_epsilon, std::optional<torch::stable::Tensor> scale_ub,
+    std::optional<torch::stable::Tensor> residual);
+
+void rms_norm_per_block_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor const& weight,
+                              torch::stable::Tensor& scales,
+                              double const var_epsilon,
+                              std::optional<torch::stable::Tensor> scale_ub,
+                              std::optional<torch::stable::Tensor> residual,
+                              int64_t group_size, bool is_scale_transposed);
+
+// Positional encoding kernels (shared CUDA/ROCm)
+void rotary_embedding(torch::stable::Tensor& positions,
+                      torch::stable::Tensor& query,
+                      std::optional<torch::stable::Tensor> key,
+                      int64_t head_size, torch::stable::Tensor& cos_sin_cache,
+                      bool is_neox, int64_t rope_dim_offset, bool inverse);
+
+void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
+                        int64_t num_heads_k, int64_t num_heads_v,
+                        int64_t head_dim, double eps,
+                        torch::stable::Tensor& q_weight,
+                        torch::stable::Tensor& k_weight,
+                        torch::stable::Tensor& cos_sin_cache, bool is_neox,
+                        torch::stable::Tensor& position_ids,
+                        int64_t forced_token_heads_per_warp);
+
+// Sampler kernels (shared CUDA/ROCm)
+void apply_repetition_penalties_(
+    torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
+    const torch::stable::Tensor& output_mask,
+    const torch::stable::Tensor& repetition_penalties);
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK);
+
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void persistent_topk(const torch::stable::Tensor& logits,
+                     const torch::stable::Tensor& lengths,
+                     torch::stable::Tensor& output,
+                     torch::stable::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len);
+
+void selective_scan_fwd(
+    const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
+    const torch::stable::Tensor& A, const torch::stable::Tensor& B,
+    const torch::stable::Tensor& C,
+    const std::optional<torch::stable::Tensor>& D_,
+    const std::optional<torch::stable::Tensor>& z_,
+    const std::optional<torch::stable::Tensor>& delta_bias_,
+    bool delta_softplus,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    const std::optional<torch::stable::Tensor>& cache_indices,
+    const std::optional<torch::stable::Tensor>& has_initial_state,
+    const torch::stable::Tensor& ssm_states, int64_t null_block_id,
+    int64_t block_size,
+    const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
+    const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
+    const std::optional<torch::stable::Tensor>& initial_state_idx,
+    const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
+    const std::optional<torch::stable::Tensor>& last_chunk_indices);
+
+// Activation kernels (shared CUDA/ROCm)
+void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
+void silu_and_mul_clamp(torch::stable::Tensor& out,
+                        torch::stable::Tensor& input, double limit);
+void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
+void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
+void gelu_tanh_and_mul(torch::stable::Tensor& out,
+                       torch::stable::Tensor& input);
+void fatrelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                     double threshold);
+void swigluoai_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input,
+                       double alpha = 1.702, double limit = 7.0);
+void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
+void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
+void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
+
+// INT8 quantization kernels (shared CUDA/ROCm)
+void static_scaled_int8_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor const& scale,
+                              std::optional<torch::stable::Tensor> const& azp);
+
+void dynamic_scaled_int8_quant(torch::stable::Tensor& out,
+                               torch::stable::Tensor const& input,
+                               torch::stable::Tensor& scales,
+                               std::optional<torch::stable::Tensor> const& azp);
+
+// FP8 quantization kernels (shared CUDA/ROCm)
+void static_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor const& scale,
+    std::optional<torch::headeronly::IntHeaderOnlyArrayRef> group_shape =
+        std::nullopt);
+
+void dynamic_scaled_fp8_quant(torch::stable::Tensor& out,
+                              torch::stable::Tensor const& input,
+                              torch::stable::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::stable::Tensor& out, torch::stable::Tensor const& input,
+    torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> const& scale_ub);
+
+// GPTQ kernels (shared CUDA/ROCm)
+torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
+                                torch::stable::Tensor b_q_weight,
+                                torch::stable::Tensor b_gptq_qzeros,
+                                torch::stable::Tensor b_gptq_scales,
+                                torch::stable::Tensor b_g_idx, bool use_exllama,
+                                bool use_v2_format, int64_t bit);
+
+void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
+                  int64_t bit);
+
+// GGML kernels (shared CUDA/ROCm)
+torch::stable::Tensor ggml_dequantize(
+    torch::stable::Tensor W, int64_t type, int64_t m, int64_t n,
+    std::optional<torch::headeronly::ScalarType> const& dtype);
+
+torch::stable::Tensor ggml_mul_mat_vec_a8(torch::stable::Tensor W,
+                                          torch::stable::Tensor X, int64_t type,
+                                          int64_t row);
+
+torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,
+                                      torch::stable::Tensor X, int64_t type,
+                                      int64_t row);
+
+torch::stable::Tensor ggml_moe_a8(torch::stable::Tensor X,
+                                  torch::stable::Tensor W,
+                                  torch::stable::Tensor sorted_token_ids,
+                                  torch::stable::Tensor expert_ids,
+                                  torch::stable::Tensor num_tokens_post_padded,
+                                  int64_t type, int64_t row, int64_t top_k,
+                                  int64_t tokens);
+
+torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
+                                      torch::stable::Tensor W,
+                                      torch::stable::Tensor topk_ids,
+                                      int64_t top_k, int64_t type, int64_t row,
+                                      int64_t tokens);
+
+int64_t ggml_moe_get_block_size(int64_t type);

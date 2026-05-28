@@ -9,17 +9,19 @@ from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
+from vllm.platforms import current_platform
 
-from .utils import _get_lora_device
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -33,16 +35,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(base_layer)
+
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._init_lora_stream_context()
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
+        # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
+        # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
+        # matches `lora_a_stacked` length under EP.
+        self.n_slices = base_layer.local_num_experts * (self._w13_slices + 1)
 
         self.base_layer.ensure_moe_quant_config_init()
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             moe_kernel = self.base_layer.quant_method.moe_kernel
-            # Don't let the kernel own shared experts so the runner can
-            # overlap them with routed experts via a separate CUDA stream.
-            moe_kernel.shared_experts = None
         else:
             prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
             moe_kernel = FusedMoEKernel(
@@ -63,7 +69,25 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             FusedMoEModularMethod(self.base_layer.quant_method, moe_kernel)
         )
 
+    def _init_lora_stream_context(self) -> None:
+        self._lora_stream: torch.cuda.Stream | None = None
+        self._events: tuple[torch.cuda.Event, ...] | None = None
+        if not self._enable_aux_cuda_stream:
+            return
+        if not current_platform.is_cuda_alike():
+            return
+        self._lora_stream = _get_lora_aux_cuda_stream()
+        # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
+        # the same event objects; reuse-within-a-pair is fine because the
+        # second pair starts only after intermediate_cache1.add_() has joined.
+        self._events = tuple(torch.cuda.Event() for _ in range(4))
+
     def _build_lora_context(self):
+        use_dual_stream = (
+            self._enable_aux_cuda_stream
+            and not self.fully_sharded
+            and self._lora_stream is not None
+        )
         return MoELoRAContext(
             w13_lora_a_stacked=self.w13_lora_a_stacked,
             w13_lora_b_stacked=self.w13_lora_b_stacked,
@@ -79,6 +103,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             local_num_experts=self.base_layer.local_num_experts,
             punica_wrapper=self.punica_wrapper,
             use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
+            aux_stream=self._lora_stream if use_dual_stream else None,
+            events=self._events if use_dual_stream else None,
         )
 
     def _create_lora_a_weights(
@@ -377,7 +403,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Returns True if the layer can be replaced by this LoRA layer."""
 
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 2
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
@@ -540,4 +567,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 1

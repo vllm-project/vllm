@@ -15,15 +15,15 @@ from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
-)
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -232,7 +232,7 @@ if has_mori():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        backend="mori",
+        backend="mori_high_throughput",
         supports_apply_weight_on_input=False,
     )
 

@@ -85,10 +85,12 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
+    split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
+    extract_function_tool_names,
     extract_tool_types,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -449,11 +451,16 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             context: ConversationContext
+            function_tool_names = extract_function_tool_names(request.tools)
             if self.use_harmony:
                 if request.stream:
-                    context = StreamingHarmonyContext(messages, available_tools)
+                    context = StreamingHarmonyContext(
+                        messages, available_tools, function_tool_names
+                    )
                 else:
-                    context = HarmonyContext(messages, available_tools)
+                    context = HarmonyContext(
+                        messages, available_tools, function_tool_names
+                    )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
                     # This is a feature in development for parsing
@@ -1070,10 +1077,11 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[ResponseOutputItem]:
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
+        fn_names = context.function_tool_names
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(harmony_to_response_output(msg))
+            output_items.extend(harmony_to_response_output(msg, fn_names))
         # Handle the generation stopped in the middle (if any).
-        last_items = parser_state_to_response_output(context.parser)
+        last_items = parser_state_to_response_output(context.parser, fn_names)
         if last_items:
             output_items.extend(last_items)
         return output_items
@@ -1407,18 +1415,19 @@ class OpenAIServingResponses(OpenAIServing):
             if not delta_message:
                 continue
 
-            target_state, tool_call = processor.resolve_target_state(delta_message)
-            if target_state == _StateType.NONE:
-                continue
+            for dm in split_delta(delta_message):
+                target_state, tool_call = processor.resolve_target_state(dm)
+                if target_state == _StateType.NONE:
+                    continue
 
-            if processor.needs_transition(target_state, tool_call):
-                for event in processor.close_current():
-                    yield _increment_sequence_number_and_return(event)
-                for event in processor.open(target_state, tool_call):
-                    yield _increment_sequence_number_and_return(event)
+                if processor.needs_transition(target_state, tool_call):
+                    for event in processor.close_current():
+                        yield _increment_sequence_number_and_return(event)
+                    for event in processor.open(target_state, tool_call):
+                        yield _increment_sequence_number_and_return(event)
 
-            for event in processor.emit_delta(delta_message, output, _get_logprobs):
-                yield _increment_sequence_number_and_return(event)
+                for event in processor.emit_delta(dm, output, _get_logprobs):
+                    yield _increment_sequence_number_and_return(event)
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
@@ -1448,7 +1457,9 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.is_expecting_start():
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(previous_item, state):
+                    for event in emit_previous_item_done_events(
+                        previous_item, state, ctx.function_tool_names
+                    ):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()
 

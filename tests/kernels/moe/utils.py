@@ -17,12 +17,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
-    TritonExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
@@ -142,7 +142,6 @@ def batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -195,7 +194,6 @@ def naive_batched_moe(
             quant_config=quant_config,
             moe_config=moe_config,
         ),
-        inplace=False,
     )
 
     return fused_experts.apply(
@@ -631,7 +629,6 @@ def modular_triton_fused_moe(
             use_monolithic=False,
         ),
         TritonExperts(moe_config, quant_config),
-        inplace=False,
     )
 
 
