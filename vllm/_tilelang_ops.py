@@ -24,8 +24,6 @@ else:
     tilelang = None  # type: ignore[assignment]
     T = None  # type: ignore[assignment]
 
-# Conditions adapted from
-# https://github.com/sgl-project/sglang/blob/0abe6a85a51f2b7f1c3ca0e8f78944b609b94344/python/sglang/srt/layers/mhc.py#L33 # noqa: E501
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
 
