@@ -280,7 +280,7 @@ def test_cpu_offloading(
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
         **({"attention_config": {"backend": attn_backend}} if attn_backend else {}),
-        # HMA models need explicit opt-in when kv_transfer_config is set
+        # Keep HMA explicitly enabled for HMA model coverage.
         **({"disable_hybrid_kv_cache_manager": False} if uses_hma else {}),
         **({"enable_prefix_caching": True} if force_prefix_caching else {}),
         # ROCm: batch size 1 to reduce variability
@@ -347,12 +347,12 @@ def test_tiering_offloading() -> None:
 
 def test_fs_tiering_offloading(tmp_path) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec
-    + fs_python secondary tier."""
+    + fs secondary tier."""
     extra_config: dict = {
         "cpu_bytes_to_use": 1 << 30,
         "block_size": 48,
         "spec_name": "TieringOffloadingSpec",
-        "secondary_tiers": [{"type": "fs_python", "root_dir": str(tmp_path)}],
+        "secondary_tiers": [{"type": "fs", "root_dir": str(tmp_path)}],
     }
     kv_transfer_config = KVTransferConfig(
         kv_connector="OffloadingConnector",
