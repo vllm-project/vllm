@@ -323,24 +323,56 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
     # WEIGHT
     # Repack weights to marlin format
+    padded_N = _round_up(N, 64)
+
+    def pad_weight_for_marlin(
+        weight: torch.Tensor,
+        size_n: int,
+        size_k: int,
+        padded_size_n: int,
+        padded_size_k: int,
+        num_shards: int,
+    ) -> torch.Tensor:
+        n_pad_per_shard = padded_size_n // num_shards - size_n // num_shards
+        k_pad_bytes = (padded_size_k - size_k) // 2
+        if n_pad_per_shard == 0 and k_pad_bytes == 0:
+            return weight
+        if num_shards == 1:
+            return torch.nn.functional.pad(weight, (0, k_pad_bytes, 0, n_pad_per_shard))
+        weight = weight.reshape(num_shards, size_n // num_shards, size_k // 2)
+        weight = torch.nn.functional.pad(
+            weight, (0, k_pad_bytes, 0, n_pad_per_shard, 0, 0)
+        )
+        return weight.reshape(padded_size_n, padded_size_k // 2)
+
     def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
         num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
             size_n, size_k = N * num_shards, K
+            padded_size_n, padded_size_k = padded_N * num_shards, K
         else:
             size_n, size_k = K, N
+            padded_size_n, padded_size_k = K, padded_N
 
         assert weight.shape == (E, size_n, size_k // 2)
 
         for i in range(E):
-            qweight = weight[i].view(torch.int32).T.contiguous()
+            expert_weight = pad_weight_for_marlin(
+                weight[i],
+                size_n,
+                size_k,
+                padded_size_n,
+                padded_size_k,
+                num_shards,
+            )
+            qweight = expert_weight.view(torch.int32).T.contiguous()
 
             marlin_qweight = ops.gptq_marlin_repack(
                 b_q_weight=qweight,
                 perm=perm,
-                size_k=size_k,
-                size_n=size_n,
+                size_k=padded_size_k,
+                size_n=padded_size_n,
                 num_bits=4,
                 is_a_8bit=is_a_8bit,
             )
@@ -362,19 +394,36 @@ def prepare_nvfp4_moe_layer_for_marlin(
         num_shards = 2 if is_act_and_mul else 1
         if "w13" in name:
             size_n, size_k = N * num_shards, K
+            padded_size_n, padded_size_k = padded_N * num_shards, K
         else:
             size_n, size_k = K, N
+            padded_size_n, padded_size_k = K, padded_N
+
+        def pad_scale_for_marlin(scale: torch.Tensor) -> torch.Tensor:
+            n_pad_per_shard = padded_size_n // num_shards - size_n // num_shards
+            k_pad_groups = padded_size_k // GROUP_SIZE - size_k // GROUP_SIZE
+            if n_pad_per_shard == 0 and k_pad_groups == 0:
+                return scale
+            if num_shards == 1:
+                return torch.nn.functional.pad(
+                    scale, (0, k_pad_groups, 0, n_pad_per_shard)
+                )
+            scale = scale.reshape(num_shards, size_n // num_shards, -1)
+            scale = torch.nn.functional.pad(
+                scale, (0, k_pad_groups, 0, n_pad_per_shard, 0, 0)
+            )
+            return scale.reshape(padded_size_n, padded_size_k // GROUP_SIZE)
 
         # All experts share one global_scale, so compute the max
         # scale_factor across all experts first, then apply uniformly.
         combined_scale_factor = _nvfp4_compute_scale_factor(scales, param_dtype)
 
         for i in range(E):
-            scale = scales[i].T
+            scale = pad_scale_for_marlin(scales[i]).T
             marlin_scales = marlin_permute_scales(
                 s=scale,
-                size_k=size_k,
-                size_n=size_n,
+                size_k=padded_size_k,
+                size_n=padded_size_n,
                 group_size=GROUP_SIZE,
                 is_a_8bit=is_a_8bit,
             )
