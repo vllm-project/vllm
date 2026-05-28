@@ -318,7 +318,21 @@ def _tq_decode_stage1(
 # ---------------------------------------------------------------------------
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "stride_ko_b",
+        "stride_ko_h",
+        "stride_ko_s",
+        "stride_vo_b",
+        "stride_vo_h",
+        "stride_vo_s",
+        "stride_cache_block",
+        "stride_cache_pos",
+        "stride_cache_head",
+        "stride_bt_b",
+        "POS_OFFSET",
+    ]
+)
 def _tq_full_dequant_kv(
     KV_cache_ptr,
     Block_table_ptr,
@@ -335,6 +349,7 @@ def _tq_full_dequant_kv(
     stride_cache_pos,
     stride_cache_head,
     stride_bt_b,
+    POS_OFFSET,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
@@ -354,8 +369,9 @@ def _tq_full_dequant_kv(
     bid = bh // NUM_KV_HEADS
     hid = bh % NUM_KV_HEADS
 
-    page_idx = pos // BLOCK_SIZE
-    page_off = pos % BLOCK_SIZE
+    global_pos = pos + POS_OFFSET
+    page_idx = global_pos // BLOCK_SIZE
+    page_off = global_pos % BLOCK_SIZE
     block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx).to(tl.int64)
     slot_base = (
         block_num * stride_cache_block
