@@ -10,6 +10,9 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 ReqId = str
 
+# Prefix for synthetic request-ids used by eviction-triggered store batches.
+LAZY_STORE_PREFIX = "__lazy_store__"
+
 
 @dataclass
 class TransferJob:

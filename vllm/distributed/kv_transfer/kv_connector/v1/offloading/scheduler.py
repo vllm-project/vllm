@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    LAZY_STORE_PREFIX,
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
@@ -17,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -37,6 +40,9 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.v1.core.block_pool import BlockPool
 
 logger = init_logger(__name__)
 
@@ -304,6 +310,21 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
+        # Eviction-triggered store mode (opt-in via KV_OFFLOAD_LAZY_STORE=1).
+        # Instead of offloading every newly-computed full block, the GPU
+        # block pool notifies us at HBM eviction time and we schedule a
+        # D->H copy of the just-evicted block on the next scheduler step.
+        # Single-group only; multi-group support requires the listener to
+        # carry the kv_group index.
+        self._gpu_block_pool: BlockPool | None = None
+        self._lazy_store = (
+            os.environ.get("KV_OFFLOAD_LAZY_STORE", "0") == "1"
+            and self.config.block_size_factor == 1
+            and len(self.config.kv_group_configs) == 1
+        )
+        self._lazy_counter = 0
+        self._pending_evictions: list[tuple[int, BlockHash]] = []
+
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
         self._job_counter += 1
@@ -334,6 +355,20 @@ class OffloadingConnectorScheduler:
                 break
             hit_count += 1
         return hit_count if not defer_lookup else None
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """Bind the GPU block pool. In lazy-store mode, register an eviction
+        listener so we can schedule a D->H copy per HBM eviction."""
+        self._gpu_block_pool = gpu_block_pool
+        if self._lazy_store and hasattr(
+            gpu_block_pool, "register_eviction_listener"
+        ):
+            gpu_block_pool.register_eviction_listener(self._on_eviction)
+        elif self._lazy_store:
+            self._lazy_store = False
+
+    def _on_eviction(self, block_id: int, block_hash: BlockHash) -> None:
+        self._pending_evictions.append((block_id, block_hash))
 
     def _sliding_window_lookup(
         self,
@@ -861,6 +896,65 @@ class OffloadingConnectorScheduler:
 
         return store_jobs
 
+    def _build_eviction_store_jobs(
+        self, store_jobs: dict[int, TransferJob]
+    ) -> None:
+        """Schedule a D->H copy for every block the GPU prefix cache just
+        evicted (collected by `_on_eviction`). Single kv-group only.
+
+        Pallas gather is dispatched on the same compute stream as the
+        upcoming `model.forward()`, so stream serialization ensures the
+        gather reads the about-to-be-overwritten block before the new
+        owner writes to it; no GPU-block pinning required.
+        """
+        if not self._pending_evictions:
+            return
+        evictions = self._pending_evictions
+        self._pending_evictions = []
+
+        synthetic_req_id = f"{LAZY_STORE_PREFIX}{self._lazy_counter}"
+        req_context = ReqContext(req_id=synthetic_req_id)
+
+        seen: set[BlockHash] = set()
+        block_ids: list[int] = []
+        offload_keys: list[OffloadKey] = []
+        for bid, bh in evictions:
+            if bh in seen:
+                continue
+            seen.add(bh)
+            key = make_offload_key(bh, 0)
+            if self.manager.lookup(key, req_context):
+                continue
+            block_ids.append(bid)
+            offload_keys.append(key)
+        if not offload_keys:
+            return
+
+        store_output = self.manager.prepare_store(offload_keys, req_context)
+        if store_output is None or not store_output.keys_to_store:
+            return
+
+        key_to_bid = dict(zip(offload_keys, block_ids))
+        src_block_ids = [key_to_bid[k] for k in store_output.keys_to_store]
+        src_spec = GPULoadStoreSpec(
+            src_block_ids,
+            group_sizes=(len(src_block_ids),),
+            block_indices=(0,),
+        )
+
+        job_id = self._generate_job_id()
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=synthetic_req_id,
+            pending_count=self.config.num_workers,
+            keys=set(store_output.keys_to_store),
+            is_store=True,
+        )
+        store_jobs[job_id] = TransferJob(
+            req_id=synthetic_req_id,
+            transfer_spec=(src_spec, store_output.store_spec),
+        )
+        self._lazy_counter += 1
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -880,9 +974,12 @@ class OffloadingConnectorScheduler:
         ):
             self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
+        store_jobs = self._build_store_jobs(scheduler_output)
+        if self._lazy_store:
+            self._build_eviction_store_jobs(store_jobs)
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=self._build_store_jobs(scheduler_output),
+            store_jobs=store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
@@ -915,6 +1012,17 @@ class OffloadingConnectorScheduler:
             if job_status.pending_count > 0:
                 continue
             assert job_status.pending_count == 0
+
+            # Eviction-triggered stores have a synthetic req_id and no
+            # _req_status entry; complete them with a stub ReqContext and
+            # skip the per-request bookkeeping.
+            if job_status.req_id.startswith(LAZY_STORE_PREFIX):
+                assert job_status.is_store
+                self.manager.complete_store(
+                    job_status.keys, ReqContext(req_id=job_status.req_id)
+                )
+                del self._jobs[job_id]
+                continue
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
