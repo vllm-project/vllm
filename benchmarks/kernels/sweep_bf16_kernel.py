@@ -69,8 +69,10 @@ SHAPES = [
     (1024, 4096, "K=4096 small-M sanity"),
 ]
 
-YTILES = [1, 2, 3, 4]
+YTILES = [1, 2]
 UNRLS = [1, 2, 4]
+ACHUNKS = [8, 16]
+WVPRGRPS = [16, 32]
 
 # Working-set guards used by the dispatcher's variant selection
 # (wvSplitK_hf_sml_ vs wvSplitK_hf_ vs wvSplitK_hf_big_).  bf16 / fp16
@@ -103,8 +105,8 @@ def run_sweep(shapes, batch_sizes, warmup, rep, dtype, csv_path):
     print(f"Dtype: {dtype}")
     print(f"Shapes: {len(shapes)}, Batch sizes: {batch_sizes}")
     print(
-        f"Param grid: YTILE={YTILES} x UNRL={UNRLS}  "
-        f"(WvPrGrp and A_CHUNK are macro-baked at 16/8 in wvSplitK_sweep)"
+        f"Param grid: YTILE={YTILES} x UNRL={UNRLS} x "
+        f"A_CHUNK={ACHUNKS} x WvPrGrp={WVPRGRPS}"
     )
     print(f"warmup={warmup}ms, rep={rep}ms")
     print()
@@ -119,6 +121,8 @@ def run_sweep(shapes, batch_sizes, warmup, rep, dtype, csv_path):
             "label",
             "ytile",
             "unrl",
+            "achunk",
+            "wvprgrp",
             "time_us",
             "weight_bw_gibs",
             "is_dispatcher_pick",
@@ -150,43 +154,64 @@ def run_sweep(shapes, batch_sizes, warmup, rep, dtype, csv_path):
             prod_bw = weight_bytes / (prod_us * 1e-6) / (1 << 30)
 
             shape_rows = []
-            for ytile, unrl in itertools.product(YTILES, UNRLS):
+            for ytile, unrl, ac, w in itertools.product(
+                YTILES, UNRLS, ACHUNKS, WVPRGRPS
+            ):
                 if M % ytile != 0:
                     skipped += 1
                     continue
                 try:
                     us = time_us(
-                        lambda yt=ytile, ur=unrl, a=A, b=B: ops.wvSplitK_sweep(
-                            a, b, cu_count, yt, ur
-                        ),
+                        lambda yt=ytile,
+                        ur=unrl,
+                        ac=ac,
+                        w=w,
+                        a=A,
+                        b=B: ops.wvSplitK_sweep(a, b, cu_count, yt, ur, ac, w),
                         warmup=warmup,
                         rep=rep,
                     )
                     bw = weight_bytes / (us * 1e-6) / (1 << 30)
                 except Exception as e:
-                    print(f"  ERROR: N={N} {M}x{K} yt={ytile} ur={unrl}: {e}")
+                    print(
+                        f"  ERROR: N={N} {M}x{K} yt={ytile} ur={unrl} "
+                        f"ac={ac} w={w}: {e}"
+                    )
                     us = float("inf")
                     bw = 0.0
                 writer.writerow(
-                    [M, K, N, label, ytile, unrl, f"{us:.1f}", f"{bw:.1f}", ""]
+                    [M, K, N, label, ytile, unrl, ac, w, f"{us:.1f}", f"{bw:.1f}", ""]
                 )
-                shape_rows.append((ytile, unrl, us, bw))
+                shape_rows.append((ytile, unrl, ac, w, us, bw))
                 tested += 1
 
             # Production-pick anchor row.
             writer.writerow(
-                [M, K, N, label, "", "", f"{prod_us:.1f}", f"{prod_bw:.1f}", "True"]
+                [
+                    M,
+                    K,
+                    N,
+                    label,
+                    "",
+                    "",
+                    "",
+                    "",
+                    f"{prod_us:.1f}",
+                    f"{prod_bw:.1f}",
+                    "True",
+                ]
             )
 
             if shape_rows:
-                best = min(shape_rows, key=lambda r: r[2])
-                speedup = prod_us / best[2] if best[2] > 0 else 0.0
+                best = min(shape_rows, key=lambda r: r[4])
+                speedup = prod_us / best[4] if best[4] > 0 else 0.0
                 elapsed = time.time() - t0
                 print(
                     f"  N={N} {M:>6}x{K:<6} {label:<38} "
                     f"prod={prod_us:>7.1f}us  "
-                    f"best yt={best[0]} ur={best[1]} -> {best[2]:>7.1f}us "
-                    f"({speedup:.2f}x)  [{tested} tested, {elapsed:.0f}s]"
+                    f"best yt={best[0]} ur={best[1]} ac={best[2]:>2} w={best[3]:>2} "
+                    f"-> {best[4]:>7.1f}us ({speedup:.2f}x)  "
+                    f"[{tested} tested, {elapsed:.0f}s]"
                 )
                 best_per_shape.append(
                     {
@@ -196,8 +221,10 @@ def run_sweep(shapes, batch_sizes, warmup, rep, dtype, csv_path):
                         "label": label,
                         "ytile": best[0],
                         "unrl": best[1],
-                        "time_us": best[2],
-                        "bw_gibs": best[3],
+                        "achunk": best[2],
+                        "wvprgrp": best[3],
+                        "time_us": best[4],
+                        "bw_gibs": best[5],
                         "prod_us": prod_us,
                     }
                 )
@@ -217,15 +244,16 @@ def run_sweep(shapes, batch_sizes, warmup, rep, dtype, csv_path):
     )
     print("=" * 110)
     print(
-        f"{'N':>2} {'M':>6}x{'K':<6}  {'Label':<38}  "
-        f"{'yt':>3} {'ur':>3}  {'best_us':>9}  {'prod_us':>9}  {'speedup':>8}"
+        f"{'N':>2} {'M':>6}x{'K':<6}  {'Label':<28}  "
+        f"{'yt':>3} {'ur':>3} {'ac':>3} {'w':>3}  "
+        f"{'best_us':>9}  {'prod_us':>9}  {'speedup':>8}"
     )
     print("-" * 110)
     for r in best_per_shape:
         speedup = r["prod_us"] / r["time_us"] if r["time_us"] > 0 else 0.0
         print(
-            f"{r['N']:>2} {r['M']:>6}x{r['K']:<6}  {r['label']:<38}  "
-            f"{r['ytile']:>3} {r['unrl']:>3}  "
+            f"{r['N']:>2} {r['M']:>6}x{r['K']:<6}  {r['label']:<28}  "
+            f"{r['ytile']:>3} {r['unrl']:>3} {r['achunk']:>3} {r['wvprgrp']:>3}  "
             f"{r['time_us']:>9.1f}  {r['prod_us']:>9.1f}  {speedup:>7.2f}x"
         )
 

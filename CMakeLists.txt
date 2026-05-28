@@ -1232,10 +1232,27 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
 
   set(VLLM_ROCM_FLAGS ${VLLM_GPU_FLAGS})
 
+  # Two flags control which sweep entry points are built:
+  #   VLLM_SKINNY_GEMM_SWEEP       - umbrella, enables every sweep op
+  #                                  (bf16 wvSplitK_sweep + int4g + int8 +
+  #                                  w8a8 + moe).  Slow: the int4g/moe TUs
+  #                                  dominate build time.
+  #   VLLM_SKINNY_GEMM_SWEEP_BF16  - just the bf16 wvSplitK_sweep op.
+  # Use _BF16 alone when only the bf16 path is under investigation; the
+  # umbrella flag still implies _BF16 for backwards compat.
+  set(_ROCM_SWEEP_ENABLED FALSE)
   if(VLLM_SKINNY_GEMM_SWEEP OR (DEFINED ENV{VLLM_SKINNY_GEMM_SWEEP} AND NOT $ENV{VLLM_SKINNY_GEMM_SWEEP} STREQUAL "0"))
-    list(APPEND VLLM_ROCM_FLAGS "-DVLLM_SKINNY_GEMM_SWEEP=1")
     set(_ROCM_SWEEP_ENABLED TRUE)
-    message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP enabled")
+  endif()
+
+  set(_ROCM_SWEEP_BF16_ENABLED FALSE)
+  if(_ROCM_SWEEP_ENABLED OR VLLM_SKINNY_GEMM_SWEEP_BF16 OR (DEFINED ENV{VLLM_SKINNY_GEMM_SWEEP_BF16} AND NOT $ENV{VLLM_SKINNY_GEMM_SWEEP_BF16} STREQUAL "0"))
+    set(_ROCM_SWEEP_BF16_ENABLED TRUE)
+  endif()
+
+  if(_ROCM_SWEEP_ENABLED)
+    list(APPEND VLLM_ROCM_FLAGS "-DVLLM_SKINNY_GEMM_SWEEP=1")
+    message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP (all sweep ops) enabled")
     # Sweep wrappers split per-op so the TUs compile in parallel with the
     # production wvSplitK_int4 TU (kernel templates live in the shared
     # skinny_gemms_int4_kernels.cuh header).
@@ -1243,6 +1260,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/skinny_gemms_int4_sweep_wvsplitk.cu"
       "csrc/rocm/skinny_gemms_int4_sweep_wvsplitk_hf.cu"
       "csrc/rocm/skinny_gemms_int4_sweep_moe.cu")
+  endif()
+
+  if(_ROCM_SWEEP_BF16_ENABLED)
+    list(APPEND VLLM_ROCM_FLAGS "-DVLLM_SKINNY_GEMM_SWEEP_BF16=1")
+    message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP_BF16 (bf16 wvSplitK_sweep) enabled")
   endif()
 
   define_extension_target(
@@ -1256,9 +1278,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     WITH_SOABI)
 
   # COMPILE_FLAGS only apply to HIP-language files (via generator expression).
-  # torch_bindings.cpp is compiled as CXX so needs the define separately.
+  # torch_bindings.cpp is compiled as CXX so needs the defines separately.
   if(_ROCM_SWEEP_ENABLED)
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKINNY_GEMM_SWEEP=1)
+  endif()
+  if(_ROCM_SWEEP_BF16_ENABLED)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKINNY_GEMM_SWEEP_BF16=1)
   endif()
 endif()
 

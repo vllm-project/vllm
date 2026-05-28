@@ -44,11 +44,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK_fused_silu_gate_mul", torch::kCUDA,
                 &wvSplitK_fused_silu_gate_mul);
 
-#ifdef VLLM_SKINNY_GEMM_SWEEP
-  // FP16/BF16 skinny GEMM sweep: ytile/unrl as runtime args (benchmark only)
+#ifdef VLLM_SKINNY_GEMM_SWEEP_BF16
+  // FP16/BF16 skinny GEMM sweep: all four tunable axes (ytile, unrl,
+  // achunk, wvprgrp) as runtime args (benchmark only).  Allowed values:
+  //   ytile   in {1, 2}
+  //   unrl    in {1, 2, 4}
+  //   achunk  in {8, 16}
+  //   wvprgrp in {16, 32}
   rocm_ops.def(
       "wvSplitK_sweep(Tensor in_a, Tensor in_b, Tensor? in_bias, "
-      "int CuCount, int ytile, int unrl) -> Tensor");
+      "int CuCount, int ytile, int unrl, int achunk, int wvprgrp) -> Tensor");
   rocm_ops.impl("wvSplitK_sweep", torch::kCUDA, &wvSplitK_sweep);
 #endif
 
