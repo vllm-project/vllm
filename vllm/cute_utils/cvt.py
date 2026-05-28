@@ -1,21 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import cutlass
-import cutlass.cute as cute
-from cutlass import Float32, Uint32
+from cutlass import Constexpr, Float32, Uint32, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
 from cutlass.cutlass_dsl import T, dsl_user_op
 
 
 @dsl_user_op
-def _recast_val(x, dtype, *, loc=None, ip=None):
-    return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
-
-
-@dsl_user_op
-def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
+def fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
     out = llvm.inline_asm(
         T.i32(),
         [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
@@ -28,62 +20,37 @@ def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
 
 
 @dsl_user_op
-def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([T.f32(), T.f32()]),
-        [data.ir_value(loc=loc, ip=ip)],
-        "shl.b32 $0, $2, 16;\n\tand.b32 $1, $2, 0xFFFF0000;\n",
-        "=f,=f,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return (
-        Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
-        Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
-    )
+def bf16x2_to_fp32x2(data, *, loc=None, ip=None) -> tuple[Float32, Float32]:
+    if isinstance(data, Uint32):
+        out = llvm.inline_asm(
+            llvm.StructType.get_literal([T.f32(), T.f32()]),
+            [data.ir_value(loc=loc, ip=ip)],
+            "shl.b32 $0, $2, 16;\n\tand.b32 $1, $2, 0xFFFF0000;",
+            "=f,=f,r",
+            has_side_effects=False,
+            is_align_stack=False,
+            loc=loc,
+            ip=ip,
+        )
+        return (
+            Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
+            Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
+        )
+
+    elif isinstance(data, (cute.Tensor, cute.TensorSSA)):
+        # NOTE: the output is always 1D
+        size = cute.size(data.shape)
+        out = cute.make_rmem_tensor(size * 2, Float32)
+        for i in range(size):
+            out[i * 2], out[i * 2 + 1] = bf16x2_to_fp32x2(data[i])
+        return out
+
+    else:
+        raise ValueError(f"Unsupported type {type(data)}")
 
 
 @dsl_user_op
-def _bf16x2_abs(a: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip)],
-        "abs.bf16x2 $0, $1;",
-        "=r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _bf16x2_max(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "max.bf16x2 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _bf16x2_mul(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "mul.rn.bf16x2 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+def fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
     # there is only fp8->fp16 conversion, hence we need to go
     # round trip through fp16.
     out = llvm.inline_asm(
@@ -118,7 +85,7 @@ def _fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
 
 
 @dsl_user_op
-def _fp32x4_to_fp8x4(
+def fp32x4_to_fp8x4(
     a0: Float32,
     a1: Float32,
     a2: Float32,
@@ -151,9 +118,9 @@ def _fp32x4_to_fp8x4(
 
 
 @dsl_user_op
-def _fp32x8_to_fp4x8(
+def fp32x8_to_fp4x8(
     vals: cute.Tensor,
-    offset: cutlass.Constexpr[int],
+    offset: Constexpr[int],
     *,
     loc=None,
     ip=None,
