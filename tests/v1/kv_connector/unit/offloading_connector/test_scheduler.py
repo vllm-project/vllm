@@ -956,9 +956,10 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
         )
 
     def setup(r, max_offload_tokens):
-        r.new_request(token_ids=[0] * offloaded_block_size * 3)
-        req = r.scheduler.requests[str(r.req_id)]
-        req.kv_transfer_params = {"max_offload_tokens": max_offload_tokens}
+        r.new_request(
+            token_ids=[0] * offloaded_block_size * 3,
+            kv_transfer_params={"max_offload_tokens": max_offload_tokens},
+        )
         r.manager.prepare_store.side_effect = (
             lambda keys, req_context: generate_store_output(keys)
         )
