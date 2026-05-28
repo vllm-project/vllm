@@ -33,7 +33,7 @@ class KVCacheBlocks:
     blocks: tuple[Sequence[KVCacheBlock], ...]
     """
     `blocks[i][j]` refers to the i-th kv_cache_group
-    and the j-th block of tokens.We don't use block of
+    and the j-th block of tokens. We don't use block of
     tokens as the outer dimension because it assumes all
     kv_cache_groups have the same number of blocks, which is true for now but
     will be broken if we want to give different block_size to different
@@ -293,7 +293,7 @@ class KVCacheManager:
         ----------------------------------------------------------------------
         ```
 
-        Abbrivations:
+        Abbreviations:
 
         ```
         comp      = request.num_computed_tokens
