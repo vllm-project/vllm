@@ -591,6 +591,7 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
+                record_local_prefix_cache_stats = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -598,6 +599,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    record_local_prefix_cache_stats = True
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -744,6 +746,11 @@ class Scheduler(SchedulerInterface):
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
                     break
+
+                if record_local_prefix_cache_stats:
+                    self.kv_cache_manager.record_prefix_cache_stats(
+                        request, num_new_local_computed_tokens
+                    )
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that

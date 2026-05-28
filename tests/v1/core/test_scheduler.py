@@ -1562,6 +1562,42 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
     assert len(scheduler.waiting) == 0
 
 
+def test_prefix_cache_stats_skip_failed_allocation():
+    block_size = 4
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        block_size=block_size,
+        num_blocks=2,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=block_size * 2,
+        max_tokens=1,
+        block_size=block_size,
+    )
+    scheduler.add_request(request)
+
+    empty_hits = tuple(
+        () for _ in range(scheduler.kv_cache_manager.num_kv_cache_groups)
+    )
+    scheduler.kv_cache_manager.coordinator.find_longest_cache_hit = Mock(
+        return_value=(empty_hits, block_size)
+    )
+    scheduler.kv_cache_manager.allocate_slots = Mock(return_value=None)
+
+    output = scheduler.schedule()
+
+    assert len(output.num_scheduled_tokens) == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.waiting) == 1
+
+    stats = scheduler.kv_cache_manager.prefix_cache_stats
+    assert stats is not None
+    assert stats.requests == 0
+    assert stats.queries == 0
+    assert stats.hits == 0
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
