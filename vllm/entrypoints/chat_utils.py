@@ -350,6 +350,13 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
+    wo_eos: bool
+    """If True, the assistant message is rendered without a trailing EOS token
+    so the model can continue generating from it. DeepSeek V4 only."""
+
+    mask: bool
+    """If True, the message is masked from training loss. DeepSeek V4 only."""
+
 
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
@@ -386,6 +393,13 @@ class ConversationMessage(TypedDict, total=False):
 
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
+
+    wo_eos: bool
+    """If True, render this assistant message without a trailing EOS token so
+    the model can continue generating from it. DeepSeek V4 only."""
+
+    mask: bool
+    """If True, the message is masked from training loss. DeepSeek V4 only."""
 
 
 # Passed in by user
@@ -1794,6 +1808,14 @@ def _parse_chat_message_content(
 
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
+
+        # Preserve DeepSeek V4-specific per-message flags so that the
+        # encoder can honour them. `wo_eos` is used for prefill/continuation
+        # of an assistant message; `mask` is used to mark portions of the
+        # conversation that must not be trained on.
+        for extra_key in ("wo_eos", "mask"):
+            if extra_key in message:
+                result_msg[extra_key] = message[extra_key]  # type: ignore[literal-required]
 
         if role == "developer":
             result_msg["tools"] = message.get("tools", None)

@@ -40,6 +40,24 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 messages.insert(0, {"role": "system"})
                 messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
+            # When `continue_final_message=True`, the final assistant message
+            # must be rendered without the trailing EOS so the model can
+            # continue generating from it. Mark that message with `wo_eos`
+            # so the encoder honours it. Mirrors HuggingFace's behaviour for
+            # `apply_chat_template(continue_final_message=True)`.
+            continue_final_message = kwargs.get("continue_final_message", False)
+            if continue_final_message:
+                if not messages or messages[-1].get("role") != "assistant":
+                    raise ValueError(
+                        "Cannot set `continue_final_message` to True when "
+                        "the last message is not from the assistant."
+                    )
+                # Copy to avoid mutating the caller's message dict.
+                last = dict(messages[-1])
+                last["wo_eos"] = True
+                messages[-1] = last  # type: ignore[assignment]
+
+            # The V4 reference currently accepts only "max", "high", or None.
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
                 reasoning_effort = None
