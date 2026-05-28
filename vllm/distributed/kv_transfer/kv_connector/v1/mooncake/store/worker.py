@@ -20,7 +20,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import regex as re
 import torch
@@ -50,6 +50,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     PoolKey,
     ReqMeta,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
+    LOOKUP_MSG,
+    RESET_MSG,
+    RESP_ERR,
+    RESP_OK,
+)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.v1.core.kv_cache_utils import (
@@ -68,6 +74,12 @@ DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+_T = TypeVar("_T")
+
+
+def _rotate_list(values: list[_T], offset: int) -> list[_T]:
+    return values[offset:] + values[:offset]
+
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
 DEFAULT_MOONCAKE_DISK_STAGING_BUFFER_BYTES = 1280 * 1024 * 1024
@@ -711,6 +723,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
         )
+        # _invalid_block_ids can be access by both the Worker and RecvingThread
+        self._invalid_block_ids_lock = threading.Lock()
+        self._invalid_block_ids: set[int] = set()
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
             None
@@ -720,6 +735,16 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
         )
         self.coord = coord
+
+    def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(block_ids)
+
+    def get_and_clear_block_ids_with_load_errors(self) -> set[int]:
+        with self._invalid_block_ids_lock:
+            invalid_block_ids = self._invalid_block_ids.copy()
+            self._invalid_block_ids.clear()
+        return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
@@ -737,6 +762,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list: list[list[int]] = []
         size_list: list[list[int]] = []
         key_list: list[str] = []
+        block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             for start, end, key in db.process_tokens(
@@ -745,25 +771,29 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                addr, size, _ = db.prepare_value(start, end, req_meta.block_ids[g_idx])
+                addr, size, block_id = db.prepare_value(
+                    start, end, req_meta.block_ids[g_idx]
+                )
                 key_list.append(key.to_string())
                 addr_list.append(addr)
                 size_list.append(size)
+                block_id_list.append(block_id)
 
-        # Rotate lists by tp_rank for load balancing
+        # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
-        key_list_c = key_list[rotation:] + key_list[:rotation]
-        addr_list_c = addr_list[rotation:] + addr_list[:rotation]
-        size_list_c = size_list[rotation:] + size_list[:rotation]
+        key_list_c = _rotate_list(key_list, rotation)
+        addr_list_c = _rotate_list(addr_list, rotation)
+        size_list_c = _rotate_list(size_list, rotation)
+        block_id_list_c = _rotate_list(block_id_list, rotation)
 
-        load_batches = [(key_list_c, addr_list_c, size_list_c)]
+        load_batches = [(key_list_c, addr_list_c, size_list_c, block_id_list_c)]
         if self.usable_disk_offload_buffer_budget_bytes is not None:
             total_staging_bytes = sum(
                 _estimate_disk_offload_staging_bytes(size) for size in size_list_c
             )
             if total_staging_bytes > self.usable_disk_offload_buffer_budget_bytes:
                 assert self.disk_offload_buffer_budget_bytes is not None
-                load_batches, oversized_key = _split_disk_offload_load_batches(
+                split_batches, oversized_key = _split_disk_offload_load_batches(
                     key_list_c,
                     addr_list_c,
                     size_list_c,
@@ -772,6 +802,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 )
                 if oversized_key is not None:
                     oversized_key_index = key_list_c.index(oversized_key)
+                    # Mark every block: we skip the whole request, and the
+                    # tp_rank rotation means oversized_key isn't necessarily
+                    # the first block in the request's original order.
+                    self._add_load_error_block_ids(block_id_list_c)
                     oversized_key_bytes = _estimate_disk_offload_staging_bytes(
                         size_list_c[oversized_key_index]
                     )
@@ -786,12 +820,25 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     self.set_finished_request(req_id)
                     self.request_queue.task_done()
                     return
+                load_batches = []
+                block_id_offset = 0
+                for batch_keys, batch_addrs, batch_sizes in split_batches:
+                    next_block_id_offset = block_id_offset + len(batch_keys)
+                    batch_block_ids = block_id_list_c[
+                        block_id_offset:next_block_id_offset
+                    ]
+                    load_batches.append(
+                        (batch_keys, batch_addrs, batch_sizes, batch_block_ids)
+                    )
+                    block_id_offset = next_block_id_offset
 
         current_batch_keys: list[str] = key_list_c
+        current_batch_block_ids: list[int] = block_id_list_c
         batch_bytes = 0
         try:
-            for batch_keys, batch_addrs, batch_sizes in load_batches:
+            for batch_keys, batch_addrs, batch_sizes, batch_block_ids in load_batches:
                 current_batch_keys = batch_keys
+                current_batch_block_ids = batch_block_ids
                 batch_bytes = _sum_batch_bytes(batch_sizes)
                 tiers_by_key: dict[str, str] | None = None
                 if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
@@ -806,8 +853,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                         req_id, batch_keys, res, tiers_by_key
                     )
                 failed = [
-                    (key, value)
-                    for key, value in zip(batch_keys, res, strict=True)
+                    (key, value, block_id)
+                    for key, value, block_id in zip(
+                        batch_keys, res, batch_block_ids, strict=True
+                    )
                     if value < 0
                 ]
                 self._record_operation(
@@ -819,15 +868,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     num_failed_keys=len(failed),
                 )
                 if failed:
+                    self._add_load_error_block_ids(
+                        [block_id for _, _, block_id in failed]
+                    )
                     logger.warning(
                         "Failed to get %d Mooncake keys from sub-batch "
                         "(batch_keys=%d, first_failures=%s)",
                         len(failed),
                         len(batch_keys),
-                        failed[:3],
+                        [(key, value) for key, value, _ in failed[:3]],
                     )
                     break
         except Exception as e:
+            self._add_load_error_block_ids(current_batch_block_ids)
             self._record_operation(
                 "load_get",
                 load_get_start,
@@ -1239,6 +1292,11 @@ class MooncakeStoreWorker:
         )
         return done_sending, done_recving
 
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.kv_recv_thread is None:
+            return set()
+        return self.kv_recv_thread.get_and_clear_block_ids_with_load_errors()
+
     def _record_kv_connector_operation(
         self,
         operation: str,
@@ -1372,7 +1430,14 @@ class MooncakeStoreWorker:
 
 
 class LookupKeyServer:
-    """ZMQ server on worker rank 0 for handling prefix lookup queries."""
+    """ZMQ server on worker rank 0 for the LookupKey admin channel.
+
+    Handles two request types, tagged at frame 0:
+    - ``LOOKUP_MSG``: prefix-cache hit query, returns hit count.
+    - ``RESET_MSG``: drains the send thread queue, then runs
+      ``store.remove_all(force=True)``. Caller must have paused the
+      scheduler first.
+    """
 
     def __init__(
         self,
@@ -1398,13 +1463,37 @@ class LookupKeyServer:
         def process_request():
             while self.running:
                 all_frames = self.socket.recv_multipart(copy=False)
-                token_len = int.from_bytes(all_frames[0], byteorder="big")
-                hash_frames = all_frames[1:]
-                hashes_str = self.decoder.decode(hash_frames)
-                block_hashes = [BlockHash(bytes.fromhex(s)) for s in hashes_str]
-                result = self.store_worker.lookup(token_len, block_hashes)
-                response = result.to_bytes(4, "big")
-                self.socket.send(response)
+                msg_type = bytes(all_frames[0])
+
+                if msg_type == LOOKUP_MSG:
+                    token_len = int.from_bytes(all_frames[1], byteorder="big")
+                    hash_frames = all_frames[2:]
+                    hashes_str = self.decoder.decode(hash_frames)
+                    block_hashes = [BlockHash(bytes.fromhex(s)) for s in hashes_str]
+                    result = self.store_worker.lookup(token_len, block_hashes)
+                    self.socket.send(result.to_bytes(4, "big"))
+
+                elif msg_type == RESET_MSG:
+                    try:
+                        # Drain in-flight puts before wiping the master;
+                        # otherwise stale puts can repopulate it post-reset.
+                        # Safe across HMA: store.remove_all wipes the underlying
+                        # flat key space, clearing every (group_id, hash) entry.
+                        if self.store_worker.kv_send_thread is not None:
+                            self.store_worker.kv_send_thread.request_queue.join()
+                        self.store_worker.store.remove_all(force=True)
+                        logger.info("Mooncake store reset via remove_all succeeded.")
+                        self.socket.send(RESP_OK)
+                    except Exception as e:
+                        logger.error("Mooncake remove_all failed: %s", e)
+                        self.socket.send(RESP_ERR)
+
+                else:
+                    logger.warning(
+                        "LookupKeyServer received unknown msg_type: %r",
+                        msg_type,
+                    )
+                    self.socket.send(RESP_ERR)
 
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
@@ -1421,7 +1510,12 @@ class LookupKeyServer:
 
 
 class LookupKeyClient:
-    """ZMQ client for querying prefix cache hits from worker."""
+    """ZMQ client for the LookupKey admin channel.
+
+    Routes both prefix-cache lookups and admin commands (currently:
+    ``reset``) to ``LookupKeyServer`` on worker rank 0. The first frame
+    of every request is a named tag from ``protocol.py``.
+    """
 
     def __init__(self, vllm_config: VllmConfig):
         self.encoder = MsgpackEncoder()
@@ -1438,11 +1532,23 @@ class LookupKeyClient:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [token_len_bytes] + list(hash_frames)
+        all_frames = [LOOKUP_MSG, token_len_bytes] + list(hash_frames)
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
+
+    def reset(self) -> bool:
+        """Trigger ``store.remove_all(force=True)`` on worker rank 0.
+
+        Ordering assumption: caller MUST ensure no in-flight Mooncake
+        lookups or transfers when invoking reset. In RL workflows this
+        holds naturally at the step boundary after weight updates and
+        rollout drain. Returns True on ACK, False on NACK.
+        """
+        self.socket.send(RESET_MSG)
+        resp = self.socket.recv()
+        return bytes(resp) == RESP_OK
 
     def close(self):
         self.socket.close(linger=0)
