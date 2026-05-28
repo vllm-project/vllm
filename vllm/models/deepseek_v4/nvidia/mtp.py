@@ -37,7 +37,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .model import (
@@ -147,10 +146,9 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if current_platform.is_cuda():
-            hidden_states = self.mtp_block.hc_post(
-                hidden_states, residual, post_mix, res_mix
-            )
+        hidden_states = self.mtp_block.hc_post(
+            hidden_states, residual, post_mix, res_mix
+        )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.
@@ -163,23 +161,16 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
-        self.device = current_platform.device_type
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_tokens,
             dtype=torch.int32,
-            device=self.device,
         )
 
-        # Three aux streams shared across all MTP layers, mirroring
-        # DeepseekV4Model. ROCm runs the same work serially for now.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        # Three aux streams shared across all MTP layers, mirroring DeepseekV4Model.
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
@@ -292,11 +283,6 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
-            # Pre-MoE norm + gate are now owned by
-            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
-            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
-            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
-            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -444,11 +430,11 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        # ``e_score_correction_bias`` lives on
-                        # ``norm_gate`` directly (not on the inner gate).
+                        # ``e_score_correction_bias`` lives on the gate
+                        # under a different attribute name.
                         name = name.replace(
                             ".ffn.gate.bias",
-                            ".ffn.norm_gate.e_score_correction_bias",
+                            ".ffn.gate.e_score_correction_bias",
                         )
                     param = params_dict[name]
                     weight_loader = getattr(

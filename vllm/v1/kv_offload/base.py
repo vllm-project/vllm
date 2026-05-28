@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -385,15 +386,16 @@ class OffloadingSpec(ABC):
             * parallel_config.prefill_context_parallel_size
         )
 
-        # block size used by vLLM for hashing request tokens for the sake
-        # of enabling prefix caching
-        self.hash_block_size = (
-            vllm_config.cache_config.block_size * context_parallel_factor
-        )
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
             kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
             for kv_cache_group in kv_cache_config.kv_cache_groups
+        )
+
+        # hash_block_size must match what the scheduler uses for
+        # Request.block_hashes (resolved via resolve_kv_cache_block_sizes).
+        _, self.hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
         )
 
         for block_size in self.gpu_block_size:
