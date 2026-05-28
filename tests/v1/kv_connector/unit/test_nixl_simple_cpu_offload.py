@@ -14,10 +14,12 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import (
+    create_model_runner_output,
     create_request,
     create_scheduler,
     create_vllm_config,
 )
+from vllm import SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
     MultiKVConnectorMetadata,
@@ -25,6 +27,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnectorMetadata,
 )
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -32,7 +36,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     SlidingWindowSpec,
 )
-from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import Request
+from vllm.v1.simple_kv_offload.metadata import (
+    SimpleCPUOffloadMetadata,
+    SimpleCPUOffloadWorkerMetadata,
+)
 
 NIXL_WRAPPER_PATCH = (
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper"
@@ -231,7 +240,7 @@ def test_nixl_wins_load_over_cpu_offload():
 @patch(NIXL_WRAPPER_PATCH, FakeNixlWrapper)
 def test_cpu_offload_wins_when_nixl_has_no_match():
     """When NixlConnector returns 0 matched tokens and SimpleCPUOffloadConnector has a
-    CPU cache hit, we load the CPU blocks."""
+    CPU cache hit, the CPU offload connector (index 1) wins the load."""
     vllm_config, kv_cache_config = _multi_connector_config()
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
     mc = scheduler.connector
@@ -245,36 +254,31 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
     scheduler.add_request(req1)
     sched_out1 = scheduler.schedule()
 
-    meta1 = sched_out1.kv_connector_metadata
-    assert isinstance(meta1, MultiKVConnectorMetadata)
+    # build_connector_meta runs before _update_after_schedule, so num_computed_tokens
+    # is still 0 during the first schedule and the store sees no confirmed blocks.
+    # Simulate one model step so the second schedule triggers the store.
+    model_output = create_model_runner_output(reqs=[req1])
+    scheduler.update_from_output(sched_out1, model_output)
 
-    cpu_meta = meta1.metadata[1]
+    sched_out2 = scheduler.schedule()
+    meta2 = sched_out2.kv_connector_metadata
+    assert isinstance(meta2, MultiKVConnectorMetadata)
+    cpu_meta = meta2.metadata[1]
     assert isinstance(cpu_meta, SimpleCPUOffloadMetadata)
-    # cpuoffload is storing the blocks
-    if cpu_meta.store_event >= 0:
-        from vllm.v1.outputs import KVConnectorOutput
-        from vllm.v1.simple_kv_offload.metadata import (
-            SimpleCPUOffloadWorkerMetadata,
-        )
+    assert cpu_meta.store_event >= 0, "Expected a store event on the second schedule"
 
-        cpu_connector = mc._connectors[1]
-        worker_meta = SimpleCPUOffloadWorkerMetadata(
-            completed_store_events={
-                cpu_meta.store_event: cpu_connector.scheduler_manager._expected_worker_count  # noqa: E501
-            },
-        )
-        output = KVConnectorOutput(
-            finished_recving=set(),
-            kv_connector_worker_meta=worker_meta,
-        )
-        cpu_connector.update_connector_output(output)
+    cpu_connector = mc._connectors[1]
+    worker_meta = SimpleCPUOffloadWorkerMetadata(
+        completed_store_events={
+            cpu_meta.store_event: cpu_connector.scheduler_manager._expected_worker_count
+        },
+    )
+    output = KVConnectorOutput(
+        finished_recving=set(),
+        kv_connector_worker_meta=worker_meta,
+    )
+    cpu_connector.update_connector_output(output)
 
-    from vllm import SamplingParams
-    from vllm.utils.hashing import sha256
-    from vllm.v1.core.kv_cache_utils import get_request_block_hasher
-    from vllm.v1.request import Request
-
-    # same request
     req2 = Request(
         request_id="id-cpu-offload-hit",
         prompt_token_ids=req1.prompt_token_ids,
@@ -284,16 +288,10 @@ def test_cpu_offload_wins_when_nixl_has_no_match():
         block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
     )
 
-    # No cache hit on gpu, check cpu
     hit_tokens, is_async = mc.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-
-    assert hit_tokens and hit_tokens > 0
+    assert hit_tokens is not None and hit_tokens > 0
     assert mc._requests_to_connector[req2.request_id] == 1
     assert is_async is True
-    # else:
-    #     assert req2.request_id not in mc._requests_to_connector or (
-    #         mc._requests_to_connector.get(req2.request_id) != 0
-    #     )
 
 
 @pytest.mark.parametrize("swa_enabled", [False, True], ids=["fa_only", "fa_sw"])
