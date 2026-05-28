@@ -5,7 +5,9 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import ipaddress
 import os
+import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -45,6 +47,8 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "image": ImageMediaIO,
     "video": VideoMediaIO,
 }
+
+FORBID_PRIVATE_NETWORKS_ACCESS_IO_KWARGS = "forbid_private_networks_access"
 
 
 def merge_media_io_kwargs(
@@ -282,17 +286,55 @@ class MediaConnector:
                 f"{url_spec.hostname}"
             )
 
+    def _assert_network_is_public(self, url_spec: Url) -> None:
+        hostname = url_spec.hostname
+        try:
+            results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+            for result in results:
+                _, _, _, _, sockaddr = result
+                address = sockaddr[0]
+                ip_obj = ipaddress.ip_address(address)
+                if ip_obj.is_private:
+                    raise ValueError(
+                        f"The media URL must resolve to a public domain. "
+                        f"Input media URL: {url_spec.url}"
+                    )
+        except socket.gaierror as e:
+            raise ValueError(f"Unable to resolve URL domain '{hostname}': {e}") from e
+
+    def _maybe_validate_private_networks_access(
+        self, url: str | Url, forbid_private_networks_access: bool = False
+    ) -> None:
+        if not forbid_private_networks_access:
+            return
+        if not isinstance(url, Url):
+            url = parse_url(url)
+        self._assert_network_is_public(url)
+
+    def _get_forbid_private_networks_access_for_modality(self, modality: str):
+        return (
+            self.media_io_kwargs.get(modality, {}).get(
+                FORBID_PRIVATE_NETWORKS_ACCESS_IO_KWARGS, None
+            )
+            is not None
+        )
+
     def load_from_url(
         self,
         url: str,
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
+        forbid_private_networks_access: bool = False,
     ) -> _M:  # type: ignore[type-var]
         if url[:5].lower() == "data:":
             return self._load_data_url(url, media_io)
 
         url_spec = parse_url(url)
+
+        self._maybe_validate_private_networks_access(
+            url_spec, forbid_private_networks_access
+        )
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
@@ -323,6 +365,7 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
+        forbid_private_networks_access: bool = False,
     ) -> _M:
         loop = asyncio.get_running_loop()
 
@@ -333,6 +376,10 @@ class MediaConnector:
             return await future
 
         url_spec = parse_url(url)
+
+        self._maybe_validate_private_networks_access(
+            url_spec, forbid_private_networks_access
+        )
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
@@ -375,11 +422,15 @@ class MediaConnector:
         Load audio from a URL.
         """
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("audio")
+        )
 
         return self.load_from_url(
             audio_url,
             audio_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            forbid_private_networks_access=forbid_private_networks_access,
         )
 
     async def fetch_audio_async(
@@ -390,11 +441,15 @@ class MediaConnector:
         Asynchronously fetch audio from a URL.
         """
         audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("audio")
+        )
 
         return await self.load_from_url_async(
             audio_url,
             audio_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            forbid_private_networks_access=forbid_private_networks_access,
         )
 
     def fetch_image(
@@ -411,12 +466,16 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("image")
+        )
 
         try:
             return self.load_from_url(
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                forbid_private_networks_access=forbid_private_networks_access,
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
@@ -436,12 +495,16 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("image")
+        )
 
         try:
             return await self.load_from_url_async(
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                forbid_private_networks_access=forbid_private_networks_access,
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
@@ -460,11 +523,15 @@ class MediaConnector:
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("video")
+        )
 
         return self.load_from_url(
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            forbid_private_networks_access=forbid_private_networks_access,
         )
 
     async def fetch_video_async(
@@ -482,11 +549,15 @@ class MediaConnector:
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
         video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        forbid_private_networks_access = (
+            self._get_forbid_private_networks_access_for_modality("video")
+        )
 
         return await self.load_from_url_async(
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            forbid_private_networks_access=forbid_private_networks_access,
         )
 
     def fetch_image_embedding(

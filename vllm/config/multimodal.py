@@ -110,7 +110,9 @@ class MultiModalConfig:
     media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
-    `--media-io-kwargs '{"video": {"num_frames": 40} }'`"""
+    `--media-io-kwargs '{"video": {"num_frames": 40} }'`
+    or to forbid private private networks access for images, set
+    `--media-io-kwargs '{"image": {"forbid_private_networks_access": true} }'`"""
     mm_processor_kwargs: dict[str, object] | None = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
