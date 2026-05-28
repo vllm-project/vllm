@@ -398,6 +398,80 @@ To enable this feature:
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
+## Monitoring and Metrics
+
+NixlConnector reports transfer performance metrics via both periodic CLI log lines and Prometheus histograms/counters.
+
+### CLI Log Output
+
+When KV transfers are active, vLLM logs a summary line at each metrics interval:
+
+```
+KV Transfer metrics: Num successful transfers=80, Avg xfer time (ms)=1.381,
+P90 xfer time (ms)=2.601, Avg post time (ms)=0.672, P90 post time (ms)=0.801,
+Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0
+```
+
+### Multi-Rank Aggregation Semantics
+
+!!! important
+    All metrics are **aggregated across all TP ranks** before summary statistics are computed. Each TP rank independently records per-transfer telemetry, and the scheduler concatenates observations from all ranks before computing averages and percentiles.
+
+| Metric | What it represents |
+|--------|-------------------|
+| **Num successful transfers** | Total completed transfers across ALL TP ranks. With TP=8 and 10 requests, expect up to 80 transfers. |
+| **Avg xfer time (ms)** | Mean transfer duration across all individual rank-level operations. |
+| **P90 xfer time (ms)** | 90th percentile over the combined distribution from all ranks. |
+| **Avg post time (ms)** | Mean time to submit the transfer request to the NIXL transport layer. High values indicate submission-path contention. |
+| **P90 post time (ms)** | 90th percentile of post (submission) duration. |
+| **Avg MB per transfer** | Average MiB per rank-level transfer. Multiply by TP to estimate total data per request. |
+| **Throughput (MB/s)** | `total_MiB_all_ranks / total_time_all_ranks`. This is **average per-rank throughput**, NOT aggregate system throughput. Multiply by TP for aggregate throughput. |
+| **Avg number of descriptors** | Mean NIXL descriptors (memory regions) per transfer. Each descriptor typically maps to one KV cache block. |
+
+### Deriving System-Level Metrics
+
+To compute the **aggregate system throughput** for a TP=N deployment:
+
+```
+Aggregate throughput ≈ reported Throughput (MB/s) × N
+```
+
+To estimate **total data moved per request**:
+
+```
+Data per request ≈ Avg MB per transfer × N
+```
+
+### Prometheus Metrics
+
+The following metrics are exported under the `vllm:nixl_*` namespace:
+
+| Prometheus Metric | Type | Description |
+|------------------|------|-------------|
+| `vllm:nixl_xfer_time_seconds` | Histogram | Transfer duration (seconds) |
+| `vllm:nixl_post_time_seconds` | Histogram | Post/submit duration (seconds) |
+| `vllm:nixl_bytes_transferred` | Histogram | Bytes per transfer |
+| `vllm:nixl_num_descriptors` | Histogram | Descriptors per transfer |
+| `vllm:nixl_num_failed_transfers` | Counter | Failed transfer operations |
+| `vllm:nixl_num_failed_notifications` | Counter | Failed notification sends |
+| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests with expired KV blocks (P-side) |
+
+!!! tip
+    Unlike the CLI log (which reports interval summaries), Prometheus receives every individual observation. Use PromQL `histogram_quantile()` for custom percentile queries:
+    ```promql
+    histogram_quantile(0.99, rate(vllm:nixl_xfer_time_seconds_bucket[5m]))
+    ```
+
+### Troubleshooting with Metrics
+
+| Symptom | Likely Cause |
+|---------|-------------|
+| High `Avg post time` (>5ms) | Transport submission contention — check NIC saturation or Progress Thread configuration |
+| High `P90 xfer time` with low average | Tail latency from network congestion or NUMA-remote memory access |
+| `num_failed_transfers` increasing | Network errors or remote endpoint unavailability |
+| `num_kv_expired_reqs` increasing | D-instance not consuming KV blocks before P-instance lease timeout |
+| Low `Throughput` with many descriptors | Many small transfers — consider enabling `cross_layers_blocks` for coalesced transfers |
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:
