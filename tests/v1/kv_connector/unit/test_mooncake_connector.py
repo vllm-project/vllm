@@ -373,15 +373,16 @@ async def test_kv_producer(monkeypatch):
             prefill_worker, "_send_blocks", return_value=0
         ) as mock_send_blocks:
             # Under the standardized blocks-first layout K and V are packed
-            # into a single contiguous region per block, so each block
-            # produces one coalesced transfer.
+            # into a single contiguous region per block. Adjacent blocks are
+            # coalesced into a single larger transfer; all cases below pass
+            # a single contiguous run.
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
-                src_ptrs, dst_ptrs, lengths = [], [], []
-                for sb, db in zip(src_blocks, dst_blocks):
-                    src_ptrs.append(src_base + sb * block_len)
-                    dst_ptrs.append(dst_base + db * block_len)
-                    lengths.append(block_len)
-                return src_ptrs, dst_ptrs, lengths
+                n = len(src_blocks)
+                return (
+                    [src_base + src_blocks[0] * block_len],
+                    [dst_base + dst_blocks[0] * block_len],
+                    [n * block_len],
+                )
 
             # Normal case: 2 blocks to 2 blocks
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
