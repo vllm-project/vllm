@@ -454,22 +454,22 @@ class Qwen3_VisionBlock(nn.Module):
         sp_enabled: bool = False,
         tp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
+        x_normed = self.norm1(x)
         if sp_enabled:
-            x = tp_group.all_gather(x, dim=0)
-        x = self.norm1(x)
-        attn_out = self.attn(
-            x,
+            x_normed = tp_group.all_gather(x_normed, dim=0)
+        x_attn = self.attn(
+            x_normed,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            sp_enabled=sp_enabled,
         )
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
         if sp_enabled:
-            seq_chunk = x.shape[0] // tp_group.world_size
-            x = x[tp_group.rank_in_group * seq_chunk : (tp_group.rank_in_group + 1) * seq_chunk]
+            x_attn = tp_group.reduce_scatter(x_attn, dim=0)
+        x = x + x_attn
+        x = x + self.mlp(self.norm2(x))
         return x
 
 
