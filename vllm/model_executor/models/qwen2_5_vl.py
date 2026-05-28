@@ -413,7 +413,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         sp_enabled: bool = False,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
-        self.proj.reduce_results = False if sp_enabled else None
+        self.proj.reduce_results = False if sp_enabled else True
 
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
