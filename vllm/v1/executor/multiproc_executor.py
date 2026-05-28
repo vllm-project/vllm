@@ -811,6 +811,18 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        try:
+            from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+            if is_torch_equal_or_newer("2.13.0.dev"):
+                from torch._inductor.codecache import torch_key, triton_key
+
+                torch_key.prefetch()
+                triton_key.prefetch()
+                # TODO: also prefetch cutlass_key if it turns out to be needed.
+        except Exception:
+            logger.debug("Failed to prefetch torch/triton keys", exc_info=True)
+
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
