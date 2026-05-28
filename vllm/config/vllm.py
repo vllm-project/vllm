@@ -1406,7 +1406,7 @@ class VllmConfig:
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
-        # - No preference: auto-disable for unsupported features (e.g. kv connector)
+        # - No preference: auto-disable for unsupported features or connector configs
         # - Explicit disable (--disable-kv-cache-manager): always respect it
         need_disable_hybrid_kv_cache_manager = False
         # logger should only print warning message for hybrid models. As we
@@ -1438,43 +1438,25 @@ class VllmConfig:
                 need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
+            # Auto-disable HMA only when the connector config does not support it.
             if self.kv_transfer_config is not None:
-                from vllm.config.kv_transfer import KVTransferConfig
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
-                from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                    supports_hma,
-                )
 
-                connector_cls = KVConnectorFactory.get_connector_class(
-                    self.kv_transfer_config
-                )
-                all_support_hma = supports_hma(connector_cls)
-                # MultiConnector subclasses SupportsHMA; only effectively
-                # supports HMA when every sub-connector does.
-                if all_support_hma and connector_cls.__name__ == "MultiConnector":
-                    sub_ktcs = self.kv_transfer_config.kv_connector_extra_config.get(
-                        "connectors", []
-                    )
-                    all_support_hma = all(
-                        supports_hma(
-                            KVConnectorFactory.get_connector_class(
-                                KVTransferConfig(**sub)
-                            )
-                        )
-                        for sub in sub_ktcs
-                    )
-                if not all_support_hma:
+                if not KVConnectorFactory.supports_hma_config(self.kv_transfer_config):
                     need_disable_hybrid_kv_cache_manager = True
                     logger.warning(
                         "Turning off hybrid kv cache manager because "
-                        "connector %s does not subclass `SupportsHMA`. "
-                        "This will reduce performance on models with "
-                        "sliding window or Mamba attention. See "
-                        "kv_connector/v1/base.py for details.",
-                        connector_cls.__name__,
+                        "`--kv-transfer-config` selects a KV connector that "
+                        "does not support it. Impact: hybrid SSM models "
+                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "startup without it; models with sliding window "
+                        "attention will run with reduced performance. "
+                        "To add HMA support to a KV connector, subclass "
+                        "`SupportsHMA` defined in kv_connector/v1/base.py "
+                        "(for MultiConnector, all child connectors must "
+                        "support HMA)."
                     )
             self.scheduler_config.disable_hybrid_kv_cache_manager = (
                 need_disable_hybrid_kv_cache_manager
@@ -1846,22 +1828,6 @@ class VllmConfig:
                         compile_range_end,
                     )
 
-        if compilation_config.pass_config.fuse_minimax_qk_norm:
-            from vllm.compilation.passes.fusion.minimax_qk_norm_fusion import (
-                MAX_TOKEN_NUM,
-            )
-
-            max_token_num = min(
-                MAX_TOKEN_NUM, self.scheduler_config.max_num_batched_tokens
-            )
-            if compile_range_end is not None and max_token_num < compile_range_end:
-                computed_compile_ranges_endpoints.append(max_token_num)
-            else:
-                logger.debug(
-                    "Max num batched tokens below MiniMax QK norm fusion threshold, "
-                    "MiniMax QK norm fusion enabled for all num_tokens."
-                )
-
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
@@ -1980,8 +1946,12 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if model_config is not None and model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
+        if (
+            model_config is not None
+            and model_config.has_inner_state
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            unsupported.append("hybrid/mamba models with align cache mode")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
