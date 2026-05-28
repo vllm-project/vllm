@@ -256,6 +256,12 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Identifies the upstream quantization format the weights were exported
+    # from (e.g. "modelopt", "compressed_tensors"). Backends that need to
+    # interpret a shared weight payload differently per source (FlashInfer
+    # B12x NVFP4) read this; most MoE methods can ignore it.
+    source_format: str | None = None
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -506,6 +512,7 @@ class FusedMoEQuantConfig:
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
+        source_format: str | None = None,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -577,6 +584,7 @@ class FusedMoEQuantConfig:
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
+            source_format=source_format,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -806,6 +814,7 @@ def nvfp4_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
     gemm1_clamp_limit: float | None = None,
+    source_format: str | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -825,6 +834,7 @@ def nvfp4_moe_quant_config(
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        source_format=source_format,
     )
 
 
@@ -852,6 +862,7 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    source_format: str | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-but activations and nvp4 weights.
@@ -863,6 +874,7 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        source_format=source_format,
     )
 
 

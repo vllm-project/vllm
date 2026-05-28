@@ -1604,6 +1604,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            source_format="modelopt",
         )
 
     @property
@@ -2386,6 +2387,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, ParallelLMHead):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):
