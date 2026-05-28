@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 from torch import nn
 
@@ -556,6 +558,246 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if copy_source:
             buffer.copy_(source)
         return buffer
+
+    def _maybe_start_checkpoint_trace(
+        self,
+        *,
+        state_indices_tensor_d_input: torch.Tensor,
+        state_indices_tensor_d_output: torch.Tensor,
+        num_decode_tokens: int,
+        ssm_state: torch.Tensor,
+        old_x: torch.Tensor,
+        old_B: torch.Tensor,
+        old_dt: torch.Tensor,
+        old_cumAdt: torch.Tensor,
+        cache_buf_idx: torch.Tensor,
+        prev_num_accepted_tokens: torch.Tensor,
+        hidden_states_d: torch.Tensor,
+        dt_d: torch.Tensor,
+        A_d: torch.Tensor,
+        B_d: torch.Tensor,
+        C_d: torch.Tensor,
+        D_d: torch.Tensor,
+        dt_bias: torch.Tensor,
+        dt_softplus: bool,
+    ) -> dict[str, object] | None:
+        trace_dir = os.environ.get("MAMBA_CKPT_TRACE_DIR")
+        if not trace_dir or torch.cuda.is_current_stream_capturing():
+            return None
+
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank_filter = os.environ.get("MAMBA_CKPT_TRACE_TP_RANK", "")
+        if tp_rank_filter and tp_rank != int(tp_rank_filter):
+            return None
+
+        layer_filter = os.environ.get("MAMBA_CKPT_TRACE_LAYER", "")
+        if layer_filter and layer_filter not in self.prefix:
+            return None
+
+        max_calls = int(os.environ.get("MAMBA_CKPT_TRACE_CALLS", "64"))
+        if not hasattr(MambaMixer2, "_ckpt_trace_calls"):
+            MambaMixer2._ckpt_trace_calls = 0
+            MambaMixer2._ckpt_trace_seen_calls = 0
+            MambaMixer2._ckpt_trace_target_slot = None
+        if MambaMixer2._ckpt_trace_calls >= max_calls:
+            return None
+
+        flat_indices = state_indices_tensor_d_input.reshape(-1)
+        if flat_indices.numel() != num_decode_tokens:
+            return None
+
+        valid_indices = flat_indices != NULL_BLOCK_ID
+        if not bool(valid_indices.any().item()):
+            return None
+        valid_rows = torch.nonzero(valid_indices, as_tuple=False).flatten()
+        valid_slots = flat_indices[valid_indices].to(torch.long)
+
+        skip_calls = int(os.environ.get("MAMBA_CKPT_TRACE_SKIP_CALLS", "0"))
+        if MambaMixer2._ckpt_trace_seen_calls < skip_calls:
+            MambaMixer2._ckpt_trace_seen_calls += 1
+            return None
+        MambaMixer2._ckpt_trace_seen_calls += 1
+
+        target_slot_env = os.environ.get("MAMBA_CKPT_TRACE_SLOT", "")
+        if target_slot_env:
+            target_slot = int(target_slot_env)
+        elif MambaMixer2._ckpt_trace_target_slot is not None:
+            target_slot = int(MambaMixer2._ckpt_trace_target_slot)
+        else:
+            target_slot = int(flat_indices[valid_indices][0].item())
+            MambaMixer2._ckpt_trace_target_slot = target_slot
+
+        matching_rows = torch.nonzero(flat_indices == target_slot, as_tuple=False)
+        if matching_rows.numel() == 0:
+            return None
+
+        row = int(matching_rows[0].item())
+        call_id = int(MambaMixer2._ckpt_trace_calls)
+        MambaMixer2._ckpt_trace_calls += 1
+
+        os.makedirs(trace_dir, exist_ok=True)
+        safe_prefix = "".join(
+            ch if ch.isalnum() else "_" for ch in self.prefix
+        )[-96:]
+        path = os.path.join(
+            trace_dir,
+            f"{safe_prefix}_pid{os.getpid()}_call{call_id:04d}"
+            f"_slot{target_slot}.pt",
+        )
+
+        def cpu_clone(tensor: torch.Tensor) -> torch.Tensor:
+            return tensor.detach().cpu().clone()
+
+        def layout(tensor: torch.Tensor) -> dict[str, object]:
+            return {
+                "shape": tuple(tensor.shape),
+                "stride": tuple(tensor.stride()),
+                "dtype": str(tensor.dtype),
+            }
+
+        include_static = call_id == 0 or os.environ.get(
+            "MAMBA_CKPT_TRACE_STATIC_EVERY", "0"
+        ) not in ("", "0", "false", "False")
+
+        record: dict[str, object] = {
+            "meta": {
+                "call_id": call_id,
+                "prefix": self.prefix,
+                "pid": os.getpid(),
+                "tp_rank": tp_rank,
+                "row": row,
+                "slot": target_slot,
+                "num_decode_tokens": num_decode_tokens,
+                "checkpoint_interval": self.mamba_checkpoint_interval,
+                "state_dtype": str(ssm_state.dtype),
+                "input_dtype": str(hidden_states_d.dtype),
+                "dt_softplus": dt_softplus,
+                "include_static": include_static,
+                "layout": {
+                    "state": layout(ssm_state),
+                    "old_x": layout(old_x),
+                    "old_B": layout(old_B),
+                    "old_dt": layout(old_dt),
+                    "old_cumAdt": layout(old_cumAdt),
+                    "x": layout(hidden_states_d),
+                    "dt": layout(dt_d),
+                    "B": layout(B_d),
+                    "C": layout(C_d),
+                    "A": layout(A_d),
+                    "D": layout(D_d),
+                    "dt_bias": layout(dt_bias),
+                },
+            },
+            "state_indices_input": cpu_clone(state_indices_tensor_d_input),
+            "state_indices_output": cpu_clone(state_indices_tensor_d_output),
+            "pre": {
+                "state": cpu_clone(ssm_state[target_slot]),
+                "old_x": cpu_clone(old_x[target_slot]),
+                "old_B": cpu_clone(old_B[target_slot]),
+                "old_dt": cpu_clone(old_dt[target_slot]),
+                "old_cumAdt": cpu_clone(old_cumAdt[target_slot]),
+                "cache_buf_idx": int(cache_buf_idx[target_slot].item()),
+                "prev_num_accepted_tokens": int(
+                    prev_num_accepted_tokens[target_slot].item()
+                ),
+            },
+            "input": {
+                "x": cpu_clone(hidden_states_d[row]),
+                "dt": cpu_clone(dt_d[row]),
+                "B": cpu_clone(B_d[row]),
+                "C": cpu_clone(C_d[row]),
+            },
+        }
+        full_batch = os.environ.get("MAMBA_CKPT_TRACE_FULL_BATCH", "0") == "1"
+        if full_batch:
+            record["batch"] = {
+                "rows": cpu_clone(valid_rows),
+                "slots": cpu_clone(valid_slots),
+                "pre": {
+                    "state": cpu_clone(ssm_state[valid_slots]),
+                    "old_x": cpu_clone(old_x[valid_slots]),
+                    "old_B": cpu_clone(old_B[valid_slots]),
+                    "old_dt": cpu_clone(old_dt[valid_slots]),
+                    "old_cumAdt": cpu_clone(old_cumAdt[valid_slots]),
+                    "cache_buf_idx": cpu_clone(cache_buf_idx[valid_slots]),
+                    "prev_num_accepted_tokens": cpu_clone(
+                        prev_num_accepted_tokens[valid_slots]
+                    ),
+                },
+                "input": {
+                    "x": cpu_clone(hidden_states_d[valid_rows]),
+                    "dt": cpu_clone(dt_d[valid_rows]),
+                    "B": cpu_clone(B_d[valid_rows]),
+                    "C": cpu_clone(C_d[valid_rows]),
+                },
+            }
+        if include_static:
+            record["static"] = {
+                "A": cpu_clone(A_d),
+                "D": cpu_clone(D_d),
+                "dt_bias": cpu_clone(dt_bias),
+            }
+        return {
+            "path": path,
+            "record": record,
+            "row": row,
+            "slot": target_slot,
+            "valid_slots": valid_slots if full_batch else None,
+        }
+
+    def _finish_checkpoint_trace(
+        self,
+        trace: dict[str, object] | None,
+        *,
+        ssm_state: torch.Tensor,
+        old_x: torch.Tensor,
+        old_B: torch.Tensor,
+        old_dt: torch.Tensor,
+        old_cumAdt: torch.Tensor,
+        cache_buf_idx: torch.Tensor,
+        prev_num_accepted_tokens: torch.Tensor,
+        ssm_out_d: torch.Tensor,
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            row = int(trace["row"])
+            slot = int(trace["slot"])
+            record = trace["record"]
+            assert isinstance(record, dict)
+
+            def cpu_clone(tensor: torch.Tensor) -> torch.Tensor:
+                return tensor.detach().cpu().clone()
+
+            record["post"] = {
+                "state": cpu_clone(ssm_state[slot]),
+                "old_x": cpu_clone(old_x[slot]),
+                "old_B": cpu_clone(old_B[slot]),
+                "old_dt": cpu_clone(old_dt[slot]),
+                "old_cumAdt": cpu_clone(old_cumAdt[slot]),
+                "cache_buf_idx": int(cache_buf_idx[slot].item()),
+                "prev_num_accepted_tokens": int(
+                    prev_num_accepted_tokens[slot].item()
+                ),
+                "out": cpu_clone(ssm_out_d[row]),
+            }
+            valid_slots = trace.get("valid_slots")
+            if valid_slots is not None and "batch" in record:
+                record["batch"]["post"] = {
+                    "state": cpu_clone(ssm_state[valid_slots]),
+                    "old_x": cpu_clone(old_x[valid_slots]),
+                    "old_B": cpu_clone(old_B[valid_slots]),
+                    "old_dt": cpu_clone(old_dt[valid_slots]),
+                    "old_cumAdt": cpu_clone(old_cumAdt[valid_slots]),
+                    "cache_buf_idx": cpu_clone(cache_buf_idx[valid_slots]),
+                    "prev_num_accepted_tokens": cpu_clone(
+                        prev_num_accepted_tokens[valid_slots]
+                    ),
+                    "out": cpu_clone(ssm_out_d),
+                }
+            torch.save(record, trace["path"])
+        except Exception as exc:
+            logger.warning("Failed to write Mamba checkpoint trace: %s", exc)
 
     def forward(
         self,
@@ -1136,12 +1378,77 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_decode_tokens, -1, self.head_dim
             )
 
+            # fp32 state-scratch detour: SSU on fp16 cache accumulates
+            # systematic round-to-nearest bias across the ~100-step decode
+            # horizon at c=50, which the model amplifies into garbage
+            # (samples degrade ~50 chars in). Run the kernel against a
+            # transient fp32 copy of the SSM state instead; fp32 storage
+            # has enough precision to absorb the per-call rounding without
+            # SR, and the cast-back to fp16 happens just once per layer.
+            # Use a PERSISTENT scratch buffer (allocated lazily, retained
+            # on self) so the same memory is reused inside CUDA graph
+            # captures — allocating a fresh fp32 tensor per call would
+            # invalidate the captured graph.
 
-            import os
             _PROBE_MAX = int(os.environ.get("MAMBA_PROBE_CALLS", "0"))
             _PROBE_AFTER = os.environ.get("MAMBA_PROBE_AFTER", "1") == "1"
             if not hasattr(MambaMixer2, "_probe_calls"):
                 MambaMixer2._probe_calls = 0
+
+            # One-shot dtype audit: log every kernel-arg dtype/shape/stride
+            # exactly once across the whole model, so we can verify the
+            # runtime wiring matches what the kernel expects without
+            # spamming the eval log.
+            _DTYPE_AUDIT = os.environ.get("MAMBA_DTYPE_AUDIT", "0") == "1"
+            if _DTYPE_AUDIT and not getattr(MambaMixer2, "_dtype_audited", False):
+                MambaMixer2._dtype_audited = True
+                def _fmt(t, name):
+                    if t is None:
+                        return f"{name}=None"
+                    return (f"{name}: dtype={t.dtype} shape={tuple(t.shape)} "
+                            f"stride={tuple(t.stride())} contig={t.is_contiguous()}")
+                logger.warning(
+                    "DTYPE_AUDIT layer=%s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n"
+                    "  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s\n  %s",
+                    self.prefix,
+                    _fmt(ssm_state, "ssm_state"),
+                    _fmt(hidden_states_d, "x (hidden_states_d)"),
+                    _fmt(dt_d, "dt_d"),
+                    _fmt(A_d, "A_d"),
+                    _fmt(B_d, "B_d"),
+                    _fmt(C_d, "C_d"),
+                    _fmt(D_d, "D_d"),
+                    _fmt(dt_bias, "dt_bias"),
+                    _fmt(old_x, "old_x"),
+                    _fmt(old_B, "old_B"),
+                    _fmt(old_dt, "old_dt"),
+                    _fmt(old_cumAdt, "old_cumAdt"),
+                    _fmt(cache_buf_idx, "cache_buf_idx"),
+                    _fmt(prev_num_accepted_tokens, "prev_num_accepted_tokens"),
+                    _fmt(state_indices_tensor_d_input, "state_indices_tensor_d_input"),
+                    _fmt(query_start_loc_d, "query_start_loc_d"),
+                )
+
+            checkpoint_trace = self._maybe_start_checkpoint_trace(
+                state_indices_tensor_d_input=state_indices_tensor_d_input,
+                state_indices_tensor_d_output=state_indices_tensor_d_output,
+                num_decode_tokens=num_decode_tokens,
+                ssm_state=ssm_state,
+                old_x=old_x,
+                old_B=old_B,
+                old_dt=old_dt,
+                old_cumAdt=old_cumAdt,
+                cache_buf_idx=cache_buf_idx,
+                prev_num_accepted_tokens=prev_num_accepted_tokens,
+                hidden_states_d=hidden_states_d,
+                dt_d=dt_d,
+                A_d=A_d,
+                B_d=B_d,
+                C_d=C_d,
+                D_d=D_d,
+                dt_bias=dt_bias,
+                dt_softplus=True,
+            )
 
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
@@ -1198,6 +1505,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dim=1,
             )
             ssm_out_d.mul_((~null_decode_rows).view(-1, 1, 1))
+            self._finish_checkpoint_trace(
+                checkpoint_trace,
+                ssm_state=ssm_state,
+                old_x=old_x,
+                old_B=old_B,
+                old_dt=old_dt,
+                old_cumAdt=old_cumAdt,
+                cache_buf_idx=cache_buf_idx,
+                prev_num_accepted_tokens=prev_num_accepted_tokens,
+                ssm_out_d=ssm_out_d,
+            )
             if (_PROBE_AFTER and MambaMixer2._probe_calls < _PROBE_MAX):
                 MambaMixer2._probe_calls += 1
                 _idx = state_indices_tensor_d_input.flatten()

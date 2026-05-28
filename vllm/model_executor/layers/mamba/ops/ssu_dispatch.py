@@ -447,26 +447,12 @@ class FlashInferSSUBackend(MambaSSUBackend):
         spec_uniform_state_slots: bool = False,
     ) -> None:
         global _shuffle_test_calls
-        # Narrow SSM-state dtypes (fp16 / bf16) require Philox stochastic
-        # rounding inside the checkpointing kernel — round-to-nearest
-        # accumulates a systematic bias across the ~100-step decode horizon
-        # at c=50 that collapses GSM-8k (fp16 int=3 drops from ~0.94 to
-        # ~0.02 without SR). Force SR on for the checkpointing dispatch
-        # whenever the cache dtype is narrower than fp32, regardless of
-        # the user's `enable_stochastic_rounding` setting — this is a wire-
-        # level fix, not a behavior change in the SSU itself. We also raise
-        # philox_rounds to 40 because the default 10 rounds isn't enough to
-        # decorrelate the SR noise at small intervals (int=3 at 10 rounds
-        # scores 0.78, at 40 rounds scores 0.94).
-        _state_needs_sr = state.dtype in (torch.float16, torch.bfloat16)
         rand_seed = (
             torch.randint(0, 2**32, (1,), dtype=torch.int64, device=state.device)
-            if self._mamba_config.enable_stochastic_rounding or _state_needs_sr
+            if self._mamba_config.enable_stochastic_rounding
             else None
         )
         _philox_rounds = self._mamba_config.stochastic_rounding_philox_rounds or 10
-        if _state_needs_sr and _philox_rounds < 40:
-            _philox_rounds = 40
 
         checkpointing_args = (
             old_x,
