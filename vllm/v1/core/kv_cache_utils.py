@@ -693,6 +693,7 @@ def _check_enough_kv_cache_memory(
     get_needed_memory: Callable[[], int],
     max_model_len: int,
     estimate_max_model_len: Callable[[int], int],
+    num_kv_shards: int = 1,
 ):
     if available_memory <= 0:
         raise ValueError(
@@ -705,6 +706,13 @@ def _check_enough_kv_cache_memory(
         )
 
     needed_memory = get_needed_memory()
+
+    # Account for KV cache sharding across tensor/pipeline parallel workers.
+    # With TP/PP, the KV cache is distributed across multiple GPUs, so the
+    # effective available memory per worker is multiplied by the number of
+    # workers sharing the KV cache.
+    if num_kv_shards > 1:
+        available_memory *= num_kv_shards
 
     if needed_memory > available_memory:
         estimated_max_len = estimate_max_model_len(available_memory)
@@ -811,11 +819,20 @@ def check_enough_kv_cache_memory(
 
     # No need to check for available memory if the kv_cache_spec is empty
     if kv_cache_spec:
+        # Calculate the number of KV cache shards across tensor/pipeline
+        # parallel workers. With TP/PP, the KV cache is distributed across
+        # multiple GPUs, so we need to account for this when checking if
+        # there is enough memory.
+        num_kv_shards = (
+            vllm_config.parallel_config.tensor_parallel_size
+            * vllm_config.parallel_config.pipeline_parallel_size
+        )
         _check_enough_kv_cache_memory(
             available_memory,
             lambda: max_memory_usage_bytes(vllm_config, kv_cache_spec.values()),
             vllm_config.model_config.max_model_len,
             lambda am: estimate_max_model_len(vllm_config, kv_cache_spec, am),
+            num_kv_shards=num_kv_shards,
         )
 
 
@@ -2031,6 +2048,14 @@ def get_kv_cache_configs(
             vllm_config, projected_groups_per_worker, available_memory
         )
 
+    # Calculate the number of KV cache shards across tensor/pipeline parallel
+    # workers. With TP/PP, the KV cache is distributed across multiple GPUs,
+    # so we need to account for this when checking if there is enough memory.
+    num_kv_shards = (
+        vllm_config.parallel_config.tensor_parallel_size
+        * vllm_config.parallel_config.pipeline_parallel_size
+    )
+
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
@@ -2040,6 +2065,7 @@ def get_kv_cache_configs(
             partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
             vllm_config.model_config.max_model_len,
             partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            num_kv_shards=num_kv_shards,
         )
 
     kv_cache_configs: list[KVCacheConfig] = []

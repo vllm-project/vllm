@@ -2270,6 +2270,54 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
         get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
+def test_check_enough_kv_cache_memory_accounts_for_tp_pp_sharding():
+    """KV cache memory check must account for tensor/pipeline parallelism.
+
+    With TP/PP, the KV cache is distributed across multiple GPUs, so the
+    per-GPU available memory should be multiplied by the number of workers
+    sharing the KV cache (TP × PP) before comparing against the total
+    required memory. Without this, multi-GPU deployments with KV offloading
+    would fail to start even when the aggregated KV capacity is sufficient.
+
+    See: https://github.com/vllm-project/vllm/issues/43755
+    """
+    from vllm.config import ParallelConfig
+
+    # Create a config with TP=8, PP=2 (16 GPUs total)
+    model_config = ModelConfig(max_model_len=16384)
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        pipeline_parallel_size=2,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel_config,
+    )
+
+    # Calculate memory per block per layer
+    # block_size=16, num_kv_heads=2, head_size=64, dtype=float32 (4 bytes)
+    # KV cache: 2 (K+V) * 16 * 2 * 64 * 4 = 16384 bytes per block per layer
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # With TP=8, PP=2, we have 16 GPUs sharing the KV cache.
+    # Per-GPU available memory: 1024 blocks worth (16 MB per layer)
+    # Total available across 16 GPUs: 16384 blocks worth
+    # Required for max_model_len=16384: 1024 blocks per layer * 2 layers = 2048 blocks
+    # 2048 blocks < 16384 blocks, so this should PASS
+    per_gpu_available_memory = mem_per_block_per_layer * 1024  # 1024 blocks per GPU
+
+    # This should NOT raise because the aggregated memory across 16 GPUs
+    # (1024 * 16 = 16384 blocks) is more than enough for 2048 blocks needed.
+    # Without the TP/PP fix, this would incorrectly raise ValueError because
+    # it would compare per-GPU memory (1024 blocks) against total needed (2048 blocks).
+    get_kv_cache_configs(vllm_config, [kv_cache_specs], [per_gpu_available_memory])
+
+
 def test_unify_hybrid_kv_cache_specs():
     # 1. has_full_attention and has_sliding_window
     before_spec_1 = new_kv_cache_spec()
