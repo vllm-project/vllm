@@ -107,13 +107,13 @@ impl ClientInner {
         Ok(registry.abortable_request_ids(request_ids))
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is
-    /// finished, it will be removed from the registry.
-    pub fn take_sender_for_output(
+    /// Obtain stream senders for a whole engine output batch with one registry
+    /// lock acquisition.
+    pub fn take_senders_for_outputs<'a>(
         &self,
-        output: &EngineCoreOutput,
-    ) -> Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
-        self.request_reg.lock().sender_for_output(output)
+        outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
+    ) -> Vec<Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>>> {
+        self.request_reg.lock().senders_for_outputs(outputs)
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -301,9 +301,10 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs.classify() {
                 ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
-                    for output in batch.outputs {
+                    let senders = inner.take_senders_for_outputs(&batch.outputs);
+                    for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
-                        let Some(sender) = inner.take_sender_for_output(&output) else {
+                        let Some(sender) = sender else {
                             debug!(request_id, "dropping output for inactive request");
                             continue;
                         };
