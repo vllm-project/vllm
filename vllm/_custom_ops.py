@@ -2560,7 +2560,38 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "moe_wna16_marlin_
         use_atomic_add: bool,
         use_fp32_reduce: bool,
         is_zp_float: bool,
+        thread_k: int = -1,
+        thread_n: int = -1,
+        blocks_per_sm: int = -1,
     ):
+        del (
+            b_qweight,
+            b_bias,
+            b_scales,
+            a_scales,
+            global_scale,
+            b_qzeros,
+            g_idx,
+            perm,
+            workspace,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_past_padded,
+            topk_weights,
+            moe_block_size,
+            mul_topk_weights,
+            b_q_type,
+            size_k,
+            is_k_full,
+            use_atomic_add,
+            use_fp32_reduce,
+            is_zp_float,
+            thread_k,
+            thread_n,
+            blocks_per_sm,
+        )
+        if output is not None:
+            return output
         return torch.empty(
             (size_m * top_k, size_n), dtype=input.dtype, device=input.device
         )
