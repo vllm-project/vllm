@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -10,8 +10,9 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 from vllm.utils.math_utils import cdiv
 
-# tilelang is only available on CUDA platforms
-if TYPE_CHECKING or current_platform.is_cuda():
+# TileLang is used for MHC on CUDA and ROCm. Keep non-GPU imports cheap so
+# registering the Python wrapper modules does not require TileLang everywhere.
+if TYPE_CHECKING or current_platform.is_cuda_alike():
     if not has_tilelang():
         raise ImportError(
             "tilelang is required for mhc but is not installed. Install it with "
@@ -22,6 +23,8 @@ if TYPE_CHECKING or current_platform.is_cuda():
 else:
     tilelang = None  # type: ignore[assignment]
     T = None  # type: ignore[assignment]
+
+ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
 
 @cache
@@ -37,12 +40,17 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
+pass_configs: dict[tilelang.PassConfigKey, Any] = {
+    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+}
+
+if current_platform.is_cuda():
+    pass_configs[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] = 10
+
+
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
@@ -78,7 +86,8 @@ def mhc_pre_big_fuse_tilelang(
     layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
 
     with T.Kernel(num_tokens, threads=96) as i:
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
         ##################################################################
         # _pre_norm_fn_fwd_norm
         rms = T.alloc_fragment(1, T.float32)
@@ -174,15 +183,178 @@ def mhc_pre_big_fuse_tilelang(
                         ol[i1_h] += pre * xl[i_hc, i1_h]
 
                 T.copy(ol, layer_input[i, i0_h * hidden_block])
-        T.pdl_trigger()
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+# Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
+)
+def mhc_pre_big_fuse_with_norm_tilelang(
+    gemm_out_mul,
+    gemm_out_sqrsum,
+    hc_scale,
+    hc_base,
+    residual,
+    post_mix,
+    comb_mix,
+    layer_input,
+    norm_weight,
+    hidden_size: int,
+    rms_eps: float,
+    hc_pre_eps: float,
+    hc_sinkhorn_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    norm_eps: float,
+    n_splits: int = 16,
+    hc_mult: int = 4,
+    gemm_last_dim: int = -1,
+):
+    num_tokens = T.dynamic("num_tokens")
+    hc_mult3 = hc_mult * (2 + hc_mult)
+    if gemm_last_dim < 0:
+        gemm_last_dim = hc_mult3
+    hidden_block = math.gcd(1024, hidden_size)
+
+    gemm_out_mul: T.Tensor[[n_splits, num_tokens, gemm_last_dim], T.float32]  # type: ignore[no-redef, valid-type]
+    gemm_out_sqrsum: T.Tensor[[n_splits, num_tokens], T.float32]  # type: ignore[no-redef, valid-type]
+    hc_scale: T.Tensor[[3], T.float32]  # type: ignore[no-redef, valid-type]
+    hc_base: T.Tensor[[hc_mult3], T.float32]  # type: ignore[no-redef, valid-type]
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    comb_mix: T.Tensor[[num_tokens, hc_mult * hc_mult], T.float32]  # type: ignore[no-redef, valid-type]
+    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+    norm_weight: T.Tensor[[hidden_size], T.bfloat16]  # type: ignore[no-redef, valid-type]
+
+    with T.Kernel(num_tokens, threads=96) as i:
+        rms = T.alloc_fragment(1, T.float32)
+        mixes = T.alloc_fragment(hc_mult3, T.float32)
+        T.clear(mixes)
+        rms[0] = 0
+
+        if ENABLE_PDL:
+            T.pdl_sync()
+
+        for i_split in T.serial(n_splits):
+            rms[0] += gemm_out_sqrsum[i_split, i]
+        rms[0] = T.rsqrt(rms[0] / (hc_mult * hidden_size) + rms_eps)
+        for j in T.Parallel(hc_mult3):
+            mixes[j] = 0
+            for i_split in T.serial(n_splits):
+                mixes[j] += gemm_out_mul[i_split, i, j]
+            mixes[j] *= rms[0]
+        mixes_shared = T.alloc_shared(hc_mult3, T.float32)
+        T.copy(mixes, mixes_shared)
+
+        if T.get_thread_binding() < 32:
+            cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
+            for j in T.Parallel(hc_mult):
+                post_mix[i, j] = (
+                    T.sigmoid(
+                        mixes_shared[j + hc_mult] * hc_scale[1] + hc_base[j + hc_mult]
+                    )
+                    * hc_post_mult_value
+                )
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = (
+                    mixes_shared[j * hc_mult + k + hc_mult * 2] * hc_scale[2]
+                    + hc_base[j * hc_mult + k + hc_mult * 2]
+                )
+
+            row_sum = T.alloc_fragment(hc_mult, T.float32)
+            col_sum = T.alloc_fragment(hc_mult, T.float32)
+
+            row_max = T.alloc_fragment(hc_mult, T.float32)
+            T.reduce_max(cm, row_max, dim=1)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = T.exp(cm[j, k] - row_max[j])
+            T.reduce_sum(cm, row_sum, dim=1)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = cm[j, k] / row_sum[j] + hc_sinkhorn_eps
+
+            T.reduce_sum(cm, col_sum, dim=0)
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+
+            for _ in T.serial(sinkhorn_repeat - 1):
+                T.reduce_sum(cm, row_sum, dim=1)
+                for j, k in T.Parallel(hc_mult, hc_mult):
+                    cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
+
+                T.reduce_sum(cm, col_sum, dim=0)
+                for j, k in T.Parallel(hc_mult, hc_mult):
+                    cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+
+            for j, k in T.Parallel(hc_mult, hc_mult):
+                comb_mix[i, j * hc_mult + k] = cm[j, k]
+        else:
+            pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
+            for j in T.Parallel(hc_mult):
+                pre_mix_shared[j] = (
+                    T.sigmoid(
+                        mixes_shared[j] * hc_scale[0] + hc_base[j],
+                    )
+                    + hc_pre_eps
+                )
+
+            # Pass 1: stash unnormalized weighted-sum output in shared memory
+            # as bf16 (matches the rounding that RMSNorm would see) while
+            # accumulating the per-position squared sum.
+            output_shared = T.alloc_shared(hidden_size, T.bfloat16)
+            sumsq_per_pos = T.alloc_fragment(hidden_block, T.float32)
+            T.clear(sumsq_per_pos)
+
+            for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=3):
+                xs = T.alloc_shared((hc_mult, hidden_block), T.bfloat16)
+                xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
+                T.copy(residual[i, 0, i0_h * hidden_block], xs)
+                T.copy(xs, xl)
+
+                ol = T.alloc_fragment(hidden_block, T.float32)
+                T.clear(ol)
+
+                for i_hc in T.serial(hc_mult):
+                    pre = pre_mix_shared[i_hc]
+                    for i1_h in T.Parallel(hidden_block):
+                        ol[i1_h] += pre * xl[i_hc, i1_h]
+
+                for i1_h in T.Parallel(hidden_block):
+                    sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
+                    output_shared[i0_h * hidden_block + i1_h] = T.bfloat16(ol[i1_h])
+
+            sumsq = T.alloc_fragment(1, T.float32)
+            T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
+            rsqrt_norm = T.alloc_fragment(1, T.float32)
+            rsqrt_norm[0] = T.rsqrt(sumsq[0] / hidden_size + norm_eps)
+
+            # Pass 2: scale by rsqrt * norm_weight and write the result to HBM.
+            for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                w_shared = T.alloc_shared(hidden_block, T.bfloat16)
+                w_local = T.alloc_fragment(hidden_block, T.float32)
+                T.copy(norm_weight[i0_h * hidden_block], w_shared)
+                T.copy(w_shared, w_local)
+
+                ol = T.alloc_fragment(hidden_block, T.float32)
+                for i1_h in T.Parallel(hidden_block):
+                    ol[i1_h] = (
+                        output_shared[i0_h * hidden_block + i1_h]
+                        * rsqrt_norm[0]
+                        * w_local[i1_h]
+                    )
+
+                T.copy(ol, layer_input[i, i0_h * hidden_block])
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+@tilelang.jit(
+    pass_configs=pass_configs,
 )
 def mhc_fused_tilelang(
     comb_mix,
@@ -223,8 +395,8 @@ def mhc_fused_tilelang(
 
     with T.Kernel(m, n_tiles, split_k, threads=n_thr) as (i_n, i_nt, i_ks):
         tid = T.get_thread_binding()
-        warp_id = T.get_warp_idx()
-        lane = T.get_lane_idx()
+        warp_id = tid // 32
+        lane = tid % 32
 
         s_warp = T.alloc_shared((num_warps, tile_n + 1), T.float32)
         s_post = T.alloc_shared((hc,), T.float32)
@@ -240,7 +412,8 @@ def mhc_fused_tilelang(
         T.clear(sqr)
         h_split_start = i_ks * h_per_split
 
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
 
         T.copy(post_mix[i_n, 0], s_post)
         T.copy(comb_mix[i_n, 0, 0], s_comb)
@@ -299,15 +472,12 @@ def mhc_fused_tilelang(
                     v2 += s_warp[w, tile_n]
                 rp_out[i_ks, i_n] = v2
 
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
 )
 def mhc_post_tilelang(
     a,
@@ -340,7 +510,8 @@ def mhc_post_tilelang(
 
         a_local = T.alloc_fragment((hc, hc), T.float32)
         c_local = T.alloc_fragment(hc, T.float32)
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
         T.copy(a[i_n, 0, 0], a_local)
         T.copy(c[i_n, 0], c_local)
 
@@ -356,15 +527,193 @@ def mhc_post_tilelang(
                     x_local[i_hco, i1_h] += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
 
             T.copy(x_local, x[i_n, 0, i0_h * h_blk])
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
 
 
 @tilelang.jit(
-    pass_configs={
-        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
-    },
+    pass_configs=pass_configs,
+)
+def hc_prenorm_gemm_tilelang(
+    x,
+    fn,
+    out,
+    sqrsum,
+    hidden_size: int,
+    hc_mult: int = 4,
+    n_out: int = 24,
+    n_thr: int = 512,
+    tile_n: int = 12,
+    n_splits: int = 1,
+) -> tilelang.JITKernel:
+    num_tokens = T.dynamic("num_tokens")
+    hc_hidden_size = hc_mult * hidden_size
+    k_per_split = hc_hidden_size // n_splits
+    k_iters = k_per_split // n_thr
+    n_tiles = T.ceildiv(n_out, tile_n)
+
+    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
+    out: T.Tensor((n_splits, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
+    sqrsum: T.Tensor((n_splits, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
+
+    with T.Kernel(num_tokens, n_tiles, n_splits, threads=n_thr) as (
+        i_n,
+        i_t,
+        i_s,
+    ):
+        tid = T.get_thread_binding()
+        acc = T.alloc_local((tile_n,), T.float32)
+        sqr = T.alloc_local((1,), T.float32)
+        T.clear(acc)
+        T.clear(sqr)
+
+        if ENABLE_PDL:
+            T.pdl_sync()
+
+        for it in T.serial(k_iters):
+            i_k = i_s * k_per_split + it * n_thr + tid
+            x_val = x[i_n, i_k]
+            for i_o in T.unroll(tile_n):
+                out_idx = i_t * tile_n + i_o
+                if out_idx < n_out:
+                    acc[i_o] += x_val * fn[out_idx, i_k]
+            if i_t == 0:
+                sqr[0] += x_val * x_val
+
+        for i_o in T.unroll(tile_n):
+            acc[i_o] = T.warp_reduce_sum(acc[i_o])
+        if i_t == 0:
+            sqr[0] = T.warp_reduce_sum(sqr[0])
+
+        lane = tid % 32
+        warp_id = tid // 32
+        num_warps = n_thr // 32
+        warp_acc = T.alloc_shared((num_warps, tile_n), T.float32)
+        warp_sqr = T.alloc_shared(num_warps, T.float32)
+
+        if lane == 0:
+            for i_o in T.unroll(tile_n):
+                warp_acc[warp_id, i_o] = acc[i_o]
+            if i_t == 0:
+                warp_sqr[warp_id] = sqr[0]
+        T.sync_threads()
+
+        if warp_id == 0:
+            if lane < tile_n:
+                reduced_acc = T.alloc_var(T.float32, init=0.0)
+                for i_w in T.unroll(num_warps):
+                    reduced_acc += warp_acc[i_w, lane]
+                out_idx = i_t * tile_n + lane
+                if out_idx < n_out:
+                    out[i_s, i_n, out_idx] = reduced_acc
+            if lane == 0 and i_t == 0:
+                reduced_sqr = T.alloc_var(T.float32, init=0.0)
+                for i_w in T.unroll(num_warps):
+                    reduced_sqr += warp_sqr[i_w]
+                sqrsum[i_s, i_n] = reduced_sqr
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+@tilelang.jit(
+    pass_configs=pass_configs,
+)
+def hc_prenorm_gemm_block_m_tilelang(
+    x,
+    fn,
+    out,
+    sqrsum,
+    hidden_size: int,
+    hc_mult: int = 4,
+    n_out: int = 24,
+    n_thr: int = 512,
+    tile_n: int = 12,
+    block_m: int = 2,
+) -> tilelang.JITKernel:
+    num_tokens = T.dynamic("num_tokens")
+    hc_hidden_size = hc_mult * hidden_size
+    k_iters = hc_hidden_size // n_thr
+    n_tiles = T.ceildiv(n_out, tile_n)
+    m_tiles = T.ceildiv(num_tokens, block_m)
+
+    x: T.Tensor((num_tokens, hc_hidden_size), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    fn: T.Tensor((n_out, hc_hidden_size), T.float32)  # type: ignore[no-redef, valid-type]
+    out: T.Tensor((1, num_tokens, n_out), T.float32)  # type: ignore[no-redef, valid-type]
+    sqrsum: T.Tensor((1, num_tokens), T.float32)  # type: ignore[no-redef, valid-type]
+
+    with T.Kernel(m_tiles, n_tiles, threads=n_thr) as (i_mt, i_t):
+        tid = T.get_thread_binding()
+        acc = T.alloc_local((block_m, tile_n), T.float32)
+        sqr = T.alloc_local((block_m,), T.float32)
+        T.clear(acc)
+        T.clear(sqr)
+
+        if ENABLE_PDL:
+            T.pdl_sync()
+
+        for it in T.serial(k_iters):
+            i_k = it * n_thr + tid
+            fn_val = T.alloc_local((tile_n,), T.float32)
+            for i_o in T.unroll(tile_n):
+                out_idx = i_t * tile_n + i_o
+                if out_idx < n_out:
+                    fn_val[i_o] = fn[out_idx, i_k]
+                else:
+                    fn_val[i_o] = 0.0
+            for i_m in T.unroll(block_m):
+                token_idx = i_mt * block_m + i_m
+                if token_idx < num_tokens:
+                    x_val = x[token_idx, i_k]
+                    for i_o in T.unroll(tile_n):
+                        acc[i_m, i_o] += x_val * fn_val[i_o]
+                    if i_t == 0:
+                        sqr[i_m] += x_val * x_val
+
+        for i_m in T.unroll(block_m):
+            for i_o in T.unroll(tile_n):
+                acc[i_m, i_o] = T.warp_reduce_sum(acc[i_m, i_o])
+            if i_t == 0:
+                sqr[i_m] = T.warp_reduce_sum(sqr[i_m])
+
+        lane = tid % 32
+        warp_id = tid // 32
+        num_warps = n_thr // 32
+        warp_acc = T.alloc_shared((num_warps, block_m, tile_n), T.float32)
+        warp_sqr = T.alloc_shared((num_warps, block_m), T.float32)
+
+        if lane == 0:
+            for i_m in T.unroll(block_m):
+                for i_o in T.unroll(tile_n):
+                    warp_acc[warp_id, i_m, i_o] = acc[i_m, i_o]
+                if i_t == 0:
+                    warp_sqr[warp_id, i_m] = sqr[i_m]
+        T.sync_threads()
+
+        if warp_id == 0:
+            for i_m in T.unroll(block_m):
+                token_idx = i_mt * block_m + i_m
+                if token_idx < num_tokens:
+                    if lane < tile_n:
+                        reduced_acc = T.alloc_var(T.float32, init=0.0)
+                        for i_w in T.unroll(num_warps):
+                            reduced_acc += warp_acc[i_w, i_m, lane]
+                        out_idx = i_t * tile_n + lane
+                        if out_idx < n_out:
+                            out[0, token_idx, out_idx] = reduced_acc
+                    if lane == 0 and i_t == 0:
+                        reduced_sqr = T.alloc_var(T.float32, init=0.0)
+                        for i_w in T.unroll(num_warps):
+                            reduced_sqr += warp_sqr[i_w, i_m]
+                        sqrsum[0, token_idx] = reduced_sqr
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+@tilelang.jit(
+    pass_configs=pass_configs,
 )
 def hc_head_fuse_tilelang(
     residual,
@@ -399,7 +748,8 @@ def hc_head_fuse_tilelang(
     out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
 
     with T.Kernel(num_tokens, threads=n_thr) as i:
-        T.pdl_sync()
+        if ENABLE_PDL:
+            T.pdl_sync()
 
         # ------------------------------------------------------------------
         # Pass 1 – for each residual channel m_c and h_block:
@@ -457,4 +807,5 @@ def hc_head_fuse_tilelang(
 
             T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
 
-        T.pdl_trigger()
+        if ENABLE_PDL:
+            T.pdl_trigger()
