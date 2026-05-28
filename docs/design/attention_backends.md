@@ -205,8 +205,9 @@ hardware and configuration.
 | `FLASHINFER` | FlashInfer CUTLASS backend | fp16, bf16 | 10.x | DeepSeek R1 dims only |
 | `TOKENSPEED_MLA` | | fp16, bf16 | 10.x | DeepSeek R1 dims only |
 
-> **‡** TRT-LLM Ragged is the default on Blackwell (SM100).
-> On other GPUs, FlashAttention is used as the default.
+> **‡** Automatic selection tries FlashAttention first. On Blackwell
+> (SM100), the fallback order is TRT-LLM Ragged, FlashInfer, then
+> TokenSpeed MLA. On other GPUs, only FlashAttention is considered.
 
 ### Decode Backends
 

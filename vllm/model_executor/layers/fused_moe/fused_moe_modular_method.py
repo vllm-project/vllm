@@ -51,14 +51,12 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
             FusedMoEKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-                inplace=inplace,
             ),
         )
 
