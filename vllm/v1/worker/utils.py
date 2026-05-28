@@ -92,6 +92,7 @@ class KVBlockZeroer:
         self._id_cap: int = 0
         self._ids_pinned: torch.Tensor | None = None
         self._ids_gpu: torch.Tensor | None = None
+        self._mamba_tensors: list[torch.Tensor] = []
 
     def init_meta(
         self,
@@ -117,6 +118,7 @@ class KVBlockZeroer:
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None
+        self._mamba_tensors = []
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -167,11 +169,20 @@ class KVBlockZeroer:
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
                     seg_addrs.append(dp + off_bytes)
 
-        if not seg_addrs or page_size_el is None:
+        if seg_addrs and page_size_el is not None:
+            blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
+            self._meta = (
+                torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
+                page_size_el,
+                blk_size,
+                len(seg_addrs),
+            )
+        else:
             self._meta = None
+
+        if self._meta is None and not self._mamba_tensors:
             return
 
-        blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
         self._id_cap = 8192
         self._ids_pinned = torch.empty(
             self._id_cap,
@@ -179,18 +190,11 @@ class KVBlockZeroer:
             pin_memory=self.pin_memory,
         )
         self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
-        self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            page_size_el,
-            blk_size,
-            len(seg_addrs),
-        )
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
-        if not block_ids or self._meta is None:
+        if not block_ids or (self._meta is None and not self._mamba_tensors):
             return
-        seg_addrs, page_size_el, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         if n_blocks > self._id_cap:
             self._id_cap = n_blocks * 2
@@ -206,15 +210,21 @@ class KVBlockZeroer:
         self._ids_pinned[:n_blocks].numpy()[:] = block_ids
         idx = self._ids_gpu[:n_blocks]
         idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
-        grid = (n_blocks * n_segs * (page_size_el // blk_size),)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            PAGE_SIZE_EL=page_size_el,
-            BLOCK_SIZE=blk_size,
-        )
+
+        if self._meta is not None:
+            seg_addrs, page_size_el, blk_size, n_segs = self._meta
+            grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+            _zero_kv_blocks_kernel[grid](
+                seg_addrs,
+                idx,
+                n_blocks,
+                N_SEGS=n_segs,
+                PAGE_SIZE_EL=page_size_el,
+                BLOCK_SIZE=blk_size,
+            )
+
+        for tensor in self._mamba_tensors:
+            tensor.index_fill_(0, idx, 0)
 
 
 @dataclass

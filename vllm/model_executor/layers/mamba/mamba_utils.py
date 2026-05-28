@@ -79,12 +79,13 @@ class MambaStateDtypeCalculator:
         conv_state_dtype, temporal_state_dtype = cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
         )
+        ckpt_replay_dtype = torch.bfloat16
         return (
             conv_state_dtype,
             temporal_state_dtype,
             torch.float32,
-            torch.bfloat16,
-            torch.bfloat16,
+            ckpt_replay_dtype,
+            ckpt_replay_dtype,
             torch.float32,
             torch.float32,
             torch.int32,
@@ -199,10 +200,6 @@ class MambaStateShapeCalculator:
         temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim)
         nheads = divide(num_heads, tp_world_size)
         ngroups = max(1, divide(n_groups, tp_world_size))
-        # MTP: each spec step writes 1+num_spec tokens to one slot; the
-        # window must fit `checkpoint_interval` accepted history + the
-        # current call's NPREDICTED writes before the kernel checks
-        # `prev_k + NPREDICTED > max_window` (kernel hard limit: 16).
         max_window = checkpoint_interval + num_spec
         old_x_shape = (max_window, nheads, head_dim)
         old_B_shape = (2, max_window, ngroups, state_size)

@@ -56,6 +56,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
@@ -749,22 +750,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             old_cumAdt_src = old_cumAdt
             cache_buf_idx_src = cache_buf_idx
             prev_num_accepted_tokens_src = prev_num_accepted_tokens
-            if not old_x.is_contiguous():
-                old_x = self._get_contiguous_checkpointing_buffer(
-                    old_x, "_checkpointing_old_x", copy_source=True
-                )
-            if not old_B.is_contiguous():
-                old_B = self._get_contiguous_checkpointing_buffer(
-                    old_B, "_checkpointing_old_B", copy_source=True
-                )
-            if not old_dt.is_contiguous():
-                old_dt = self._get_contiguous_checkpointing_buffer(
-                    old_dt, "_checkpointing_old_dt", copy_source=True
-                )
-            if not old_cumAdt.is_contiguous():
-                old_cumAdt = self._get_contiguous_checkpointing_buffer(
-                    old_cumAdt, "_checkpointing_old_cumAdt", copy_source=True
-                )
+            # FlashInfer checkpointing_ssu accepts strided cache pages for
+            # old_x/old_B/old_dt/old_cumAdt — only inner-dim contiguity is
+            # required, outer strides are passed via the wrapper. Mirror
+            # those big tensors here was both wasteful and incorrect (Daniel
+            # 2026-05 notes: removing this mirror was the 0.02 → 0.92 fix).
+            # The scalar tracker tensors below still need contiguous mirrors
+            # because FlashInfer requires them contiguous.
             if not cache_buf_idx.is_contiguous():
                 cache_buf_idx = self._get_contiguous_checkpointing_buffer(
                     cache_buf_idx,
@@ -1140,6 +1132,17 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             assert preallocated_ssm_out_d is not None
 
+            ssm_out_d = preallocated_ssm_out_d.view(
+                num_decode_tokens, -1, self.head_dim
+            )
+
+
+            import os
+            _PROBE_MAX = int(os.environ.get("MAMBA_PROBE_CALLS", "0"))
+            _PROBE_AFTER = os.environ.get("MAMBA_PROBE_AFTER", "1") == "1"
+            if not hasattr(MambaMixer2, "_probe_calls"):
+                MambaMixer2._probe_calls = 0
+
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
@@ -1156,7 +1159,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
-                out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
+                out=ssm_out_d,
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
                 max_seqlen=state_indices_tensor_d.size(-1),
@@ -1186,6 +1189,35 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # one of those lands.
                 spec_uniform_state_slots=False,
             )
+            # Padding rows from CUDA-graph batches or block-table padding map
+            # to NULL_BLOCK_ID slots. The kernel still wrote arbitrary output
+            # for those rows; zero them so they don't poison downstream layers.
+            null_decode_rows = torch.all(
+                state_indices_tensor_d_input.reshape(num_decode_tokens, -1)
+                == NULL_BLOCK_ID,
+                dim=1,
+            )
+            ssm_out_d.mul_((~null_decode_rows).view(-1, 1, 1))
+            if (_PROBE_AFTER and MambaMixer2._probe_calls < _PROBE_MAX):
+                MambaMixer2._probe_calls += 1
+                _idx = state_indices_tensor_d_input.flatten()
+                _valid = _idx[_idx >= 0]
+                _take = _valid[:8].to(torch.long)
+                _slot = _take[0].item() if _take.numel() > 0 else -1
+                _out_norm_per_pos = ssm_out_d.detach().float().abs().mean(dim=(1,2)).cpu().tolist()[:8]
+                logger.warning(
+                    "[MMP %d] %s pd=%d dd=%d nt=%d slots=%s pa=%s bi=%s "
+                    "state[s0]=%.3e out_per_pos[:8]=%s",
+                    MambaMixer2._probe_calls, self.prefix,
+                    num_prefills, num_decodes, num_decode_tokens,
+                    _take.cpu().tolist(),
+                    prev_num_accepted_tokens[_take].cpu().tolist()
+                        if _take.numel() > 0 else [],
+                    cache_buf_idx[_take].cpu().tolist()
+                        if _take.numel() > 0 else [],
+                    float(ssm_state[_slot].abs().mean().item()) if _slot >= 0 else 0.0,
+                    [f"{v:.3e}" for v in _out_norm_per_pos],
+                )
         if old_x is not old_x_src:
             old_x_src.copy_(old_x)
         if old_B is not old_B_src:

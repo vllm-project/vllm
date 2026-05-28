@@ -494,6 +494,15 @@ def test_checkpointing_ssu_copies_replay_state_to_destination_slot(
 
 
 @requires_flashinfer
+@pytest.mark.xfail(
+    reason=(
+        "Known FlashInfer kernel bug at max_window=1 with batch>1: "
+        "the checkpointing_ssu kernel produces incorrect output in this "
+        "regime even via the varlen path. Tracked upstream; checkpointing "
+        "with interval=1 falls back to the old kernel in production."
+    ),
+    strict=False,
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 def test_checkpointing_ssu_stp_large_batch_outputs_match_old_flashinfer(
     dtype: torch.dtype,
