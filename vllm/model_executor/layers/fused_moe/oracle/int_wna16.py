@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -37,6 +38,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
+    XPU = "XPU"
 
 
 def backend_to_kernel_cls(
@@ -57,6 +59,13 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
+    elif backend == WNA16MoEBackend.XPU:
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+            XPUExpertsInt4,
+        )
+
+        return [XPUExpertsInt4]
+
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -65,6 +74,9 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
+    if current_platform.is_xpu():
+        return [WNA16MoEBackend.XPU]
+
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -156,8 +168,7 @@ def make_wna16_moe_kernel(
     w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Currently, we only support MarlinExperts and BatchedMarlinExperts
-    assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
+    assert experts_cls is not None
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
@@ -172,31 +183,52 @@ def make_wna16_moe_kernel(
     assert prepare_finalize is not None
     assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
 
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        assert experts_cls == BatchedMarlinExperts
+    if experts_cls in (MarlinExperts, BatchedMarlinExperts):
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            assert experts_cls == BatchedMarlinExperts
+            max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens is not None
+            experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=moe_config,
+                quant_config=moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=is_k_full,
+            )
+        else:
+            assert experts_cls == MarlinExperts
+            experts = MarlinExperts(
+                moe_config=moe_config,
+                quant_config=moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=is_k_full,
+            )
+    elif (
+        prepare_finalize.activation_format
+        == mk.FusedMoEActivationFormat.BatchedExperts
+    ):
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+        experts = experts_cls(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
     else:
-        assert experts_cls == MarlinExperts
-        experts = MarlinExperts(
+        experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
         )
 
     return mk.FusedMoEKernel(
@@ -525,10 +557,47 @@ def _process_awq_weights_marlin(
     )
 
 
+def _process_weights_xpu(
+    w13_qweight: torch.Tensor,
+    w2_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    None,  # w13_g_idx
+    None,  # w2_g_idx
+    None,  # w13_g_idx_sort_indices
+    None,  # w2_g_idx_sort_indices
+    None,  # w13_input_global_scale
+    None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    return (
+        w13_qweight.transpose(1, 2).contiguous().view(torch.uint8),
+        w2_qweight.transpose(1, 2).contiguous().view(torch.uint8),
+        w13_scales.transpose(1, 2).contiguous(),
+        w2_scales.transpose(1, 2).contiguous(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        w13_bias,
+        w2_bias,
+    )
+
+
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig,
+    quant_config: QuantizationConfig | None,
     input_dtype: torch.dtype | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -615,6 +684,15 @@ def convert_to_wna16_moe_kernel_format(
             w2_g_idx,
             w13_qzeros,
             w2_qzeros,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend == WNA16MoEBackend.XPU:
+        return _process_weights_xpu(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
             w13_bias,
             w2_bias,
         )
