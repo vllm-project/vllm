@@ -336,6 +336,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
     ],
     PlatformEnum.ROCM: [
         TritonW4A16LinearKernel,
@@ -833,24 +834,41 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     current platform."""
     config = NvFp4LinearLayerConfig()
 
-    # VLLM_BATCH_INVARIANT unconditionally forces emulation for deterministic
-    # execution. It overrides both --linear-backend and the deprecated env
-    # vars below.
+    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
+    # batch-invariant CUTLASS implementation when available, otherwise fall
+    # back to emulation. It overrides both --linear-backend and the deprecated
+    # env vars below.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
     if envs.VLLM_BATCH_INVARIANT:
-        if linear_backend not in ("auto", "emulation"):
-            logger.warning_once(
-                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using "
-                "the emulation backend for deterministic execution.",
-                linear_backend,
-            )
+        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+        if bi_supported:
+            if linear_backend not in ("auto", "cutlass"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the CUTLASS backend for deterministic execution.",
+                    linear_backend,
+                )
+            else:
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+                    "CUTLASS backend for deterministic execution."
+                )
+            force_kernel = CutlassNvFp4LinearKernel
         else:
+            if linear_backend not in ("auto", "emulation"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the emulation backend for deterministic execution.",
+                    linear_backend,
+                )
             logger.info_once(
-                "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                "emulation backend for deterministic execution."
+                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                "kernel is not supported on this platform; falling back to "
+                "emulation for deterministic execution. Reason: %s",
+                reason,
             )
-        force_kernel = EmulationNvFp4LinearKernel
+            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
         # is "auto". Deprecation warnings are emitted from vllm/envs.py.
