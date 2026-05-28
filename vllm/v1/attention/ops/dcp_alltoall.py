@@ -430,8 +430,8 @@ def dcp_a2a_lse_reduce(
     H_per_rank = H // world_size
 
     if empty_req_mask is not None:
-        cp_attn_out.masked_fill_(empty_req_mask[:, None], -float("inf"))
-        cp_attn_lse.masked_fill_(empty_req_mask[:, None, None], 0)
+        cp_attn_lse.masked_fill_(empty_req_mask[:, None], -float("inf"))
+        cp_attn_out.masked_fill_(empty_req_mask[:, None, None], 0)
 
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
