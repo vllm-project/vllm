@@ -1248,9 +1248,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
-            assert output_intermediate_tensors is not None
-            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            output_intermediate_tensors.kv_connector_output = kv_connector_output
             return output_intermediate_tensors
         return None
 
@@ -1287,7 +1284,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.postprocess_state(
                     input_batch.idx_mapping, torch.zeros_like(input_batch.idx_mapping)
                 )
-            return None
+
+            # Post-step KV connector related operations.
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
         sampler_output, num_sampled, num_rejected = self.sample(
@@ -1415,17 +1415,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
+        # Post-step KV connector related operations.
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return None
+            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         assert self.pooling_runner is not None
         pooler_output, is_valid = self.pooling_runner.pool(
             hidden_states, input_batch, self.req_states
         )
-
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
 
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(

@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
 
@@ -76,7 +77,10 @@ def _make_runner(**overrides: Any) -> Any:
     runner.max_num_reqs = 8
     runner.max_num_tokens = 16
     runner.decode_query_len = 1
-    runner.kv_connector = SimpleNamespace(set_disabled=lambda *_: None)
+    runner.kv_connector = SimpleNamespace(
+        set_disabled=lambda *_: None,
+        post_forward=lambda *_, **__: None,
+    )
     runner.eplb = eplb.EPLBController(runner.parallel_config, runner.device)
     runner.pooling_runner = None
     runner.execute_model_state = None
@@ -186,5 +190,6 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     )
     runner.eplb.step = lambda *args, **kwargs: events.append("eplb")
 
-    assert mrv2.GPUModelRunner.sample_tokens(runner, None) is None
+    output = mrv2.GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]

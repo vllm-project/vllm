@@ -81,7 +81,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
+from vllm.v1.utils import IterationDetails, compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -396,12 +396,22 @@ class EngineCore:
             raise err
 
     @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput):
+    def log_iteration_details(self, scheduler_output: SchedulerOutput | None):
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
+        # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
+        if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
+            yield
+            return
         self._iteration_index = getattr(self, "_iteration_index", 0)
-        iteration_details = compute_iteration_details(scheduler_output)
+        # scheduler_output=None marks a DP dummy iteration.
+        if scheduler_output is None:
+            iteration_details = IterationDetails(0, 0, 0, 0)
+            is_dummy = True
+        else:
+            iteration_details = compute_iteration_details(scheduler_output)
+            is_dummy = False
         before = time.monotonic()
         yield
         logger.info(
@@ -420,6 +430,7 @@ class EngineCore:
                     " generation tokens, iteration elapsed time: ",
                     format((time.monotonic() - before) * 1000, ".2f"),
                     " ms",
+                    " (dummy)" if is_dummy else "",
                 ]
             )
         )
@@ -1853,7 +1864,8 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
-                self.execute_dummy_batch()
+                with self.log_iteration_details(None):
+                    self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
