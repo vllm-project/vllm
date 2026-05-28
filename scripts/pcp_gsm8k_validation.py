@@ -89,6 +89,23 @@ def main() -> int:
         help="Shard MoE experts across the (DP * PCP * TP) ranks.",
     )
     parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=None,
+        help="Override gpu_memory_utilization (default: vLLM default 0.9).",
+    )
+    parser.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=None,
+        help="Override max_num_batched_tokens.",
+    )
+    parser.add_argument(
+        "--load-format",
+        default=None,
+        help="Override load_format (e.g. 'fastsafetensors' for big NVFP4 models).",
+    )
+    parser.add_argument(
         "--result-json",
         default=None,
         help="Optional path to write the eval result dict as JSON",
@@ -125,6 +142,12 @@ def main() -> int:
         llm_kwargs["attention_backend"] = args.attention_backend
     if args.enable_expert_parallel:
         llm_kwargs["enable_expert_parallel"] = True
+    if args.gpu_memory_utilization is not None:
+        llm_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+    if args.max_num_batched_tokens is not None:
+        llm_kwargs["max_num_batched_tokens"] = args.max_num_batched_tokens
+    if args.load_format is not None:
+        llm_kwargs["load_format"] = args.load_format
 
     t0 = time.perf_counter()
     llm = LLM(**llm_kwargs)
