@@ -58,13 +58,14 @@ class DPCoordinator:
 
     def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
         try:
+            timeout = 120
             ready = multiprocessing.connection.wait(
-                [zmq_addr_pipe, self.proc.sentinel], timeout=30
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
             )
             if not ready:
                 raise RuntimeError(
                     "DP Coordinator process failed to report ZMQ addresses "
-                    "during startup."
+                    f"within timeout={timeout} seconds during startup."
                 )
             try:
                 return zmq_addr_pipe.recv()

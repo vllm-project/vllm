@@ -86,7 +86,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization

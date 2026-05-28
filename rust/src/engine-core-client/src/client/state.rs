@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
@@ -80,7 +80,7 @@ impl EngineRoutingState {
 #[derive(Debug)]
 pub struct RequestRegistry {
     closed: bool,
-    requests: BTreeMap<String, TrackedRequest>,
+    requests: HashMap<String, TrackedRequest>,
     routing_per_engine: BTreeMap<EngineId, EngineRoutingState>,
 }
 
@@ -88,7 +88,7 @@ impl RequestRegistry {
     pub fn new(engines: &[ConnectedEngine]) -> Self {
         Self {
             closed: false,
-            requests: BTreeMap::default(),
+            requests: HashMap::default(),
             routing_per_engine: engines
                 .iter()
                 .map(|engine| (engine.engine_id.clone(), EngineRoutingState::default()))
@@ -178,6 +178,15 @@ impl RequestRegistry {
                 .get(output.request_id.as_str())
                 .map(|tracked| tracked.sender.clone())
         }
+    }
+
+    /// Obtain stream senders for a whole engine output batch under one
+    /// registry lock. Finished outputs are removed before returning.
+    pub fn senders_for_outputs<'a>(
+        &mut self,
+        outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
+    ) -> Vec<Option<OutputSender>> {
+        outputs.into_iter().map(|output| self.sender_for_output(output)).collect()
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
