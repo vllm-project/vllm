@@ -594,6 +594,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def is_arch_support_pdl(cls) -> bool:
+        # Conditions adapted from
+        # https://github.com/sgl-project/sglang/blob/0abe6a85a51f2b7f1c3ca0e8f78944b609b94344/sgl-kernel/python/sgl_kernel/utils.py#L61 # noqa: E501
         try:
             device = torch.cuda.current_device()
             major, _ = torch.cuda.get_device_capability(device)
