@@ -48,7 +48,7 @@ class FileSystemTierManager(SecondaryTierManager):
     queue, so neither starves.
 
     submit_store / submit_load are non-blocking: they enqueue tasks and return.
-    get_finished() polls job completion and returns completed JobResults.
+    get_finished_jobs() polls job completion and returns completed JobResults.
 
     """
 
@@ -135,7 +135,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
 
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
