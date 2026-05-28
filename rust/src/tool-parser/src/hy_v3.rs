@@ -99,12 +99,6 @@ impl HyV3ToolParser {
         }
         Ok(())
     }
-
-    fn reset(&mut self) -> String {
-        self.mode = HyV3Mode::Text;
-        self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
-    }
 }
 
 impl ToolParser for HyV3ToolParser {
@@ -140,7 +134,9 @@ impl ToolParser for HyV3ToolParser {
     }
 
     fn reset(&mut self) -> String {
-        HyV3ToolParser::reset(self)
+        self.mode = HyV3Mode::Text;
+        self.emitted_tool_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 }
 
