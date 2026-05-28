@@ -18,7 +18,6 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
-    ModelConfig,
     PassConfig,
     VllmConfig,
 )
@@ -94,11 +93,12 @@ def test_fuse_mla_dual_rms_norm(
     dtype: torch.dtype,
     hidden_size: int,
     monkeypatch: pytest.MonkeyPatch,
+    make_compile_test_model_config,
 ):
     torch._dynamo.reset()
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm"],

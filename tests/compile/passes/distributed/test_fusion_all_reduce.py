@@ -272,6 +272,7 @@ def test_all_reduce_fusion_pass_replace(
     flashinfer_allreduce_backend,
     use_aiter: bool,
     monkeypatch: pytest.MonkeyPatch,
+    compile_test_llama_model_path: str,
 ):
     if use_aiter:
         with monkeypatch.context() as m:
@@ -303,6 +304,7 @@ def test_all_reduce_fusion_pass_replace(
                 flashinfer_allreduce_backend,
                 use_aiter,
                 monkeypatch,
+                compile_test_llama_model_path,
             ),
             nprocs=nprocs,
         )
@@ -323,6 +325,7 @@ def all_reduce_fusion_pass_on_test_model(
     flashinfer_allreduce_backend,
     use_aiter: bool,
     monkeypatch: pytest.MonkeyPatch,
+    compile_test_llama_model_path: str,
 ):
     set_random_seed(0)
 
@@ -361,11 +364,12 @@ def all_reduce_fusion_pass_on_test_model(
     vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path
 
-    # this is a fake model name to construct the model config
-    # in the vllm_config, it's not really used.
-    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
+        model=compile_test_llama_model_path,
+        tokenizer=compile_test_llama_model_path,
+        dtype=dtype,
+        skip_tokenizer_init=True,
+        seed=42,
     )
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)

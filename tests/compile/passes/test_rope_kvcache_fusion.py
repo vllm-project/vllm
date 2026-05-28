@@ -20,7 +20,6 @@ from vllm.config import (
     CacheConfig,
     CompilationConfig,
     CompilationMode,
-    ModelConfig,
     PassConfig,
     VllmConfig,
 )
@@ -218,6 +217,7 @@ def test_rope_kvcache_fusion(
     dtype: torch.dtype,
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
+    make_compile_test_model_config,
 ):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -228,7 +228,7 @@ def test_rope_kvcache_fusion(
         custom_ops.append("+rotary_embedding")
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         cache_config=CacheConfig(
             block_size=block_size,
             cache_dtype=kv_cache_dtype,

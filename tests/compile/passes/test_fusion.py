@@ -22,7 +22,6 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
-    ModelConfig,
     PassConfig,
     VllmConfig,
 )
@@ -305,6 +304,7 @@ def test_fusion_rmsnorm_quant(
     kernel_groupshape,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
+    make_compile_test_model_config,
 ):
     force_kernel, group_shape = kernel_groupshape
 
@@ -343,7 +343,7 @@ def test_fusion_rmsnorm_quant(
         custom_ops.append("+quant_fp8")
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
@@ -400,10 +400,11 @@ def test_aiter_fusion_rmsnorm_quant(
     eps: float,
     kernel_groupshape_quant: tuple,
     monkeypatch: pytest.MonkeyPatch,
+    make_compile_test_model_config,
 ):
     force_kernel, group_shape, use_aiter_quant_op = kernel_groupshape_quant
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=["+rms_norm", "+quant_fp8"],
