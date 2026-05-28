@@ -46,6 +46,7 @@ http-body = "1.0.1"
 itertools = "0.14.0"
 libc = "0.2.177"
 llm-multimodal = { git = "https://github.com/vllm-project/llm-multimodal", rev = "5b558989844d1c7af3e43d0f604069ffd9c06320" }
+mimalloc = "0.1.52"
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
@@ -80,7 +81,6 @@ tekken = { package = "tekken-rs", version = "0.1.1", default-features = false }
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
-mimalloc = "0.1.52"
 tiktoken-rs = "0.9.1"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
 tokenizers = "0.22.0"
