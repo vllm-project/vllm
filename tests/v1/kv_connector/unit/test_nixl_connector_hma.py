@@ -376,7 +376,7 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     """
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
     )
     block_size = 16
     llm_kwargs = {

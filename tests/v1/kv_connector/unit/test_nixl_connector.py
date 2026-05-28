@@ -1363,7 +1363,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     timeout = 6
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
         kv_connector_extra_config={"kv_lease_duration": timeout},
     )
     llm_kwargs = {
@@ -2737,3 +2737,47 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_both' should emit a DeprecationWarning for NixlConnector."""
+    import warnings
+
+    vllm_config = create_vllm_config(kv_role="kv_both")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+
+    deprecation_warnings = [
+        w for w in caught if issubclass(w.category, DeprecationWarning)
+    ]
+    assert len(deprecation_warnings) == 1
+    assert "kv_role='kv_both'" in str(deprecation_warnings[0].message)
+    assert "NixlConnector" in str(deprecation_warnings[0].message)
+
+
+def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
+    import warnings
+
+    for role in ("kv_consumer", "kv_producer"):
+        vllm_config = create_vllm_config(kv_role=role)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+
+        deprecation_warnings = [
+            w for w in caught if issubclass(w.category, DeprecationWarning)
+        ]
+        assert len(deprecation_warnings) == 0, (
+            f"kv_role={role!r} should not emit DeprecationWarning"
+        )

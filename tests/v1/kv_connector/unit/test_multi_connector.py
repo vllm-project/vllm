@@ -1057,7 +1057,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             "connectors": [
                 {
                     "kv_connector": "NixlConnector",
-                    "kv_role": "kv_both",
+                    "kv_role": "kv_consumer",
                 },
                 {
                     "kv_connector": "MockConnector",

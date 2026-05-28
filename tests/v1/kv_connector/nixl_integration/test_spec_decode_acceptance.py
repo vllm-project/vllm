@@ -56,12 +56,12 @@ MODEL_CONFIGS = [
         expected_acceptance_lengths_per_pos=[0.7296, 0.5208, 0.3545],
         id="llama3-8b-eagle3",
     ),
-    ModelConfig(
-        model="Qwen/Qwen3.5-0.8B-Base",
-        method="mtp",
-        expected_acceptance_length=1.798,
-        id="qwen35-0.8b-mtp",
-    ),
+    # ModelConfig(
+    #     model="Qwen/Qwen3.5-0.8B-Base",
+    #     method="mtp",
+    #     expected_acceptance_length=1.798,
+    #     id="qwen35-0.8b-mtp",
+    # ),
 ]
 
 DEFAULT_NUM_PROMPTS = 80
