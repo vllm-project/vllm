@@ -150,6 +150,10 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HERMES)
     );
     assert_eq!(
+        factory.resolve_name_for_model("tencent/Hy3-preview"),
+        Some(names::HY_V3)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M2-01"),
         Some(names::MINIMAX_M2)
     );
