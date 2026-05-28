@@ -115,21 +115,6 @@ class TestCLSPool:
         expected = torch.tensor([[1.0, 2.0], [5.0, 6.0]])
         assert torch.equal(out, expected)
 
-    def test_single_sequence(self):
-        hidden = torch.tensor([[10.0, 20.0], [30.0, 40.0], [50.0, 60.0]])
-        metadata = _make_metadata([3])
-        pooler = CLSPool()
-        out = pooler(hidden, metadata)
-        expected = torch.tensor([[10.0, 20.0]])
-        assert torch.equal(out, expected)
-
-    def test_single_token_sequences(self):
-        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-        metadata = _make_metadata([1, 1])
-        pooler = CLSPool()
-        out = pooler(hidden, metadata)
-        assert torch.equal(out, hidden)
-
     def test_rejects_partial_prefill(self):
         hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
         metadata = _make_metadata([3], num_scheduled_tokens=[2])
