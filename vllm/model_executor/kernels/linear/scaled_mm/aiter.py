@@ -4,7 +4,6 @@
 
 import torch
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     rocm_aiter_ops,
@@ -247,7 +246,6 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if c.weight_shape is None:
             return False, "weight_shape is required for Aiter kernels"
         N, K = c.weight_shape
-        fp8_dtype = current_platform.fp8_dtype()
 
         if c.out_dtype is not torch.bfloat16:
             return False, "requires bfloat16 output dtype."
@@ -261,7 +259,8 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
             return (
                 False,
-                f"requires N >= 16 and both N and K divisible by 16, received N={N} and K={K}.",
+                "requires N >= 16 and both N and K divisible by 16, "
+                f"received N={N} and K={K}.",
             )
 
         return True, None
