@@ -7,6 +7,7 @@ import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
+    _use_tf32_hc_prenorm_gemm,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
@@ -94,6 +95,20 @@ def hc_head_ref(
     pre_mix = torch.nn.functional.linear(residual_norm, fn)
     pre_mix = torch.sigmoid(pre_mix * hc_scale + hc_base) + hc_eps
     return torch.sum(pre_mix.unsqueeze(-1) * residual.float(), dim=-2).bfloat16()
+
+
+def test_sm120_uses_tf32_hc_prenorm_gemm_without_deepgemm(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+    monkeypatch.setattr(
+        "vllm.utils.deep_gemm.is_deep_gemm_supported",
+        lambda: False,
+    )
+
+    assert _use_tf32_hc_prenorm_gemm()
 
 
 @pytest.mark.skipif(
