@@ -1423,14 +1423,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Fusion is supported in both shuffle and non-shuffle KV cache layouts.
         return rocm_aiter_ops.is_enabled()
-
-    def set_fused_kv_cache_layout(self):
-        # No-op: this backend uses the AITER flash attention kernel for
-        # decode, which reads V in the same layout the AITER fused write
-        # produces, so no layout adjustment is needed.
-        pass
 
     def do_qk_norm_rope_kvcache_update(
         self,
