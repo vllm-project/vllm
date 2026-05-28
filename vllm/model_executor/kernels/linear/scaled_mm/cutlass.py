@@ -311,16 +311,50 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         out_dtype = self.config.out_dtype
-        # hopper requires padding only when M is not 4-aligned.
-        if self.is_hopper and A.shape[0] % 4 != 0:
-            return torch.ops.vllm.padded_cutlass(
-                A,
-                B,
-                As,
-                Bs,
-                list(self.weight_group_shape),
-                out_dtype,
-            )
+        if self.is_hopper:
+
+            def run_padded(
+                A: torch.Tensor,
+                B: torch.Tensor,
+                As: torch.Tensor,
+                Bs: torch.Tensor,
+            ) -> torch.Tensor:
+                return torch.ops.vllm.padded_cutlass(
+                    A,
+                    B,
+                    As,
+                    Bs,
+                    list(self.weight_group_shape),
+                    out_dtype,
+                )
+
+            def run_direct(
+                A: torch.Tensor,
+                B: torch.Tensor,
+                As: torch.Tensor,
+                Bs: torch.Tensor,
+            ) -> torch.Tensor:
+                return ops.cutlass_scaled_mm(
+                    A,
+                    B.T,
+                    out_dtype=out_dtype,
+                    scale_a=As,
+                    scale_b=Bs.T,
+                )
+
+            if torch.compiler.is_compiling():
+                # vLLM compile drops shape guards, so keep the M-alignment
+                # decision inside the graph
+                return torch.cond(
+                    A.shape[0] % 4 != 0,
+                    run_padded,
+                    run_direct,
+                    (A, B, As, Bs),
+                )
+
+            if A.shape[0] % 4 != 0:
+                return run_padded(A, B, As, Bs)
+
         return ops.cutlass_scaled_mm(
             A,
             B.T,
