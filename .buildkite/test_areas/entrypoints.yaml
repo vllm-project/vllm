@@ -28,7 +28,7 @@ steps:
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       soft_fail: true
       depends_on:
       - image-build-amd
