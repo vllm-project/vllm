@@ -323,11 +323,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         from vllm.v1.worker.workspace import current_workspace_manager
 
-        max_num_partial_tiles = (
-            reduce_partial_map_size
-            if isinstance(reduce_partial_map_size, int)
-            else int(torch.Size(reduce_partial_map_size).numel())
-        )
+        max_num_partial_tiles = reduce_partial_map_size
         current_workspace_manager().get_simultaneous(
             (
                 (max_num_partial_tiles * _FP8_PREFILL_TILE_Q, num_head_k, v_head_dim),
