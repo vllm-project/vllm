@@ -357,9 +357,6 @@ def get_quant_config(
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
-    inflight_quant_config = quant_cls.get_inflight_quantization_config()
-    if inflight_quant_config is not None:
-        return quant_cls.from_config(inflight_quant_config)
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,

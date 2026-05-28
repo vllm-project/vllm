@@ -915,20 +915,6 @@ class FusedMoE(PluggableLayer):
             param.data.copy_(loaded_weight)
             return True if return_success else None
 
-        load_expert_weight = getattr(self.quant_method, "load_expert_weight", None)
-        if load_expert_weight is not None:
-            handled = load_expert_weight(
-                layer=self,
-                param=param,
-                loaded_weight=loaded_weight,
-                weight_name=weight_name,
-                shard_id=shard_id,
-                expert_id=expert_id,
-                return_success=return_success,
-            )
-            if handled is not None:
-                return handled
-
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)

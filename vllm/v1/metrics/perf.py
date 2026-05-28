@@ -76,18 +76,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
 }
 
 
-def _get_quant_weight_byte_size(quant_method: str) -> float | None:
-    if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
-        return _QUANT_WEIGHT_BYTE_SIZE[quant_method]
-
-    try:
-        from vllm.model_executor.layers.quantization import get_quantization_config
-
-        return get_quantization_config(quant_method).get_effective_weight_bytes()
-    except ValueError:
-        return None
-
-
 #### Basic Data Types ####
 
 
@@ -398,8 +386,8 @@ class AttentionQuantizationConfigParser(Parser):
             return args
 
         quant_method = cfg.get_name()
-        if (weight_byte_size := _get_quant_weight_byte_size(quant_method)) is not None:
-            args.weight_byte_size = weight_byte_size
+        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
             raise InvalidComponent(
                 f"Unsupported quantization method for attention metrics: {quant_method}"
@@ -660,8 +648,8 @@ class FfnQuantizationConfigParser(Parser):
             return args
 
         quant_method = cfg.get_name()
-        if (weight_byte_size := _get_quant_weight_byte_size(quant_method)) is not None:
-            args.weight_byte_size = weight_byte_size
+        if quant_method in _QUANT_WEIGHT_BYTE_SIZE:
+            args.weight_byte_size = _QUANT_WEIGHT_BYTE_SIZE[quant_method]
         else:
             raise InvalidComponent(
                 f"Unsupported quantization method for FFN metrics: {quant_method}"

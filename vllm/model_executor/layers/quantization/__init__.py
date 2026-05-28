@@ -106,10 +106,6 @@ def register_quantization_config(quantization: str):
 
 
 def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
-    from vllm.plugins import load_general_plugins
-
-    load_general_plugins()
-
     if quantization not in QUANTIZATION_METHODS:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
