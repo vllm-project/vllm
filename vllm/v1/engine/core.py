@@ -1876,8 +1876,10 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Skip the optimization while a pause is pending so consensus is
+        # reached on the next step instead of waiting up to 32 steps.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        if not self.pending_pause and self.step_counter % 32 != 0:
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(

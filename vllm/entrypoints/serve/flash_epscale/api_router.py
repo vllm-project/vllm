@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-DEFAULT_TAGS = ["expert_weights", "kv_cache"]
+DEFAULT_TAGS = ["shared_weights","expert_weights", "kv_cache"]
 
 
 def _elapsed_ms(start: float) -> float:
