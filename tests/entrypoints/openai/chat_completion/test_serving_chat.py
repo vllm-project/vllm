@@ -2073,8 +2073,21 @@ async def test_streaming_n_gt1_independent_tool_parsers():
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_parser_preserves_requested_stop_reason():
-    """Requested stops should flush parser-buffered text, not tool-call finish."""
+@pytest.mark.parametrize(
+    ("finish_reason", "stop_reason", "request_stop"),
+    [
+        ("stop", "a", ["a"]),
+        ("stop", None, None),
+        ("length", None, None),
+    ],
+    ids=["requested-stop", "eos-stop", "length"],
+)
+async def test_streaming_tool_parser_flushes_buffered_content_on_terminal_finish(
+    finish_reason,
+    stop_reason,
+    request_stop,
+):
+    """Flush parser-buffered raw text for stop, EOS, and length finishes."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -2118,14 +2131,16 @@ async def test_streaming_tool_parser_preserves_requested_stop_reason():
             },
         }
     ]
-    request = ChatCompletionRequest(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": "test"}],
-        stream=True,
-        stop=["a"],
-        tools=tools,
-        tool_choice="auto",
-    )
+    request_kwargs = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "test"}],
+        "stream": True,
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+    if request_stop is not None:
+        request_kwargs["stop"] = request_stop
+    request = ChatCompletionRequest(**request_kwargs)
 
     async def result_generator():
         yield RequestOutput(
@@ -2156,8 +2171,8 @@ async def test_streaming_tool_parser_preserves_requested_stop_reason():
                     token_ids=[124],
                     cumulative_logprob=0.0,
                     logprobs=None,
-                    finish_reason="stop",
-                    stop_reason="a",
+                    finish_reason=finish_reason,
+                    stop_reason=stop_reason,
                 )
             ],
             finished=True,
@@ -2185,13 +2200,13 @@ async def test_streaming_tool_parser_preserves_requested_stop_reason():
 
     assert final_choice is not None
     assert final_choice["delta"]["content"] == '{"n'
-    assert final_choice["finish_reason"] == "stop"
-    assert final_choice["stop_reason"] == "a"
+    assert final_choice["finish_reason"] == finish_reason
+    assert final_choice.get("stop_reason") == stop_reason
 
 
 @pytest.mark.asyncio
 async def test_streaming_tool_parser_stop_flush_skips_streamed_content():
-    """Requested-stop flush should not replay content already streamed."""
+    """Terminal flush should not replay content already streamed."""
     mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
@@ -2327,6 +2342,141 @@ async def test_streaming_tool_parser_stop_flush_skips_streamed_content():
     assert "".join(content_deltas) == 'Hello {"n'
     assert final_choice["finish_reason"] == "stop"
     assert final_choice["stop_reason"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_parser_does_not_flush_after_tool_call_delta():
+    """Keep completed tool-call streams on the tool_calls finish path."""
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaFunctionCall,
+        DeltaToolCall,
+    )
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.enable_auto_tools = True
+    serving_chat.tool_parser = object()
+
+    class ParserWithStreamedToolThenTerminalState:
+        def __init__(self, *args, **kwargs):
+            self._stream_state = SimpleNamespace(
+                tool_call_id_type="random",
+                history_tool_call_cnt=0,
+            )
+            self.tool_parser = SimpleNamespace(
+                prev_tool_call_arr=[],
+                streamed_args_for_tool=[],
+                current_tool_id=-1,
+            )
+
+        def parse_delta(self, delta_text, *args, **kwargs):
+            if delta_text != "<tool>":
+                return None
+
+            self.tool_parser.prev_tool_call_arr = [
+                {"name": "get_weather", "arguments": {}}
+            ]
+            self.tool_parser.streamed_args_for_tool = ["{}"]
+            self.tool_parser.current_tool_id = 0
+            return DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        id="call_abc",
+                        type="function",
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="{}",
+                        ),
+                    )
+                ]
+            )
+
+    serving_chat.parser_cls = ParserWithStreamedToolThenTerminalState
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        stream=True,
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ],
+        tool_choice="auto",
+    )
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="<tool>",
+                    token_ids=[123],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    saw_tool_delta = False
+    final_choice = None
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=get_tokenizer(MODEL_NAME),
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.strip() or "data: [DONE]" in chunk_str:
+            continue
+        data = json.loads(chunk_str.removeprefix("data: ").strip())
+        choice = data["choices"][0]
+        saw_tool_delta |= bool(choice["delta"].get("tool_calls"))
+        if choice["finish_reason"] is not None:
+            final_choice = choice
+
+    assert saw_tool_delta
+    assert final_choice is not None
+    assert final_choice["finish_reason"] == "tool_calls"
+    assert final_choice["delta"].get("content") is None
 
 
 def test_has_unstreamed_tool_parser_state_handles_non_integer_tool_ids():
