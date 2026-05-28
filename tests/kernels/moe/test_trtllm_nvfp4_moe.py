@@ -201,7 +201,6 @@ def test_trtllm_fp4_moe_no_graph(
                 use_monolithic=False,
             ),
             trtllm_inner,
-            inplace=False,
         )
 
         trtllm_output = trtllm_experts.apply(
