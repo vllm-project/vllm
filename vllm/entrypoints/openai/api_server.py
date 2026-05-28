@@ -703,6 +703,22 @@ async def run_server_worker(
         sock.close()
 
 
+def run_entrypoint(args: Namespace) -> None:
+    if envs.VLLM_RUST_FRONTEND_PATH:
+        if args.api_server_count is not None and args.api_server_count > 1:
+            logger.warning(
+                "Ignoring --api-server-count=%d when using rust front-end process",
+                args.api_server_count,
+            )
+        args.api_server_count = 1
+        args.model_tag = args.model
+        from vllm.entrypoints.cli.serve import run_multi_api_server
+
+        run_multi_api_server(args)
+    else:
+        uvloop.run(run_server(args))
+
+
 if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
@@ -715,4 +731,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    run_entrypoint(args)
