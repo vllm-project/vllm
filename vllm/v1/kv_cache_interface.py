@@ -183,7 +183,15 @@ class KVCacheLayout(Enum):
 
     @property
     def layer_stride_order(self) -> tuple[int, ...]:
-        """4D permutation [B, H, N, C] for per-layer tensors (drops L)."""
+        """4D permutation [B, H, N, C] for per-layer tensors (drops L).
+
+        TODO(RFC #42082, part 3): non-layer-compact layouts (BLHNC, BHLNC)
+        interleave layers within a block and cannot be expressed as an
+        independent 4D per-layer view. Callers that want a per-layer view
+        under those layouts must wait for the connector refactor (part 3),
+        which switches to 5D views with meta tensors so the per-layer
+        slicing is no longer needed.
+        """
         if not self.is_layer_compact:
             compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
             raise ValueError(
@@ -244,10 +252,17 @@ def reshape_kv_cache(
     For ``AttentionSpec``, the raw int8 buffer is reinterpreted as
     ``spec.dtype``, viewed with the full 5D physical layout from
     ``layout.stride_order``, then permuted back to the logical
-    ``[L, B, H, N, C]`` shape.  ``result[i]`` gives slot *i*'s 4D view.
+    ``[L, B, H, N, C]`` shape.  ``result[i]`` gives slot *i*'s 4D
+    logical view ``(B, H, N, C)``.
 
-    For non-attention specs (e.g. ``MambaSpec``), returns the raw buffer
-    for each layer slot — the backend is responsible for interpreting it.
+    For non-``AttentionSpec`` specs (e.g. ``MambaSpec``), this function
+    currently returns raw ``int8`` byte slices — the buffer is split
+    into ``num_layer_slots`` equal-sized regions with no dtype cast and
+    no per-state reshape. This does NOT match what Mamba kernels expect
+    (a list of typed (conv, ssm, ...) state tensors, one per entry in
+    ``MambaSpec.shapes``/``dtypes``); the legacy ``gpu_model_runner.py``
+    path builds those typed views directly via ``torch.as_strided`` and
+    bypasses this function.
     """
     if not isinstance(spec, AttentionSpec):
         slot_size = raw.numel() // num_layer_slots
@@ -860,50 +875,17 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
-        FullAttentionSpec object.
-        """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
+        assert all(isinstance(spec, SinkFullAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be "
+            "SinkFullAttentionSpec."
         )
-
-        sliding_window = set(
-            spec.sliding_window for spec in specs if spec.sliding_window is not None
+        sink_lens = {spec.sink_len for spec in specs}
+        assert len(sink_lens) == 1, (
+            "All SinkFullAttentionSpec layers in the same KV cache group must "
+            f"have the same sink_len; got {sink_lens}."
         )
-        attention_chunk_size = set(
-            spec.attention_chunk_size
-            for spec in specs
-            if spec.attention_chunk_size is not None
-        )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
-        merged_spec = cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            head_size_v=specs[0].head_size_v,
-            sink_len=specs[0].sink_len,
-            dtype=specs[0].dtype,
-            kv_quant_mode=specs[0].kv_quant_mode,
-            page_size_padded=specs[0].page_size_padded,
-            sliding_window=cls.merge_window_sizes(sliding_window),
-            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
-        )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
-            merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
-        return merged_spec
+        merged = super().merge(specs)
+        return replace(merged, sink_len=sink_lens.pop())
 
 
 @dataclass(frozen=True)

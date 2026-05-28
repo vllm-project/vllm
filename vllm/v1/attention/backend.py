@@ -856,7 +856,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
-            kv_cache,
+            kv_cache.squeeze(1),
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
@@ -936,7 +936,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
-            kv_cache,
+            kv_cache.squeeze(1),
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,

@@ -1265,6 +1265,8 @@ def compress_norm_rope_store_cutedsl(
     token_stride: int,
     scale_dim: int,
 ) -> None:
+    # (B, H=1, N, C) -> (B, N, C)
+    kv_cache = kv_cache.squeeze(1)
     if compress_ratio == 4:
         # For C4A, the single fused kernel is faster than the two-kernel version.
         fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(

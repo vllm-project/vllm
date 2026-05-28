@@ -20,7 +20,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
 from vllm.v1.attention.backends.utils import (
     PerLayerParameters,
-    get_kv_cache_layout,
+    resolve_kv_cache_layout,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
@@ -373,7 +373,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     # 3. Run through FlashInfer with TRTLLM enabled
     set_kv_cache_layout("LBHNC")
-    get_kv_cache_layout.cache_clear()
+    resolve_kv_cache_layout.cache_clear()
 
     try:
         is_nvfp4 = kv_cache_dtype == "nvfp4"
@@ -487,7 +487,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     finally:
         set_kv_cache_layout(None)
-        get_kv_cache_layout.cache_clear()
+        resolve_kv_cache_layout.cache_clear()
 
 
 @pytest.mark.parametrize(

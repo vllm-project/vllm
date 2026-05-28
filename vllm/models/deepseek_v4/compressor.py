@@ -319,7 +319,9 @@ class DeepseekCompressor(nn.Module):
         if current_platform.is_cuda():
             # NVIDIA GPUs.
             if self.head_dim == 512:
-                from .nvidia.ops import compress_norm_rope_store_cutedsl
+                from .nvidia.ops.sparse_attn_compress_cutedsl import (
+                    compress_norm_rope_store_cutedsl,
+                )
 
                 # Main compressor path.
                 # Use a cutedsl kernel for better performance.

@@ -372,16 +372,25 @@ async def test_kv_producer(monkeypatch):
         with patch.object(
             prefill_worker, "_send_blocks", return_value=0
         ) as mock_send_blocks:
-            # With packed KV layout (LBHNC), blocks are transferred as
-            # whole units. Contiguous blocks are coalesced into a single
-            # transfer.
-            # Normal case: 2 contiguous blocks coalesced into 1 transfer.
+            # Under the standardized blocks-first layout K and V are packed
+            # into a single contiguous region per block, so each block
+            # produces one coalesced transfer.
+            def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
+                src_ptrs, dst_ptrs, lengths = [], [], []
+                for sb, db in zip(src_blocks, dst_blocks):
+                    src_ptrs.append(src_base + sb * block_len)
+                    dst_ptrs.append(dst_base + db * block_len)
+                    lengths.append(block_len)
+                return src_ptrs, dst_ptrs, lengths
+
+            # Normal case: 2 blocks to 2 blocks
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [10, 11], [20, 21])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
-                [0x1000 + 10 * block_len],
-                [0x2000 + 20 * block_len],
-                [2 * block_len],
+                src,
+                dst,
+                lens,
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -407,12 +416,13 @@ async def test_kv_producer(monkeypatch):
             xfer_meta.req_blocks["d-req-1"] = (transfer_id, [[20]])
             # Worker processes the consumer's request
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
-            # Verify transfer parameters are correct: block 11 to block 20
+            # Verify transfer parameters are correct: 11 to 20
+            src, dst, lens = expected_transfers(0x1000, 0x2000, [11], [20])
             mock_send_blocks.assert_called_once_with(
                 "consumer-host:54321",
-                [0x1000 + 11 * block_len],
-                [0x2000 + 20 * block_len],
-                [block_len],
+                src,
+                dst,
+                lens,
             )
             mock_socket.send_multipart.assert_called_once()
 
@@ -796,10 +806,9 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 flat_remote = [b for g in remote_block_ids for b in g]
                 num_blocks = len(flat_local)
 
-                # Packed KV layout: full-block transfers, no K/V split.
-                local_kv_block_len = local_block_len
-                remote_kv_block_len = remote_block_len
-
+                # Under the standardized blocks-first layout K and V are
+                # already packed into a single contiguous region per block,
+                # so _expand_transfer_regions emits one region per layer.
                 assert len(src_ptrs) == num_blocks
                 assert len(dst_ptrs) == num_blocks
                 assert len(lengths) == num_blocks
@@ -807,20 +816,22 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 if d_tp_size <= P_TP_SIZE:
                     tp_ratio = P_TP_SIZE // d_tp_size
                     expected_src_off = 0
-                    expected_dst_off = (P_TP_RANK % tp_ratio) * local_kv_block_len
-                    expected_xfer_len = local_kv_block_len
+                    expected_dst_off = (P_TP_RANK % tp_ratio) * local_block_len
+                    expected_xfer_len = local_block_len
                 else:
                     ratio_abs = d_tp_size // P_TP_SIZE
-                    expected_src_off = (d_rank % ratio_abs) * remote_kv_block_len
+                    expected_src_off = (d_rank % ratio_abs) * remote_block_len
                     expected_dst_off = 0
-                    expected_xfer_len = remote_kv_block_len
+                    expected_xfer_len = remote_block_len
 
+                local_region_base = 0x1000
+                remote_region_base = 0x2000
                 for blk_idx, (lblk, rblk) in enumerate(zip(flat_local, flat_remote)):
                     assert src_ptrs[blk_idx] == (
-                        0x1000 + lblk * local_block_len + expected_src_off
+                        local_region_base + lblk * local_block_len + expected_src_off
                     )
                     assert dst_ptrs[blk_idx] == (
-                        0x2000 + rblk * remote_block_len + expected_dst_off
+                        remote_region_base + rblk * remote_block_len + expected_dst_off
                     )
                     assert lengths[blk_idx] == expected_xfer_len
 

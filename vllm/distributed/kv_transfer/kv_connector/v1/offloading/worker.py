@@ -58,9 +58,8 @@ class OffloadingConnectorWorker:
     ):
         num_blocks = self.spec.kv_cache_config.num_blocks
 
-        # layer_name -> list of matching KV cache tensors.
+        # layer_name -> (num_blocks, page_size_bytes) int8 view.
         # Standardized layouts always have num_blocks as the leading dim.
-        # Legacy backends with K/V outermost produce 2 tensors (one per K/V).
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
@@ -77,99 +76,34 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
+                layer_kv_cache = kv_caches[layer_name]
+                # AttentionSpec yields a single tensor; MambaSpec yields a
+                # list of typed state tensors that share one underlying
+                # buffer. Either way, the first tensor's storage_offset
+                # marks the start of this layer's region.
+                ref = (
+                    layer_kv_cache[0]
+                    if isinstance(layer_kv_cache, list)
+                    else layer_kv_cache
+                )
+                page = layer_kv_cache_spec.page_size_bytes
+                offset = ref.storage_offset() * ref.element_size()
+                tensors_per_block[layer_name] = (
+                    torch.tensor([], dtype=torch.int8, device=ref.device)
+                    .set_(ref.untyped_storage())
+                    .view(-1)[offset : offset + num_blocks * page]
+                    .view(num_blocks, page),
+                )
+                page_size_bytes[layer_name] = page
+
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert isinstance(layer_kv_cache, torch.Tensor)
-
-                    # Standardized shapes always have num_blocks at dim 0
-                    num_blocks_logical_dim = 0
-
-                    logical_strides = layer_kv_cache.stride()
-                    physical_to_logical = sorted(
-                        range(len(logical_strides)),
-                        key=lambda idx: logical_strides[idx],
-                        reverse=True,
+                    unpadded_page_size_bytes[layer_name] = (
+                        layer_kv_cache_spec.real_page_size_bytes
                     )
-
-                    num_blocks_physical_dim = physical_to_logical.index(
-                        num_blocks_logical_dim
-                    )
-
-                    storage = layer_kv_cache.untyped_storage()
-                    offset = (
-                        layer_kv_cache.storage_offset() * layer_kv_cache.element_size()
-                    )
-
-                    if num_blocks_physical_dim == 0:
-                        page = layer_kv_cache_spec.page_size_bytes
-                        tensors_per_block[layer_name] = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(-1)[offset : offset + num_blocks * page]
-                            .view(num_blocks, page),
-                        )
-                        page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.page_size_bytes
-                        )
-                        unpadded_page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.real_page_size_bytes
-                        )
-                    else:
-                        # Legacy K/V-outermost layout
-                        assert layer_kv_cache.shape[0] == 2
-                        assert physical_to_logical[0] == 0
-                        assert num_blocks_physical_dim == 1
-
-                        half_page_size = layer_kv_cache_spec.page_size_bytes // 2
-                        layer_bytes = 2 * num_blocks * half_page_size
-                        raw = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(-1)[offset : offset + layer_bytes]
-                            .view(2, num_blocks, half_page_size)
-                        )
-                        # Unbind to separate K and V tensors.
-                        tensors_per_block[layer_name] = tuple(raw.unbind(0))
-
-                        page_size_bytes[layer_name] = half_page_size
-                        unpadded_page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.real_page_size_bytes // 2
-                        )
-
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    state_tensors = kv_caches[layer_name]
-                    assert isinstance(state_tensors, list)
-                    assert len(state_tensors) > 0
-
-                    first = state_tensors[0]
-                    storage = first.untyped_storage()
-                    page = layer_kv_cache_spec.page_size_bytes
-                    offset = first.storage_offset() * first.element_size()
-                    tensor = (
-                        torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=first.device,
-                        )
-                        .set_(storage)
-                        .view(-1)[offset : offset + num_blocks * page]
-                        .view(num_blocks, page)
-                    )
-                    tensors_per_block[layer_name] = (tensor,)
-
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = replace(
                         layer_kv_cache_spec, page_size_padded=None
                     ).page_size_bytes
-
                 else:
                     raise NotImplementedError
 

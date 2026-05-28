@@ -756,7 +756,7 @@ def context_attention_fwd(
             b_start_loc,
             b_seq_len,
             alibi_slopes,
-            v_cache.shape[3],
+            v_cache.shape[2],
             k_cache.shape[4],
             o,
             b_loc.stride(0),
@@ -780,8 +780,8 @@ def context_attention_fwd(
             k_cache.stride(4),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
             v_cache.stride(0),
             v_cache.stride(1),
-            v_cache.stride(2),
-            v_cache.stride(3),  # [num_blocks, num_kv_heads, head_size, block_size]
+            v_cache.stride(3),
+            v_cache.stride(2),  # [num_blocks, num_kv_heads, block_size, head_size]
             num_queries_per_kv=num_queries_per_kv,
             IN_PRECISION=IN_PRECISION,
             BLOCK_M=BLOCK,
@@ -799,7 +799,7 @@ def context_attention_fwd(
     if current_platform.is_rocm():
         extra_kargs = {}
 
-    real_block_size = v_cache.shape[3]
+    real_block_size = v_cache.shape[2]
     is_pow2 = real_block_size > 0 and (real_block_size & (real_block_size - 1) == 0)
     # For standard models involving powers of 2,
     # follow the original logic (Llama 128/64)
@@ -854,8 +854,8 @@ def context_attention_fwd(
         stride_k_cache_x=k_cache.stride(4),
         stride_v_cache_bs=v_cache.stride(0),
         stride_v_cache_h=v_cache.stride(1),
-        stride_v_cache_d=v_cache.stride(2),
-        stride_v_cache_bl=v_cache.stride(3),
+        stride_v_cache_d=v_cache.stride(3),
+        stride_v_cache_bl=v_cache.stride(2),
         BLOCK_SIZE=TRITON_BLOCK_SIZE,
         PHYSICAL_BLOCK_SIZE=real_block_size,
         num_queries_per_kv=num_queries_per_kv,

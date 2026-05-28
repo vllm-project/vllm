@@ -19,44 +19,33 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Split a unified KV cache into legacy paged-attention key/value views.
+        """Return strided K/V views over the unified KV cache.
 
-        Input ``kv_cache`` has shape ``[B, N, H, 2*C]`` (after the caller's
-        ``transpose(1, 2)`` on the logical ``[B, H, N, 2*C]`` tensor).
-
-        Returns contiguous tensors in the legacy paged-attention format:
+        Input ``kv_cache`` has shape ``[B, N, H, 2*C]`` with K and V
+        interleaved in the trailing content dim. Returns:
           * key_cache:   ``[B, H, C//x, N, x]``
-          * value_cache: ``[B, H, C, N]``
+          * value_cache: ``[B, H, N, C]``
 
-        where ``x = 16 // element_size`` and ``C = head_size``.
+        where ``x = 16 // element_size``. V is in ``[B, H, N, C]`` (not
+        the legacy ``[B, H, C, N]``) because no permutation of the
+        interleaved cache yields N-innermost as a view. Triton consumers
+        use explicit per-dim strides, so the layout change is invisible
+        as long as callers pass strides by semantic dimension.
 
-        Because K and V are interleaved in the content dimension, the
-        resulting tensors are always contiguous *copies* — callers that
-        need to *write* to the cache should use stride-aware kernels
-        (e.g. ``reshape_and_cache_flash``) on the raw split views instead.
+        TODO(RFC #42082): the ROCm C++ ``ops.paged_attention_rocm`` kernel
+        still requires the legacy V layout and contiguous tensors;
+        ``has_native_kv_cache_layout`` routes around it. A follow-up
+        should port that HIP kernel to consume the unified layout.
         """
         x = 16 // kv_cache.element_size()
-
-        # Slice K and V from the interleaved content dimension.
-        # Result shape: [B, N, H, C]  (non-contiguous view)
         key_slice = kv_cache[..., :head_size]
         value_slice = kv_cache[..., head_size:]
-
-        # key: [B, N, H, C] → permute → [B, H, N, C]
-        #      → unflatten C → [B, H, N, C//x, x]
-        #      → transpose N↔C//x → [B, H, C//x, N, x]
-        #      → contiguous copy for the paged-attention kernel.
         key_cache = (
             key_slice.permute(0, 2, 1, 3)
             .unflatten(-1, (head_size // x, x))
             .transpose(2, 3)
-            .contiguous()
         )
-
-        # value: [B, N, H, C] → permute → [B, H, C, N]
-        #        → contiguous copy for the paged-attention kernel.
-        value_cache = value_slice.permute(0, 2, 3, 1).contiguous()
-
+        value_cache = value_slice.permute(0, 2, 1, 3)
         return key_cache, value_cache
 
     @staticmethod

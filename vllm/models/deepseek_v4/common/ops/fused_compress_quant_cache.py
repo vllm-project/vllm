@@ -67,6 +67,9 @@ def compress_norm_rope_store_triton(
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
         num_warps = 1
 
+    # (B, H=1, N, C) -> (B, N, C)
+    kv_cache = kv_cache.squeeze(1)
+
     kernel[(num_actual,)](
         # state cache
         state_cache,

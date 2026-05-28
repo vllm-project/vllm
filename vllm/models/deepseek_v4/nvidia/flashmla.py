@@ -95,21 +95,6 @@ class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
         # V3.2 default of 576 from FlashMLASparseBackend).
         return [512]
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
-
 
 class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     """FlashMLA sparse MLA implementation for DeepSeek V4's custom MLA layer."""

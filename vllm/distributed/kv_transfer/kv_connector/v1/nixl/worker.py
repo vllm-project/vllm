@@ -67,7 +67,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheLayout,
@@ -421,7 +421,7 @@ class NixlConnectorWorker:
         self.attn_backends = get_current_attn_backends(vllm_config)
         self.backend_name = self.attn_backends[0].get_name()
 
-        self.kv_cache_layout = get_kv_cache_layout()
+        self.kv_cache_layout = resolve_kv_cache_layout().name
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.info(
             "Detected attention backend(s) %s",

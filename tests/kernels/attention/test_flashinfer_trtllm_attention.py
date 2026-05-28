@@ -74,17 +74,20 @@ def make_nvfp4_kv_cache(
         kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
     )
 
-    # Allocate in HND physical order, permute to NHD logical order.
-    # hnd_order swaps dims 2↔3; it is its own inverse.
+    # Production layout: 4D packed (B, H, N, 2*full_dim) where K and V are
+    # concatenated along the last dim. NHC-permuted view is what
+    # reshape_and_cache_flash consumes.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
-    hnd_order = (0, 1, 3, 2, 4)
-    kv_cache = torch.zeros(
-        (num_blocks, 2, num_kv_heads, block_size, full_dim),
+    kv_cache_hnc = torch.zeros(
+        (num_blocks, num_kv_heads, block_size, 2 * full_dim),
         dtype=torch.uint8,
         device=kv_bf16_hnd.device,
-    ).permute(*hnd_order)
+    )
+    kv_cache_nhc = kv_cache_hnc.permute(0, 2, 1, 3)
+    k_view_nhc = kv_cache_nhc[..., :full_dim]
+    v_view_nhc = kv_cache_nhc[..., full_dim:]
 
-    # Flatten NHD [N, T, H, D] → token tensors [N*T, H, D] for the kernel.
+    # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
     num_tokens = num_blocks * block_size
     k_tokens = (
         kv_bf16_hnd[:, 0]
@@ -98,22 +101,19 @@ def make_nvfp4_kv_cache(
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=kv_bf16_hnd.device)
 
-    # reshape_and_cache_flash: kernel receives kv_cache[:, 0] and [:, 1]
-    # (full K/V buffers containing both data and scale).
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         k_tokens,
         v_tokens,
-        kv_cache[:, 0],
-        kv_cache[:, 1],
+        k_view_nhc,
+        v_view_nhc,
         slot_mapping,
         "nvfp4",
         kv_scale_tensor,
         kv_scale_tensor,
     )
 
-    # Split in HND order for trtllm kernel (expects HND numTokensPerPage).
-    kv_cache_hnd = kv_cache.permute(*hnd_order)
-    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(kv_cache_hnd)
+    # Split into data/scale views in HNC order for trtllm kernel.
+    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(kv_cache_hnc)
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(

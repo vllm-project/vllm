@@ -51,7 +51,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 from vllm.v1.request import RequestStatus
@@ -843,7 +843,7 @@ class MooncakeConnectorWorker:
         # NOTE (NickLucche) models with multiple backends are not supported yet
         backend = get_current_attn_backend(vllm_config)
         self.backend_name = backend.get_name()
-        self.kv_cache_layout = get_kv_cache_layout()
+        self.kv_cache_layout = resolve_kv_cache_layout().name
         logger.debug("Detected attention backend %s", self.backend_name)
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
