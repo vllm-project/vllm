@@ -5,13 +5,10 @@ import importlib
 import logging
 import math
 import os
-import pathlib
-import tempfile
 from importlib.util import find_spec
 
 import torch
 import torch.nn.functional as F
-from torch.utils.cpp_extension import load_inline
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
@@ -1688,50 +1685,11 @@ def rocm_sparse_attn_prefill(
 
 # ============================================================================
 # HIP MFMA kernel implementation for sparse-MLA decode.
+# Compiled at build time via CMakeLists.txt (_rocm_sparse_mla_C extension).
+# Ops are registered under torch.ops.vllm_sparse_mla_hip namespace.
 # ============================================================================
 
-_SPARSE_MLA_DECODE_CU = (
-    pathlib.Path(__file__).resolve().parents[4]
-    / "csrc"
-    / "rocm"
-    / "sparse_mla_decode.cu"
-)
-
-
 logger = logging.getLogger(__name__)
-
-_sparse_mla_hip_module_cache: dict = {}
-
-
-def _build_sparse_mla_hip_ext():
-    if "ext" in _sparse_mla_hip_module_cache:
-        return _sparse_mla_hip_module_cache["ext"]
-    cache_dir = os.environ.get(
-        "VLLM_SPARSE_MLA_HIP_CACHE_DIR",
-        str(pathlib.Path(tempfile.gettempdir()) / "vllm_sparse_mla_hip_cache"),
-    )
-    os.makedirs(cache_dir, exist_ok=True)
-    os.environ["PYTORCH_ROCM_ARCH"] = "gfx950"
-    ext = load_inline(
-        name="vllm_sparse_mla_hip",
-        cpp_sources=[""],
-        cuda_sources=[_SPARSE_MLA_DECODE_CU.read_text()],
-        functions=[],
-        extra_cflags=["-O3", "-DNDEBUG", "-std=c++17"],
-        extra_cuda_cflags=[
-            "-O3",
-            "-std=c++17",
-            "--offload-arch=gfx950",
-            "-DNDEBUG",
-            "-Wno-c++11-narrowing",
-            "-Wno-unused-result",
-        ],
-        with_cuda=True,
-        build_directory=cache_dir,
-        verbose=False,
-    )
-    _sparse_mla_hip_module_cache["ext"] = ext
-    return ext
 
 
 def _sparse_mla_hip_as_int32_1d(x):
@@ -1801,8 +1759,6 @@ def _decode_sparse_mla_hip(
     num_head_blocks = (num_heads + BLOCK_H - 1) // BLOCK_H
     total_max_k = max_main_len + (max_extra_len if has_extra else 0)
     split_k = _pick_split_k(num_queries, num_head_blocks, total_max_k)
-
-    _build_sparse_mla_hip_ext()
 
     if split_k == 1:
         torch.ops.vllm_sparse_mla_hip.decode_single(

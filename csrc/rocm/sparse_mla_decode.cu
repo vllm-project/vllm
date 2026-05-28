@@ -5,21 +5,20 @@
 #include <hip/hip_bf16.h>
 #include <hip/hip_fp8.h>
 
-#include <torch/extension.h>
+#include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
+
+#include "core/registration.h"
 
 using bf16x8 = __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16;
 using fx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 
 static constexpr int NOPE_DIM = 448;
-static constexpr int ROPE_DIM = 64;
 static constexpr int TOKEN_BYTES = 576;
 static constexpr int SCALE_BYTES = 8;
 static constexpr int HEAD_DIM = 512;
 static constexpr int BLOCK_H = 16;
 static constexpr int BLOCK_K = 32;
-static constexpr int N_TILES = HEAD_DIM / 16;    // 32
-static constexpr int QK_N_TILES = BLOCK_K / 16;  // 2
 
 __device__ __forceinline__ fx4 mfma_16x16x32_bf16(bf16x8 a, bf16x8 b, fx4 c) {
   return __builtin_amdgcn_mfma_f32_16x16x32_bf16(a, b, c, 0, 0, 0);
@@ -689,3 +688,5 @@ TORCH_LIBRARY_IMPL(vllm_sparse_mla_hip, CUDA, m) {
   m.impl("decode_single", &sparse_mla_decode_single);
   m.impl("decode_split", &sparse_mla_decode_split);
 }
+
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
