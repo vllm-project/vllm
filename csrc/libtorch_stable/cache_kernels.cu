@@ -5,7 +5,7 @@
 #include "../cuda_compat.h"
 
 #include "quantization/vectorization_utils.cuh"
-#include "../concat_mla_q.cuh"
+#include "concat_mla_q.cuh"
 
 #ifdef USE_ROCM
   #include "../quantization/w8a8/fp8/amd/quant_utils.cuh"

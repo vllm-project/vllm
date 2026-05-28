@@ -20,7 +20,7 @@
 #include <algorithm>
 
 #include "../../attention/attention_dtypes.h"
-#include "../../attention/attention_utils.cuh"
+#include "attention_utils.cuh"
 #include "../../cuda_compat.h"
 
 #ifdef USE_ROCM
