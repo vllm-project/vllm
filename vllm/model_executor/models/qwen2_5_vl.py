@@ -517,23 +517,22 @@ class Qwen2_5_VisionBlock(nn.Module):
         sp_enabled: bool = False,
         tp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
-        x = self.norm1(x)
         if sp_enabled:
-            x_full = tp_group.all_gather(x, dim=0)
-        else:
-            x_full = x
+            x = tp_group.all_gather(x, dim=0)
+        x = self.norm1(x)
         x_attn = self.attn(
-            x_full,
+            x,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
         )
-        if sp_enabled:
-            x_attn = tp_group.reduce_scatter(x_attn, dim=0)
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
+        if sp_enabled:
+            seq_chunk = x.shape[0] // tp_group.world_size
+            x = x[tp_group.rank_in_group * seq_chunk : (tp_group.rank_in_group + 1) * seq_chunk]
         return x
 
 
