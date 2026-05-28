@@ -180,6 +180,10 @@ class KimiKdaPrefill(CustomOp):
 
         final_state = torch.empty_like(initial_state)
         out = torch.empty_like(v)
+
+        # TODO: support int32 cu_seqlens in FlashKDA
+        if cu_seqlens is not None:
+            cu_seqlens = cu_seqlens.to(torch.int64)
         flash_kda.fwd(
             q,
             k,
