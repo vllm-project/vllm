@@ -46,7 +46,7 @@ class CmdQwenTerminalAgent(BaseAgent):
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct,
+        model_name: str = "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         api_base: str = "http://localhost:7557/v1",
         api_key: str = "EMPTY",
         max_turns: int = 20,
