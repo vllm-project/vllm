@@ -729,6 +729,9 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.quantization.awq_marlin import (
             AWQMarlinConfig,
         )
+        from vllm.model_executor.layers.quantization.moe_wna16 import (
+            MoeWNA16Config,
+        )
 
         if isinstance(quant_config, AWQMarlinConfig):
             if w13_qzeros is None or w2_qzeros is None:
@@ -763,6 +766,11 @@ def convert_to_wna16_moe_kernel_format(
             pack_factor = 32 // quant_config.num_bits
             group_size = quant_config.group_size
             actorder = quant_config.actorder
+        elif isinstance(quant_config, MoeWNA16Config):
+            num_bits = quant_config.weight_bits
+            pack_factor = quant_config.bit8_pack_factor
+            group_size = quant_config.group_size
+            actorder = None
         else:
             raise TypeError(
                 "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
