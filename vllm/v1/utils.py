@@ -241,7 +241,7 @@ class APIServerProcessManager:
 
     def gather_actual_addresses(
         self,
-        timeout: float = 60.0,
+        timeout: float = envs.VLLM_ENGINE_READY_TIMEOUT_S,
     ) -> tuple[list[str], list[str]]:
         """Return (inputs, outputs) reported by each child, indexed by
         ``client_index``. Raises ``RuntimeError`` on timeout or premature

@@ -42,6 +42,7 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import has_tilelang
 
 from .model import DeepseekV4DecoderLayer
 
@@ -121,6 +122,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         self.hc_head_op = HCHeadOp()
+        self.has_tilelang = has_tilelang()
 
     def forward(
         self,
@@ -153,7 +155,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if current_platform.is_cuda():
+        if self.has_tilelang:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix
             )

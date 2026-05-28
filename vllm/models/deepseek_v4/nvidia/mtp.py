@@ -40,7 +40,6 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .model import (
@@ -156,10 +155,9 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if current_platform.is_cuda():
-            hidden_states = self.mtp_block.hc_post(
-                hidden_states, residual, post_mix, res_mix
-            )
+        hidden_states = self.mtp_block.hc_post(
+            hidden_states, residual, post_mix, res_mix
+        )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.
@@ -172,23 +170,16 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
-        self.device = current_platform.device_type
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_tokens,
             dtype=torch.int32,
-            device=self.device,
         )
 
-        # Three aux streams shared across all MTP layers, mirroring
-        # DeepseekV4Model. ROCm runs the same work serially for now.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        # Three aux streams shared across all MTP layers, mirroring DeepseekV4Model.
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
