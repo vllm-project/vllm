@@ -490,9 +490,13 @@ def configure_subprocess(
         numactl_args = _get_numactl_enginecore_args(
             parallel_config, local_rank, dp_local_rank
         )
-    else:
+    elif process_kind == "worker":
         numactl_args = _get_numactl_worker_args(
             parallel_config, local_rank, dp_local_rank
+        )
+    else:
+        raise ValueError(
+            f"Unknown process_kind {process_kind!r}; expected 'worker' or 'EngineCore'."
         )
 
     executable, debug_str = _get_numactl_executable()

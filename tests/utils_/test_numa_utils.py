@@ -389,6 +389,18 @@ def test_get_numactl_args_requires_detectable_nodes(monkeypatch):
         numa_utils._get_numactl_worker_args(vllm_config.parallel_config, local_rank=0)
 
 
+def test_configure_subprocess_rejects_unknown_process_kind():
+    """configure_subprocess only knows 'worker' and 'EngineCore'; anything
+    else must raise ValueError instead of silently routing to the worker
+    path."""
+    vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
+    with pytest.raises(ValueError, match="process_kind"):
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank=0, process_kind="bogus"
+        ):
+            pass
+
+
 def test_log_numactl_show(monkeypatch):
     log_lines = []
 
