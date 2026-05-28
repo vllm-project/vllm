@@ -17,6 +17,7 @@ anyhow.workspace = true
 clap.workspace = true
 educe.workspace = true
 itertools.workspace = true
+mimalloc.workspace = true
 native-tls-vendored = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true

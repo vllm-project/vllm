@@ -6,7 +6,7 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
-use super::{Result, ToolCallDelta, ToolParseResult};
+use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
 mod deepseek_v32;
@@ -89,10 +89,10 @@ impl DeepSeekDsmlToolParser {
     }
 
     /// Apply one parsed DSML event to parser state and output.
-    fn apply_event(&mut self, event: DsmlEvent, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: DsmlEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             DsmlEvent::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
             DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
             DsmlEvent::Invoke { name, raw_params } => {
@@ -112,7 +112,7 @@ impl DeepSeekDsmlToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index: self.emitted_invoke_count,
                     name: Some(name),
                     arguments,
@@ -125,46 +125,41 @@ impl DeepSeekDsmlToolParser {
         Ok(())
     }
 
-    /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 
-    /// Push one decoded text chunk through the DSML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         // Extract tool calls from streaming model output.
         //
         // Uses a buffer-until-complete-invoke strategy: text is buffered until
         // a complete invoke block is available, then parsed and emitted in one
         // shot.
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_dsml_event(input, self.mode, self.tokens)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match self.mode {
-            DsmlMode::Text => result.normal_text.push_str(&self.buffer),
+            DsmlMode::Text => output.normal_text.push_str(&self.buffer),
             DsmlMode::Done => {}
             DsmlMode::ToolBlock => {
-                self.reset();
                 return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));
             }
         }
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
     }
 }
 

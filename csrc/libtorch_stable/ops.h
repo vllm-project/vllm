@@ -164,6 +164,17 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 #endif
 
+// Attention kernels (shared CUDA/ROCm)
+void merge_attn_states(
+    torch::stable::Tensor& output,
+    std::optional<torch::stable::Tensor> output_lse,
+    const torch::stable::Tensor& prefix_output,
+    const torch::stable::Tensor& prefix_lse,
+    const torch::stable::Tensor& suffix_output,
+    const torch::stable::Tensor& suffix_lse,
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::stable::Tensor>& output_scale = std::nullopt);
+
 torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
                                          bool inplace);
 
@@ -219,6 +230,48 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& cos_sin_cache, bool is_neox,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
+
+// Sampler kernels (shared CUDA/ROCm)
+void apply_repetition_penalties_(
+    torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
+    const torch::stable::Tensor& output_mask,
+    const torch::stable::Tensor& repetition_penalties);
+
+void top_k_per_row_prefill(const torch::stable::Tensor& logits,
+                           const torch::stable::Tensor& rowStarts,
+                           const torch::stable::Tensor& rowEnds,
+                           torch::stable::Tensor& indices, int64_t numRows,
+                           int64_t stride0, int64_t stride1, int64_t topK);
+
+void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
+                          const torch::stable::Tensor& seqLens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void persistent_topk(const torch::stable::Tensor& logits,
+                     const torch::stable::Tensor& lengths,
+                     torch::stable::Tensor& output,
+                     torch::stable::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len);
+
+void selective_scan_fwd(
+    const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
+    const torch::stable::Tensor& A, const torch::stable::Tensor& B,
+    const torch::stable::Tensor& C,
+    const std::optional<torch::stable::Tensor>& D_,
+    const std::optional<torch::stable::Tensor>& z_,
+    const std::optional<torch::stable::Tensor>& delta_bias_,
+    bool delta_softplus,
+    const std::optional<torch::stable::Tensor>& query_start_loc,
+    const std::optional<torch::stable::Tensor>& cache_indices,
+    const std::optional<torch::stable::Tensor>& has_initial_state,
+    const torch::stable::Tensor& ssm_states, int64_t null_block_id,
+    int64_t block_size,
+    const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
+    const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
+    const std::optional<torch::stable::Tensor>& initial_state_idx,
+    const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
+    const std::optional<torch::stable::Tensor>& last_chunk_indices);
 
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
