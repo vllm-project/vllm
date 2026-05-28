@@ -1,0 +1,53 @@
+[package]
+name = "vllm-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+asynk-strim-attr.workspace = true
+easy-ext.workspace = true
+futures.workspace = true
+half.workspace = true
+itertools.workspace = true
+llm-multimodal.workspace = true
+minijinja.workspace = true
+minijinja-contrib.workspace = true
+openai-harmony.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde-json-fmt.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+subenum.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+trait-set.workspace = true
+uuid.workspace = true
+vllm-engine-core-client.workspace = true
+vllm-llm.workspace = true
+vllm-reasoning-parser.workspace = true
+vllm-text.workspace = true
+vllm-tokenizer.workspace = true
+vllm-tool-parser.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+expect-test.workspace = true
+paste.workspace = true
+rmp-serde.workspace = true
+serial_test.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+zeromq.workspace = true
+
+[lints]
+workspace = true

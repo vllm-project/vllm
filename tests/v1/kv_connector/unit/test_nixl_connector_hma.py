@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -637,6 +638,30 @@ def test_mamba_n1_d_side(has_mamba, is_hma_required, expected_count):
 
 
 @pytest.mark.cpu_test
+def test_mamba_n1_d_side_builds_decode_metadata():
+    req = create_request(num_tokens=10, do_remote_prefill=True)
+    sched = make_nixl_scheduler(has_mamba=True, is_hma_required=True)
+
+    num_computed_tokens, is_async = sched.get_num_new_matched_tokens(
+        req, num_computed_tokens=0
+    )
+
+    assert num_computed_tokens == req.num_prompt_tokens - 1
+    assert is_async is True
+
+    vllm_config = create_vllm_config()
+    metadata = MockMambaBuilder.build_mamba_metadata(
+        vllm_config,
+        seq_lens=[req.num_prompt_tokens],
+        query_lens=[1],
+        is_prefilling=[True],
+    )
+
+    assert metadata.num_decodes == 1
+    assert metadata.num_prefills == 0
+
+
+@pytest.mark.cpu_test
 def test_mamba_n1_p_side_truncation():
     """P-side: Mamba truncates prompt to N-1, sets max_tokens=1.
 
@@ -698,8 +723,7 @@ def test_has_mamba_init(
 
     block_size = 16
     vllm_config = create_vllm_config(block_size=block_size)
-    # VllmConfig.__post_init__ auto-disables HMA when kv_transfer_config
-    # is set; override so we can test the scheduler's own derivation.
+    # Explicitly enable HMA so we can test the scheduler's own derivation.
     vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
     kv_cache_config = make_kv_cache_config(
         block_size=block_size,
