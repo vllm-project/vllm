@@ -229,7 +229,6 @@ def get_tokenizer(
     # Some models have an incorrect tokenizer_class on the hub.
     # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
     model_type = getattr(config, "model_type", None) if config else None
-    needs_tokenizers_backend_cache = False
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from transformers.tokenization_utils_tokenizers import TokenizersBackend
 
@@ -238,15 +237,14 @@ def get_tokenizer(
             model_type,
         )
         tokenizer_cls_ = TokenizersBackend
-        needs_tokenizers_backend_cache = True
     elif tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
         tokenizer_cls_ = tokenizer_cls
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
-    if needs_tokenizers_backend_cache:
-        from .hf import get_cached_tokenizer
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from vllm.tokenizers.hf import get_cached_tokenizer
 
         tokenizer = get_cached_tokenizer(tokenizer)
     if not tokenizer.is_fast:
