@@ -17,11 +17,11 @@ from .quant_config import DeepseekV4FP8Config
 # default that mypy sees; the ROCm branch overrides it at runtime and is
 # kept type-compatible via ``# type: ignore[assignment]``.
 if TYPE_CHECKING or not current_platform.is_rocm():
-    from .nvidia.deepseek_v4 import DeepseekV4ForCausalLM
-    from .nvidia.deepseek_v4_mtp import DeepSeekV4MTP
+    from .nvidia.model import DeepseekV4ForCausalLM
+    from .nvidia.mtp import DeepSeekV4MTP
 else:
-    from .amd.deepseek_v4 import DeepseekV4ForCausalLM  # type: ignore[assignment]
-    from .amd.deepseek_v4_mtp import DeepSeekV4MTP  # type: ignore[assignment]
+    from .amd.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .amd.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
 __all__ = [
     "DeepSeekV4MTP",

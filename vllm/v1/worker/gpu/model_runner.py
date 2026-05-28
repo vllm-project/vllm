@@ -37,6 +37,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
@@ -49,7 +50,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -392,10 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
-        (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
-            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+        self.attn_groups, attn_cg_support, kernel_block_sizes = init_attn_backend(
+            self.kv_cache_config, self.vllm_config, self.device
         )
-
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -431,9 +431,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
-                self.model_state,
-                self.kv_cache_config,
-                self.block_tables,
+                self.model_state, self.kv_cache_config, self.block_tables
             )
 
         self.kv_caches: list[torch.Tensor] = []
@@ -441,10 +439,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
-            self.attn_backends,
+            self.attn_groups,
             self.device,
             self.cache_config.cache_dtype,
             kernel_block_sizes,
+            self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
@@ -1084,7 +1083,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
+            if self.lora_config:
+                # program a no-LoRA mapping here so kernels early-exit instead of
+                # reading uninitialized metadata during dummy runs.
+                # FIXME: Replace this with LoRA warmup:
+                # https://github.com/vllm-project/vllm/pull/35536
+                assert hasattr(self, "lora_manager")
+                adapter_manager = self.lora_manager._adapter_manager
+                adapter_manager.set_adapter_mapping(
+                    LoRAMapping(
+                        index_mapping=(0,) * input_batch.num_tokens_after_padding,
+                        prompt_mapping=(0,) * input_batch.num_reqs,
+                        is_prefill=True,
+                    )
+                )
+                seen_wrappers: set[int] = set()
+                for punica_wrapper in adapter_manager.punica_wrapper_mapping.values():
+                    if id(punica_wrapper) in seen_wrappers:
+                        continue
+                    seen_wrappers.add(id(punica_wrapper))
+                    for kernel_meta in (
+                        punica_wrapper.token_mapping_meta,  # type: ignore[attr-defined]
+                        punica_wrapper.prompt_mapping_meta,  # type: ignore[attr-defined]
+                    ):
+                        kernel_meta.no_lora_flag_cpu[0] = False
+                        kernel_meta.num_active_loras_cpu[0] = 1
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1183,19 +1206,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states = None
             output_intermediate_tensors = model_output
 
-        kv_connector_output = self.kv_connector.post_forward(scheduler_output)
+        finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(
             input_batch=input_batch,
             attn_metadata=attn_metadata,
             slot_mappings_by_layer=slot_mappings_by_layer,
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
-            kv_connector_output=kv_connector_output,
+            finished_req_ids=finished_req_ids,
         )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert output_intermediate_tensors is not None
+            kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
             output_intermediate_tensors.kv_connector_output = kv_connector_output
             return output_intermediate_tensors
         return None
@@ -1214,7 +1238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = self.execute_model_state.slot_mappings_by_layer
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
-        kv_connector_output = self.execute_model_state.kv_connector_output
+        finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1256,8 +1280,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             sampled_token_ids=None,  # type: ignore
             prompt_logprobs_dict=prompt_logprobs_dict,  # type: ignore[arg-type]
-            kv_connector_output=kv_connector_output,
         )
+        # Start async output copy here so that it can overlap with speculator proposal.
         async_output = AsyncOutput(
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
@@ -1320,6 +1344,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
+        # Post-step KV connector related operations.
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        model_runner_output.kv_connector_output = kv_connector_output
+
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
@@ -1336,7 +1364,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         input_batch = self.execute_model_state.input_batch
         hidden_states = self.execute_model_state.hidden_states
-        kv_connector_output = self.execute_model_state.kv_connector_output
+        finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1347,6 +1375,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         pooler_output, is_valid = self.pooling_runner.pool(
             hidden_states, input_batch, self.req_states
         )
+
+        # Post-step KV connector related operations.
+        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
 
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -1431,4 +1462,4 @@ class ExecuteModelState(NamedTuple):
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
-    kv_connector_output: KVConnectorOutput | None
+    finished_req_ids: set[str]
