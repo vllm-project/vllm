@@ -59,8 +59,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
-        assert quant_config.quant_dtype == "nvfp4", (
-            "FlashInferB12xExperts only supports nvfp4 quantization."
+        # W4A4 sets quant_dtype="nvfp4"; W4A16 sets quant_dtype=None.
+        # Either way, weights must be nvfp4 for this kernel.
+        assert quant_config.weight_quant_dtype == "nvfp4", (
+            "FlashInferB12xExperts only supports nvfp4 weight quantization."
         )
         self.out_dtype = moe_config.in_dtype
         self.num_local_experts = moe_config.num_local_experts
