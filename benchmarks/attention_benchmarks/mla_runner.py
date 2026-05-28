@@ -29,6 +29,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 # ============================================================================
 # VllmConfig Creation
@@ -79,8 +80,8 @@ def create_minimal_vllm_config(
         index_topk: Optional topk value for sparse MLA backends. If provided,
                     the config will include index_topk for sparse attention.
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
-                        "cudnn", "trtllm"). Configures the attention config to
-                        force the specified prefill backend.
+                        "trtllm"). Configures the attention config to force
+                        the specified prefill backend.
 
     Returns:
         VllmConfig for benchmarking
@@ -179,19 +180,13 @@ def create_minimal_vllm_config(
 
     if prefill_backend is not None:
         prefill_cfg = get_prefill_backend_config(prefill_backend)
+        vllm_config.attention_config.mla_prefill_backend = prefill_cfg[
+            "mla_prefill_backend"
+        ]
         if prefill_cfg["flash_attn_version"] is not None:
             vllm_config.attention_config.flash_attn_version = prefill_cfg[
                 "flash_attn_version"
             ]
-        vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
-            "disable_flashinfer_prefill"
-        ]
-        vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
-            "use_cudnn_prefill"
-        ]
-        vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = prefill_cfg[
-            "use_trtllm_ragged_deepseek_prefill"
-        ]
 
     return vllm_config
 
@@ -206,39 +201,27 @@ def create_minimal_vllm_config(
 _PREFILL_BACKEND_CONFIG: dict[str, dict] = {
     "fa2": {
         "flash_attn_version": 2,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa3": {
         "flash_attn_version": 3,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa4": {
         "flash_attn_version": 4,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "flashinfer": {
         "flash_attn_version": None,
-        "disable_flashinfer_prefill": False,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
-    },
-    "cudnn": {
-        "flash_attn_version": None,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": True,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASHINFER,
     },
     "trtllm": {
         "flash_attn_version": None,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": True,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TRTLLM_RAGGED,
+    },
+    "tokenspeed": {
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TOKENSPEED_MLA,
     },
 }
 
@@ -404,6 +387,7 @@ def _build_attention_metadata(
         query_start_loc=q_start_gpu,
         query_start_loc_cpu=q_start_cpu,
         seq_lens=seq_lens_gpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=num_computed_tokens_cpu,
         slot_mapping=slot_mapping,
@@ -623,6 +607,21 @@ def _create_backend_impl(
 
     # Create mock layer
     layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
+
+    # Attach a prefill backend (MLAAttention does this in __init__; the metadata
+    # builder reads layer.prefill_backend from static_forward_context).
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+    layer.prefill_backend = prefill_backend_cls(
+        num_heads=mla_dims["num_q_heads"],
+        scale=(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]) ** -0.5,
+        kv_lora_rank=mla_dims["kv_lora_rank"],
+        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
+        qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
+        v_head_dim=mla_dims["v_head_dim"],
+        vllm_config=vllm_config,
+    )
 
     # Create builder instance if needed
     builder_instance = None
@@ -960,19 +959,6 @@ def _run_mla_benchmark_batched(
     results = []
 
     with set_current_vllm_config(vllm_config):
-        # Clear cached prefill backend detection functions so they re-evaluate
-        # with the current VllmConfig. These are @functools.cache decorated and
-        # would otherwise return stale results from a previous backend's config.
-        from vllm.model_executor.layers.attention.mla_attention import (
-            use_cudnn_prefill,
-            use_flashinfer_prefill,
-            use_trtllm_ragged_deepseek_prefill,
-        )
-
-        use_flashinfer_prefill.cache_clear()
-        use_cudnn_prefill.cache_clear()
-        use_trtllm_ragged_deepseek_prefill.cache_clear()
-
         # Create backend impl, layer, builder, and indexer (reused across benchmarks)
         impl, layer, builder_instance, indexer = _create_backend_impl(
             backend_cfg,
@@ -984,38 +970,36 @@ def _run_mla_benchmark_batched(
             kv_cache_dtype=kv_cache_dtype,
         )
 
-        # Verify the actual prefill backend matches what was requested
+        # Verify the actual prefill backend matches what was requested. The
+        # selector + impl construction already raise on misuse; here we just
+        # check the resolved class against the requested name as a sanity guard.
         if prefill_backend is not None:
-            prefill_cfg = get_prefill_backend_config(prefill_backend)
-            fa_version = prefill_cfg["flash_attn_version"]
-
-            if fa_version is not None:
-                # FA backend: verify the impl's FA version
-                actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
+            expected_class = {
+                "fa2": "FlashAttnPrefillBackend",
+                "fa3": "FlashAttnPrefillBackend",
+                "fa4": "FlashAttnPrefillBackend",
+                "flashinfer": "FlashInferPrefillBackend",
+                "trtllm": "TrtllmRaggedPrefillBackend",
+                "tokenspeed": "TokenspeedMLAPrefillBackend",
+            }.get(prefill_backend)
+            actual_class = type(getattr(layer, "prefill_backend", None)).__name__
+            if expected_class and actual_class != expected_class:
+                raise RuntimeError(
+                    f"Prefill backend '{prefill_backend}' requested "
+                    f"{expected_class}, got {actual_class}. Check "
+                    f"attention_config plumbing or installed deps."
+                )
+            if prefill_backend in {"fa2", "fa3", "fa4"}:
+                fa_version = int(prefill_backend[2:])
+                actual_fa_version = getattr(
+                    layer.prefill_backend, "vllm_flash_attn_version", None
+                )
                 if actual_fa_version != fa_version:
                     raise RuntimeError(
                         f"Prefill backend '{prefill_backend}' requested FA "
-                        f"version {fa_version}, but the impl is using FA "
-                        f"version {actual_fa_version}. Check "
-                        f"vllm/v1/attention/backends/fa_utils.py."
+                        f"version {fa_version}, got "
+                        f"{actual_fa_version} on {actual_class}."
                     )
-            else:
-                # Non-FA backend: verify the builder picked the right path
-                expected_flags = {
-                    "flashinfer": "_use_fi_prefill",
-                    "cudnn": "_use_cudnn_prefill",
-                    "trtllm": "_use_trtllm_ragged_prefill",
-                }
-                flag_name = expected_flags.get(prefill_backend)
-                if flag_name and not getattr(builder_instance, flag_name, False):
-                    raise RuntimeError(
-                        f"Prefill backend '{prefill_backend}' was requested "
-                        f"but the metadata builder did not enable it. This "
-                        f"usually means a dependency is missing (e.g., "
-                        f"flashinfer not installed) or the platform doesn't "
-                        f"support it."
-                    )
-
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)

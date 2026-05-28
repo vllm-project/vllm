@@ -371,193 +371,200 @@ class TestCUDAGraphWrapper:
         assert not wrapper.concrete_cudagraph_entries
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
-class TestCudagraphIntegration:
-    def setup_method(self):
-        # only FULL mode for non-uniform batches
-        self.comp_config = CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            cudagraph_mode="FULL",
-            cudagraph_capture_sizes=[10, 20],
-        )
-        self.vllm_config = _create_vllm_config(self.comp_config)
-        self.dispatcher = CudagraphDispatcher(self.vllm_config)
-        self.dispatcher.initialize_cudagraph_keys(
-            self.comp_config.cudagraph_mode, uniform_decode_query_len=1
-        )
+def _run_and_monitor_call(
+    wrapper, input_tensor, runtime_mode, batch_descriptor, vllm_config
+):
+    """Helper to run a single call and monitor the action."""
 
-    def _run_and_monitor_call(
-        self, wrapper, input_tensor, runtime_mode, batch_descriptor
+    with (
+        patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
+        patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,
     ):
-        """Helper to run a single call and monitor the action."""
+        entry = wrapper.concrete_cudagraph_entries.get(batch_descriptor, None)
 
-        with (
-            patch("torch.cuda.graph", wraps=torch.cuda.graph) as mock_graph_context,
-            patch.object(wrapper, "runnable", wraps=wrapper.runnable) as mock_runnable,
-        ):
-            entry = wrapper.concrete_cudagraph_entries.get(batch_descriptor, None)
-
-            context = set_forward_context(
-                attn_metadata=None,
-                vllm_config=self.vllm_config,
-                cudagraph_runtime_mode=runtime_mode,
-                batch_descriptor=batch_descriptor,
-            )
-            mock_replay = MagicMock()
-            if entry and entry.cudagraph:
-                with (
-                    context,
-                    patch.object(
-                        entry.cudagraph, "replay", new_callable=MagicMock
-                    ) as mock_replay,
-                ):
-                    wrapper(input_tensor)
-            else:
-                with context:
-                    wrapper(input_tensor)
-
-            if mock_graph_context.called:
-                # note that this is globally mocked, so it will be detected
-                # even whether called by the inner or outer wrapper
-                return "capture_global"
-            if mock_replay.called:
-                # only for outer wrapper
-                return "replay"
-            if mock_runnable.call_count > 0:
-                # only for outer wrapper
-                return "bypass"
-            return "unknown"
-
-    @create_new_process_for_each_test("spawn")
-    def test_capture_replay_bypass_logic(self):
-        model = SimpleMLP().to(DEVICE_TYPE)
-        full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
-        max_bs = 16
-        persistent_input_buffer = torch.zeros(max_bs, 10, device=DEVICE_TYPE)
-        input_1 = persistent_input_buffer[:1]
-        input_2 = persistent_input_buffer[:2]
-        input_3 = persistent_input_buffer[:3]
-
-        desc_1 = BatchDescriptor(num_tokens=1)
-        desc_2 = BatchDescriptor(num_tokens=2)
-        desc_3_unseen = BatchDescriptor(num_tokens=3)
-
-        # 0. global warmup
-        with set_forward_context(
+        context = set_forward_context(
             attn_metadata=None,
-            vllm_config=self.vllm_config,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            batch_descriptor=None,
-        ):
-            full_wrapper(input_1)
-
-        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_1.num_tokens)
-        # 1. Capture first shape
-        action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
-        assert action == "capture_global"
-
-        # 2. Replay first shape
-        action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
-        assert action == "replay"
-
-        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_2.num_tokens)
-        # 3. Capture second shape
-        action = self._run_and_monitor_call(full_wrapper, input_2, rt_mode, key)
-        assert action == "capture_global"
-
-        # 4. Replay second shape
-        action = self._run_and_monitor_call(
-            full_wrapper, input_2, CUDAGraphMode.FULL, desc_2
+            vllm_config=vllm_config,
+            cudagraph_runtime_mode=runtime_mode,
+            batch_descriptor=batch_descriptor,
         )
-        assert action == "replay"
+        mock_replay = MagicMock()
+        if entry and entry.cudagraph:
+            with (
+                context,
+                patch.object(
+                    entry.cudagraph, "replay", new_callable=MagicMock
+                ) as mock_replay,
+            ):
+                wrapper(input_tensor)
+        else:
+            with context:
+                wrapper(input_tensor)
 
-        # 5. Bypass if no key match
-        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_3_unseen.num_tokens)
-        assert rt_mode == CUDAGraphMode.NONE
-        action = self._run_and_monitor_call(full_wrapper, input_3, rt_mode, key)
-        assert action == "bypass"
+        if mock_graph_context.called:
+            # note that this is globally mocked, so it will be detected
+            # even whether called by the inner or outer wrapper
+            return "capture_global"
+        if mock_replay.called:
+            # only for outer wrapper
+            return "replay"
+        if mock_runnable.call_count > 0:
+            # only for outer wrapper
+            return "bypass"
+        return "unknown"
 
-        # capture unseen shape is not allowed after disable
-        set_cudagraph_capturing_enabled(False)
-        with pytest.raises(RuntimeError):
-            self._run_and_monitor_call(
-                full_wrapper, input_3, CUDAGraphMode.FULL, desc_3_unseen
-            )
-        set_cudagraph_capturing_enabled(True)
 
-    @create_new_process_for_each_test("spawn")
-    def test_nested_wrappers(self):
-        """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
-        model = SimpleMLP().to(DEVICE_TYPE)
-        full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
-        input_1 = torch.randn(1, 10, device=DEVICE_TYPE)
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+def test_capture_replay_bypass_logic():
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode="FULL",
+        cudagraph_capture_sizes=[1, 2],
+    )
+    vllm_config = _create_vllm_config(comp_config)
+    dispatcher = CudagraphDispatcher(vllm_config)
+    dispatcher.initialize_cudagraph_keys(
+        comp_config.cudagraph_mode, uniform_decode_query_len=1
+    )
+    model = SimpleMLP().to(DEVICE_TYPE)
+    full_wrapper = CUDAGraphWrapper(model, vllm_config, CUDAGraphMode.FULL)
+    max_bs = 16
+    persistent_input_buffer = torch.zeros(max_bs, 10, device=DEVICE_TYPE)
+    input_1 = persistent_input_buffer[:1]
+    input_2 = persistent_input_buffer[:2]
+    input_3 = persistent_input_buffer[:3]
 
-        # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
-        inner_model = SimpleMLP().to(DEVICE_TYPE)
-        piecewise_wrapper = CUDAGraphWrapper(
-            inner_model, self.vllm_config, CUDAGraphMode.PIECEWISE
+    desc_1 = BatchDescriptor(num_tokens=1)
+    desc_2 = BatchDescriptor(num_tokens=2)
+    desc_3_unseen = BatchDescriptor(num_tokens=3)
+
+    # 0. global warmup
+    with set_forward_context(
+        attn_metadata=None,
+        vllm_config=vllm_config,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        batch_descriptor=None,
+    ):
+        full_wrapper(input_1)
+
+    rt_mode, key = dispatcher.dispatch(num_tokens=desc_1.num_tokens)
+    # 1. Capture first shape
+    action = _run_and_monitor_call(full_wrapper, input_1, rt_mode, key, vllm_config)
+    assert action == "capture_global"
+
+    # 2. Replay first shape
+    action = _run_and_monitor_call(full_wrapper, input_1, rt_mode, key, vllm_config)
+    assert action == "replay"
+
+    rt_mode, key = dispatcher.dispatch(num_tokens=desc_2.num_tokens)
+    # 3. Capture second shape
+    action = _run_and_monitor_call(full_wrapper, input_2, rt_mode, key, vllm_config)
+    assert action == "capture_global"
+
+    # 4. Replay second shape
+    action = _run_and_monitor_call(
+        full_wrapper, input_2, CUDAGraphMode.FULL, key, vllm_config
+    )
+    assert action == "replay"
+
+    # 5. Bypass if no key match
+    rt_mode, key = dispatcher.dispatch(num_tokens=desc_3_unseen.num_tokens)
+    assert rt_mode == CUDAGraphMode.NONE
+    action = _run_and_monitor_call(full_wrapper, input_3, rt_mode, key, vllm_config)
+    assert action == "bypass"
+
+    # capture unseen shape is not allowed after disable
+    set_cudagraph_capturing_enabled(False)
+    with pytest.raises(RuntimeError):
+        _run_and_monitor_call(
+            full_wrapper, input_3, CUDAGraphMode.FULL, desc_3_unseen, vllm_config
         )
-        inner_model.forward = MagicMock(wraps=inner_model.forward)
-        outer_model = SimpleMLP().to(DEVICE_TYPE)
-        # When outer model is called, it calls the piecewise_wrapper
-        outer_model.forward = MagicMock(
-            wraps=outer_model.forward, side_effect=piecewise_wrapper
-        )
-        full_wrapper = CUDAGraphWrapper(
-            outer_model, self.vllm_config, CUDAGraphMode.FULL
-        )
+    set_cudagraph_capturing_enabled(True)
 
-        desc_1 = BatchDescriptor(num_tokens=1)
 
-        # 0. global warmup
-        with set_forward_context(
-            attn_metadata=None,
-            vllm_config=self.vllm_config,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            batch_descriptor=None,
-        ):
-            full_wrapper(input_1)
+@create_new_process_for_each_test("spawn")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+def test_nested_wrappers():
+    """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
+    comp_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode="FULL",
+        cudagraph_capture_sizes=[1],
+    )
+    vllm_config = _create_vllm_config(comp_config)
+    dispatcher = CudagraphDispatcher(vllm_config)
+    dispatcher.initialize_cudagraph_keys(
+        comp_config.cudagraph_mode, uniform_decode_query_len=1
+    )
+    model = SimpleMLP().to(DEVICE_TYPE)
+    full_wrapper = CUDAGraphWrapper(model, vllm_config, CUDAGraphMode.FULL)
+    input_1 = torch.randn(1, 10, device=DEVICE_TYPE)
 
-        # --- Test runtime mode FULL---
-        # Run with FULL mode context. Expect outer wrapper to capture.
-        # The inner mock should be called once inside the graph capture.
-        outer_model.forward.reset_mock()
-        inner_model.forward.reset_mock()
-        action = self._run_and_monitor_call(
-            full_wrapper, input_1, CUDAGraphMode.FULL, desc_1
-        )
-        assert action == "capture_global"
-        assert outer_model.forward.call_count == 1
-        assert inner_model.forward.call_count == 1
+    # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
+    inner_model = SimpleMLP().to(DEVICE_TYPE)
+    piecewise_wrapper = CUDAGraphWrapper(
+        inner_model, vllm_config, CUDAGraphMode.PIECEWISE
+    )
+    inner_model.forward = MagicMock(wraps=inner_model.forward)
+    outer_model = SimpleMLP().to(DEVICE_TYPE)
+    # When outer model is called, it calls the piecewise_wrapper
+    outer_model.forward = MagicMock(
+        wraps=outer_model.forward, side_effect=piecewise_wrapper
+    )
+    full_wrapper = CUDAGraphWrapper(outer_model, vllm_config, CUDAGraphMode.FULL)
 
-        # Run again. Expect outer wrapper to replay.
-        # The outer model should NOT be called because the whole graph
-        # is replayed.
-        action = self._run_and_monitor_call(
-            full_wrapper, input_1, CUDAGraphMode.FULL, desc_1
-        )
-        assert action == "replay"
-        assert outer_model.forward.call_count == 1  # No new call
-        assert inner_model.forward.call_count == 1
+    desc_1 = BatchDescriptor(num_tokens=1)
 
-        # --- Test runtime mode PIECEWISE ---
-        outer_model.forward.reset_mock()
-        inner_model.forward.reset_mock()
-        # Run with PIECEWISE mode context.
-        # Expect outer wrapper to bypass and call inner wrapper.
-        # Inner wrapper should capture.
-        action = self._run_and_monitor_call(
-            full_wrapper, input_1, CUDAGraphMode.PIECEWISE, desc_1
-        )
-        assert action == "capture_global"
-        assert outer_model.forward.call_count == 1
-        assert inner_model.forward.call_count == 1
+    # 0. global warmup
+    with set_forward_context(
+        attn_metadata=None,
+        vllm_config=vllm_config,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE,
+        batch_descriptor=None,
+    ):
+        full_wrapper(input_1)
 
-        # Run again with PIECEWISE.
-        # Outer bypasses, inner replays.
-        action = self._run_and_monitor_call(
-            full_wrapper, input_1, CUDAGraphMode.PIECEWISE, desc_1
-        )
-        assert action == "bypass"
-        assert outer_model.forward.call_count == 2
-        assert inner_model.forward.call_count == 1
+    # --- Test runtime mode FULL---
+    # Run with FULL mode context. Expect outer wrapper to capture.
+    # The inner mock should be called once inside the graph capture.
+    outer_model.forward.reset_mock()
+    inner_model.forward.reset_mock()
+    action = _run_and_monitor_call(
+        full_wrapper, input_1, CUDAGraphMode.FULL, desc_1, vllm_config
+    )
+    assert action == "capture_global"
+    assert outer_model.forward.call_count == 1
+    assert inner_model.forward.call_count == 1
+
+    # Run again. Expect outer wrapper to replay.
+    # The outer model should NOT be called because the whole graph
+    # is replayed.
+    action = _run_and_monitor_call(
+        full_wrapper, input_1, CUDAGraphMode.FULL, desc_1, vllm_config
+    )
+    assert action == "replay"
+    assert outer_model.forward.call_count == 1  # No new call
+    assert inner_model.forward.call_count == 1
+
+    # --- Test runtime mode PIECEWISE ---
+    outer_model.forward.reset_mock()
+    inner_model.forward.reset_mock()
+    # Run with PIECEWISE mode context.
+    # Expect outer wrapper to bypass and call inner wrapper.
+    # Inner wrapper should capture.
+    action = _run_and_monitor_call(
+        full_wrapper, input_1, CUDAGraphMode.PIECEWISE, desc_1, vllm_config
+    )
+    assert action == "capture_global"
+    assert outer_model.forward.call_count == 1
+    assert inner_model.forward.call_count == 1
+
+    # Run again with PIECEWISE.
+    # Outer bypasses, inner replays.
+    action = _run_and_monitor_call(
+        full_wrapper, input_1, CUDAGraphMode.PIECEWISE, desc_1, vllm_config
+    )
+    assert action == "bypass"
+    assert outer_model.forward.call_count == 2
+    assert inner_model.forward.call_count == 1

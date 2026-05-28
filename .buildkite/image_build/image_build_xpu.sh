@@ -11,8 +11,8 @@ REPO=$2
 BUILDKITE_COMMIT=$3
 
 # authenticate with AWS ECR
-aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY" || true
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 936637512419.dkr.ecr.us-east-1.amazonaws.com || true
 
 # skip build if image already exists
 if ! docker manifest inspect "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-xpu &> /dev/null; then

@@ -143,12 +143,12 @@ def _tq_decode_stage1(
             Block_table_ptr + bt_base + page_idx,
             mask=kv_mask,
             other=0,
-        )
+        ).to(tl.int64)
 
         slot_bases = (
             block_nums * stride_cache_block
-            + page_off * stride_cache_pos
-            + kv_head * stride_cache_head
+            + page_off.to(tl.int64) * stride_cache_pos
+            + tl.cast(kv_head, tl.int64) * stride_cache_head
         )
 
         # ============================================================
@@ -356,11 +356,11 @@ def _tq_full_dequant_kv(
 
     page_idx = pos // BLOCK_SIZE
     page_off = pos % BLOCK_SIZE
-    block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx)
+    block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx).to(tl.int64)
     slot_base = (
         block_num * stride_cache_block
-        + page_off * stride_cache_pos
-        + hid * stride_cache_head
+        + tl.cast(page_off, tl.int64) * stride_cache_pos
+        + tl.cast(hid, tl.int64) * stride_cache_head
     )
 
     d_offs = tl.arange(0, BLOCK_D)
@@ -588,10 +588,16 @@ def triton_turboquant_decode_attention(
     )
 
     # Stage 2: Reduce across KV splits
-    if output_buf is not None and output_buf.shape[0] >= B:
+    # Output in query dtype — eliminates float16_copy kernel after stage2
+    out_dtype = query.dtype
+    if (
+        output_buf is not None
+        and output_buf.shape[0] >= B
+        and output_buf.dtype == out_dtype
+    ):
         output = output_buf[:B, :Hq, :D]
     else:
-        output = torch.empty(B, Hq, D, dtype=torch.float32, device=device)
+        output = torch.empty(B, Hq, D, dtype=out_dtype, device=device)
         if buf_holder is not None:
             buf_holder._tq_output_buf = output
     if lse_buf is not None and lse_buf.shape[0] >= B:
@@ -616,8 +622,9 @@ def triton_turboquant_decode_attention(
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=cfg["BLOCK_D"],
         Lv=D,
+        OUTPUT_FP16=1 if out_dtype == torch.float16 else 0,
         num_warps=4,
         num_stages=2,
     )
 
-    return output.to(query.dtype)
+    return output  # already in query dtype
