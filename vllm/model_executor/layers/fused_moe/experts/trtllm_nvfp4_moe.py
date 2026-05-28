@@ -275,9 +275,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        if router_logits_dtype == torch.float32:
-            return False
-        return True
+        return router_logits_dtype != torch.float32
 
     def apply(
         self,
