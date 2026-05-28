@@ -1837,7 +1837,10 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        function["arguments"] = json.loads(content)
+                        content = json.loads(content)
+                    # json.loads("null") returns Python None, which would
+                    # crash chat templates that call arguments.items().
+                    function["arguments"] = content if content is not None else {}
                 else:
                     function["arguments"] = {}
 
