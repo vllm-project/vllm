@@ -51,9 +51,7 @@ class Step3p5MTPProposer(EagleProposer):
             return self._slot_mapping_buffer
         buf = self._per_group_slot_mapping_buffers.get(gid)
         if buf is None:
-            buf = torch.zeros(
-                self.max_positions, dtype=torch.int64, device=self.device
-            )
+            buf = torch.zeros(self.max_positions, dtype=torch.int64, device=self.device)
             self._per_group_slot_mapping_buffers[gid] = buf
         return buf
 
@@ -211,9 +209,7 @@ class Step3p5MTPProposer(EagleProposer):
                 else:
                     layer_to_spec[layer_name] = group_spec
 
-        attention_groups: dict[
-            tuple[str, int], AttentionGroup
-        ] = {}
+        attention_groups: dict[tuple[tuple[str, str], int], AttentionGroup] = {}
         for layer_name in sorted(self._draft_attn_layer_names):
             if layer_name not in layer_to_spec:
                 continue

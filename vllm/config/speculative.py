@@ -485,10 +485,9 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
 
-        if (
-            hf_config.model_type in ("step3p5", "step3p7")
-            or hf_config.architectures[0] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration")
-        ):
+        if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[
+            0
+        ] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration"):
             quantization_config = getattr(hf_config, "quantization_config", None)
             hf_config = getattr(hf_config, "text_config", hf_config)
             if (
