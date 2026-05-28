@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     SparseMLAAttentionImpl,
 )
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -48,7 +49,11 @@ from vllm.v1.attention.ops.flashmla import (
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
-from vllm.vllm_flash_attn import flash_attn_varlen_func  # type: ignore[attr-defined]
+
+if is_flash_attn_varlen_func_available():
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+else:
+    flash_attn_varlen_func = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -1127,6 +1132,9 @@ class FlashMLASparseStaticSinkImpl(FlashMLASparseImpl):
             dtype=torch.int32,
         )
 
+        assert flash_attn_varlen_func is not None, (
+            "FlashMLASparseStaticSinkImpl requires flash_attn_varlen_func."
+        )
         sink_o, sink_lse = flash_attn_varlen_func(
             q=q_pe,
             k=sink_k_pe,
