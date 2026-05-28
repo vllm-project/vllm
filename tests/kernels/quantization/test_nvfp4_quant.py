@@ -34,6 +34,7 @@ PAD_SHAPES = [
     (64, 7152),
     (32, 14336),
 ]
+PADDED_OUTPUT_SHAPES = [(128, 48), (128, 80), (150, 48), (150, 80), (64, 7152)]
 SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
 
@@ -130,6 +131,10 @@ def recover_swizzled_scales(scale, m, n):
     return result[:m, :scale_n]
 
 
+def round_up(x: int, y: int) -> int:
+    return (x + y - 1) // y * y
+
+
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -203,6 +208,60 @@ def test_python_util_matches_cpp_allocation(
     assert py_scale.dtype == cpp_scale.dtype, (
         f"Scale dtype mismatch: Python {py_scale.dtype} vs C++ {cpp_scale.dtype}"
     )
+
+
+@pytest.mark.parametrize("shape", PADDED_OUTPUT_SHAPES)
+@pytest.mark.parametrize("is_sf_swizzled_layout", [True, False])
+@torch.inference_mode()
+def test_quantize_to_fp4_with_padded_output(
+    shape: tuple[int, int],
+    is_sf_swizzled_layout: bool,
+) -> None:
+    from vllm._custom_ops import create_fp4_output_tensors
+
+    dtype = torch.float16
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = shape
+    padded_n = round_up(n, 32)
+    assert padded_n > n
+
+    x = torch.randn((m, n), dtype=dtype)
+    tensor_amax = torch.abs(x).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+    out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
+
+    out, out_scale = ops.scaled_fp4_quant(
+        x,
+        global_scale,
+        is_sf_swizzled_layout=is_sf_swizzled_layout,
+        padded_n=padded_n,
+    )
+    py_out, py_scale = create_fp4_output_tensors(
+        m,
+        n,
+        torch.device("cuda:0"),
+        is_sf_swizzled_layout,
+        padded_n=padded_n,
+    )
+
+    assert out.shape == (m, padded_n // 2)
+    assert out.shape == py_out.shape
+    assert out_scale.shape == py_scale.view(torch.float8_e4m3fn).shape
+
+    out_ans = cast_from_fp4(out[:, : n // 2], m, n)
+    torch.testing.assert_close(out_ans, out_ref)
+    assert torch.count_nonzero(out[:, n // 2 :]) == 0
+
+    if is_sf_swizzled_layout:
+        scale_ans = recover_swizzled_scales(out_scale, m, padded_n)
+        torch.testing.assert_close(scale_ans[:, : n // BLOCK_SIZE], scale_ref)
+        assert torch.count_nonzero(scale_ans[:, n // BLOCK_SIZE :]) == 0
+    else:
+        scale_ans = out_scale.to(torch.float32)
+        torch.testing.assert_close(scale_ans[:, : n // BLOCK_SIZE], scale_ref)
+        assert torch.count_nonzero(scale_ans[:, n // BLOCK_SIZE :]) == 0
 
 
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)

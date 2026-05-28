@@ -50,9 +50,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -100,9 +97,6 @@ class FusedMoE(PluggableLayer):
                                       not supported by the router (or the experts).
     """
 
-    # Auto-incrementing layer ID for routing replay buffer binding.
-    _next_moe_layer_id: int = 0
-
     # --8<-- [end:fused_moe]
 
     def __init__(
@@ -147,10 +141,6 @@ class FusedMoE(PluggableLayer):
         hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
-
-        # Assign unique layer ID for routing replay buffer binding.
-        self.moe_layer_id = FusedMoE._next_moe_layer_id
-        FusedMoE._next_moe_layer_id += 1
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -342,8 +332,8 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -416,7 +406,7 @@ class FusedMoE(PluggableLayer):
         }
         # need full intermediate size pre-sharding for WNA16 act order
         if self.quant_method.__class__.__name__ in (
-            "GPTQMarlinMoEMethod",
+            "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
@@ -479,7 +469,6 @@ class FusedMoE(PluggableLayer):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    inplace=not self.moe_config.disable_inplace,
                 )
             )
 

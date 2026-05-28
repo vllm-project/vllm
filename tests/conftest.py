@@ -224,19 +224,28 @@ def init_test_http_connection():
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
-    temp_file = tempfile.mkstemp()[1]
+    # Close the fd returned by mkstemp; FileStore opens the path itself.
+    # Leaving it open leaks one FD per test and eventually exhausts the
+    # ulimit, causing FileStore's destructor to throw c10::DistStoreError
+    # ("Too many open files") during gc and abort the process.
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
 
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 @pytest.fixture
@@ -785,10 +794,15 @@ class HfRunner:
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
-            prompts, images=images, videos=videos, audios=audios
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
@@ -1233,11 +1247,35 @@ class VllmRunner:
     def __enter__(self):
         return self
 
+    def _wait_for_rocm_memory_release(self, gpu_memory_utilization: float) -> None:
+        from tests.utils import wait_for_gpu_memory_to_clear
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            return
+
+        num_gpus = torch.accelerator.device_count()
+        if num_gpus == 0:
+            return
+
+        # V1 startup requires free_memory >= total * gpu_memory_utilization.
+        # Wait for the complementary used-memory ratio so the next runner does
+        # not fail the startup guard immediately after this runner exits. Bound
+        # the wait so cleanup failures fail this test instead of hanging.
+        wait_for_gpu_memory_to_clear(
+            devices=list(range(num_gpus)),
+            threshold_ratio=1.0 - gpu_memory_utilization,
+            timeout_s=120,
+        )
+
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
         # This is needed because when executing consecutive tests, the GC
         # might not be fast enough in shutting down the llm engine. This can lead to OOMs
         # because when the next test starts some GPU memory is still in use.
+        gpu_memory_utilization = (
+            self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+        )
         try:
             self.llm.llm_engine.engine_core.shutdown()
         except Exception:
@@ -1245,6 +1283,7 @@ class VllmRunner:
             pass
         del self.llm
         cleanup_dist_env_and_memory()
+        self._wait_for_rocm_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
