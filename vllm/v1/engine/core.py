@@ -22,7 +22,10 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    stateless_destroy_torch_distributed_process_group,
+)
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
@@ -601,6 +604,9 @@ class EngineCore:
         # visible to the garbage collector again. Without this, deleting
         # the engine in-process (e.g. unit tests) leaks GPU memory.
         gc.unfreeze()
+        # Tear down distributed state initialized in this EngineCore process
+        # before it exits and release cached memory.
+        cleanup_dist_env_and_memory()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
@@ -647,8 +653,18 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
-    def _reset_caches(self, reset_running_requests=True) -> None:
-        self.reset_prefix_cache(reset_running_requests=reset_running_requests)
+    def _reset_caches(
+        self,
+        reset_running_requests: bool = True,
+        reset_connector: bool = True,
+    ) -> None:
+        # reset_connector=True so external connectors clear alongside
+        # local caches, matching the pause_generation(clear_cache=True)
+        # contract. No-op when no connector is configured.
+        self.reset_prefix_cache(
+            reset_running_requests=reset_running_requests,
+            reset_connector=reset_connector,
+        )
         self.reset_mm_cache()
         self.reset_encoder_cache()
 
@@ -1234,11 +1250,10 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
-        # If no model execution happened but there are waiting requests
-        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
-        # background threads (like NIXL handshake) to make progress.
-        # Without this, the tight polling loop can starve background threads.
-        if not model_executed and self.scheduler.has_unfinished_requests():
+        # If no model execution happened but there is still scheduler work
+        # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
+        # the GIL briefly to allow background transfer threads to make progress.
+        if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
 
         return model_executed

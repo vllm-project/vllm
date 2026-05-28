@@ -35,25 +35,9 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-cleanup_docker() {
-  # Get Docker's root directory
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  if [ -z "$docker_root" ]; then
-    echo "Failed to determine Docker root directory."
-    exit 1
-  fi
-  echo "Docker root directory: $docker_root"
-
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
-  threshold=70
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
-  else
-    echo "Disk usage is below $threshold%. No cleanup needed."
-  fi
+report_docker_usage() {
+  echo "--- Docker usage"
+  docker system df || true
 }
 
 cleanup_network() {
@@ -254,8 +238,8 @@ re_quote_pytest_markers() {
 echo "--- ROCm info"
 rocminfo
 
-# --- Docker housekeeping ---
-cleanup_docker
+# --- Docker status ---
+report_docker_usage
 
 # --- Pull test image ---
 echo "--- Pulling container"
@@ -264,9 +248,17 @@ container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | hea
 docker pull "${image_name}"
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  # docker run uses --rm, so the container is normally already gone when the
+  # EXIT trap runs. Cleanup is best-effort and must not affect the test result.
+  docker rm -f "${container_name}" >/dev/null 2>&1 || true
 }
-trap remove_docker_container EXIT
+
+on_exit() {
+  local exit_code=$?
+  remove_docker_container
+  exit "$exit_code"
+}
+trap on_exit EXIT
 
 # --- Prepare commands ---
 echo "--- Running container"
