@@ -576,7 +576,7 @@ def resolve_kv_cache_block_sizes(
 
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp * pcp``. Multiple groups: LCM of every
+      ``cache_config.block_size * dcp``. Multiple groups: LCM of every
       group's block size — context parallelism is not supported here.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
@@ -585,16 +585,20 @@ def resolve_kv_cache_block_sizes(
       the scheduler block size (i.e. disables finer hashing) if block hashing
       is inactive or a mamba group's block size diverges from the cache
       block size (mamba_cache_mode != "align").
+
+    Note: PCP-real does NOT shard the KV cache (each rank stores the full
+    sequence after the K/V all-gather), so PCP must not appear in the
+    scheduler/hash block-size computation. DCP does shard, so it does.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
-    pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
+    if len(groups) <= 1:  # Single group: block_size * dcp
+        bs = cache_config.block_size * dcp
         return bs, bs
 
+    pcp = vllm_config.parallel_config.prefill_context_parallel_size
     if dcp != 1 or pcp != 1:
         raise ValueError(
             "Hybrid KV cache groups with multiple block sizes do not "

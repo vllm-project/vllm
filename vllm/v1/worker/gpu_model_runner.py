@@ -1953,6 +1953,19 @@ class GPUModelRunner(
             # GLOBAL token positions. Temporarily upload global data to the
             # shared GPU buffers, run compute_slot_mapping, then overwrite
             # with the LOCAL view further below.
+            #
+            # NOTE: the non-PCP path computes slot_mapping AFTER the
+            # `self.num_computed_tokens[:num_reqs].copy_(...)` H2D sync
+            # further down. Under PCP we run slot_mapping earlier, so we
+            # must sync num_computed_tokens here too — otherwise the GPU
+            # tensor still holds the previous step's values (e.g. an end-
+            # of-decode count for a now-finished request), corrupting
+            # positions and producing wrap-around slot indices that
+            # overwrite the prior step's K/V.
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
             self.req_indices.np[:global_total] = global_req_indices
             self.req_indices.copy_to_gpu(global_total)
             self.query_pos.copy_to_gpu(global_total)

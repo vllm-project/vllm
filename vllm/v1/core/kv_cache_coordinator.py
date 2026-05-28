@@ -357,10 +357,16 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.block_size = self.kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
+        # Under PCP-real, K/V are all-gathered across PCP ranks before the
+        # cache write, so each rank stores the FULL sequence — PCP does
+        # NOT shard the KV cache; only DCP does. Multiplying block_size by
+        # pcp_world_size here would inflate the coordinator's view of the
+        # block boundary, breaking prefix-caching's block-hash bookkeeping
+        # (the hash_block_size == self.block_size assertion below) and
+        # causing the `cache_full_blocks` AssertionError on follow-up
+        # requests under PCP > 1.
         if dcp_world_size > 1:
             self.block_size *= dcp_world_size
-        if pcp_world_size > 1:
-            self.block_size *= pcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (

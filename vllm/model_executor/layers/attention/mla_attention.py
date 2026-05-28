@@ -1755,9 +1755,30 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_cpu[reqs_start + 1 : num_reqs + 1]
                 - query_start_loc_cpu[reqs_start:num_reqs]
             )
-            context_lens_cpu = (
-                seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
-            )
+            if self.pcp_world_size > 1:
+                # Under PCP-real, query_start_loc is LOCAL (this rank's share
+                # of new Q) while seq_lens_cpu is GLOBAL (full sequence). A
+                # naive `seq_lens - local_query_lens` over-counts: it treats
+                # OTHER ranks' new-Q tokens as "context", triggering a
+                # redundant chunked-context FA that double-counts attention
+                # against K positions the head/tail FA already covers
+                # (head+tail FA together attend to the PCP-allgathered K).
+                # The correct global-new-Q count is `local_q * pcp_ws`
+                # (each rank's local share is padded to be equal). For the
+                # initial-prefill case this gives context_lens=0; the only
+                # imprecision is up to (2*pcp_ws-1) tokens of padding which
+                # would cause under-count in a multi-step prefill where
+                # prior context exists in cache — addressed separately.
+                global_new_q_padded = (
+                    prefill_query_lens_cpu * self.pcp_world_size
+                )
+                context_lens_cpu = (
+                    seq_lens_cpu[reqs_start:num_reqs] - global_new_q_padded
+                ).clamp(min=0)
+            else:
+                context_lens_cpu = (
+                    seq_lens_cpu[reqs_start:num_reqs] - prefill_query_lens_cpu
+                )
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -2624,44 +2645,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
-
-        # PCP diagnostic: dump the prefill attention output tensor along
-        # with the metadata needed to map its rows to global Q positions.
-        # See scripts/pcp_attn_out_diff.py.
-        import os as _os
-        _dump_dir = _os.environ.get("VLLM_PCP_ATTN_DUMP_DIR")
-        if _dump_dir:
-            import vllm.v1.attention.backend as _be
-            if not hasattr(_be, "_ATTN_DUMP_LAYER_IDS"):
-                _be._ATTN_DUMP_LAYER_IDS = {}
-                _be._ATTN_DUMP_RECORDED = set()
-            _kv_id = id(kv_c_and_k_pe_cache)
-            if _kv_id not in _be._ATTN_DUMP_LAYER_IDS:
-                _be._ATTN_DUMP_LAYER_IDS[_kv_id] = len(_be._ATTN_DUMP_LAYER_IDS)
-            _layer_idx = _be._ATTN_DUMP_LAYER_IDS[_kv_id]
-            try:
-                import torch.distributed as _dist
-                _rank = _dist.get_rank() if _dist.is_initialized() else 0
-            except Exception:
-                _rank = int(_os.environ.get("RANK", "0"))
-            _key = (int(_rank), _layer_idx)
-            if _key not in _be._ATTN_DUMP_RECORDED:
-                _be._ATTN_DUMP_RECORDED.add(_key)
-                _path = _os.path.join(
-                    _dump_dir, f"rank{_rank}_layer{_layer_idx:02d}.pt"
-                )
-                torch.save(
-                    {
-                        "attn_output": output.detach().cpu().to(torch.float32),
-                        "query_start_loc": (
-                            prefill_metadata.query_start_loc.detach().cpu()
-                        ),
-                        "pcp_world_size": self.pcp_world_size,
-                        "pcp_rank": self.pcp_rank,
-                        "num_mqa_tokens": int(attn_metadata.num_decode_tokens or 0),
-                    },
-                    _path,
-                )
 
     @abstractmethod
     def forward_mqa(
