@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -55,6 +52,7 @@ class Fp8MoeBackend(Enum):
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
+    CPU = "CPU"
 
 
 def _get_priority_backends(
@@ -80,6 +78,7 @@ def _get_priority_backends(
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
+        Fp8MoeBackend.CPU,
     ]
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
@@ -102,6 +101,10 @@ def _get_priority_backends(
         # move XPU backend to the front.
         _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.XPU)
 
+    if current_platform.is_cpu():
+        # CPU platform uses FP8 W8A16 fused MoE kernel.
+        _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.CPU)
+
     return _AVAILABLE_BACKENDS
 
 
@@ -117,14 +120,14 @@ def backend_to_kernel_cls(
         return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
         return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
-        from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
             TritonOrDeepGemmExperts,
         )
 
@@ -138,35 +141,35 @@ def backend_to_kernel_cls(
         return [BatchedDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
 
     elif backend == Fp8MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
         return [TritonExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
         return [BatchedTritonExperts]
 
     elif backend == Fp8MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
         return [AiterExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.triton_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
             TritonOrCutlassExperts,
         )
 
@@ -182,9 +185,17 @@ def backend_to_kernel_cls(
     elif backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
+            XPUExpertsMxfp8,
         )
 
-        return [XPUExpertsFp8]
+        return [XPUExpertsFp8, XPUExpertsMxfp8]
+
+    elif backend == Fp8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsFp8,
+        )
+
+        return [CPUExpertsFp8]
 
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
@@ -410,6 +421,7 @@ def select_fp8_moe_backend(
 
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
+    # TODO(bnell): replace layer with weight_block_size
     layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -472,6 +484,12 @@ def convert_to_fp8_moe_kernel_format(
         )
 
         w13, w2 = prepare_fp8_moe_layer_for_xpu(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_fp8_moe_layer_for_cpu,
+        )
+
+        w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
@@ -491,9 +509,12 @@ def make_fp8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None,
     a2_scale: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -508,11 +529,13 @@ def make_fp8_moe_quant_config(
     a method of the modular kernel itself.
     """
 
-    # MARLIN is mixed precision W8A16 config.
-    if fp8_backend == Fp8MoeBackend.MARLIN:
+    # MARLIN and CPU are mixed precision W8A16 config.
+    if fp8_backend == Fp8MoeBackend.MARLIN or fp8_backend == Fp8MoeBackend.CPU:
         return fp8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             block_shape=block_shape,
         )
 
@@ -523,12 +546,15 @@ def make_fp8_moe_quant_config(
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             a1_gscale=(1.0 / a1_scale),
             a2_gscale=(1.0 / a2_scale),
             g1_alphas=(w1_scale * a1_scale).squeeze(),
             g2_alphas=(w2_scale * a2_scale).squeeze(),
+            gemm1_clamp_limit=swiglu_limit,
         )
     # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
     # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
@@ -539,21 +565,27 @@ def make_fp8_moe_quant_config(
             "mxfp8",
             w1_scale=w1_scale,
             w2_scale=w2_scale,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_shape,
-            is_nvfp4_scale_swizzled=False,
+            is_scale_swizzled=False,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 
@@ -563,7 +595,6 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -593,17 +624,9 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
         )
 
-    # NOTE(rob): we only want the mk to control the shared_expert
-    # if using all2all (for SBO). bnell is making this explicit in
-    # the new MoE runner class.
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
-        inplace=(
-            not moe_config.disable_inplace
-            and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
-        ),
     )
 
     return kernel

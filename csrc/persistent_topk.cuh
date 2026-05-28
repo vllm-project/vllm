@@ -126,10 +126,10 @@ struct RadixRowState {
 // ============================================================================
 
 struct PersistentTopKParams {
-  const float* __restrict__ input;  // [num_rows, stride]
-  int32_t* __restrict__ output;     // [num_rows, top_k]
-  int32_t* __restrict__ lengths;    // [num_rows]
-  RadixRowState* row_states;        // large path: per-group state
+  const float* __restrict__ input;      // [num_rows, stride]
+  int32_t* __restrict__ output;         // [num_rows, top_k]
+  const int32_t* __restrict__ lengths;  // [num_rows]
+  RadixRowState* row_states;            // large path: per-group state
   uint32_t num_rows;
   uint32_t stride;
   uint32_t top_k;           // actual k value for output stride
@@ -887,26 +887,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   uint32_t* shared_ordered =
       reinterpret_cast<uint32_t*>(smem_raw + kFixedSmemLarge);
 
-  // RadixRowState for multi-CTA cooperative radix
+  // RadixRowState for multi-CTA cooperative radix.
+  // Zero-initialization is done host-side via cudaMemsetAsync in topk.cu
+  // before launch — that gives a stream-ordered happens-before edge for all
+  // CTAs, which the previous in-kernel init (CTA-0 only + intra-CTA
+  // __syncthreads) did not provide and which manifested as a race against
+  // CTA-1+'s first red_release on arrival_counter.
   RadixRowState* state = &params.row_states[group_id];
-
-  // -- Initialize RadixRowState (only needed if large rows exist) --
-  if (params.max_seq_len > RADIX_THRESHOLD) {
-    if (cta_in_group == 0) {
-      for (uint32_t buf = 0; buf < 3; buf++) {
-        for (uint32_t i = tx; i < RADIX; i += kThreadsPerBlock) {
-          state->histogram[buf][i] = 0;
-        }
-      }
-      if (tx == 0) {
-        state->remaining_k = 0;
-        state->prefix = 0;
-        state->arrival_counter = 0;
-        state->output_counter = 0;
-      }
-    }
-    __syncthreads();
-  }
 
   int barrier_phase = 0;
   const uint32_t total_iters = (params.num_rows + num_groups - 1) / num_groups;
@@ -1282,9 +1269,11 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
 }
 
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
-cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
-                                        IdType* lengths, uint32_t num_rows,
-                                        uint32_t top_k_val, uint32_t max_len,
+cudaError_t FilteredTopKRaggedTransform(const DType* input,
+                                        IdType* output_indices,
+                                        const IdType* lengths,
+                                        uint32_t num_rows, uint32_t top_k_val,
+                                        uint32_t max_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
   constexpr int MAX_VEC = 16 / sizeof(DType);

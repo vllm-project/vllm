@@ -62,15 +62,14 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
 
 bool moe_permute_unpermute_supported();
 
+int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
+                                        int64_t num_experts);
+
 void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
 
 #ifndef USE_ROCM
-// cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
-torch::Tensor router_gemm_bf16_fp32(torch::Tensor const& input,
-                                    torch::Tensor const& weight);
-
 // DeepSeek V3 optimized router GEMM kernel for SM90+
 // Computes output = mat_a @ mat_b.T where:
 //   mat_a: [num_tokens, hidden_dim] in bf16

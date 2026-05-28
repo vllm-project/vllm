@@ -42,7 +42,8 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "mori",
+    "mori_high_throughput",
+    "mori_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -135,8 +136,10 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
-    is provided explicitly to vllm serve."""
+    wide-EP setup in Kubernetes. Supported only for MoE deployments; non-MoE
+    models should use independent vLLM instances without --data-parallel-*
+    arguments. Set implicitly when --data-parallel-rank is provided explicitly
+    to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. Enables running an AsyncLLM
@@ -175,7 +178,8 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori": Use mori kernels
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
@@ -289,6 +293,10 @@ class ParallelConfig:
     If set, this value is passed to torch.distributed.init_process_group as the
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
+
+    cpu_distributed_timeout_seconds: int | None = None
+    """Timeout (in seconds) for cpu communication groups. If None, PyTorch's
+    default timeout is used (1800s for gloo)."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
@@ -615,7 +623,8 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "mori",
+                "mori_high_throughput",
+                "mori_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -662,6 +671,33 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
         aggregated_has_unfinished = bool(tensor.item())
         return aggregated_has_unfinished
+
+    @staticmethod
+    def sync_dp_state(
+        dp_group: ProcessGroup, has_unfinished: bool, pending_pause: bool
+    ) -> tuple[bool, bool]:
+        """Combined all-reduce for DP state synchronization.
+
+        Uses a single SUM all-reduce on a 2-element tensor:
+          [0] = 1 if this rank has unfinished work, else 0.
+                SUM > 0 ≡ logical OR across ranks → any rank has work.
+          [1] = 1 if this rank has a pending pause request, else 0.
+                SUM == dp_size ≡ all ranks reached pause consensus.
+
+        has_unfinished_global is true if any rank has unfinished work,
+        or if some ranks are waiting for a pause consensus.
+
+        Returns:
+            (has_unfinished_global, pause_consensus)
+        """
+        tensor = torch.tensor(
+            [int(has_unfinished), int(pending_pause)], dtype=torch.int32, device="cpu"
+        )
+        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        dp_size = dp_group.size()
+        pause_count = tensor[1].item()
+        has_unfinished_global = tensor[0].item() > 0 or pause_count % dp_size != 0
+        return has_unfinished_global, pause_count == dp_size
 
     @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
@@ -867,12 +903,18 @@ class ParallelConfig:
                 # (torch.distributed.batch_isend_irecv doesn't
                 # support stateless mode), so we use PyNCCL backend
                 self.eplb_config.communicator = "pynccl"
-            elif self.eplb_config.use_async:
-                # Torch Gloo is a backend that allows avoiding hangs
-                # due to NCCL multi-thread conflicts in async EPLB
-                self.eplb_config.communicator = "torch_gloo"
             else:
-                self.eplb_config.communicator = "torch_nccl"
+                # Avoid torch_nccl: NCCL is fundamentally incompatible
+                # with async EPLB due to multi-stream conflicts, and
+                # batched isend/irecv hangs under high load.
+                # See https://github.com/pytorch/pytorch/issues/174288
+                # Prefer nixl when available; fall back to torch_gloo.
+                from vllm.distributed.nixl_utils import is_nixl_available
+
+                if is_nixl_available():
+                    self.eplb_config.communicator = "nixl"
+                else:
+                    self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:
