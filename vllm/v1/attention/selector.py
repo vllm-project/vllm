@@ -28,6 +28,7 @@ class AttentionSelectorConfig(NamedTuple):
     attn_type: str = AttentionType.DECODER
     use_non_causal: bool = False
     use_batch_invariant: bool = False
+    use_kv_connector: bool = False
 
     def __repr__(self):
         return (
@@ -42,7 +43,8 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
             f"attn_type={self.attn_type}, "
             f"use_non_causal={self.use_non_causal}, "
-            f"use_batch_invariant={self.use_batch_invariant})"
+            f"use_batch_invariant={self.use_batch_invariant}, "
+            f"use_kv_connector={self.use_kv_connector})"
         )
 
 
@@ -77,6 +79,11 @@ def get_attn_backend(
     else:
         block_size = None
 
+    kv_transfer_config = vllm_config.kv_transfer_config
+    use_kv_connector = (
+        kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
+    )
+
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
@@ -90,6 +97,7 @@ def get_attn_backend(
         attn_type=attn_type or AttentionType.DECODER,
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+        use_kv_connector=use_kv_connector,
     )
 
     return _cached_get_attn_backend(

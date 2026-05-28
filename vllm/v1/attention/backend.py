@@ -178,6 +178,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_kv_connector(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -220,6 +224,7 @@ class AttentionBackend(ABC):
         attn_type: str,
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -256,6 +261,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("non-causal attention not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
+        if use_kv_connector and not cls.supports_kv_connector():
+            invalid_reasons.append("KV connector not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,

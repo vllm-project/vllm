@@ -114,6 +114,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             return self.connector_worker.build_connector_worker_meta()
         return None
 
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int | None, bool]:

@@ -225,6 +225,8 @@ if current_platform.is_rocm():
         x,
         k_stride0,
         v_stride0,
+        k_cache_block_stride,
+        v_cache_block_stride,
         block_size,
         head_size,
         num_kv_heads,
@@ -241,15 +243,17 @@ if current_platform.is_rocm():
             return
         block_id = slot_id // block_size
         block_offset = slot_id % block_size
-        dst_offset = (
-            block_id * num_kv_heads * head_size * block_size
-            + head_id * head_size * block_size
+        k_dst_offset = (
+            block_id * k_cache_block_stride + head_id * head_size * block_size
         )
         dst_k_shuffle_offset = (
-            dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+            k_dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+        )
+        v_dst_offset = (
+            block_id * v_cache_block_stride + head_id * head_size * block_size
         )
         dst_v_shuffle_offset = (
-            dst_offset
+            v_dst_offset
             + block_offset // x * head_size * x
             + offset * x
             + block_offset % x
@@ -280,18 +284,6 @@ if current_platform.is_rocm():
         _, num_kv_heads, head_size = key.shape
         num_blocks, block_size, _, _ = key_cache.shape
         x = 16 // key_cache.element_size()
-        k_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, head_size // x, block_size, x],
-            dtype=key_cache.dtype,
-            device="meta",
-        )
-        v_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, block_size // x, head_size, x],
-            dtype=value_cache.dtype,
-            device="meta",
-        )
-        new_key_cache = key_cache.view_as(k_cache_template)
-        new_value_cache = value_cache.view_as(v_cache_template)
         QUANT = False
         if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
@@ -302,14 +294,16 @@ if current_platform.is_rocm():
         reshape_and_cache_shuffle_kernel[grid](
             key,
             value,
-            new_key_cache,
-            new_value_cache,
+            key_cache,
+            value_cache,
             slot_mapping,
             k_scales,
             v_scales,
             x,
             key.stride(0),
             value.stride(0),
+            key_cache.stride(0),
+            value_cache.stride(0),
             block_size,
             head_size,
             num_kv_heads,
@@ -1013,7 +1007,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1267,18 +1261,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     max_logits = torch.empty_like(exp_sums)
                     num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     x = 16 // key_cache.element_size()
-                    k_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, head_size // x, block_size, x],
-                        dtype=key_cache.dtype,
-                        device="meta",
+                    new_key_cache = key_cache.reshape(
+                        num_blocks, num_kv_heads, head_size // x, block_size, x
                     )
-                    v_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, block_size // x, head_size, x],
-                        dtype=value_cache.dtype,
-                        device="meta",
+                    new_value_cache = value_cache.reshape(
+                        num_blocks, num_kv_heads, block_size // x, head_size, x
                     )
-                    new_key_cache = key_cache.view_as(k_cache_template)
-                    new_value_cache = value_cache.view_as(v_cache_template)
                     k_qscale = (
                         layer._k_scale
                         if attn_metadata.k_scale is None
