@@ -5,10 +5,7 @@ from collections.abc import Callable
 from contextlib import suppress
 
 import torch
-import torch._inductor.pattern_matcher as pm
 import torch.distributed.distributed_c10d as c10d
-import torch.fx as fx
-from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
 from vllm.config import VllmConfig
@@ -21,11 +18,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
-    VllmInductorPass,
-    VllmPatternMatcherPass,
     VllmPatternReplacement,
 )
 
@@ -330,7 +324,7 @@ direct_register_custom_op(
 )
 
 
-class BasePattern:
+class BasePattern(VllmPatternReplacement[..., torch.Tensor]):
     def __init__(self, dtype: torch.dtype, device: str | None) -> None:
         self.dtype = dtype
         self.device = device
@@ -344,8 +338,9 @@ class GEMMReduceScatterPattern(BasePattern):
         mm_weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         return [mul, mm_weight]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
+    @property
+    def pattern(self):
+        def _pattern(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
             mm = torch.ops.aten.mm.default(mul, mm_weight)
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 mm,
@@ -355,7 +350,11 @@ class GEMMReduceScatterPattern(BasePattern):
             )
             return reduce_scatter
 
-        def replacement(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(mul: torch.Tensor, mm_weight: torch.Tensor) -> torch.Tensor:
             gemm_rs = torch.ops.symm_mem.fused_matmul_reduce_scatter(
                 mul,
                 mm_weight,
@@ -363,36 +362,33 @@ class GEMMReduceScatterPattern(BasePattern):
                 scatter_dim=0,
                 group_name=self.tp.device_group.group_name,
             )
-
             return gemm_rs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
 class AllGatherGEMMPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         x = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-
         return [x, weight]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
-            x: torch.Tensor,
-            weight: torch.Tensor,
-        ) -> torch.Tensor:
+    @property
+    def pattern(self):
+        def _pattern(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             all_gather = torch.ops.vllm.all_gather.default(
                 x,
                 dim=0,
                 world_size=self.tp_size,
                 group_name=self.tp.unique_name,
             )
-
             return torch.ops.aten.mm.default(all_gather, weight)
 
-        def replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
                 x,
                 [weight],
@@ -401,9 +397,7 @@ class AllGatherGEMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
 class ScaledMMReduceScatterPattern(BasePattern):
@@ -418,8 +412,9 @@ class ScaledMMReduceScatterPattern(BasePattern):
         scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
         return [input, mm_weight, scale_a, scale_b]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             input: torch.Tensor,
             mat2: torch.Tensor,
             scale_a: torch.Tensor,
@@ -442,7 +437,11 @@ class ScaledMMReduceScatterPattern(BasePattern):
             )
             return reduce_scatter
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             input: torch.Tensor,
             mat2: torch.Tensor,
             scale_a: torch.Tensor,
@@ -466,12 +465,9 @@ class ScaledMMReduceScatterPattern(BasePattern):
                 self.dtype,  # out_dtype
                 False,  # use_fast_accum
             )
-
             return gemm_rs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
 class AllGatherScaledMMPattern(BasePattern):
@@ -482,16 +478,14 @@ class AllGatherScaledMMPattern(BasePattern):
             .contiguous()
             .transpose(0, 1)
         )
-
         s1 = x.shape[0] * self.tp_size
-
         scale_a = torch.empty([s1, 1], device=self.device, dtype=torch.float32)
         scale_b = torch.empty([1, 16], device=self.device, dtype=torch.float32)
-
         return [x, weight, scale_a, scale_b]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             x: torch.Tensor,
             weight: torch.Tensor,
             scale_a: torch.Tensor,
@@ -500,7 +494,6 @@ class AllGatherScaledMMPattern(BasePattern):
             all_gather = torch.ops.vllm.all_gather.default(
                 x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
             )
-
             return torch.ops.aten._scaled_mm.default(
                 all_gather,
                 mat2=weight,
@@ -511,7 +504,11 @@ class AllGatherScaledMMPattern(BasePattern):
                 out_dtype=self.dtype,
             )
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             x: torch.Tensor,
             weight: torch.Tensor,
             scale_a: torch.Tensor,
@@ -531,9 +528,7 @@ class AllGatherScaledMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
 class CutlassScaledMMReduceScatterPattern(BasePattern):
@@ -550,8 +545,9 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
         cutlass_mm_output = torch.empty([16, 16], device=self.device, dtype=self.dtype)
         return [input, mm_weight, scale_a, scale_b, cutlass_mm_output]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             input: torch.Tensor,
             weight: torch.Tensor,
             scale_a: torch.Tensor,
@@ -567,7 +563,6 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
                 b_scales=scale_b,
                 bias=None,
             )
-
             reduce_scatter = torch.ops.vllm.reduce_scatter.default(
                 cutlass_scaled_mm[1],
                 dim=0,
@@ -576,7 +571,11 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
             )
             return reduce_scatter
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             input: torch.Tensor,
             mat2: torch.Tensor,
             scale_a: torch.Tensor,
@@ -601,12 +600,9 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
                 self.dtype,  # out_dtype
                 False,  # use_fast_accum
             )
-
             return gemm_rs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
 class AllGatherCutlassScaledMMPattern(BasePattern):
@@ -628,8 +624,9 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
 
         return [x, weight, scale_a, scale_b, output]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             x: torch.Tensor,
             weight: torch.Tensor,
             scale_a: torch.Tensor,
@@ -639,7 +636,6 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             all_gather = torch.ops.vllm.all_gather.default(
                 x, dim=0, world_size=self.tp_size, group_name=self.tp.unique_name
             )
-
             cutlass_scaled_mm = torch.ops.higher_order.auto_functionalized(
                 torch.ops._C.cutlass_scaled_mm.default,
                 out=output,
@@ -651,7 +647,11 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             )
             return cutlass_scaled_mm[1]
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             x: torch.Tensor,
             weight: torch.Tensor,
             scale_a: torch.Tensor,
@@ -672,14 +672,10 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
-class FlashInferBMMFP8ReduceScatterPattern(
-    BasePattern, VllmPatternReplacement[..., torch.Tensor]
-):
+class FlashInferBMMFP8ReduceScatterPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         a_2d = torch.empty([16, 16], device=self.device, dtype=FP8_DTYPE)
         b_2d = (
@@ -741,9 +737,7 @@ class FlashInferBMMFP8ReduceScatterPattern(
         return _replacement
 
 
-class FlashInferAllGatherBMMFP8Pattern(
-    BasePattern, VllmPatternReplacement[..., torch.Tensor]
-):
+class FlashInferAllGatherBMMFP8Pattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         a_shard_2d = torch.empty([8, 16], device=self.device, dtype=FP8_DTYPE)
         b_2d = (
@@ -898,31 +892,25 @@ class FlashInferAllGatherFP4Pattern(
 
 
 class AsyncTPPass(VllmFusionPatternMatcherPass):
-    @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config, pass_name="async_tp_pass")
+        super().__init__(config, "async_tp_pass")
 
         enable_symm_mem_for_group(get_tp_group().device_group.group_name)
-        GEMMReduceScatterPattern(self.model_dtype, self.device).register(self.pm_pass)
 
-        AllGatherGEMMPattern(self.model_dtype, self.device).register(self.pm_pass)
+        self.register(GEMMReduceScatterPattern(self.model_dtype, self.device))
+        self.register(AllGatherGEMMPattern(self.model_dtype, self.device))
 
         # These fusions are enabled only for bfloat16 models because
         # `scaled_mm` or `cutlass_scaled_mm` with per-token (row-wise) scaling
         # only supports bfloat16 as the output dtype.
         if self.model_dtype == torch.bfloat16:
-            ScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.pm_pass
+            self.register(ScaledMMReduceScatterPattern(self.model_dtype, self.device))
+            self.register(AllGatherScaledMMPattern(self.model_dtype, self.device))
+            self.register(
+                CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device)
             )
-            AllGatherScaledMMPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
-
-            CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
-            AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
-                self.pm_pass
+            self.register(
+                AllGatherCutlassScaledMMPattern(self.model_dtype, self.device)
             )
             with suppress(ImportError):
                 import vllm.utils.flashinfer  # noqa: F401
@@ -972,9 +960,3 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
             or not self.compilation_config.splitting_ops
         ), "AsyncTPPass requires full-graph compilation"
         return True
-
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.pm_pass.apply(graph)
-        VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
-        logger.debug("Replaced %s patterns", self.matched_count)
