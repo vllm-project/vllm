@@ -308,13 +308,16 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    # Per-API-server ports are picked by the kernel at each child's bind()
-    # to avoid parent-probe vs child-bind TOCTOU; Rust front-end opts out
-    # because it has no port-report-back channel.
+    # Defer port allocation to the child's bind() to avoid TOCTOU, except
+    # for Rust front-end and Ray DP, which can't see the post-bind rebind
+    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
+    # so pre-allocate driver-side -- reintroducing the original race only
+    # there.
+    is_ray_dp = parallel_config.data_parallel_backend == "ray"
     addresses = get_engine_zmq_addresses(
         vllm_config,
         num_api_servers,
-        defer_api_server_ports=not rust_frontend_path,
+        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
     )
 
     with launch_core_engines(
@@ -348,11 +351,15 @@ def run_multi_api_server(args: argparse.Namespace):
                 tensor_queue=tensor_queue,
             )
 
-            # Forward each child's bound endpoints to the engine handshake
-            # (runs on ``with`` exit).
-            actual_inputs, actual_outputs = api_server_manager.gather_actual_addresses()
-            addresses.inputs = actual_inputs
-            addresses.outputs = actual_outputs
+            if not is_ray_dp:
+                # Forward each child's bound endpoints to the engine handshake
+                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
+                # are pre-allocated above and Ray actors already hold them.
+                actual_inputs, actual_outputs = (
+                    api_server_manager.gather_actual_addresses()
+                )
+                addresses.inputs = actual_inputs
+                addresses.outputs = actual_outputs
 
     # Wait for API servers.
     try:

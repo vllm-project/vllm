@@ -178,7 +178,7 @@ def rocm_unquantized_gemm_impl(
 
     if use_skinny:
         x_view = x.reshape(-1, x.size(-1))
-        if m > 8 and 0 < n <= 4:
+        if m > 8 and 0 < n <= 5:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)
             return out.reshape(*x.shape[:-1], weight.shape[0])

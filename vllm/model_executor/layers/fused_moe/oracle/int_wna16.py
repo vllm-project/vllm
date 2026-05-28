@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from enum import Enum
 from typing import Any
 
@@ -35,6 +36,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -43,6 +45,7 @@ class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
+    XPU = "XPU"
 
 
 def backend_to_kernel_cls(
@@ -55,6 +58,12 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
+    elif backend == WNA16MoEBackend.XPU:
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+            XPUExpertsWNA16,
+        )
+
+        return [XPUExpertsWNA16]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -63,6 +72,9 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
+    if current_platform.is_xpu():
+        return [WNA16MoEBackend.XPU]
+
     _AVAILABLE_BACKENDS = [
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
@@ -194,16 +206,20 @@ def make_wna16_moe_kernel(
     w2_g_idx_sort_indices: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExpertsWNA16,
+    )
+
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts
     # and BatchedMarlinExperts
     assert experts_cls in (
         MarlinExperts,
         BatchedMarlinExperts,
         TrtLlmMxint4ExpertsMonolithic,
-    )
-
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_make_prepare_finalize,
+        XPUExpertsWNA16,
     )
 
     is_monolithic = experts_cls.is_monolithic()
@@ -229,10 +245,23 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+    if experts_cls is XPUExpertsWNA16:
+        assert (
+            prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard
+        ), (
+            "XPUExpertsWNA16 only supports the Standard activation format; "
+            "xpu_fused_moe(is_int4=True) does not implement BatchedExperts."
+        )
+        experts: mk.FusedMoEExperts = XPUExpertsWNA16(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        )
+    elif (
+        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+    ):
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts: mk.FusedMoEExperts = experts_cls(
+        experts = experts_cls(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
@@ -636,6 +665,69 @@ def _process_awq_weights_marlin(
     )
 
 
+def _process_weights_xpu(
+    layer: torch.nn.Module,
+    quant_config: QuantizationConfig,
+    w13_qweight: torch.Tensor,
+    w2_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """Repack GPTQ-format INT4 MoE weights into the layout
+    `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects:
+
+        w13: [E, 2*N, K] int4 (uint8 storage [E, 2*N, K // 2])
+        w13_scales: [E, 2*N, K // group_size] params_dtype
+        w2:  [E, K, N]   int4 (uint8 storage [E, K, N // 2])
+        w2_scales:  [E, K, N // group_size]   params_dtype
+
+    Input GPTQ layout from FusedMoE.weight_loader:
+        w13: [E, K // 8, 2*N] int32 (8 nibbles per int32 along the input dim)
+        w13_scales: [E, K // group_size, 2*N] params_dtype
+        w2:  [E, N // 8, K] int32
+        w2_scales:  [E, N // group_size, K] params_dtype
+
+    Transpose dim 1 ↔ dim 2 then view int32 → uint8 to recover sequential
+    int4-packed bytes along the input dim. Each packed int32 holds 8 nibbles
+    `(n7<<28)|(n6<<24)|...|(n1<<4)|n0` in ascending K order; on a
+    little-endian host the int32→uint8 view exposes them as bytes
+    `[n1<<4|n0, n3<<4|n2, n5<<4|n4, n7<<4|n6]`, i.e. two nibbles per byte
+    with the lower nibble = lower input-K index. xpu_fused_moe(is_int4=True)
+    expects this convention; on a big-endian host the byte order reverses
+    and the kernel would silently miscompute, so we hard-fail.
+    """
+    del layer, quant_config  # unused — kept for parity with the marlin helper
+
+    if sys.byteorder != "little":
+        raise NotImplementedError(
+            "_process_weights_xpu requires a little-endian host: the GPTQ "
+            "int32 → uint8 nibble repack relies on LE byte ordering."
+        )
+
+    w13_xpu = w13_qweight.transpose(1, 2).contiguous().view(torch.uint8)
+    w2_xpu = w2_qweight.transpose(1, 2).contiguous().view(torch.uint8)
+    w13_scales_xpu = w13_scales.transpose(1, 2).contiguous()
+    w2_scales_xpu = w2_scales.transpose(1, 2).contiguous()
+
+    return (
+        w13_xpu,
+        w2_xpu,
+        w13_scales_xpu,
+        w2_scales_xpu,
+        w13_bias,
+        w2_bias,
+    )
+
+
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -757,6 +849,42 @@ def convert_to_wna16_moe_kernel_format(
             w2_g_idx,
             w13_bias,
             w2_bias,
+        )
+    elif backend == WNA16MoEBackend.XPU:
+        assert quant_config is not None
+        (
+            w13_xpu,
+            w2_xpu,
+            w13_scale_xpu,
+            w2_scale_xpu,
+            w13_bias_out,
+            w2_bias_out,
+        ) = _process_weights_xpu(
+            layer,
+            quant_config,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_bias,
+            w2_bias,
+        )
+        empty = torch.empty((0,), dtype=torch.int32, device=w13.device)
+        return (
+            w13_xpu,
+            w2_xpu,
+            w13_scale_xpu,
+            w2_scale_xpu,
+            empty,  # w13_g_idx
+            empty,  # w2_g_idx
+            empty,  # w13_g_idx_sort_indices
+            empty,  # w2_g_idx_sort_indices
+            None,  # w13_qzeros — sym int4 on XPU has none; kernel does uint4b8→s4
+            None,  # w2_qzeros
+            None,  # w13_input_global_scale
+            None,  # w2_input_global_scale
+            w13_bias_out,
+            w2_bias_out,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
