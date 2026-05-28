@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
+from collections.abc import Callable
+from typing import ParamSpec
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
@@ -16,7 +19,6 @@ from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
@@ -25,6 +27,8 @@ from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
+
+P = ParamSpec("P")
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +137,6 @@ class QkNormRopeKvCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        # match_rocm_aiter is auto-detected by MatcherRotaryEmbedding via
-        # rocm_aiter_ops.is_triton_rotary_embed_enabled(), so no need to
-        # enumerate AITER variants here.
-        # flashinfer rotary is also not enumerated: standard RotaryEmbedding
-        # hard-codes use_flashinfer=False, and the only class that toggles
-        # it (DeepseekScalingRotaryEmbedding, MLA-only) isn't handled by
-        # this pass, so the flashinfer variant would never match anything.
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
@@ -156,6 +153,26 @@ class QkNormRopeKvCachePattern:
         k_weight = empty_bf16(1, self.head_size)
         cos_sin_cache = empty_bf16(L, self.head_size)
         return [qkv, positions, q_weight, k_weight, cos_sin_cache]
+
+    @staticmethod
+    def wrap_trace_fn(
+        trace_fn: Callable[P, fx.GraphModule],
+        *process_fx_fns: Callable[[fx.GraphModule], None],
+    ) -> Callable[P, fx.GraphModule]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> fx.GraphModule:
+            gm = trace_fn(*args, **kwargs)
+            for process_fx in process_fx_fns:
+                process_fx(gm)
+
+            return gm
+
+        return wrapped
+
+    @staticmethod
+    def fx_view_to_reshape(gm: torch.fx.GraphModule) -> None:
+        from torch._inductor.fx_passes.post_grad import view_to_reshape
+
+        view_to_reshape(gm)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -221,20 +238,33 @@ class QkNormRopeKvCachePattern:
                 layer_name=self.layer_name,
             )
 
-            # results[0] = dummy, results[1] = q_out, results[2] = k_out
             return results[0], results[1], results[2], v
 
-        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
-            gm = pm.fwd_only(*args, **kwargs)
-            view_to_reshape(gm)
-            return gm
+        trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(
+            pm.fwd_only,
+            QkNormRopeKvCachePattern.fx_view_to_reshape,
+        )
+
+        # Pre-build the search pattern with `ignore_types=(int, torch.SymInt)`
+        # and pass it via `search_fn_pattern=` so torch skips both of its
+        # internal `fx_to_pattern` calls and treats dynamic-shape SymInts as
+        # wildcards.
+        inputs = self.get_inputs()
+        argnames = [*inspect.signature(pattern).parameters.keys()]
+        search_gm = trace_fn(pattern, inputs)
+        search_fn_pattern = pm.fx_to_pattern(
+            search_gm,
+            ignore_types=(int, torch.SymInt),
+            argnames=argnames,
+        )
 
         pm.register_replacement(
             pattern,
             replacement,
-            self.get_inputs(),
-            fwd_and_view_to_reshape,
+            inputs,
+            trace_fn,
             pm_pass,
+            search_fn_pattern=search_fn_pattern,
         )
 
 
@@ -272,17 +302,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
-        rope_custom_enabled = cc.is_custom_op_enabled("rotary_embedding")
-        rms_custom_enabled = cc.is_custom_op_enabled("rms_norm")
-        logger.debug(
-            "QkNormRopeKvCacheFusionPass init: "
-            "RotaryEmbedding.enabled()=%s, rope_custom_enabled=%s, "
-            "RMSNorm custom_op_enabled=%s",
-            RotaryEmbedding.enabled(),
-            rope_custom_enabled,
-            rms_custom_enabled,
-        )
-
         # RMS norm variants are no longer iterated: after the vLLM IR migration (#33825)
         # AITER rope variants are also not iterated: `MatcherRotaryEmbedding`
         # auto-detects via `rocm_aiter_ops.is_triton_rotary_embed_enabled()`
@@ -300,48 +319,15 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                         is_neox=neox,
                     ).register(self.patterns)
 
-        # Backends that set _use_interleaved_v_cache (e.g. ROCM_ATTN)
-        # require a consistent V-cache layout across ALL compile ranges.
-        # If max_token_num is too small, unfused ranges would write
-        # standard-layout V while the attention kernel reads interleaved,
-        # corrupting long-sequence generation.  Force fusion to cover all
-        # ranges so both write and read paths agree on the layout.
-        max_batched = config.scheduler_config.max_num_batched_tokens
-        needs_full_coverage = any(
-            getattr(layer.impl, "_use_interleaved_v_cache", False)
-            for _, layer in attn_layers.items()
-            if layer.impl.fused_qk_norm_rope_kvcache_supported()
-        )
-        if (
-            needs_full_coverage
-            and max_batched is not None
-            and self.max_token_num < max_batched
-        ):
-            logger.info(
-                "Raising rope_kvcache_fusion_max_token_num from %d to %d "
-                "to maintain consistent interleaved V-cache layout across "
-                "all compile ranges (required by attention backend).",
-                self.max_token_num,
-                max_batched,
-            )
-            self.max_token_num = max_batched
-
+        # NOTE: part 2 (ROCM_ATTN integration) will need to auto-raise
+        # `self.max_token_num` to `max_num_batched_tokens` so fusion covers
+        # ALL compile ranges and the interleaved V-cache layout stays
+        # consistent between fused writes and the attention kernel's reads.
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        _orig_fx_to_pat = pm.fx_to_pattern
-
-        def _relaxed_fx_to_pattern(*a, **kw):
-            kw["ignore_types"] = (int, torch.SymInt)
-            return _orig_fx_to_pat(*a, **kw)
-
-        pm.fx_to_pattern = _relaxed_fx_to_pattern
-        try:
-            self.matched_count = self.patterns.apply(graph)
-        finally:
-            pm.fx_to_pattern = _orig_fx_to_pat
-
+        self.matched_count = self.patterns.apply(graph)
         logger.info(
             "QK-Norm+RoPE+KVCache fusion: replaced %s pattern(s) "
             "with AITER fused_qk_norm_rope_cache_pts_quant_shuffle",

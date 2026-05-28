@@ -72,9 +72,6 @@ class QkNormRopePattern:
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
-        # match_rocm_aiter is auto-detected by MatcherRotaryEmbedding via
-        # rocm_aiter_ops.is_triton_rotary_embed_enabled(), so no need to
-        # enumerate AITER variants here.
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_dim,
