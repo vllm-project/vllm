@@ -1117,14 +1117,23 @@ class DeepseekV4Model(nn.Module):
                     continue
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                mapped_name = name.replace(weight_name, param_name)
 
-                if is_pp_missing_parameter(name, self):
+                if is_pp_missing_parameter(mapped_name, self):
                     break
-                param = params_dict[name]
+                if mapped_name not in params_dict:
+                    if (
+                        param_name == "compressor.fused_wkv_wgate"
+                        and mapped_name.endswith(
+                            (".weight_scale", ".weight_scale_inv", ".input_scale")
+                        )
+                    ):
+                        break
+                    raise KeyError(mapped_name)
+                param = params_dict[mapped_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
+                loaded_params.add(mapped_name)
                 break
             else:
                 if ".experts." in name:
@@ -1175,6 +1184,12 @@ class DeepseekV4Model(nn.Module):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
+                    if name not in params_dict:
+                        if name.endswith(
+                            (".weight_scale", ".weight_scale_inv", ".input_scale")
+                        ):
+                            continue
+                        raise KeyError(name)
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
