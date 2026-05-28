@@ -1213,7 +1213,7 @@ def wait_for_engine_startup(
                         finished[proc.name] = proc.exitcode
             
             if coord_process is not None and coord_process.exitcode is not None:
-                            finished[coord_process.name] = coord_process.exitcode
+                finished[coord_process.name] = coord_process.exitcode
             raise RuntimeError(
                 "Engine core initialization failed. "
                 "See root cause above. "
