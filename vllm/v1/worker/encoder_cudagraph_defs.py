@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Data transfer objects for encoder CUDA graph management."""
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+
+EncoderCudaGraphPaddingLogic = Callable[[torch.Tensor, torch.Tensor], None]
 
 
 @dataclass
@@ -50,6 +53,13 @@ class EncoderCudaGraphConfig:
     out_hidden_size: int
     """Output hidden dim of the vision encoder.
     Used for DP gather buffer allocation."""
+
+    padding_logics: dict[str, EncoderCudaGraphPaddingLogic] = field(
+        default_factory=dict
+    )
+    """Optional per-buffer replay padding/copy logic.
+    If absent for a key, the manager zeros the capture buffer and slice-copies
+    the replay buffer into it."""
 
     max_frames_per_video: int = 1
     """Maximum number of frames per video.

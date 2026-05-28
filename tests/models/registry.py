@@ -363,7 +363,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
-    "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
         "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
     ),
@@ -845,6 +844,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
+    ),
+    "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Nano",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",

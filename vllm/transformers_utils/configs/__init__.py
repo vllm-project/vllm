@@ -25,6 +25,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "ColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "OpsColQwen3Config": "vllm.transformers_utils.configs.colqwen3",
     "Qwen3VLNemotronEmbedConfig": "vllm.transformers_utils.configs.colqwen3",
+    "Cosmos3Config": "vllm.transformers_utils.configs.cosmos3",
     "DeepseekVLV2Config": "vllm.transformers_utils.configs.deepseek_vl2",
     "DeepseekV4Config": "vllm.transformers_utils.configs.deepseek_v4",
     "DotsOCRConfig": "vllm.transformers_utils.configs.dotsocr",
@@ -45,7 +46,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # tiiuae/falcon-7b(-instruct) models. Newer Falcon models will use the
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
-    "JAISConfig": "vllm.transformers_utils.configs.jais",
     "LagunaConfig": "vllm.transformers_utils.configs.laguna",
     "Lfm2MoeConfig": "vllm.transformers_utils.configs.lfm2_moe",
     "MedusaConfig": "vllm.transformers_utils.configs.medusa",
@@ -95,6 +95,7 @@ __all__ = [
     "ColQwen3Config",
     "OpsColQwen3Config",
     "Qwen3VLNemotronEmbedConfig",
+    "Cosmos3Config",
     "DeepseekVLV2Config",
     "DeepseekV3Config",
     "DeepseekV4Config",
@@ -113,7 +114,6 @@ __all__ = [
     "HyperCLOVAXConfig",
     "IsaacConfig",
     "RWConfig",
-    "JAISConfig",
     "LagunaConfig",
     "Lfm2MoeConfig",
     "MedusaConfig",
