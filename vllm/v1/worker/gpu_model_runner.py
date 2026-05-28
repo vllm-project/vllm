@@ -3072,7 +3072,14 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
+        for_drafter: bool = False,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        # `for_drafter=True` is set when the draft path calls this with a
+        # non-zero `shift_computed_tokens`. In that mode we must NOT mutate
+        # `req_state.mrope_positions`, `req_state.mrope_position_delta`, or
+        # the shared `self.mrope_positions` GPU buffer — `target_positions`
+        # in `propose_draft_token_ids` is a view into that buffer, and the
+        # main forward pass already wrote the authoritative values into it.
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         mm_embeds = list[torch.Tensor]()
@@ -3146,17 +3153,24 @@ class GPUModelRunner(
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
-                should_sync_mrope_positions = True
+                # We still need to call `recompute_mrope_positions` in the
+                # draft path because it strips position channels from
+                # `mm_embeds_req`. The returned positions/delta are discarded
+                # when `for_drafter=True`.
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
                         input_ids=req_state.prompt_token_ids,
                         multimodal_embeddings=mm_embeds_req,
                         mrope_positions=req_state.mrope_positions,
-                        num_computed_tokens=req_state.num_computed_tokens,
+                        num_computed_tokens=num_computed_tokens
+                        if for_drafter
+                        else req_state.num_computed_tokens,
                     )
                 )
-                req_state.mrope_positions.copy_(new_mrope_positions)
-                req_state.mrope_position_delta = new_delta
+                if not for_drafter:
+                    should_sync_mrope_positions = True
+                    req_state.mrope_positions.copy_(new_mrope_positions)
+                    req_state.mrope_position_delta = new_delta
 
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
@@ -4990,9 +5004,15 @@ class GPUModelRunner(
                         target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
+                # `for_drafter=True` keeps this call read-only with respect to
+                # per-request and runner-wide mrope state. Without it, the
+                # pruning branch would overwrite the `self.mrope_positions`
+                # GPU buffer that `target_positions` views, corrupting the
+                # drafter's positions input. See issue #43820.
                 mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
+                    for_drafter=True,
                 )
             else:
                 mm_embed_inputs = None
