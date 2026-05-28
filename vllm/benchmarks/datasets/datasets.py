@@ -305,9 +305,10 @@ class BenchmarkDataset(ABC):
             needed = num_requests - len(requests)
             additional = []
             for i in range(needed):
+                orig_req = random.choice(requests)
                 req = replace(
-                    random.choice(requests),
-                    request_id=request_id_prefix + str(len(requests) + i),
+                    orig_req,
+                    request_id=f"{request_id_prefix}_{i}_of_{orig_req.request_id}",
                 )
                 additional.append(req)
             requests.extend(additional)
@@ -327,14 +328,26 @@ class BenchmarkDataset(ABC):
 # -----------------------------------------------------------------------------
 
 
+MAX_PROMPT_LEN = 1024
+MAX_TOTAL_LEN = 2048
+DISABLE_LEN_FILTER = False
+
+
 def is_valid_sequence(
     prompt_len: int,
     output_len: int,
     min_len: int = 4,
-    max_prompt_len: int = 1024,
-    max_total_len: int = 2048,
+    max_prompt_len: int | None = None,
+    max_total_len: int | None = None,
     skip_min_output_len_check: bool = False,
 ) -> bool:
+    global MAX_PROMPT_LEN, MAX_TOTAL_LEN, DISABLE_LEN_FILTER
+    if DISABLE_LEN_FILTER:
+        return True
+    if max_prompt_len is None:
+        max_prompt_len = MAX_PROMPT_LEN
+    if max_total_len is None:
+        max_total_len = MAX_TOTAL_LEN
     """
     Validate a sequence based on prompt and output lengths.
 
@@ -1336,6 +1349,8 @@ class ShareGPTDataset(BenchmarkDataset):
             for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
         ]
+        for idx, entry in enumerate(self.data):
+            entry["request_id"] = entry.get("request_id", str(idx))
         random.seed(self.random_seed)
         if not getattr(self, "disable_shuffle", False):
             random.shuffle(self.data)
@@ -1394,7 +1409,7 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                     multi_modal_data=mm_content,
-                    request_id=request_id_prefix + str(ind),
+                    request_id=entry['request_id'],
                 )
             )
             ind += 1
@@ -1633,6 +1648,23 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--disable-shuffle",
         action="store_true",
         help="Disable shuffling of dataset samples for deterministic ordering.",
+    )
+    parser.add_argument(
+        "--max-prompt-len",
+        type=int,
+        default=1024,
+        help="Maximum prompt length allowed for sequence validation.",
+    )
+    parser.add_argument(
+        "--max-total-len",
+        type=int,
+        default=2048,
+        help="Maximum combined (prompt + output) length allowed for sequence validation.",
+    )
+    parser.add_argument(
+        "--disable-len-filter",
+        action="store_true",
+        help="Disable prompt/sequence length filtering/validation.",
     )
 
     # group for dataset specific arguments
@@ -2038,6 +2070,14 @@ def _parse_range_ratio(value: str) -> RangeRatio:
 
 
 def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
+    global DISABLE_LEN_FILTER, MAX_PROMPT_LEN, MAX_TOTAL_LEN
+    if hasattr(args, "disable_len_filter") and args.disable_len_filter:
+        DISABLE_LEN_FILTER = True
+    if hasattr(args, "max_prompt_len") and args.max_prompt_len is not None:
+        MAX_PROMPT_LEN = args.max_prompt_len
+    if hasattr(args, "max_total_len") and args.max_total_len is not None:
+        MAX_TOTAL_LEN = args.max_total_len
+
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
 

@@ -1016,6 +1016,7 @@ async def benchmark(
             "start_times": [output.start_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
+            "request_ids": [output.request_id for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
             "rtfx": metrics.rtfx,
@@ -1029,6 +1030,7 @@ async def benchmark(
             "total_token_throughput": metrics.total_token_throughput,
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
+            "request_ids": [output.request_id for output in outputs],
         }
 
     if rps_change_events:

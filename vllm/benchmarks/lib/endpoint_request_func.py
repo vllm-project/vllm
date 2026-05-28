@@ -96,6 +96,7 @@ class RequestFuncOutput:
     error: str = ""
     start_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
+    request_id: str = ""
 
 
 class RequestFunc(Protocol):
@@ -363,6 +364,7 @@ async def async_request_openai_chat_completions(
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
+    output.request_id = request_func_input.request_id or ""
 
     generated_text = ""
     ttft = 0.0
