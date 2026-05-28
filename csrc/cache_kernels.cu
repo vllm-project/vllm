@@ -143,18 +143,28 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
     return;
   }
 #elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 70100000
-  // ROCm 7.1+ exposes hipMemcpyBatchAsync. The 7.2.1 implementation early-
-  // returns hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @
-  // rocm-7.2.1 hipamd/src/hip_memory.cpp:2819-2822), so call with
-  // numAttrs=0.
+  // ROCm 7.1+ exposes hipMemcpyBatchAsync. ROCm 7.2.1-7.2.3 early-return
+  // hipErrorNotSupported whenever numAttrs > 0 (see ROCm/clr @ rocm-7.2.1
+  // hipamd/src/hip_memory.cpp:2819-2822), so those releases must call with
+  // numAttrs=0. ROCm 7.13+ accepts numAttrs > 0, so there we use the same
+  // single-attributes-entry call shape as the CUDA path above and pass
+  // srcAccessOrder through.
   {
     hipMemcpyAttributes attr = {};
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
+  #if HIP_VERSION >= 71300000
+    attr.srcAccessOrder = is_src_access_order_any
+                              ? hipMemcpySrcAccessOrderAny
+                              : hipMemcpySrcAccessOrderStream;
+    const size_t num_attrs = 1;
+  #else
+    const size_t num_attrs = 0;
+  #endif
     hipError_t result = hipMemcpyBatchAsync(
         reinterpret_cast<void**>(dst_data), reinterpret_cast<void**>(src_data),
         reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
-        &attrs_idx, 0, &fail_idx, static_cast<hipStream_t>(stream));
+        &attrs_idx, num_attrs, &fail_idx, static_cast<hipStream_t>(stream));
     TORCH_CHECK(result == hipSuccess, "hipMemcpyBatchAsync failed at index ",
                 fail_idx, " with error ", result);
     return;

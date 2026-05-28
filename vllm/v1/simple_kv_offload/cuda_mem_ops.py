@@ -52,23 +52,16 @@ _BATCH_MEMCPY_FUNC_TYPE = ctypes.CFUNCTYPE(
     ctypes.c_void_p,
 )
 
-# Resolved lazily on first use.
-_batch_memcpy_fn: Any = None
+# Resolved lazily on first use: (entry point, numAttrs to pass).
+_batch_memcpy: tuple[Any, int] | None = None
 
 
-def _resolve_batch_memcpy():
-    """Resolve the platform batch-memcpy entry point (one-time).
+def _resolve_batch_memcpy() -> tuple[Any, int]:
+    """Resolve the batch-memcpy entry point and its ``numAttrs`` (one-time).
 
-    * CUDA: ``cuMemcpyBatchAsync`` via ``cuGetProcAddress`` (uses
-      srcAccessOrder=STREAM via one attributes entry).
-    * ROCm: ``hipMemcpyBatchAsync`` from libamdhip64 (ROCm 7.1+). ROCm
-      7.2.1 or 7.2.2 rejects any call with ``numAttrs > 0``
-      (see ROCm/clr @ rocm-7.2.1 hipamd/src/hip_memory.cpp:2819-2822), so
-      we call with ``numAttrs=0``.
-
-    Raises ``RuntimeError`` if the symbol is unavailable (older CUDA
-    driver, ROCm < 7.1, unusual install). The connector requires the
-    batch API.
+    CUDA uses ``cuMemcpyBatchAsync``; ROCm uses ``hipMemcpyBatchAsync``.
+    Raises ``RuntimeError`` if the symbol is unavailable (old CUDA driver,
+    ROCm < 7.1, unusual install).
     """
     if current_platform.is_rocm():
         try:
@@ -91,14 +84,37 @@ def _resolve_batch_memcpy():
             ctypes.c_void_p,  # failIdx
             ctypes.c_void_p,  # stream
         ]
-        return fn
+        return fn, _rocm_num_attrs(lib)
 
     from cuda.bindings import driver as drv
 
     err, ptr, _ = drv.cuGetProcAddress(b"cuMemcpyBatchAsync", 12080, 0)
     if err != drv.CUresult.CUDA_SUCCESS:
         raise RuntimeError(f"cuGetProcAddress(cuMemcpyBatchAsync) failed: {err}")
-    return _BATCH_MEMCPY_FUNC_TYPE(ptr)
+    return _BATCH_MEMCPY_FUNC_TYPE(ptr), 1
+
+
+def _rocm_num_attrs(lib: ctypes.CDLL) -> int:
+    """``numAttrs`` for ``hipMemcpyBatchAsync`` on the running HIP runtime."""
+    ver = ctypes.c_int(0)
+    try:
+        if lib.hipRuntimeGetVersion(ctypes.byref(ver)) != 0:
+            ver.value = 0
+    except (OSError, AttributeError):
+        ver.value = 0
+    return _num_attrs_for_hip_version(ver.value)
+
+
+def _num_attrs_for_hip_version(version: int) -> int:
+    """``numAttrs`` for ``hipMemcpyBatchAsync`` given a HIP runtime version int.
+
+    ROCm 7.2.1-7.2.3 reject ``numAttrs > 0`` (ROCm/clr @ rocm-7.2.1
+    hipamd/src/hip_memory.cpp:2819-2822); 7.13+ accept it. ``version`` 0
+    (unknown) yields the conservative 0.
+    """
+    # HIP encodes version as major*10_000_000 + minor*100_000 + patch.
+    major, minor = version // 10_000_000, (version // 100_000) % 100
+    return 1 if (major, minor) >= (7, 13) else 0
 
 
 class BatchMemcpyParams(NamedTuple):
@@ -106,10 +122,9 @@ class BatchMemcpyParams(NamedTuple):
     dst_bases: np.ndarray  # [num_layers] uint64
     bpb: np.ndarray  # [num_layers] uint64 — bytes per block
     num_layers: int
-    # CUDA only: one attributes entry with srcAccessOrder=ANY. Unused on
-    # ROCm (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
     attrs_idx: ctypes.c_size_t
+    num_attrs: int
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
     # cuMemcpyBatchAsync() with fail_idx for backward compatibility
     fail_idx: ctypes.c_size_t
@@ -121,9 +136,10 @@ def build_params(
     dst_caches: dict[str, torch.Tensor],
     stream: torch.cuda.Stream,
 ) -> BatchMemcpyParams:
-    global _batch_memcpy_fn
-    if _batch_memcpy_fn is None:
-        _batch_memcpy_fn = _resolve_batch_memcpy()
+    global _batch_memcpy
+    if _batch_memcpy is None:
+        _batch_memcpy = _resolve_batch_memcpy()
+    _, num_attrs = _batch_memcpy
 
     assert list(src_caches.keys()) == list(dst_caches.keys())
     src_tensors = list(src_caches.values())
@@ -149,6 +165,7 @@ def build_params(
         num_layers=len(src_tensors),
         attrs=attrs,
         attrs_idx=ctypes.c_size_t(0),
+        num_attrs=num_attrs,
         fail_idx=ctypes.c_size_t(0),
         stream_handle=stream.cuda_stream,
     )
@@ -164,6 +181,9 @@ def copy_blocks(
     if n == 0:
         return
 
+    assert _batch_memcpy is not None, "build_params() must run before copy_blocks()"
+    fn, _ = _batch_memcpy
+
     src_ids = np.array(src_block_ids, dtype=np.uint64)
     dst_ids = np.array(dst_block_ids, dtype=np.uint64)
 
@@ -176,19 +196,14 @@ def copy_blocks(
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
-    # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync
-    # hipamd/src/hip_memory.cpp:2819-2822); CUDA uses one attrs entry so
-    # srcAccessOrder is honored. attrs / attrsIdxs are ignored when
-    # numAttrs==0, so we pass the same values from both paths.
-    num_attrs = 0 if current_platform.is_rocm() else 1
-    err = _batch_memcpy_fn(
+    err = fn(
         dst_all.ctypes.data,
         src_all.ctypes.data,
         sz_all.ctypes.data,
         total,
         ctypes.addressof(params.attrs),
         ctypes.byref(params.attrs_idx),
-        num_attrs,
+        params.num_attrs,
         ctypes.byref(params.fail_idx),
         params.stream_handle,
     )
