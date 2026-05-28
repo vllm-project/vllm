@@ -91,10 +91,10 @@ void fp32_router_gemm(
                   "fp32_router_gemm: expected num_experts=256");
   STD_TORCH_CHECK(num_tokens <= FP32_MAX_TOKENS,
                   "fp32_router_gemm: num_tokens must be in [0, 32]");
-  STD_TORCH_CHECK(mat_a.scalar_type() == torch::headeronly::ScalarType::Float ||
-                      mat_a.scalar_type() ==
-                          torch::headeronly::ScalarType::BFloat16,
-                  "fp32_router_gemm: mat_a must be float32 or bfloat16");
+  STD_TORCH_CHECK(
+      mat_a.scalar_type() == torch::headeronly::ScalarType::Float ||
+          mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "fp32_router_gemm: mat_a must be float32 or bfloat16");
   STD_TORCH_CHECK(mat_b.scalar_type() == torch::headeronly::ScalarType::Float,
                   "fp32_router_gemm: mat_b (weight) must be float32");
   STD_TORCH_CHECK(output.scalar_type() == torch::headeronly::ScalarType::Float,
