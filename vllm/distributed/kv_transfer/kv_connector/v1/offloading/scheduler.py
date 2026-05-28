@@ -455,6 +455,18 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens
 
+    def on_new_request(self, request: Request) -> None:
+        """Called when a new request is added to the scheduler."""
+        req_context = _create_req_context(request)
+        offloading_context = self.manager.on_new_request(req_context)
+        req_status = RequestOffloadState(
+            config=self.config,
+            req=request,
+            req_context=req_context,
+            offloading_context=offloading_context,
+        )
+        self._req_status[request.request_id] = req_status
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
@@ -477,31 +489,15 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
-        is_new_request = False
-        if req_status := self._req_status.get(request.request_id):
-            # make sure block IDs are cleared
-            for group_state in req_status.group_states:
-                group_state.block_ids.clear()
-        else:
-            is_new_request = True
-            req_context = _create_req_context(request)
-            offloading_context = self.manager.on_new_request(req_context)
-            req_status = RequestOffloadState(
-                config=self.config,
-                req=request,
-                req_context=req_context,
-                offloading_context=offloading_context,
-            )
-            self._req_status[request.request_id] = req_status
+        req_status = self._req_status[request.request_id]
+        for group_state in req_status.group_states:
+            group_state.block_ids.clear()
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens = self._lookup(req_status)
-        if is_new_request:
-            req_status.update_num_hit_blocks(
-                num_computed_tokens + (num_hit_tokens or 0)
-            )
+        req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
 
