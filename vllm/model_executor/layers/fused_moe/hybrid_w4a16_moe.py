@@ -131,16 +131,26 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
     # neutral (not measured in this PR).
     TRITON_BLOCK_SIZE_M = 32
 
-    @staticmethod
-    def _select_block_size_m(num_tokens: int, topk: int, E: int) -> int:
+    # Alignment for the group_size <= SMALL_GROUP_SIZE_THRESHOLD branch
+    # of _triton_config.  Must be lcm of the BLOCK_SIZE_M values that
+    # branch emits (128 for gemm1, 64 for gemm2).
+    TRITON_BLOCK_SIZE_M_SMALL_GS = 128
+
+    # group_size <= THRESHOLD uses the small-gs _triton_config branch;
+    # > THRESHOLD uses the default.  Boundary between 32 and 128.
+    SMALL_GROUP_SIZE_THRESHOLD = 64
+
+    def _select_block_size_m(self, num_tokens: int, topk: int, E: int) -> int:
         """Select block size in the M dimension.
 
-        Decode (num_tokens <= MAX_SKINNY_BATCH_SIZE): use small block sizes
-        compatible with the wvSplitK_int4 HIP kernel (N=1..5).
-        Prefill (num_tokens > MAX_SKINNY_BATCH_SIZE): use the Triton kernel's
-        BLOCK_SIZE_M for efficient batched GEMM.
+        Decode (num_tokens <= MAX_SKINNY_BATCH_SIZE): small block sizes
+        compatible with the wvSplitK_int4 HIP kernel.
+        Prefill: TRITON_BLOCK_SIZE_M, or TRITON_BLOCK_SIZE_M_SMALL_GS
+        for small group_size.
         """
         if num_tokens > HybridW4A16MoEExperts.MAX_SKINNY_BATCH_SIZE:
+            if self._group_size <= HybridW4A16MoEExperts.SMALL_GROUP_SIZE_THRESHOLD:
+                return HybridW4A16MoEExperts.TRITON_BLOCK_SIZE_M_SMALL_GS
             return HybridW4A16MoEExperts.TRITON_BLOCK_SIZE_M
         if num_tokens > 1:
             avg = num_tokens * topk / E
@@ -212,6 +222,27 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         """
         BLOCK_SIZE_K = self._group_size  # = 128 for the Qwen3.5-A3B path
         assert BLOCK_SIZE_K % 8 == 0
+
+        if self._group_size <= HybridW4A16MoEExperts.SMALL_GROUP_SIZE_THRESHOLD:
+            # gemm2 BM=64 < alignment=128; apply()'s _expert_ids_for
+            # repeat_interleaves expert_ids to compensate.
+            if K < 1024:
+                return dict(
+                    BLOCK_SIZE_M=64,
+                    BLOCK_SIZE_N=64,
+                    BLOCK_SIZE_K=BLOCK_SIZE_K,
+                    GROUP_SIZE_M=1,
+                    num_warps=4,
+                    num_stages=1,
+                )
+            return dict(
+                BLOCK_SIZE_M=128,
+                BLOCK_SIZE_N=64,
+                BLOCK_SIZE_K=BLOCK_SIZE_K,
+                GROUP_SIZE_M=1,
+                num_warps=8,
+                num_stages=1,
+            )
 
         # Per-shape sweep on Strix Halo (gfx1151) at BLOCK_M=32 (the
         # current alignment), using benchmarks/kernels/
