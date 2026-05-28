@@ -6957,7 +6957,7 @@ class GPUModelRunner(
                 continue
             block_size = kv_cache_group.kv_cache_spec.block_size
             block_sizes.append(block_size)
-            # Only DCP shards the KV cache under PCP-real.
+            # Only DCP shards the KV cache under PCP MLA.
             try:
                 _kv_cache_shards = get_dcp_group().world_size
             except AssertionError:

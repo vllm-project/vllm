@@ -304,7 +304,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        # Only DCP shards the KV cache under PCP-real.
+        # Only DCP shards the KV cache under PCP MLA.
         try:
             _kv_cache_shards = get_dcp_group().world_size
         except AssertionError:

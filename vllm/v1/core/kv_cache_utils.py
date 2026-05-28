@@ -586,7 +586,7 @@ def resolve_kv_cache_block_sizes(
       is inactive or a mamba group's block size diverges from the cache
       block size (mamba_cache_mode != "align").
 
-    Note: PCP-real does NOT shard the KV cache (each rank stores the full
+    Note: PCP MLA does NOT shard the KV cache (each rank stores the full
     sequence after the K/V all-gather), so PCP must not appear in the
     scheduler/hash block-size computation. DCP does shard, so it does.
     """

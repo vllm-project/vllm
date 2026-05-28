@@ -1756,7 +1756,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 - query_start_loc_cpu[reqs_start:num_reqs]
             )
             if self.pcp_world_size > 1:
-                # Under PCP-real, query_start_loc is LOCAL (this rank's share
+                # Under PCP MLA, query_start_loc is LOCAL (this rank's share
                 # of new Q) while seq_lens_cpu is GLOBAL (full sequence). A
                 # naive `seq_lens - local_query_lens` over-counts: it treats
                 # OTHER ranks' new-Q tokens as "context", triggering a

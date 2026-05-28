@@ -60,7 +60,7 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        # Under PCP-real, K/V are all-gathered across PCP ranks before
+        # Under PCP MLA, K/V are all-gathered across PCP ranks before
         # the cache write so each rank stores the FULL sequence in its
         # cache — PCP does NOT shard the KV cache; only DCP does. So
         # the per-rank effective block size only gets multiplied by

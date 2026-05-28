@@ -3,7 +3,7 @@
 """Multi-process repro for the Q-sharded prefill PCP path.
 
 Runs entirely on CPU via the gloo backend. Mirrors `test_pcp_decode_repro.py`
-but exercises the **new** Q-sharded PCP design (Phase 3 of `pcp-real`):
+but exercises the **new** Q-sharded PCP design (Phase 3 of `pcp-mla`):
 each PCP rank owns 1/N of the prefill Q tokens via DualChunkSwap and
 all-gathers K/V across the PCP group so the per-rank attention sees the
 full K/V cache.

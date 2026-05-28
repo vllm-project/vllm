@@ -254,7 +254,7 @@ class MultiGroupBlockTable:
             # Note(hc): each dcp rank only store
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
-            # must be multiplied by dcp_world_size. Under PCP-real we do NOT
+            # must be multiplied by dcp_world_size. Under PCP MLA we do NOT
             # shard the KV cache across PCP — Q is partitioned but K/V are
             # all-gathered before the kernel — so use dcp_world_size only.
             try:
