@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ast
+import contextlib
 import json
 from collections.abc import Sequence
 from typing import Any
@@ -26,9 +27,26 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.structural_tag_registry import (
+    get_enable_structured_outputs_in_reasoning,
+    get_model_structural_tag,
+)
 from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
+
+
+def _is_valid_function_name(name: str) -> bool:
+    """Return True when ``name`` looks like a real function identifier and
+    not a stray template token, malformed tag, or freeform text.
+
+    Rejects names that contain template-syntax characters (``{``, ``}``,
+    ``<``, ``>``), whitespace, quotes, or are empty.
+    """
+    if not name:
+        return False
+    forbidden = set("{}<>\"' \t\n\r")
+    return not any(c in forbidden for c in name)
 
 
 class StreamingXMLToolCallParser:
@@ -53,9 +71,16 @@ class StreamingXMLToolCallParser:
         """Reset streaming parsing state"""
 
         self.deltas = []
+        # When True (delta-by-delta streaming), _process_complete_xml_elements
+        # holds off on </parameter> when nothing follows in the buffer yet —
+        # that would be ambiguous since more tokens may still arrive.  When
+        # False (full output passed at once), an empty lookahead is a
+        # genuine end.
+        self._streaming_mode: bool = False
         # state for streaming
         self.tool_call_index = 0
         self.current_call_id = None
+        self.id_emitted = False
         self.last_completed_call_id = None
         self.current_function_name = None
         self.current_function_open = False
@@ -79,6 +104,21 @@ class StreamingXMLToolCallParser:
         self.defer_current_parameter = False
         self.deferred_param_raw_value = ""
 
+        # Depth of LITERAL nested ``<tool_call>``/``<function=...>`` opens
+        # encountered inside the current parameter's value.  Each literal
+        # opener bumps the depth; each ``</tool_call>``/``</function>``
+        # encountered while depth > 0 is also literal (decrements the
+        # depth) and must not be treated as a structural close.  Reset
+        # to 0 when leaving a parameter.
+        self._literal_tag_depth = 0
+        # Number of literal tool_call/function open or close events seen
+        # in the current ``parse_single_streaming_chunks`` call.  Used to
+        # suppress the post-processing structural-close fallback when
+        # the chunk contained literal nested-tag events: those events
+        # are already handled (escaped) by the preprocess pass and must
+        # not trigger ``_end_element`` calls.
+        self._literal_events_this_chunk = 0
+
         # recreate parser
         self.parser = ParserCreate()
         self.setup_parser()
@@ -98,72 +138,58 @@ class StreamingXMLToolCallParser:
         # Record delta count before processing
         initial_delta_count = len(self.deltas)
 
+        # Reset literal-event counter for this chunk: it will be
+        # incremented by the preprocess pass whenever it encounters a
+        # literal nested ``<tool_call>``/``<function=...>`` open or
+        # the matching close inside a parameter value.
+        self._literal_events_this_chunk = 0
+
         self.streaming_buffer += xml_chunk
 
         found_elements = self._process_complete_xml_elements()
 
         if found_elements:
             # If complete elements found, check if end events were missed
-            # some tags may not have been triggered
+            # some tags may not have been triggered.  Use structural-aware
+            # checks so that </function>/</tool_call> appearing as literal
+            # text inside a parameter value (e.g. file content) does NOT
+            # trigger a spurious close that emits a duplicate '}' or ''.
+            # When ``_literal_tag_depth > 0`` we are still inside a
+            # literal nested ``<tool_call>``/``<function=...>`` block in
+            # the current parameter's value — the chunk's `</function>`
+            # or `</tool_call>` matches a literal opener, not a real
+            # structural close, so skip the fallback close events.
             try:
-                new_deltas = self.deltas[initial_delta_count:]
-                # If this chunk contains </function>
-                # but didn't generate '}', then complete it
+                # Skip the fallback close events when this chunk
+                # contained any literal nested-tag event: those
+                # ``</function>``/``</tool_call>`` strings are matched
+                # to literal openers in the param value and have
+                # already been escaped — firing ``_end_element`` here
+                # would prematurely close the OUTER parameter and
+                # truncate its value.
+                literals_in_chunk = self._literal_events_this_chunk > 0
                 if (
                     self.current_call_id is not None
-                    and self.function_end_token in xml_chunk
+                    and not literals_in_chunk
+                    and self._literal_tag_depth == 0
+                    and self._chunk_has_structural_function_end(xml_chunk)
+                    and self.current_function_open
                 ):
-                    # - Added '}' (non-empty parameter ending)
-                    # - Added '{}' (empty parameter function)
-                    has_function_close = any(
-                        (
-                            td.tool_calls
-                            and any(
-                                (
-                                    tc.function
-                                    and tc.id == self.current_call_id
-                                    and isinstance(tc.function.arguments, str)
-                                    and (tc.function.arguments in ("}", "{}"))
-                                )
-                                for tc in td.tool_calls
-                            )
-                        )
-                        for td in new_deltas
-                    )
-                    if not has_function_close:
-                        # Close potentially unclosed element
-                        if self.current_param_name:
-                            self._end_element("parameter")
-                        if self.current_function_name:
-                            self._end_element("function")
-                # If this chunk contains </tool_call>
-                # but didn't generate final empty delta, then complete it
+                    if self.current_param_name:
+                        self._end_element("parameter")
+                    if self.current_function_name:
+                        self._end_element("function")
                 if (
                     self.current_call_id is not None
-                    and self.tool_call_end_token in xml_chunk
+                    and not literals_in_chunk
+                    and self._literal_tag_depth == 0
+                    and self._chunk_has_structural_tool_call_end(xml_chunk)
                 ):
-                    has_toolcall_close = any(
-                        (
-                            td.tool_calls
-                            and any(
-                                (
-                                    tc.type == "function"
-                                    and tc.function
-                                    and tc.function.arguments == ""
-                                    and tc.id == self.current_call_id
-                                )
-                                for tc in td.tool_calls
-                            )
-                        )
-                        for td in new_deltas
-                    )
-                    if not has_toolcall_close:
-                        # Close potentially unclosed element
-                        if self.current_param_name:
-                            self._end_element("parameter")
-                        if self.current_function_name:
-                            self._end_element("function")
-                        self._end_element("tool_call")
+                    if self.current_param_name:
+                        self._end_element("parameter")
+                    if self.current_function_open:
+                        self._end_element("function")
+                    self._end_element("tool_call")
             except Exception as e:
                 logger.warning("Error with fallback parsing: %s", e)
             # Merge newly generated deltas into single response
@@ -173,29 +199,37 @@ class StreamingXMLToolCallParser:
             return result_delta
         else:
             # No complete elements, check if there's unoutput text content
-            if self.text_content_buffer and self.tool_call_index == 0:
-                # Has text content but no tool_call yet, output text content
+            if self.text_content_buffer:
+                # Output buffered text content
                 text_delta = DeltaMessage(content=self.text_content_buffer)
                 self._emit_delta(text_delta)
                 # Clear buffer to avoid duplicate output
                 self.text_content_buffer = ""
                 return text_delta
 
-            # If this chunk contains end tags but wasn't triggered by parser,
-            # manually complete end events
-            # Only execute when still on the same call as when entered,
-            # to prevent accidentally closing new calls
-            # in multi <tool_call> scenarios
-            if self.current_call_id is not None and (
-                self.function_end_token in xml_chunk
-                or self.tool_call_end_token in xml_chunk
+            # If this chunk contains structural end tags but wasn't
+            # triggered by parser, manually complete end events. Only
+            # execute when still on the same call as when entered, to
+            # prevent accidentally closing new calls in multi-<tool_call>
+            # scenarios.  Also skip when ``_literal_tag_depth > 0``: the
+            # chunk's `</function>`/`</tool_call>` matches a literal
+            # opener inside the current parameter's value.
+            if (
+                self.current_call_id is not None
+                and self._literal_tag_depth == 0
+                and (
+                    self._chunk_has_structural_function_end(xml_chunk)
+                    or self._chunk_has_structural_tool_call_end(xml_chunk)
+                )
             ):
-                # Close potentially unclosed element
                 if self.current_param_name:
                     self._end_element("parameter")
-                if self.function_end_token in xml_chunk and self.current_function_name:
+                if (
+                    self._chunk_has_structural_function_end(xml_chunk)
+                    and self.current_function_name
+                ):
                     self._end_element("function")
-                if self.tool_call_end_token in xml_chunk:
+                if self._chunk_has_structural_tool_call_end(xml_chunk):
                     self._end_element("tool_call")
                 # Return the merged delta result generated by this fallback
                 result_delta = self._merge_new_deltas_to_single_response(
@@ -227,6 +261,141 @@ class StreamingXMLToolCallParser:
 
         return text
 
+    def _is_structural_tag_position(self) -> bool:
+        """Return True when the current element is at a structural position.
+
+        A structural opening tag (e.g. <parameter=...>) must appear at the
+        beginning of a line in the raw output — i.e. the character
+        immediately before it in the streaming buffer is a newline (or it
+        is at position 0).  Opening tags inside parameter content (e.g.
+        '"<parameter=query>"') are preceded by a non-newline character
+        such as a quote.
+        """
+        if self.last_processed_pos == 0:
+            return True
+        return self.streaming_buffer[self.last_processed_pos - 1] == "\n"
+
+    def _get_valid_param_names(self) -> set[str] | None:
+        """Return the set of parameter names defined in the schema for the
+        current function, or None when the schema is not available.
+
+        Used to filter structural-looking <parameter=NAME> tokens that
+        appear as literal text inside a parameter value (e.g. Jinja2
+        templates, test fixtures, or files that document the tool-call
+        format).
+        """
+        if not self.tools or not self.current_function_name:
+            return None
+        props = find_tool_properties(self.tools, self.current_function_name)
+        return set(props.keys()) if props else None
+
+    def _is_already_emitted_param(self, name: str) -> bool:
+        """Return True when ``name`` has already appeared as a parameter
+        of the current tool call (either fully closed or currently open).
+
+        A ``<parameter=NAME>`` whose NAME is already used for the same
+        tool is almost always literal text inside another parameter's
+        value (e.g. a parser fixture or a file that documents the
+        tool-call format).  Treating it as a real structural opening
+        causes silent value truncation and spurious extra params.
+        """
+        if name == self.current_param_name:
+            return True
+        return name in self.parameters
+
+    def _is_structural_closing_tag(self, chunk: str) -> bool:
+        """Return True when a closing tag at the current buffer position is
+        a real structural delimiter rather than literal text content.
+
+        A closing tag is structural when the text that follows it in the
+        streaming buffer (after stripping leading whitespace) begins with
+        another structural token or is empty (end of buffered output).
+
+        When the schema is available, a following <parameter=NAME> is only
+        considered structural if NAME is a known parameter of the current
+        function.  This prevents literal lines like ``<parameter=new_string>``
+        in file content from being mistaken for real structural boundaries.
+        """
+        after_pos = self.last_processed_pos + len(chunk)
+        rest = self.streaming_buffer[after_pos:].lstrip()
+
+        structural_param_follows = False
+        if rest.startswith(self.parameter_start_token):
+            valid_names = self._get_valid_param_names()
+            name_start = len(self.parameter_start_token)
+            name_end = rest.find(">", name_start)
+            if name_end != -1:
+                candidate = rest[name_start:name_end]
+                if valid_names is not None:
+                    structural_param_follows = (
+                        candidate in valid_names
+                        and not self._is_already_emitted_param(candidate)
+                    )
+                else:
+                    # Fallback (no schema): trust the name unless it is a
+                    # repeat of the current/already-emitted param, which
+                    # is almost always a literal in a parser fixture.
+                    structural_param_follows = not self._is_already_emitted_param(
+                        candidate
+                    )
+
+        # Return True when rest is an incomplete prefix of a structural
+        # closing token (e.g. rest="</" when "</function>" hasn't fully
+        # arrived yet). The empty-rest case is handled by the deferral in
+        # _process_complete_xml_elements; this guards against the
+        # partial-tag scenario where the deferral does not fire (rest is
+        # non-empty) but the token is still incomplete.
+        is_partial_structural_prefix = any(
+            tok.startswith(rest)
+            for tok in (
+                self.parameter_end_token,
+                self.function_end_token,
+                self.tool_call_end_token,
+            )
+        )
+
+        return (
+            not rest
+            or is_partial_structural_prefix
+            or structural_param_follows
+            or rest.startswith(self.parameter_end_token)
+            or rest.startswith(self.function_end_token)
+            or rest.startswith(self.tool_call_end_token)
+        )
+
+    def _chunk_has_structural_function_end(self, chunk: str) -> bool:
+        """Return True if `chunk` contains a structural </function> tag.
+
+        A structural </function> is followed (after optional whitespace)
+        by </tool_call> or end-of-string — not inside parameter content
+        such as a file whose body contains '</function>'.
+        """
+        search = 0
+        token = self.function_end_token
+        end_token = self.tool_call_end_token
+        while True:
+            idx = chunk.find(token, search)
+            if idx == -1:
+                return False
+            rest = chunk[idx + len(token) :].lstrip()
+            if not rest or rest.startswith(end_token):
+                return True
+            search = idx + len(token)
+
+    def _chunk_has_structural_tool_call_end(self, chunk: str) -> bool:
+        """Return True if `chunk` contains a structural </tool_call> tag."""
+        search = 0
+        token = self.tool_call_end_token
+        start_token = self.tool_call_start_token
+        while True:
+            idx = chunk.find(token, search)
+            if idx == -1:
+                return False
+            rest = chunk[idx + len(token) :].lstrip()
+            if not rest or rest.startswith(start_token):
+                return True
+            search = idx + len(token)
+
     def _process_complete_xml_elements(self) -> bool:
         """
         Process complete XML elements in buffer
@@ -243,6 +412,23 @@ class StreamingXMLToolCallParser:
                 # No complete element found, wait for more data
                 break
 
+            # In streaming mode, hold off on </parameter> when nothing
+            # follows in the buffer yet.  We need the lookahead to
+            # distinguish a real structural close (followed by
+            # </function> or a schema-known <parameter=NAME>) from
+            # literal text content that happens to be ``</parameter>`` on
+            # its own line (e.g. Jinja2 template files). When not in
+            # _pre_inside_parameter mode the SAX-level decision is made
+            # here; skip for now and re-evaluate on the next delta.
+            if (
+                self._streaming_mode
+                and element == self.parameter_end_token
+                and self.current_param_name is not None
+                and not self._pre_inside_parameter
+                and not self.streaming_buffer[end_pos:].lstrip()
+            ):
+                break
+
             # Check if this element should be skipped
             if self._should_skip_element(element):
                 self.last_processed_pos = end_pos
@@ -251,16 +437,12 @@ class StreamingXMLToolCallParser:
             # Found complete XML element, process it
             try:
                 preprocessed_element = self._preprocess_xml_chunk(element)
-                # Check if this is the first tool_call start
+                # Check if a new tool_call starts and we have buffered text content
                 if (
-                    (
-                        preprocessed_element.strip().startswith("<tool_call>")
-                        or preprocessed_element.strip().startswith("<function name=")
-                    )
-                    and self.tool_call_index == 0
+                    preprocessed_element.strip().startswith("<tool_call>")
+                    or preprocessed_element.strip().startswith("<function name=")
                 ) and self.text_content_buffer:
-                    # First tool_call starts,
-                    # output previously collected text content first
+                    # Output previously collected text content first
                     text_delta = DeltaMessage(content=self.text_content_buffer)
                     self._emit_delta(text_delta)
                     # Clear buffer for potential subsequent text content
@@ -286,7 +468,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments=""),
                             )
@@ -304,6 +486,16 @@ class StreamingXMLToolCallParser:
 
             # Update processed position
             self.last_processed_pos = end_pos
+
+        # Flush any text accumulated AFTER the last </tool_call> processed
+        # in this batch. Without this, trailing free text that arrives in
+        # the SAME delta as the closing </tool_call> (MTP / speculative
+        # decoding) is buffered but never emitted — and is lost entirely
+        # if EOS comes before any subsequent delta.
+        if found_any and self.text_content_buffer and self.current_call_id is None:
+            text_delta = DeltaMessage(content=self.text_content_buffer)
+            self._emit_delta(text_delta)
+            self.text_content_buffer = ""
 
         return found_any
 
@@ -441,10 +633,10 @@ class StreamingXMLToolCallParser:
             if delta.tool_calls:
                 # For tool_calls, we need to intelligently merge arguments
                 for tool_call in delta.tool_calls:
-                    # Find if there's already a tool_call with the same call_id
+                    # Find if there's already a tool_call with the same index
                     existing_call = None
                     for existing in merged_tool_calls:
-                        if existing.id == tool_call.id:
+                        if existing.index == tool_call.index:
                             existing_call = existing
                             break
 
@@ -534,36 +726,59 @@ class StreamingXMLToolCallParser:
                         if self._pre_current_param_name
                         else "string"
                     )
-                    # Only these types need deferred parsing to
-                    # handle Python literals containing single quotes
-                    is_object_type = param_type in ["object"]
+                    # Container types always need deferred parsing so the
+                    # full value is available for json.loads /
+                    # ast.literal_eval — even when the first streaming
+                    # token is just "\n".
+                    is_object_type = param_type == "object"
                     is_complex_type = (
                         param_type in ["array", "arr", "sequence"]
                         or param_type.startswith("dict")
                         or param_type.startswith("list")
                     )
-
-                    # Only delay when contains container symbols
-                    # and has single quotes and is complex type
-                    has_container_hint = (
-                        ("[" in original_chunk)
-                        or ("{" in original_chunk)
-                        or ("(" in original_chunk)
+                    # Boolean also needs deferral: streaming "t" as the
+                    # first char would otherwise be converted to False and
+                    # emit "false", shadowing the real "true" that follows.
+                    is_bool_type = param_type in ["boolean", "bool", "binary"]
+                    # Numeric types need deferral too: a nullable
+                    # parameter rendered as the literal "None" (Qwen3.5
+                    # template) or "null" (Qwen3.6 template) flips from
+                    # the partial-string fallback to JSON ``null`` only
+                    # when the FULL value is in.  Without deferral the
+                    # diff-based char emission would interleave the
+                    # partial string ("Non") with the JSON literal
+                    # ("null") and produce invalid output ("Nonl").
+                    is_numeric_type = (
+                        param_type.startswith("int")
+                        or param_type.startswith("uint")
+                        or param_type.startswith("long")
+                        or param_type.startswith("short")
+                        or param_type.startswith("unsigned")
+                        or param_type.startswith("num")
+                        or param_type.startswith("float")
                     )
 
-                    # Determine if deferred parsing is needed
-                    need_defer = False
-                    if is_complex_type:
-                        # Complex type, always need deferred parsing
-                        need_defer = True
-                    elif (
-                        is_object_type
-                        and has_container_hint
-                        and ("'" in original_chunk)
-                    ):
-                        # Object type with container symbols
-                        # and single quotes, need deferred parsing
-                        need_defer = True
+                    # Nullable string params (``anyOf: [string, null]``)
+                    # must defer too: the literal ``null`` / ``None`` is
+                    # only recognisable when the full value is in.
+                    # Without deferral, the streaming string path emits
+                    # ``"`` + chars + ``"`` and the literal stays
+                    # quoted.
+                    is_nullable_string = param_type in [
+                        "string",
+                        "str",
+                        "text",
+                        "varchar",
+                        "char",
+                        "enum",
+                    ] and self._param_allows_null(self._pre_current_param_name)
+                    need_defer = (
+                        is_complex_type
+                        or is_object_type
+                        or is_bool_type
+                        or is_numeric_type
+                        or is_nullable_string
+                    )
 
                     if not need_defer:
                         # No need for deferred parsing,
@@ -572,6 +787,69 @@ class StreamingXMLToolCallParser:
                         return self._escape_xml_special_chars(original_chunk)
                 self._pre_param_buffer += original_chunk
                 return ""
+
+        # When a parameter value is being streamed (SAX state says we are
+        # inside a <parameter>), structural-looking tokens that arrive as
+        # subsequent elements are literal text — e.g. a file whose content
+        # describes the tool-call format.  Escape them unless they are
+        # genuine structural delimiters.
+        if self.current_param_name is not None:
+            if chunk.startswith(self.tool_call_start_token) or chunk.startswith(
+                self.function_start_token
+            ):
+                # Opening tool_call/function tags are always literal inside
+                # a parameter value.  Track nesting depth so that the
+                # matching ``</function>`` / ``</tool_call>`` is also
+                # treated as literal even when its lookahead would
+                # otherwise satisfy the structural heuristic.
+                self._literal_tag_depth += 1
+                self._literal_events_this_chunk += 1
+                return self._escape_xml_special_chars(chunk)
+            if chunk.startswith(self.parameter_start_token):
+                # A structural <parameter=NAME> always follows a newline in
+                # the buffer.  When a schema is available, also require
+                # NAME to be a known parameter of the current function so
+                # that literal ``<parameter=new_string>`` inside file
+                # content is treated as text.  A NAME already emitted
+                # for this tool (or equal to the param currently being
+                # parsed) is also literal text — a parser fixture or a
+                # file that documents the tool-call format.
+                if not self._is_structural_tag_position():
+                    return self._escape_xml_special_chars(chunk)
+                name_start = len(self.parameter_start_token)
+                name_end = chunk.find(">", name_start)
+                if name_end != -1:
+                    candidate = chunk[name_start:name_end]
+                    if self._is_already_emitted_param(candidate):
+                        return self._escape_xml_special_chars(chunk)
+                    valid_names = self._get_valid_param_names()
+                    if valid_names is not None and candidate not in valid_names:
+                        return self._escape_xml_special_chars(chunk)
+            if (
+                chunk.startswith(self.parameter_end_token)
+                or chunk.startswith(self.function_end_token)
+                or chunk.startswith(self.tool_call_end_token)
+            ):
+                # Inside a literal nested tool_call/function (depth > 0),
+                # any closing tag pairs with the literal opener and is
+                # itself literal — regardless of what the lookahead says.
+                # ``</parameter>`` does not affect depth (parameters do
+                # not nest in the Qwen format).
+                if self._literal_tag_depth > 0:
+                    if chunk.startswith(self.function_end_token) or (
+                        chunk.startswith(self.tool_call_end_token)
+                    ):
+                        self._literal_tag_depth -= 1
+                        self._literal_events_this_chunk += 1
+                    else:
+                        # Literal `</parameter>` inside a nested literal
+                        # block — count it as a literal event so the
+                        # post-processing fallback knows the chunk
+                        # contained literals and skips spurious closes.
+                        self._literal_events_this_chunk += 1
+                    return self._escape_xml_special_chars(chunk)
+                if not self._is_structural_closing_tag(chunk):
+                    return self._escape_xml_special_chars(chunk)
 
         # Parameter start: enable accumulation
         if processed.startswith("<parameter name="):
@@ -592,6 +870,12 @@ class StreamingXMLToolCallParser:
     def _emit_delta(self, delta: DeltaMessage):
         """Emit Delta response (streaming output)"""
         self.deltas.append(delta)
+
+    def _get_call_id_for_delta(self) -> str | None:
+        if not self.id_emitted:
+            self.id_emitted = True
+            return self.current_call_id
+        return None
 
     def _auto_close_open_parameter_if_needed(self, incoming_tag: str | None = None):
         """Before starting to process new elements,
@@ -648,7 +932,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(
                                 name=function_name, arguments=""
@@ -679,7 +963,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(
                                     name=None, arguments=json_start
@@ -697,7 +981,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(
                                     name=None, arguments=json_continue
@@ -740,7 +1024,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments='"'),
                         )
@@ -775,7 +1059,7 @@ class StreamingXMLToolCallParser:
                 tool_calls=[
                     DeltaToolCall(
                         index=self.tool_call_index - 1,
-                        id=self.current_call_id,
+                        id=self._get_call_id_for_delta(),
                         type="function",
                         function=DeltaFunctionCall(name=None, arguments=delta_data),
                     )
@@ -799,7 +1083,9 @@ class StreamingXMLToolCallParser:
         if (
             name.startswith("parameter") or name == "parameter"
         ) and self.current_param_name:
-            # End current parameter
+            # End current parameter; reset literal-tag depth tracker
+            # since we are leaving the param's value scope.
+            self._literal_tag_depth = 0
             param_name = self.current_param_name
             param_value = self.current_param_value
 
@@ -812,27 +1098,118 @@ class StreamingXMLToolCallParser:
                     if self.deferred_param_raw_value
                     else param_value
                 )
-                parsed_value = None
-                output_arguments = None
-                try:
-                    # If previously delayed trailing newline,
-                    # add it back before parsing
-                    if self.should_emit_end_newline:
-                        raw_for_parse = raw_text + "\n"
+                parsed_value: Any = None
+                output_arguments: str | None = None
+                if self.should_emit_end_newline:
+                    raw_for_parse = raw_text + "\n"
+                else:
+                    raw_for_parse = raw_text
+                # Nullable-string short-circuit: when the schema is
+                # ``anyOf: [string, null]``, ``"null"`` and Python's
+                # ``"None"`` map to JSON null.  Any other value is
+                # kept verbatim as a string — never parsed as int,
+                # float, JSON, etc., even if it LOOKS like one.
+                _param_type_for_check = self._get_param_type(param_name)
+                if _param_type_for_check in [
+                    "string",
+                    "str",
+                    "text",
+                    "varchar",
+                    "char",
+                    "enum",
+                ] and self._param_allows_null(param_name):
+                    if raw_for_parse.strip().lower() in ("null", "none"):
+                        parsed_value = None
+                        output_arguments = "null"
                     else:
-                        raw_for_parse = raw_text
-                    parsed_value = ast.literal_eval(raw_for_parse)
-                    output_arguments = json.dumps(parsed_value, ensure_ascii=False)
-                except Exception:
-                    # Fallback: output as string as-is
-                    output_arguments = json.dumps(raw_text, ensure_ascii=False)
-                    parsed_value = raw_text
+                        parsed_value = raw_for_parse
+                        output_arguments = json.dumps(raw_for_parse, ensure_ascii=False)
+                    delta = DeltaMessage(
+                        tool_calls=[
+                            DeltaToolCall(
+                                index=self.tool_call_index - 1,
+                                id=self._get_call_id_for_delta(),
+                                type="function",
+                                function=DeltaFunctionCall(
+                                    name=None, arguments=output_arguments
+                                ),
+                            )
+                        ]
+                    )
+                    self._emit_delta(delta)
+                    self.parameters[param_name] = parsed_value
+                    self.current_param_name = None
+                    self.current_param_value = ""
+                    self.current_param_value_converted = ""
+                    self.start_quote_emitted = False
+                    self.should_emit_end_newline = False
+                    self.defer_current_parameter = False
+                    self.deferred_param_raw_value = ""
+                    return
+                raw_lower = raw_for_parse.strip().lower()
+                # Handle JSON literals that ast.literal_eval cannot parse
+                # (true/false/null are JSON, not Python).
+                if raw_lower == "null":
+                    parsed_value = None
+                    output_arguments = "null"
+                elif raw_lower == "true":
+                    parsed_value = True
+                    output_arguments = "true"
+                elif raw_lower == "false":
+                    parsed_value = False
+                    output_arguments = "false"
+                else:
+                    # Try JSON first: handles arrays/objects that use JSON
+                    # native tokens (true, false, null) which
+                    # ast.literal_eval cannot parse.
+                    try:
+                        parsed_value = json.loads(raw_for_parse)
+                        # A model trained with a buggy template
+                        # (json.dumps(str(dict))) may output a JSON-encoded
+                        # Python repr like "\"{'k': 'v'}\"". json.loads
+                        # returns a str in that case — try one more level.
+                        if isinstance(parsed_value, str):
+                            try:
+                                parsed_value = ast.literal_eval(parsed_value)
+                            except (ValueError, SyntaxError, TypeError):
+                                with contextlib.suppress(
+                                    json.JSONDecodeError, ValueError
+                                ):
+                                    parsed_value = json.loads(parsed_value)
+                        output_arguments = json.dumps(parsed_value, ensure_ascii=False)
+                    except (json.JSONDecodeError, ValueError):
+                        try:
+                            parsed_value = ast.literal_eval(raw_for_parse)
+                            # A model trained with a buggy template
+                            # (json.dumps(str(dict))) may output a
+                            # JSON-encoded Python repr like "{'k': 'v'}".
+                            # ast.literal_eval returns a str in that
+                            # case — try one more level.
+                            if isinstance(parsed_value, str):
+                                try:
+                                    parsed_value = ast.literal_eval(parsed_value)
+                                except (
+                                    ValueError,
+                                    SyntaxError,
+                                    TypeError,
+                                ):
+                                    with contextlib.suppress(
+                                        json.JSONDecodeError, ValueError
+                                    ):
+                                        parsed_value = json.loads(parsed_value)
+                            output_arguments = json.dumps(
+                                parsed_value, ensure_ascii=False
+                            )
+                        except (ValueError, SyntaxError, TypeError):
+                            # Fallback: output as string as-is
+                            output_arguments = json.dumps(raw_text, ensure_ascii=False)
+                            parsed_value = raw_text
 
                 delta = DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(
                                 name=None, arguments=output_arguments
@@ -868,7 +1245,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments='""'),
                             )
@@ -881,7 +1258,7 @@ class StreamingXMLToolCallParser:
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,
-                                id=self.current_call_id,
+                                id=self._get_call_id_for_delta(),
                                 type="function",
                                 function=DeltaFunctionCall(name=None, arguments='"'),
                             )
@@ -904,7 +1281,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments="}"),
                         )
@@ -917,7 +1294,7 @@ class StreamingXMLToolCallParser:
                     tool_calls=[
                         DeltaToolCall(
                             index=self.tool_call_index - 1,
-                            id=self.current_call_id,
+                            id=self._get_call_id_for_delta(),
                             type="function",
                             function=DeltaFunctionCall(name=None, arguments="{}"),
                         )
@@ -940,7 +1317,7 @@ class StreamingXMLToolCallParser:
                 tool_calls=[
                     DeltaToolCall(
                         index=self.tool_call_index - 1,
-                        id=self.current_call_id,
+                        id=self._get_call_id_for_delta(),
                         type="function",
                         function=DeltaFunctionCall(name=None, arguments=""),
                     )
@@ -1003,10 +1380,51 @@ class StreamingXMLToolCallParser:
 
         properties = find_tool_properties(self.tools, self.current_function_name)
         if param_name in properties and isinstance(properties[param_name], dict):
-            return self.repair_param_type(
-                str(properties[param_name].get("type", "string"))
-            )
+            prop = properties[param_name]
+            param_type = prop.get("type")
+            if isinstance(param_type, list):
+                # JSON-Schema list-form type, e.g.
+                # {"type": ["integer", "null"]}. Pick the first non-null
+                # type, mirroring the anyOf handling below.
+                for option_type in param_type:
+                    if str(option_type).lower() != "null":
+                        return self.repair_param_type(str(option_type))
+                return "string"
+            if param_type is None and "anyOf" in prop:
+                # Handle anyOf schemas (e.g. nullable types like
+                # anyOf: [{type: "integer"}, {type: "null"}]).
+                # Pick the first non-null type; fall back to "string".
+                for option in prop["anyOf"]:
+                    if isinstance(option, dict) and "type" in option:
+                        opt_type = str(option["type"])
+                        if opt_type != "null":
+                            return self.repair_param_type(opt_type)
+                return "string"
+
+            return self.repair_param_type(str(param_type or "string"))
         return "string"
+
+    def _param_allows_null(self, param_name: str | None) -> bool:
+        """Return True when the schema for ``param_name`` admits a null
+        value — either via ``"type": "null"`` or as one alternative in
+        an ``anyOf`` union.  Used to recognise the literal ``"null"`` /
+        ``"None"`` as JSON null even when the primary type is string.
+        """
+        if not self.tools or not self.current_function_name or not param_name:
+            return False
+        properties = find_tool_properties(self.tools, self.current_function_name)
+        if param_name not in properties or not isinstance(properties[param_name], dict):
+            return False
+        prop = properties[param_name]
+        if str(prop.get("type", "")).lower() == "null":
+            return True
+        for option in prop.get("anyOf", []) or []:
+            if (
+                isinstance(option, dict)
+                and str(option.get("type", "")).lower() == "null"
+            ):
+                return True
+        return False
 
     def repair_param_type(self, param_type: str) -> str:
         """Repair unknown parameter types by treating them as string
@@ -1045,13 +1463,29 @@ class StreamingXMLToolCallParser:
         Returns:
             Converted value
         """
-        if param_value.lower() == "null":
-            return None
-
         param_type = param_type.strip().lower()
+        # Nullable schemas (``anyOf: [string, null]`` or similar): the
+        # primary type may be string but the literal ``"null"`` /
+        # ``"None"`` must still convert to JSON null.  Caller passes the
+        # current parameter name via the parser state so we can query
+        # the schema.
+        if self._param_allows_null(self.current_param_name) and param_value.lower() in (
+            "null",
+            "none",
+        ):
+            return None
+        # String type takes precedence: the literal value "null" must remain
+        # the string "null" instead of being converted to Python None.
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
-        elif (
+        # Non-string: "null" → Python None → JSON null.  Also accept the
+        # Python literal "None" so that Qwen3.5-trained models — whose
+        # chat template renders null args via ``| string`` (yielding the
+        # literal "None" in the prompt) — round-trip nullable values
+        # correctly.
+        if param_value.lower() in ("null", "none"):
+            return None
+        if (
             param_type.startswith("int")
             or param_type.startswith("uint")
             or param_type.startswith("long")
@@ -1062,11 +1496,10 @@ class StreamingXMLToolCallParser:
                 return int(param_value)
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not an integer "
-                    "in tool '%s', degenerating to string.",
+                    "Parsed value '%s' is not an integer, degenerating to string.",
                     param_value,
                 )
-            return param_value
+                return param_value
         elif param_type.startswith("num") or param_type.startswith("float"):
             try:
                 float_param_value: float = float(param_value)
@@ -1077,14 +1510,12 @@ class StreamingXMLToolCallParser:
                 )
             except (ValueError, TypeError):
                 logger.warning(
-                    "Parsed value '%s' of parameter '%s' is not a float "
-                    "in tool '%s', degenerating to string.",
+                    "Parsed value '%s' is not a float, degenerating to string.",
                     param_value,
                 )
-            return param_value
+                return param_value
         elif param_type in ["boolean", "bool", "binary"]:
-            param_value = param_value.lower()
-            return param_value == "true"
+            return param_value.lower() == "true"
         else:
             return param_value
 
@@ -1098,9 +1529,12 @@ class StreamingXMLToolCallParser:
         Returns:
             Converted string for streaming output
         """
-        # Check if value is empty, but exclude numeric 0
-        if converted_value is None or converted_value == "":
+        # Empty string: no output.
+        if converted_value == "":
             return ""
+        # None → JSON null literal (e.g. for nullable integer/object params).
+        if converted_value is None:
+            return "null"
 
         if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             # String type, remove double quotes
@@ -1126,6 +1560,7 @@ class StreamingXMLToolCallParser:
         if self.current_call_id:
             self.last_completed_call_id = self.current_call_id
         self.current_call_id = None
+        self.id_emitted = False
         self.current_function_name = None
         self.current_function_open = False
         self.parameters = {}
@@ -1179,6 +1614,13 @@ class Qwen3XMLToolParser(ToolParser):
             tool_calls = []
             for tool_call in result.tool_calls:
                 if tool_call.function and tool_call.function.name:
+                    # Reject phantom tool calls produced when the model
+                    # writes an unrendered Jinja template or pseudo-XML
+                    # in its response (e.g. ``<function={{ tc.name }}>``).
+                    # Surfacing such names as real tool calls causes
+                    # "tool not found" errors at the client.
+                    if not _is_valid_function_name(tool_call.function.name):
+                        continue
                     tool_calls.append(
                         ToolCall(
                             id=tool_call.id,
@@ -1235,6 +1677,7 @@ class Qwen3XMLToolParser(ToolParser):
     ) -> DeltaMessage | None:
         if not previous_text:
             self.parser.reset_streaming_state()
+            self.parser._streaming_mode = True
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
@@ -1296,3 +1739,11 @@ class Qwen3XMLToolParser(ToolParser):
             # If no content and no tool calls, return None to indicate no update
             return None
         return delta
+
+    def get_structural_tag(self, request: ChatCompletionRequest):
+        return get_model_structural_tag(
+            model="qwen_3_5",
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=get_enable_structured_outputs_in_reasoning(),
+        )
