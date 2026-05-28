@@ -2372,6 +2372,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2568,6 +2577,15 @@ name = "memo-map"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "mime"
@@ -5644,6 +5662,7 @@ dependencies = [
  "educe",
  "expect-test",
  "itertools 0.14.0",
+ "mimalloc",
  "native-tls",
  "serde",
  "serde_json",
@@ -5740,6 +5759,25 @@ name = "vllm-metrics"
 version = "0.1.0"
 dependencies = [
  "prometheus-client",
+]
+
+[[package]]
+name = "vllm-mock-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asynk-strim-attr",
+ "clap",
+ "futures",
+ "rand 0.9.2",
+ "rmpv",
+ "serde",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "vllm-engine-core-client",
+ "zeromq",
 ]
 
 [[package]]
