@@ -174,9 +174,6 @@ def create_and_prepopulate_kv_cache(
         kv_cache[blks, :, :, head_size:] = v_blocked
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
-    # Transpose to (num_blocks, 2, ...) layout
-    kv_cache = kv_cache.transpose(0, 1).contiguous()
-
     blocks_end = start_block_idx
 
     # Permute the context blocks (excluding block 0 which is null)

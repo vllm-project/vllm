@@ -145,12 +145,27 @@ class OffloadingConnectorWorker:
                         )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    raw = kv_caches[layer_name]
-                    assert isinstance(raw, torch.Tensor)
-                    page = layer_kv_cache_spec.page_size_bytes
-                    tensors_per_block[layer_name] = (raw.view(num_blocks, page),)
+                    state_tensors = kv_caches[layer_name]
+                    assert isinstance(state_tensors, list)
+                    assert len(state_tensors) > 0
 
-                    page_size_bytes[layer_name] = page
+                    first = state_tensors[0]
+                    storage = first.untyped_storage()
+                    page = layer_kv_cache_spec.page_size_bytes
+                    offset = first.storage_offset() * first.element_size()
+                    tensor = (
+                        torch.tensor(
+                            [],
+                            dtype=torch.int8,
+                            device=first.device,
+                        )
+                        .set_(storage)
+                        .view(-1)[offset : offset + num_blocks * page]
+                        .view(num_blocks, page)
+                    )
+                    tensors_per_block[layer_name] = (tensor,)
+
+                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = replace(
                         layer_kv_cache_spec, page_size_padded=None
                     ).page_size_bytes
