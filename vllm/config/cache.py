@@ -83,7 +83,7 @@ class CacheConfig:
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
-    num_gpu_blocks_override: int | None = None
+    num_gpu_blocks_override: int | None = Field(default=None, gt=0)
     """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
     if specified. Does nothing if `None`. Used for testing preemption."""
     sliding_window: int | None = None
