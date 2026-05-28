@@ -109,11 +109,6 @@ class QuantizationConfig(ABC):
         raise NotImplementedError
 
     @classmethod
-    def get_effective_weight_bytes(cls) -> float | None:
-        """Effective bytes per weight used for perf estimation."""
-        return None
-
-    @classmethod
     def override_quantization_method(
         cls,
         hf_quant_cfg: dict[str, Any],

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from abc import abstractmethod
 
 import torch
@@ -92,19 +91,6 @@ def adjust_block_scale_shard(
     shard_offset = (shard_offset + block_n - 1) // block_n
     shard_size = (shard_size + block_n - 1) // block_n
     return shard_size, shard_offset
-
-
-def adjust_shard_indexes(
-    param: Parameter,
-    shard_offsets: dict[str, tuple[int, int]],
-    loaded_shard_id: str,
-    shard_size: int,
-    shard_offset: int,
-) -> tuple[int, int]:
-    shard_indexer = getattr(param, "shard_indexer", None)
-    if shard_indexer is None:
-        return shard_size, shard_offset
-    return shard_indexer(param, shard_offsets, loaded_shard_id)
 
 
 def adjust_scalar_to_fused_array(
@@ -768,15 +754,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         param, shard_size, shard_offset
                     )
 
-                index = list(itertools.accumulate([0] + self.output_sizes))
-                orig_offsets = {
-                    str(i): (index[i], size) for i, size in enumerate(self.output_sizes)
-                }
-                orig_offsets["total"] = (self.output_size, 0)
-                shard_size, shard_offset = adjust_shard_indexes(
-                    param, orig_offsets, str(shard_id), shard_size, shard_offset
-                )
-
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size
                 )
@@ -809,14 +786,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 )
 
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            index = list(itertools.accumulate([0] + self.output_sizes))
-            orig_offsets = {
-                str(i): (index[i], size) for i, size in enumerate(self.output_sizes)
-            }
-            orig_offsets["total"] = (self.output_size, 0)
-            shard_size, shard_offset = adjust_shard_indexes(
-                param, orig_offsets, str(loaded_shard_id), shard_size, shard_offset
-            )
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             start_idx = self.tp_rank * shard_size
             if not is_sharded_weight:
@@ -1241,28 +1210,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                         param, shard_size, shard_offset
                     )
 
-                orig_qkv_offsets = {
-                    "q": (0, self.total_num_heads * self.head_size),
-                    "k": (
-                        self.total_num_heads * self.head_size,
-                        self.total_num_kv_heads * self.head_size,
-                    ),
-                    "v": (
-                        (self.total_num_heads + self.total_num_kv_heads)
-                        * self.head_size,
-                        self.total_num_kv_heads * self.v_head_size,
-                    ),
-                    "total": (
-                        (self.total_num_heads + self.total_num_kv_heads)
-                        * self.head_size
-                        + self.total_num_kv_heads * self.v_head_size,
-                        0,
-                    ),
-                }
-                shard_size, shard_offset = adjust_shard_indexes(
-                    param, orig_qkv_offsets, shard_id, shard_size, shard_offset
-                )
-
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size
                 )
@@ -1303,26 +1250,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
 
             is_sharded_weight = getattr(param, "is_sharded_weight", False)
-            orig_qkv_offsets = {
-                "q": (0, self.num_heads * self.head_size),
-                "k": (
-                    self.num_heads * self.head_size,
-                    self.num_kv_heads * self.head_size,
-                ),
-                "v": (
-                    (self.num_heads + self.num_kv_heads) * self.head_size,
-                    self.num_kv_heads * self.v_head_size,
-                ),
-                "total": (
-                    (self.num_heads + self.num_kv_heads) * self.head_size
-                    + self.num_kv_heads * self.v_head_size,
-                    0,
-                ),
-            }
-            shard_size, shard_offset = adjust_shard_indexes(
-                param, orig_qkv_offsets, loaded_shard_id, shard_size, shard_offset
-            )
-
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
             if loaded_shard_id == "q":
                 shard_rank = self.tp_rank
