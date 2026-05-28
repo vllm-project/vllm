@@ -713,6 +713,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    kda_prefill_backend: Literal["triton", "flashkda"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1536,6 +1537,13 @@ class EngineArgs:
             default=None,
             help="Select GDN prefill backend.",
         )
+        parser.add_argument(
+            "--kda-prefill-backend",
+            dest="kda_prefill_backend",
+            choices=["triton", "flashkda"],
+            default=None,
+            help="Select KDA prefill backend.",
+        )
         return parser
 
     @classmethod
@@ -2225,6 +2233,8 @@ class EngineArgs:
 
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
+        if self.kda_prefill_backend is not None:
+            self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
 
         config = VllmConfig(
             model_config=model_config,
