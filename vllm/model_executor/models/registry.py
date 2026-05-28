@@ -146,7 +146,6 @@ _TEXT_GENERATION_MODELS = {
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
-    "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),
@@ -369,6 +368,7 @@ _MULTIMODAL_MODELS = {
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
     ),
+    "Cosmos3ForConditionalGeneration": ("cosmos3", "Cosmos3ForConditionalGeneration"),
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
@@ -704,6 +704,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Phi3SmallForCausalLM": "0.9.2",
     "Phi4FlashForCausalLM": "0.10.2",
     "Phi4MultimodalForCausalLM": "0.12.0",
+    "JAISLMHeadModel": "0.22.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
