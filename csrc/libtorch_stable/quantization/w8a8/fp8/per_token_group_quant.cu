@@ -80,6 +80,65 @@ __device__ __forceinline__ void QuantizeGroup(
       scalar_op_quant);   // scalar handler
 }
 
+template <typename T, int VEC_SIZE>
+__device__ __forceinline__ float LoadRegisterGroupAndComputeAbsmax(
+    const T* __restrict__ group_input, const bool is_valid_group,
+    T (&regs)[VEC_SIZE], const float eps) {
+  float local_absmax = eps;
+  if (!is_valid_group) {
+    return local_absmax;
+  }
+
+  uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
+  const uint4* src = reinterpret_cast<const uint4*>(group_input);
+  dst[0] = src[0];
+  dst[1] = src[1];
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    float v = fabsf(static_cast<float>(regs[i]));
+    local_absmax = fmaxf(local_absmax, v);
+  }
+
+  return local_absmax;
+}
+
+__device__ __forceinline__ float GroupReduceMax8(float val) {
+  unsigned mask = 0xffu << (threadIdx.x & 24u);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+  return val;
+}
+
+template <typename T, typename DST_DTYPE, int VEC_SIZE>
+__device__ __forceinline__ uint4
+QuantizeRegisterGroup(const T (&regs)[VEC_SIZE], const float inv_y,
+                      const float min_8bit, const float max_8bit) {
+  uint32_t packed_lo = 0;
+  uint32_t packed_lo_hi = 0;
+  uint32_t packed_hi_lo = 0;
+  uint32_t packed_hi = 0;
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    float q =
+        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    DST_DTYPE qb = DST_DTYPE(q);
+    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
+    const int shift = (i & 3) * 8;
+    if (i < 4) {
+      packed_lo |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 8) {
+      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 12) {
+      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
+    } else {
+      packed_hi |= static_cast<uint32_t>(byte) << shift;
+    }
+  }
+
+  return make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+}
+
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
           bool SCALE_UE8M0 = false, typename scale_packed_t = float>
 __global__ void per_token_group_quant_8bit_kernel(
@@ -204,29 +263,13 @@ __global__ void per_token_group_quant_8bit_register_kernel(
 
   // register-only fast path for group_size == 128.
   alignas(16) T regs[VEC_SIZE];
-  float local_absmax = eps;
-  if (is_valid_group) {
-    const T* group_input =
-        input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
-        sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
-    // for bf16/fp16, load 16 elements (32 bytes) per thread.
-    uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
-    const uint4* src = reinterpret_cast<const uint4*>(group_input);
-    dst[0] = src[0];
-    dst[1] = src[1];
-#pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-      float v = fabsf(static_cast<float>(regs[i]));
-      local_absmax = fmaxf(local_absmax, v);
-    }
-  }
-
-  // reduce absmax across all threads in the warp
-  // __shfl_xor_sync for warp level reduction.
-  unsigned mask = 0xffu << (threadIdx.x & 24u);
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
+  const T* group_input =
+      input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  // each 8-lane subgroup processes one logical group.
+  float local_absmax = LoadRegisterGroupAndComputeAbsmax<T, VEC_SIZE>(
+      group_input, is_valid_group, regs, eps);
+  local_absmax = GroupReduceMax8(local_absmax);
 
   float y_s = local_absmax / max_8bit;
   if constexpr (SCALE_UE8M0) {
@@ -252,30 +295,8 @@ __global__ void per_token_group_quant_8bit_register_kernel(
   float inv_y = 1.0f / y_s;
 
   // pack into 16 fp8/int8 bytes (= uint4)
-  uint32_t packed_lo = 0;
-  uint32_t packed_lo_hi = 0;
-  uint32_t packed_hi_lo = 0;
-  uint32_t packed_hi = 0;
-#pragma unroll
-  for (int i = 0; i < VEC_SIZE; ++i) {
-    float q =
-        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
-    DST_DTYPE qb = DST_DTYPE(q);
-    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
-    const int shift = (i & 3) * 8;
-    if (i < 4) {
-      packed_lo |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 8) {
-      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 12) {
-      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
-    } else {
-      packed_hi |= static_cast<uint32_t>(byte) << shift;
-    }
-  }
-
-  uint4 packed_out =
-      make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
+      regs, inv_y, min_8bit, max_8bit);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
@@ -494,28 +515,15 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   // alignas(16) is required so the uint4* reinterpret_cast below is
   // well-defined for T == bf16/fp16 (default alignof is 2).
   alignas(16) T regs[VEC_SIZE];
-  float local_absmax = eps;
-  if (is_valid_group) {
-    const T* group_input =
-        input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
-        sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
-    uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
-    const uint4* src = reinterpret_cast<const uint4*>(group_input);
-    dst[0] = src[0];
-    dst[1] = src[1];
-#pragma unroll
-    for (int i = 0; i < VEC_SIZE; ++i) {
-      float v = fabsf(static_cast<float>(regs[i]));
-      local_absmax = fmaxf(local_absmax, v);
-    }
-  }
+  const T* group_input =
+      input + static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
+      sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
+  float local_absmax = LoadRegisterGroupAndComputeAbsmax<T, VEC_SIZE>(
+      group_input, is_valid_group, regs, eps);
 
   // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
   // 8 lanes within the warp that share a group.
-  unsigned mask = 0xffu << (threadIdx.x & 24u);
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
-  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
+  local_absmax = GroupReduceMax8(local_absmax);
 
   float y_s = local_absmax / max_8bit;
   y_s = fmaxf(y_s, 1e-10f);
@@ -558,30 +566,8 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
   // fill four 32-bit words, four bytes each.
-  uint32_t packed_lo = 0;
-  uint32_t packed_lo_hi = 0;
-  uint32_t packed_hi_lo = 0;
-  uint32_t packed_hi = 0;
-#pragma unroll
-  for (int i = 0; i < VEC_SIZE; ++i) {
-    float q =
-        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
-    DST_DTYPE qb = DST_DTYPE(q);
-    uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
-    const int shift = (i & 3) * 8;
-    if (i < 4) {
-      packed_lo |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 8) {
-      packed_lo_hi |= static_cast<uint32_t>(byte) << shift;
-    } else if (i < 12) {
-      packed_hi_lo |= static_cast<uint32_t>(byte) << shift;
-    } else {
-      packed_hi |= static_cast<uint32_t>(byte) << shift;
-    }
-  }
-
-  uint4 packed_out =
-      make_uint4(packed_lo, packed_lo_hi, packed_hi_lo, packed_hi);
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
+      regs, inv_y, min_8bit, max_8bit);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
