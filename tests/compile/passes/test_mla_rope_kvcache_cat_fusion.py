@@ -165,9 +165,8 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # MLA uses a 3D KV cache: (num_blocks, block_size, head_size)
-        # with num_kv_heads=1 folded into head_size. No layout permutation.
-        kv_cache_shape = (num_blocks, self.block_size, self.head_size)
+        # MLA uses a 4D KV cache: (num_blocks, num_heads=1, block_size, head_size).
+        kv_cache_shape = (num_blocks, 1, self.block_size, self.head_size)
         kv_cache = torch.zeros(
             kv_cache_shape,
             dtype=self.kv_cache_dtype,
