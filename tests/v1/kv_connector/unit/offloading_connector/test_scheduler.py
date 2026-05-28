@@ -935,6 +935,99 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     assert runner.manager.complete_store.call_count == 0
 
 
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
+    """Validates max_offload_tokens: type coercion, boundary values, and capping.
+
+    Setup: 3 offloaded blocks × 3 GPU blocks each = 9 GPU block offsets (0–8).
+    """
+    gpu_block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = gpu_block_size * block_size_factor  # 12
+    num_gpu_blocks = 100
+    all_offsets = (0, 1, 2, 3, 4, 5, 6, 7, 8)
+
+    def make_runner():
+        return request_runner(
+            block_size=gpu_block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            block_size_factor=block_size_factor,
+        )
+
+    def setup(r, max_offload_tokens):
+        r.new_request(token_ids=[0] * offloaded_block_size * 3)
+        req = r.scheduler.requests[str(r.req_id)]
+        req.kv_transfer_params = {"max_offload_tokens": max_offload_tokens}
+        r.manager.prepare_store.side_effect = (
+            lambda keys, req_context: generate_store_output(keys)
+        )
+
+    # With sync scheduling, the connector flushes completed stores when the
+    # request finishes; async scheduling defers the flush to the next step.
+    flushed_all = all_offsets if not async_scheduling else ()
+    flushed_two = (0, 1, 2, 3, 4, 5) if not async_scheduling else ()
+
+    # None -> no cap, all 9 offsets stored
+    r = make_runner()
+    setup(r, None)
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=all_offsets,
+        expected_flushed=flushed_all,
+    )
+
+    # str -> warn and fall back to no cap
+    r = make_runner()
+    setup(r, "24")
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=all_offsets,
+        expected_flushed=flushed_all,
+    )
+
+    # float -> warn and fall back to no cap
+    r = make_runner()
+    setup(r, 24.5)
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=all_offsets,
+        expected_flushed=flushed_all,
+    )
+
+    # negative -> warn and fall back to no cap
+    r = make_runner()
+    setup(r, -1)
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=all_offsets,
+        expected_flushed=flushed_all,
+    )
+
+    # bool -> rejected (type(True) is bool, not int), falls back to no cap
+    r = make_runner()
+    setup(r, True)
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=all_offsets,
+        expected_flushed=flushed_all,
+    )
+
+    # zero -> valid, no blocks offloaded
+    r = make_runner()
+    setup(r, 0)
+    r.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=())
+
+    # positive int cap -> limits offload to first 2 offloaded blocks (offsets 0–5)
+    r = make_runner()
+    setup(r, 24)  # 24 tokens = 2 offloaded blocks × 12 tokens each
+    r.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2, 3, 4, 5),
+        expected_flushed=flushed_two,
+    )
+
+
 def test_flush_all_jobs_when_no_requests_remain(request_runner):
     """When all tracked requests are finished, build_connector_meta flushes
     all pending jobs since there will be no future step to complete them."""

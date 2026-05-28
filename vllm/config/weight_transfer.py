@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Literal
+
 from vllm.config.utils import config
 
 
@@ -7,7 +9,7 @@ from vllm.config.utils import config
 class WeightTransferConfig:
     """Configuration for weight transfer during RL training."""
 
-    backend: str = "nccl"
+    backend: Literal["nccl", "ipc"] | str = "nccl"
     """The backend to use for weight transfer. Validated against the
     `WeightTransferEngineFactory` registry at engine creation time.
     """
