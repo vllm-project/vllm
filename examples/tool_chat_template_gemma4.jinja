@@ -232,6 +232,9 @@
     {%- set continue_same_model_turn = (role == 'model' and prev_nt.role == 'assistant') -%}
     {%- if not continue_same_model_turn -%}
         {{- '<|turn>' + role + '\n' }}
+        {%- if role == 'model' and not enable_thinking | default(false) and not (message.get('reasoning') or message.get('reasoning_content')) -%}
+            {{- '<|channel>thought\n<channel|>' -}}
+        {%- endif -%}
     {%- endif -%}
 
     {#- Render reasoning/reasoning_content as thinking channel -#}
