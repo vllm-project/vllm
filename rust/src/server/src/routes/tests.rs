@@ -1006,7 +1006,13 @@ async fn version_returns_engine_vllm_version() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json, json!({"version": "test-vllm-version"}));
+    assert_eq!(
+        json,
+        json!({
+            "version": "test-vllm-version",
+            "rust_frontend_version": env!("CARGO_PKG_VERSION"),
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
