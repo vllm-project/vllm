@@ -66,6 +66,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
+from .adapters import as_seq_cls_model
 from .interfaces import (
     EagleModelMixin,
     MixtureOfExperts,
@@ -1719,3 +1720,7 @@ class Gemma4ForCausalLM(
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())
+
+
+class Gemma4ForSequenceClassification(as_seq_cls_model(Gemma4ForCausalLM)):
+    pass

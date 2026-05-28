@@ -315,6 +315,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
     "GPT2ForSequenceClassification": ("gpt2", "GPT2ForSequenceClassification"),
     "ErnieForSequenceClassification": ("ernie", "ErnieForSequenceClassification"),
+    "Gemma4ForSequenceClassification": (
+        "gemma4",
+        "Gemma4ForSequenceClassification",
+    ),
     "GteNewForSequenceClassification": (
         "bert_with_rope",
         "GteNewForSequenceClassification",
