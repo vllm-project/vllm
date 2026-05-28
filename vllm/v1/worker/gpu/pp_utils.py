@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -74,22 +75,19 @@ class PPHandler:
             [] if self.is_last_rank else [None] * get_pp_group().world_size
         )
         self.slot_index = -1
-        # Holds the most-recently-consumed PendingRecv (or None) for one
-        # additional worker step, to avoid allocator reusing the tensors
-        # prematurely, since we schedule pp_size+1 steps concurrently.
-        self.last_consumed_slot: PendingRecv | None = None
 
-        # Per-slot generation counter, incremented every time a slot is
-        # freed. Used for invalidating freed req data between PP decodes.
-        self.slot_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
+        # Per req-index generation counter, incremented every time a request
+        # index is freed in RequestStats. Used for invalidating freed req data
+        # between PP decodes.
+        self.req_idx_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Dedicated subgroup for the sampled-token broadcast.
         self.broadcast_group = get_pp_group().make_sibling_device_group(
             group_desc="pp_broadcast"
         )
 
-    def on_slot_freed(self, req_idx: int) -> None:
-        self.slot_gen_np[req_idx] += 1
+    def on_req_idx_freed(self, req_idx: int) -> None:
+        self.req_idx_gen_np[req_idx] += 1
 
     def get_prev_step_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
         """Advance to this step's slot and wait for its recv event, then
@@ -99,15 +97,14 @@ class PPHandler:
             return None
         self.slot_index = (self.slot_index + 1) % len(self.slots)
         slot = self.slots[self.slot_index]
-        self.last_consumed_slot = slot
         if slot is None:
             return None
         self.main_stream.wait_event(slot.event)
         self.slots[self.slot_index] = None
 
-        # Skip slots whose request has been freed (and possibly reassigned)
+        # Skip indices whose request has been freed (and possibly reassigned)
         # since this `PendingRecv` was created.
-        alive_mask = self.slot_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
+        alive_mask = self.req_idx_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
         if alive_mask.all():
             return dict(
                 sampled_tokens=slot.sampled_tokens,
@@ -118,10 +115,8 @@ class PPHandler:
         if not alive_mask.any():
             return None
 
-        alive_indices_np = np.flatnonzero(alive_mask).astype(np.int32)
-        alive_indices = torch.from_numpy(alive_indices_np).to(
-            self.device, non_blocking=True
-        )
+        alive_indices_np = np.flatnonzero(alive_mask)
+        alive_indices = async_copy_to_gpu(alive_indices_np, device=self.device)
         return dict(
             sampled_tokens=slot.sampled_tokens[alive_indices],
             num_sampled=slot.num_sampled[alive_indices],
@@ -136,7 +131,10 @@ class PPHandler:
             self.slots[self.slot_index] = None
             return False
 
-        if need_sampled_mask.all():
+        # All requests decode next iff every request in the batch needs its
+        # sampled output (i.e. no non-final prefill chunks or finishing reqs).
+        all_decode_next = bool(need_sampled_mask.all())
+        if all_decode_next:
             idx_mapping = input_batch.idx_mapping
             idx_mapping_np = input_batch.idx_mapping_np
         else:
@@ -146,27 +144,34 @@ class PPHandler:
             )
 
         # Snapshot the per-slot generation counter so a later free of any
-        # of these slots is detectable at consume time.
-        gen_at_receive_np = self.slot_gen_np[idx_mapping_np]
+        # of these RequestStates request indices is detectable at consume time.
+        gen_at_receive_np = self.req_idx_gen_np[idx_mapping_np]
 
-        # Allocate receive tensors on the main stream. We retain refs to these for
-        # pp_size + 1 steps, after which we can be sure that the broadcast stream
-        # will be finished with them (avoiding need for tensor.record_stream).
-        num_reqs = idx_mapping.shape[0]
-        sampled_tokens = torch.empty(
-            num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
-        )
-        combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
-
+        # The sender always broadcasts the full batch; receive into full-size
+        # buffers and slice down to the subset that needs a deferred postprocess.
+        num_reqs = input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
+            sampled_tokens = torch.empty(
+                num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
+            )
+            combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
             torch.distributed.broadcast(
                 sampled_tokens, src=self.last_rank, group=self.broadcast_group
             )
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
+            if not all_decode_next:
+                subset_np = np.flatnonzero(need_sampled_mask)
+                subset = async_copy_to_gpu(subset_np, device=self.device)
+                sampled_tokens = sampled_tokens[subset]
+                combined = combined[:, subset]
             num_sampled, num_rejected = combined.unbind(dim=0)
+            # Must record_stream since these were allocated on broadcast stream but
+            # later used on the main stream.
+            sampled_tokens.record_stream(self.main_stream)
+            combined.record_stream(self.main_stream)
             event = self.broadcast_stream.record_event()
         self.slots[self.slot_index] = PendingRecv(
             event,
@@ -177,9 +182,7 @@ class PPHandler:
             idx_mapping_np,
             gen_at_receive_np,
         )
-
-        # Return True if all requests will have a decode step next.
-        return idx_mapping is input_batch.idx_mapping
+        return all_decode_next
 
     def broadcast(
         self,
@@ -190,24 +193,13 @@ class PPHandler:
         req_states: RequestState,
     ) -> None:
         assert self.is_last_rank
-        need_sampled_mask = compute_need_sampled_mask(input_batch, req_states)
-        if need_sampled_mask is None:
+        if compute_need_sampled_mask(input_batch, req_states) is None:
+            # No request needs sampled outputs for a subsequent decode step.
             return
 
         assert sampled_token_ids.dtype == torch.int64
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-
-            to_record = (sampled_token_ids, num_sampled, num_rejected)
-            if not need_sampled_mask.all():
-                subset_indices_np = np.flatnonzero(need_sampled_mask).astype(np.int32)
-                subset_indices = torch.from_numpy(subset_indices_np).to(
-                    self.device, non_blocking=True
-                )
-                sampled_token_ids = sampled_token_ids[subset_indices]
-                num_sampled = num_sampled[subset_indices]
-                num_rejected = num_rejected[subset_indices]
-
             torch.distributed.broadcast(
                 sampled_token_ids.contiguous(),
                 src=self.last_rank,
@@ -217,5 +209,5 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
-            for tensor in to_record:
+            for tensor in (sampled_token_ids, num_sampled, num_rejected):
                 tensor.record_stream(self.broadcast_stream)

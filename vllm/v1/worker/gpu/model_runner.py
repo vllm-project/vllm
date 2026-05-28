@@ -679,7 +679,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if req_idx is None:
             return False
         if self.pp_handler is not None:
-            self.pp_handler.on_slot_freed(req_idx)
+            self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
