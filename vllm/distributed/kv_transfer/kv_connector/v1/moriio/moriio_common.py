@@ -80,6 +80,12 @@ class RemoteAllocInfo:
     writes_done: int = 0
     decode_dp_rank: int = 0
     transfer_offset: tuple[list[int], list[int], list[int]] | None = None
+    # Telemetry accumulated across per-layer writes for one request.
+    # Set on the first write; finalized when all layers complete.
+    post_start_ns: int | None = None
+    total_post_ns: int = 0
+    total_bytes: int = 0
+    total_descriptors: int = 0
 
 
 class ROLE(Enum):
