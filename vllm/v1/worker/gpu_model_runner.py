@@ -829,15 +829,17 @@ class GPUModelRunner(
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
         self._num_valid_draft_tokens_event: torch.cuda.Event | None = None
         self._num_valid_draft_tokens_copy_stream: torch.cuda.Stream | None = None
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
+        if self.speculative_config is not None and(
+            self.speculative_config.use_ngram_gpu()
+            or self.speculative_config.dynamic_verifying
         ):
             self._num_valid_draft_tokens_cpu = torch.empty(
                 self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
             )
             self._num_valid_draft_tokens_event = torch.cuda.Event()
             self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
+            if self.speculative_config.dynamic_verifying:
+                self._dynamic_truncated_spec_tokens: dict[str, int] = {}
 
         self._draft_token_req_ids: list[str] | None = None
         self.transfer_event = torch.Event()
@@ -1255,13 +1257,13 @@ class GPUModelRunner(
         # Save scheduler-allocated spec lengths before trimming so
         # prev_num_draft_len keeps the optimistic count for rejection correction.
         original_num_spec_per_req: dict[str, int] = {}
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
+        if self.speculative_config is not None and(
+            self.speculative_config.use_ngram_gpu()
+            or self.speculative_config.dynamic_verifying
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            update_scheduler_for_invalid_drafts(
+            self._dynamic_truncated_spec_tokens = update_scheduler_for_invalid_drafts(
                 self._num_valid_draft_tokens_event,
                 self._num_valid_draft_tokens_cpu,
                 scheduler_output,
@@ -1418,12 +1420,13 @@ class GPUModelRunner(
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
-            # Restore scheduler-side draft count after ngram trimming.
+            # Restore scheduler-side draft count after
+            # ngram/dynamic_verifying trimming.
             if original_num_spec_per_req:
                 orig = original_num_spec_per_req.get(req_id, 0)
                 if orig != req_state.prev_num_draft_len:
                     req_state.prev_num_draft_len = orig
-
+        
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
@@ -3966,12 +3969,14 @@ class GPUModelRunner(
         if self.routed_experts_initialized:
             self.routed_experts_capturer.clear_buffer()
 
-        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
+        # If ngram_gpu/dynamic_verifying is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
         if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
+            self.speculative_config is not None and(
+            self.speculative_config.use_ngram_gpu()
+            or self.speculative_config.dynamic_verifying
+            )
         ):
             num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
             spec_decode_tokens_copy = (
@@ -4526,6 +4531,9 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                dynamic_truncated_spec_tokens = self._dynamic_truncated_spec_tokens
+                if spec_config is not None
+                and spec_config.dynamic_verifying else None,
             )
 
         if not self.use_async_scheduling:
@@ -5009,6 +5017,16 @@ class GPUModelRunner(
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
             )
+            # Cache valid draft counts and async D2H copy on a dedicated stream.
+            if spec_config.dynamic_verifying:
+                self._num_valid_draft_tokens = self.drafter.num_valid_draft_tokens
+                copy_num_valid_draft_tokens(
+                    self._num_valid_draft_tokens_cpu,
+                    self._num_valid_draft_tokens_copy_stream,
+                    self._num_valid_draft_tokens_event,
+                    self._num_valid_draft_tokens,
+                    self.input_batch.num_reqs,
+                )
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:

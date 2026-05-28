@@ -67,6 +67,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
+        # For Dflash dynamic verifying
+        self.dynamic_verifying_method = self.vllm_config.speculative_config.dynamic_verifying
+        self.dynamic_verifying_min_length = self.vllm_config.speculative_config.dynamic_verifying_min_length
+        if self.dynamic_verifying_method == 'auto':
+            self.dynamic_verifying_min_length = 1
+        self.num_valid_draft_tokens = None
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -298,3 +304,71 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if dflash_config is not None:
             use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
+    
+    def _truncate_by_confidence(
+        self,
+        draft_confidence: torch.Tensor,
+        threshold: float | torch.Tensor = 0.5,
+        min_length: int = 0,
+    ) -> torch.Tensor:
+        """Truncate draft tokens per request based on confidence threshold.
+
+        Args:
+            draft_confidence: [batch_size, num_speculative_tokens] confidence
+                values for each draft token position.
+            threshold: Confidence threshold (float or per-request tensor).
+                Draft tokens at positions where confidence first drops
+                below this value are truncated.
+            min_length: Minimum number of draft tokens to keep per request.
+
+        Returns:
+            [batch_size] int32 tensor — number of draft tokens to keep per request.
+        """
+        # Mask: True where confidence >= threshold
+        valid = draft_confidence >= threshold  # [batch, num_spec_tokens]
+
+        # For each row, find the first False position.
+        # If all True, keep all tokens.
+        # Trick: flip valid, find first True in flipped = first False in original.
+        first_invalid = (~valid).float().argmax(dim=-1)  # [batch]
+
+        # If a row is all-valid (~valid is all False), argmax returns 0,
+        # but we want num_speculative_tokens. Detect this case.
+        all_valid = valid.all(dim=-1)  # [batch], bool
+
+        num_draft_tokens = torch.where(
+            all_valid,
+            draft_confidence.shape[1],
+            first_invalid,
+        )
+        if min_length:
+            num_draft_tokens = torch.clamp(num_draft_tokens, min=min_length,
+                                        max=draft_confidence.shape[1])
+        return num_draft_tokens.int()
+    
+    @override
+    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.dynamic_verifying_method:
+            logits = self.model.compute_logits(hidden_states)
+            max_logits, draft_token_ids = logits.max(dim=-1)
+            # Numerically stable max-softmax: exp(max - logsumexp) equals
+            # the max probability from softmax without materializing the
+            # full softmax tensor.
+            log_sum_exp = logits.logsumexp(dim=-1)
+            draft_confidence = (max_logits - log_sum_exp).exp()
+            draft_confidence = draft_confidence.view(-1, self.num_speculative_tokens)
+
+            if self.dynamic_verifying_method == "auto":
+                # Per-request adaptive threshold: thr_i = clamp(mean(conf_i), 0.1, 0.8).
+                # Kepping high-confidence tokens and filtering out low-confidence ones.
+                threshold = draft_confidence.mean(dim=-1, keepdim=True)\
+                                            .clamp(min=0.1, max=0.8).expand_as(draft_confidence)
+            else:
+                threshold = self.dynamic_verifying_method
+
+            self.num_valid_draft_tokens = self._truncate_by_confidence(
+                draft_confidence, threshold, self.dynamic_verifying_min_length
+            )
+            return draft_token_ids
+        else:
+            return super()._greedy_sample(hidden_states)

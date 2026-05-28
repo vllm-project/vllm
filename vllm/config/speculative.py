@@ -253,6 +253,17 @@ class SpeculativeConfig:
             )
         return SpeculativeConfig._acceptance_length_to_rates(length, n)
 
+    dynamic_verifying: float | str | None = None
+    """Dynamic verification: truncates draft tokens based on
+    confidence. Accepts a float threshold in (0, 1) (e.g. 0.7) or the
+    literal 'auto'. None disables dynamic verifying.
+    Only applies to dflash for now."""
+
+    dynamic_verifying_min_length: int = Field(default=0, ge=0)
+    """Minimum number of draft tokens to keep per request when dynamic
+    verification is enabled. Prevents over-truncation when confidence is
+    uniformly low. Only takes effect when dynamic_verifying is not None."""
+
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
@@ -803,6 +814,8 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        self._validate_dynamic_verifying()
         return self
 
     def _validate_suffix_decoding(self):
@@ -839,6 +852,48 @@ class SpeculativeConfig:
             raise ValueError(
                 f"suffix_decoding_min_token_prob="
                 f"{self.suffix_decoding_min_token_prob} must be in [0, 1]"
+            )
+
+    def _validate_dynamic_verifying(self):
+        if self.dynamic_verifying is None:
+            return
+
+        if self.method != "dflash":
+            raise ValueError(
+                f"dynamic_verifying is only supported with dflash for now, "
+                f"got method='{self.method}'."
+            )
+
+        if isinstance(self.dynamic_verifying, str):
+            if self.dynamic_verifying not in ["auto"]:
+                raise ValueError(
+                    f"dynamic_verifying string must be 'auto', "
+                    f"got '{self.dynamic_verifying}'."
+                )
+        elif isinstance(self.dynamic_verifying, (int, float)):
+            if not 0 < self.dynamic_verifying < 1:
+                if self.dynamic_verifying == 0:
+                    logger.warning(
+                        "dynamic_verifying=0 is effectively disabling dynamic "
+                        "verification, dynamic_verifying is set to None."
+                    )
+                    self.dynamic_verifying = None
+                else:
+                    raise ValueError(
+                        f"dynamic_verifying float must be in (0, 1), "
+                        f"got {self.dynamic_verifying}."
+                    )
+        else:
+            raise ValueError(
+                f"dynamic_verifying must be None, a float in (0, 1), or 'auto', "
+                f"got {self.dynamic_verifying!r}."
+            )
+
+        if self.dynamic_verifying_min_length > self.num_speculative_tokens:
+            raise ValueError(
+                f"dynamic_verifying_min_length "
+                f"({self.dynamic_verifying_min_length}) must be <= "
+                f"num_speculative_tokens ({self.num_speculative_tokens})."
             )
 
     @staticmethod
