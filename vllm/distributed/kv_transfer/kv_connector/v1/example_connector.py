@@ -17,7 +17,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -130,33 +129,24 @@ class ExampleConnector(KVConnectorBase_V1):
 
             Args:
                 dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer. In shape [2, num_pages, page_size, xxx] if not
-                    using MLA, [num_pages, page_size, xxx] otherwise.
-                src_kv_cache (torch.Tensor): the source KV cache. In shape
-                    [2, num_tokens, xxx] if not using MLA, [num_tokens, xxx]
-                    otherwise.
+                    layer. In shape [num_pages, page_size, xxx] for MLA,
+                    [num_pages, 2, page_size, xxx] otherwise.
+                src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
+                dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
                 num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[1]
                 dst_kv_cache_layer = dst_kv_cache_layer.reshape(
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
-            elif isinstance(attn_metadata, TritonAttentionMetadata):
+            else:
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
-            else:
-                num_pages = dst_kv_cache_layer_shape[1]
-                page_size = dst_kv_cache_layer_shape[2]
-                dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                    2, num_pages * page_size, -1
-                )
-                dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
 
         # Get the metadata
         metadata: KVConnectorMetadata = self._get_connector_metadata()
@@ -234,18 +224,15 @@ class ExampleConnector(KVConnectorBase_V1):
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
-            Assume the shape of the layer is (2, num_pages, page_size, xxx)
-            if MLA is not used, and (num_pages, page_size, xxx) otherwise.
+            Assume the shape of the layer is (num_pages, page_size, xxx)
+            for MLA, and (num_pages, 2, page_size, xxx) otherwise.
             """
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-            elif isinstance(attn_metadata, TritonAttentionMetadata):
-                block_idxs = slot_mapping // self._block_size
-                offsets = slot_mapping % self._block_size
-                return layer[block_idxs, :, offsets]
-            num_pages, page_size = layer.shape[1], layer.shape[2]
-            return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
+            block_idxs = slot_mapping // self._block_size
+            offsets = slot_mapping % self._block_size
+            return layer[block_idxs, :, offsets]
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleConnectorMetadata)
