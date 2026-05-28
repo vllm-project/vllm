@@ -263,6 +263,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
 
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse,"
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
+
   // Hadamard transforms
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
@@ -318,6 +332,26 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
+
+  // Apply repetition penalties to logits in-place.
+  ops.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+
+  // Optimized top-k per row operations.
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+
+  ops.def(
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
 
   // Activation ops
   // Activation function used in SwiGLU.
@@ -422,6 +456,24 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int type, SymInt row, SymInt tokens) -> Tensor");
 
   ops.def("ggml_moe_get_block_size(int type) -> int");
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int null_block_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx,"
+      "Tensor? cu_chunk_seqlen,"
+      "Tensor? last_chunk_indices) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -469,6 +521,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 
+  ops.impl("merge_attn_states", TORCH_BOX(&merge_attn_states));
+
   // Layernorm kernels (shared CUDA/ROCm)
   ops.impl("rms_norm", TORCH_BOX(&rms_norm));
   ops.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
@@ -486,6 +540,13 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+
+  // Sampler kernels (shared CUDA/ROCm)
+  ops.impl("apply_repetition_penalties_",
+           TORCH_BOX(&apply_repetition_penalties_));
+  ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
+  ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+  ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
@@ -519,6 +580,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+  ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
 }
 
 // These capability-check functions take only primitive args (no tensors), so

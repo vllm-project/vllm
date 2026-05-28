@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    disable_inplace,
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -257,7 +256,6 @@ def fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    inplace: bool = False,
     clamp_limit: float | None = None,
 ) -> torch.Tensor:
     """
@@ -285,10 +283,6 @@ def fused_marlin_moe(
     Returns:
     - torch.Tensor: The output tensor after applying the MoE layer.
     """
-
-    if inplace:
-        assert output is None, "Conflicting request"
-        assert not disable_inplace()
 
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
@@ -379,7 +373,7 @@ def fused_marlin_moe(
     ).view(-1, topk, K)
 
     if output is None:
-        output = hidden_states if inplace else torch.empty_like(hidden_states)
+        output = torch.empty_like(hidden_states)
 
     if moe_sum is None:
         return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
@@ -417,7 +411,6 @@ def batched_fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
-    inplace: bool = False,
     clamp_limit: float | None = None,
 ) -> torch.Tensor:
     """
@@ -449,8 +442,6 @@ def batched_fused_marlin_moe(
         f"hidden states must be batched. e.g. [B, MAX_TOKENS, K]."
         f"But got {hidden_states.size()}"
     )
-    if inplace:
-        assert output is None, "Conflicting request."
 
     quant_type = ScalarType.from_id(quant_type_id)
     assert quant_type in [
@@ -507,9 +498,6 @@ def batched_fused_marlin_moe(
         block_size=block_size_m,
         expert_num_tokens=expert_num_tokens,
     )
-
-    if output is None and inplace:
-        output = hidden_states
 
     # TODO (varun): This can be avoided by plumbing the marlin kernel to
     # ignore topk_weights when topk_weights_ptr is a nullptr.
