@@ -31,12 +31,7 @@ _hf_api: HfApi | None = None
 
 
 def hf_api() -> HfApi:
-    """Return a shared HfApi instance tagged with vLLM's library info.
-
-    The ``library_name`` / ``library_version`` pair is forwarded as the
-    User-Agent header on every request to the Hugging Face Hub, which lets
-    the Hub attribute download traffic to vLLM.
-    """
+    """Return a shared HfApi instance tagged with vLLM's library info."""
     global _hf_api
     if _hf_api is None:
         _hf_api = HfApi(
