@@ -1993,14 +1993,6 @@ class VllmConfig:
                 unsupported.append("parallel drafting for speculative decoding")
 
             if (
-                speculative_config.use_step3p5_mtp()
-                and (speculative_config.num_speculative_tokens or 0) > 1
-            ):
-                unsupported.append(
-                    "Step3.5 MTP multi-layer speculative decoding"
-                )
-
-            if (
                 speculative_config.method == "eagle3"
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
