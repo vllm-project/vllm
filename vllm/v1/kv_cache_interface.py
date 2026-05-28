@@ -343,12 +343,16 @@ class AttentionSpec(KVCacheSpec):
 
     def __post_init__(self):
         hs = self.head_size
+        num_heads = self.num_kv_heads
         if self.kv_quant_mode.is_nvfp4:
             hs = nvfp4_kv_cache_full_dim(hs)
+            num_heads = 2 * self.num_kv_heads
         self._init_derived(
-            num_heads=self.num_kv_heads,
+            num_heads=num_heads,
             tokens_per_state=1,
-            state_content_size=2 * hs * get_dtype_size(self.dtype),
+            state_content_size=2 * hs * get_dtype_size(self.dtype)
+            if not self.kv_quant_mode.is_nvfp4
+            else hs * get_dtype_size(self.dtype),
         )
 
     @property
@@ -415,8 +419,13 @@ class FullAttentionSpec(AttentionSpec):
         if self.kv_quant_mode.is_nvfp4:
             hs_k = nvfp4_kv_cache_full_dim(hs_k)
             hs_v = nvfp4_kv_cache_full_dim(hs_v)
+            assert hs_k == hs_v, (
+                "nvfp4 with asymmetric K/V head sizes not yet supported"
+            )
         self._init_derived(
-            state_content_size=(hs_k + hs_v) * get_dtype_size(self.dtype),
+            state_content_size=hs_k * get_dtype_size(self.dtype)
+            if self.kv_quant_mode.is_nvfp4
+            else (hs_k + hs_v) * get_dtype_size(self.dtype),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:

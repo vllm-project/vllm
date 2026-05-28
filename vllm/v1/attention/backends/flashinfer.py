@@ -1454,9 +1454,13 @@ class FlashInferImpl(AttentionImpl):
             )
         kv_cache_permute = fixed
 
-        # Split K/V from the packed content dim via narrow — zero-copy views.
-        # FlashInfer accepts non-contiguous K/V tensors through its tuple API.
-        kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
+        # Split K/V — zero-copy views.
+        # For nvfp4, K and V are stored as separate head groups (2*H heads
+        # in dim 1); for other dtypes, K and V are packed in the content dim.
+        if self.is_kvcache_nvfp4:
+            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=1)
+        else:
+            kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
 
         flashinfer_layout = get_flashinfer_layout_string()
         if flashinfer_layout == "HND":
@@ -1815,7 +1819,10 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             kv_cache = kv_cache.transpose(1, 2)
-            k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
+            if self.is_kvcache_nvfp4:
+                k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=-2)
+            else:
+                k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,

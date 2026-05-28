@@ -74,18 +74,16 @@ def make_nvfp4_kv_cache(
         kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
     )
 
-    # Production layout: 4D packed (B, H, N, 2*full_dim) where K and V are
-    # concatenated along the last dim. NHC-permuted view is what
-    # reshape_and_cache_flash consumes.
+    # Production layout: 4D (B, 2*H, N, full_dim) where K heads occupy
+    # the first H heads and V heads occupy the second H heads.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     kv_cache_hnc = torch.zeros(
-        (num_blocks, num_kv_heads, block_size, 2 * full_dim),
+        (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=kv_bf16_hnd.device,
     )
     kv_cache_nhc = kv_cache_hnc.permute(0, 2, 1, 3)
-    k_view_nhc = kv_cache_nhc[..., :full_dim]
-    v_view_nhc = kv_cache_nhc[..., full_dim:]
+    k_view_nhc, v_view_nhc = kv_cache_nhc.split(num_kv_heads, dim=-2)
 
     # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
     num_tokens = num_blocks * block_size
