@@ -236,6 +236,7 @@ class ModelArchConfigConvertorBase:
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
             "bailing_hybrid",
+            "joyai_llm_flash",
         ):
             # check is deepseek_v4 model
             if hasattr(self.hf_text_config, "compress_ratios"):
@@ -512,6 +513,11 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
+class JoyAILLMFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+      
+
 class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_hidden_size(self) -> int:
         # The speculator buffer must match the backbone (target) model's
@@ -570,4 +576,5 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "joyai_llm_flash_mtp": JoyAILLMFlashMTPModelArchConfigConvertor,
 }
