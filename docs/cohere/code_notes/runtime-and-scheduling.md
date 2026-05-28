@@ -135,6 +135,21 @@ Subtle but important:
 - Profile `env:` entries only land when the env var is currently unset;
   pre-existing `os.environ` values win and are logged at INFO so user
   overrides are visible.
+- Type coercion delegates to upstream's `get_kwargs(EngineArgs)` for the
+  field's argparse `type` fn, but `EngineArgs` may carry string-literal
+  forward-ref annotations (e.g. `quantization_config:
+  "dict[str, Any] | OnlineQuantizationConfigArgs | None"`) that upstream's
+  `is_not_builtin` trips on. `_engine_arg_kwargs` calls
+  `typing.get_type_hints(EngineArgs, include_extras=True)` to resolve them
+  and rewrites any string `Field.type` to the resolved type before
+  delegating to `get_kwargs`; originals are restored in `finally` so
+  `EngineArgs.__dataclass_fields__` is never permanently mutated. If
+  resolution raises (e.g. a forward ref names a `TYPE_CHECKING`-only
+  symbol not bound at runtime), string-annotated fields fall back to
+  `typing.Any | None` -- which keeps Optional handling so a YAML `null`
+  stays `None` rather than becoming the literal string `"None"` -- while
+  unrelated non-string fields are untouched and continue to coerce
+  correctly.
 - Failures inside `apply_cohere_auto_config` are caught and logged but
   never raised -- a malformed YAML or buggy CEL clause cannot break
   engine startup.

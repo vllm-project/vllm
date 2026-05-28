@@ -197,6 +197,43 @@ def test_coerce_invalid_value_raises():
         ac._coerce("garbage", "enable_chunked_prefill")
 
 
+def test_coerce_survives_forward_ref_annotation():
+    """String-literal forward-ref `Field.type` doesn't break unrelated fields.
+
+    When `typing.get_type_hints(EngineArgs)` raises (e.g. an unresolvable
+    TYPE_CHECKING-only name), string-annotated fields fall back to
+    `Any | None`. Non-string-annotated fields are untouched and continue to
+    coerce correctly.
+    """
+    from vllm.engine.arg_utils import _compute_kwargs
+
+    fields_by_name = {f.name: f for f in dataclasses.fields(EngineArgs)}
+    target = fields_by_name["gpu_memory_utilization"]
+    original_type = target.type
+    original_annotation = EngineArgs.__annotations__["gpu_memory_utilization"]
+    # `typing.get_type_hints` reads __annotations__, and `_compute_kwargs`
+    # reads Field.type; mutate both so the failure path is exercised
+    # deterministically, independent of any other forward-refs on EngineArgs.
+    bad = "SomeUnimportedName | None"
+    target.type = bad
+    EngineArgs.__annotations__["gpu_memory_utilization"] = bad
+    ac._engine_arg_kwargs.cache_clear()
+    _compute_kwargs.cache_clear()
+    try:
+        # Unrelated (non-string-annotated) field still coerces correctly.
+        assert ac._coerce("8192", "max_num_seqs") == 8192
+        # The string-annotated field falls back to Any | None
+        assert ac._coerce("0.95", "gpu_memory_utilization") == "0.95"
+        assert ac._coerce(None, "gpu_memory_utilization") is None
+        # Field.type restored after get_kwargs returned.
+        assert target.type == bad
+    finally:
+        target.type = original_type
+        EngineArgs.__annotations__["gpu_memory_utilization"] = original_annotation
+        ac._engine_arg_kwargs.cache_clear()
+        _compute_kwargs.cache_clear()
+
+
 # ---------- Profile resolution ----------
 
 

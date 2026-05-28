@@ -193,7 +193,29 @@ def _engine_arg_kwargs() -> dict[str, dict[str, typing.Any]]:
     """
     from vllm.engine.arg_utils import EngineArgs, get_kwargs
 
-    return get_kwargs(EngineArgs)
+    # `get_kwargs` will crash on dynamic type annotations.
+    #  Resolve them via `typing.get_type_hints` and patch
+    # `Field.type` for the duration of the `get_kwargs` call; restore in
+    # `finally` so `EngineArgs.__dataclass_fields__` is never permanently
+    # mutated.
+    #
+    # If resolution fails (e.g. a forward ref names a
+    # TYPE_CHECKING-only symbol), fall back to `Any | None` so unrelated
+    # fields still coerce correctly.
+    snapshots: list[tuple[dataclasses.Field, str]] = []
+    try:
+        try:
+            resolved = typing.get_type_hints(EngineArgs, include_extras=True)
+        except NameError:
+            resolved = {}
+        for field in dataclasses.fields(EngineArgs):
+            if isinstance(field.type, str):
+                snapshots.append((field, field.type))
+                field.type = resolved.get(field.name, typing.Any | None)
+        return get_kwargs(EngineArgs)
+    finally:
+        for field, original in snapshots:
+            field.type = original
 
 
 def _coerce(value: object, field_name: str) -> object:
