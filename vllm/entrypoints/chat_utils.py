@@ -1837,7 +1837,8 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 # if arguments is None or empty string, set to {}
                 if content := function.get("arguments"):
                     if not isinstance(content, (dict, list)):
-                        function["arguments"] = json.loads(content)
+                        parsed = json.loads(content)
+                        function["arguments"] = parsed if parsed is not None else {}
                 else:
                     function["arguments"] = {}
 
