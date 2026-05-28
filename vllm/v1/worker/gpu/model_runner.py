@@ -393,10 +393,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
-        (self.attn_backends, self.attn_groups, attn_cg_support, kernel_block_sizes) = (
-            init_attn_backend(self.kv_cache_config, self.vllm_config, self.device)
+        self.attn_groups, attn_cg_support, kernel_block_sizes = init_attn_backend(
+            self.kv_cache_config, self.vllm_config, self.device
         )
-
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -440,7 +439,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
-            self.attn_backends,
+            self.attn_groups,
             self.device,
             self.cache_config.cache_dtype,
             kernel_block_sizes,
