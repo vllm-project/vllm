@@ -1612,6 +1612,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             swiglu_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
             use_a16=self.use_a16,
+            source_format="modelopt",
         )
 
     @property
@@ -2418,6 +2419,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8LinearMethod(self.mxfp8_config)
             # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, ParallelLMHead):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):

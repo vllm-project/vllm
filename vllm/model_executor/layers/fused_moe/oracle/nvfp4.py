@@ -521,6 +521,7 @@ def make_nvfp4_moe_quant_config(
     swiglu_beta: float | None = None,
     layer: torch.nn.Module | None = None,
     use_a16: bool = False,
+    source_format: str | None = None,
 ) -> FusedMoEQuantConfig:
     use_a16 = _use_a16(backend, use_a16)
     if backend == NvFp4MoeBackend.HUMMING:
@@ -547,6 +548,7 @@ def make_nvfp4_moe_quant_config(
             gemm1_alpha=swiglu_alpha,
             gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
+            source_format=source_format,
         )
     elif backend == NvFp4MoeBackend.EMULATION:
         return nvfp4_moe_quant_config(
@@ -559,6 +561,7 @@ def make_nvfp4_moe_quant_config(
             gemm1_alpha=swiglu_alpha,
             gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
+            source_format=source_format,
         )
 
     if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
@@ -589,6 +592,7 @@ def make_nvfp4_moe_quant_config(
         gemm1_alpha=swiglu_alpha,
         gemm1_beta=swiglu_beta,
         gemm1_clamp_limit=swiglu_limit,
+        source_format=source_format,
     )
 
 

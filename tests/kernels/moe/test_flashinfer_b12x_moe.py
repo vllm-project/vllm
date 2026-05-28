@@ -181,7 +181,6 @@ def test_flashinfer_b12x_moe(
             moe_config=moe_config,
             quant_config=quant_config,
         )
-
         _process_b12x_weights(
             experts,
             w1_blockscale,
