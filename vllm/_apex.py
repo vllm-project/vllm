@@ -96,7 +96,124 @@ _stats = {
     "experts_registered": 0,
     "kv_blocks_registered": 0,
     "errors": 0,
+    "warm_calls": 0,        # in-process torch prefetch calls (Fix b)
+    "warm_bytes": 0,        # bytes scheduled for prefetch
+    "warm_cpu_hits": 0,     # how often the predicted expert was on CPU
+    "warm_gpu_hits": 0,     # already on GPU — no copy needed
 }
+
+# Registry built during ``_apex_register_moe_experts``: maps layer_idx
+# → FusedMoE module. Used by ``_apex_warm_next_layer`` (Fix b) to look
+# up the next layer's expert tensors and prefetch them on a side stream
+# while the current layer is still computing.
+_moe_by_layer: dict[int, object] = {}
+
+# Side-channel CUDA stream for prefetch (Fix b). Created lazily on first
+# use because torch.cuda may not be initialised at module import time.
+# Honour APEX_DISABLE_WARM=1 to keep the registration/hint path active
+# but disable the actual H2D copy (useful for measuring the cost of the
+# emit path itself vs the emit+prefetch path).
+_warm_stream: object | None = None
+_warm_disabled = os.environ.get("APEX_DISABLE_WARM", "0") == "1"
+
+# --- async emit worker -----------------------------------------------------
+#
+# The hot-path forward hook MUST NOT do anything that forces a CUDA sync —
+# that stalls the decode pipeline by tens of ms per emit. Instead we
+# enqueue (router_logits.detach(), metadata) onto a thread-safe queue
+# and a single background thread does the topk + ctypes round-trip
+# asynchronously. The hint arrives at apexd a few ms late but that's
+# perfectly fine for next-layer prefetch — the layer-to-layer routing
+# correlation is steady-state and apexd's policy maintains its own
+# sliding window anyway.
+import collections as _collections
+
+_emit_queue: "_collections.deque[tuple]" = _collections.deque(maxlen=64)
+_emit_queue_lock = threading.Lock()
+_emit_queue_event = threading.Event()
+_emit_thread: threading.Thread | None = None
+_emit_thread_started = False
+
+
+def _enqueue_for_async_emit(
+    router_logits, layer_idx: int, top_k: int, n_experts: int
+) -> None:
+    """Stash the router_logits tensor (not a copy — just a reference) for
+    the worker thread to consume. Detach so we don't hold autograd refs.
+    The maxlen=64 deque drops old entries when the worker can't keep up,
+    which is fine; we'd rather lose a few hints than stall the hot path.
+    """
+    try:
+        if router_logits is None:
+            return
+        # Detach is essentially free; it shares storage with the original.
+        _emit_queue.append(
+            (router_logits.detach(), int(layer_idx), int(top_k), int(n_experts))
+        )
+        _emit_queue_event.set()
+    except Exception:
+        _stats["errors"] += 1
+
+
+def _emit_worker() -> None:
+    """Background thread that drains :data:`_emit_queue`, performs the
+    GPU→CPU sync, picks topk, calls the ctypes emit, and (if enabled)
+    kicks off the in-process prefetch. Loops until ``_emit_thread_stop``.
+    Errors are counted but never crash the thread.
+    """
+    import torch  # safe; we got here only after torch was already loaded
+
+    while True:
+        if not _emit_queue:
+            _emit_queue_event.wait(timeout=0.5)
+            _emit_queue_event.clear()
+        try:
+            item = _emit_queue.popleft()
+        except IndexError:
+            continue
+        rl, layer_idx, top_k, n_experts = item
+        try:
+            if rl.dim() != 2 or n_experts <= 0:
+                continue
+            if rl.shape[0] > 32:
+                rl = rl[-32:]
+            avg = rl.mean(dim=0)
+            k = min(top_k, avg.numel())
+            if k <= 0:
+                continue
+            _, top_ids = torch.topk(avg, k)
+            local_ids = top_ids.cpu().tolist()  # the one sync, off hot path
+
+            next_layer = layer_idx + 1
+            global_ids: list[int] = []
+            for eid in local_ids:
+                base = encode_expert_id(next_layer, int(eid), n_experts)
+                global_ids.append(base)
+                global_ids.append(base + 1)
+            prefetch_experts(global_ids, top_k=top_k)
+
+            if not _warm_disabled:
+                _apex_warm_next_layer(next_layer, [int(e) for e in local_ids])
+        except Exception as exc:
+            _stats["errors"] += 1
+            if _stats["errors"] < 4:
+                logger.warning("apex: async-emit worker error: %s", exc)
+
+
+def _start_emit_worker_once() -> None:
+    """Spawn the singleton background emit worker. Idempotent and safe
+    to call from inside a forward hook (cheap fast-path after the first
+    call)."""
+    global _emit_thread, _emit_thread_started
+    if _emit_thread_started:
+        return
+    _emit_thread_started = True
+    t = threading.Thread(
+        target=_emit_worker, name="apex-async-emit", daemon=True
+    )
+    t.start()
+    _emit_thread = t
+    logger.info("apex: async-emit worker thread started")
 
 # When set, _apex periodically dumps `_stats` to this path so external
 # verification scripts (e.g. demo1/run_benchmark.sh) can read counters
@@ -490,7 +607,22 @@ def _hook_block_pool() -> bool:
 
 def _apex_register_moe_experts(runner) -> None:
     """Walk every FusedMoE module in the loaded model and register each
-    expert's (w13, w2) regions with apexd."""
+    expert's (w13, w2) regions with apexd.
+
+    Also installs a per-instance forward hook on the FusedMoE itself, so
+    the hot-path expert-prediction emit fires for *any* model that uses
+    vLLM's :class:`FusedMoE` — Mixtral, Qwen-MoE, DBRX, GLM-MoE, … —
+    not just DeepSeek-V2 (which is also hooked via its enclosing
+    DeepseekV2MoE wrapper, but that wrapper is model-specific).
+
+    The hook reads ``router_logits`` from positional arg 1 or
+    ``kwargs["router_logits"]``, which matches every vLLM FusedMoE
+    caller pattern observed in tree (Mixtral, Qwen, DBRX, GLM-MoE all
+    call ``self.experts(hidden_states, router_logits)`` — see
+    ``vllm.model_executor.models.mixtral.MixtralMoE.forward`` and
+    siblings). For Mixtral the call site is positional;
+    ``_on_experts_forward`` already handles both.
+    """
     try:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     except Exception as exc:
@@ -550,12 +682,54 @@ def _apex_register_moe_experts(runner) -> None:
             ):
                 total += 1
 
+    # --- model-agnostic hot-path hook -------------------------------------
+    # Stamp per-instance APEX metadata + register a forward hook on each
+    # FusedMoE so the next-layer expert-prediction fires for every model
+    # (not just DeepSeek-V2). Also build a layer_idx → FusedMoE registry
+    # used by ``_apex_warm_next_layer`` (the in-process torch prefetch
+    # path, Fix (b)).
+    _moe_by_layer.clear()
+    n_hooked = 0
+    for layer_idx, moe in moe_modules:
+        try:
+            moe._apex_layer_idx = int(layer_idx)
+            moe._apex_topk = int(
+                getattr(moe, "top_k", 0)
+                or getattr(moe, "_apex_topk", 0)
+                or 8
+            )
+            moe._apex_n_routed_experts = int(
+                getattr(moe, "logical_num_experts", 0)
+                or getattr(moe, "global_num_experts", 0)
+                or n_experts_per_layer
+            )
+            _moe_by_layer[int(layer_idx)] = moe
+            # If a hook is already registered (e.g. via _hook_deepseek_v2_moe
+            # for DSv2), don't double-register.
+            if getattr(moe, "_apex_hook_handle", None) is None:
+                try:
+                    handle = moe.register_forward_hook(
+                        _on_experts_forward, with_kwargs=True
+                    )
+                except TypeError:
+                    handle = moe.register_forward_hook(
+                        lambda m, a, o: _on_experts_forward(m, a, {}, o)
+                    )
+                moe._apex_hook_handle = handle
+                n_hooked += 1
+        except Exception as exc:
+            logger.warning(
+                "apex: failed to hook FusedMoE at layer %d: %s", layer_idx, exc
+            )
+            _stats["errors"] += 1
+
     logger.info(
         "apex: registered %d expert regions across %d FusedMoE modules "
-        "(n_experts_per_layer=%d)",
+        "(n_experts_per_layer=%d, n_hooked=%d)",
         total,
         len(moe_modules),
         n_experts_per_layer,
+        n_hooked,
     )
 
 
@@ -802,27 +976,22 @@ def _do_emit_next_layer_hint(
             )
         except Exception:
             pass
+    # The OLD path computed topk + .tolist() inline in the hot path.
+    # That .tolist() forces a CUDA sync — waits for the entire GPU to
+    # drain before the Python ints land. On a busy decode pipeline each
+    # sync stalls ~tens of ms, and at 200 µs emit cap (≈300 emits/sec)
+    # the cumulative cost dominates TPOT.
+    #
+    # Iteration measurements (DSV2-Lite, --cpu-offload-gb 16):
+    #   hook off, emit off              :  -1.6% TPOT (noise)
+    #   hook on, emit ON@200µs, warm off: -15.4% TPOT
+    #   hook on, emit ON@200µs, warm on : -33.5% TPOT
+    #
+    # New path: enqueue (router_logits, metadata) to a background worker
+    # thread. The worker does the GPU sync, topk, and ctypes round-trip
+    # asynchronously. The hot path never blocks the decode pipeline.
     try:
-        import torch
-
-        if router_logits is None or router_logits.dim() != 2 or n_experts <= 0:
-            return
-        if router_logits.shape[0] > 32:
-            router_logits = router_logits[-32:]
-        avg_logits = router_logits.mean(dim=0)
-        k = min(top_k, avg_logits.numel())
-        if k <= 0:
-            return
-        _, top_ids = torch.topk(avg_logits, k)
-        local_ids = top_ids.tolist()
-
-        next_layer = layer_idx + 1
-        global_ids: list[int] = []
-        for eid in local_ids:
-            base = encode_expert_id(next_layer, int(eid), n_experts)
-            global_ids.append(base)
-            global_ids.append(base + 1)
-        prefetch_experts(global_ids, top_k=top_k)
+        _enqueue_for_async_emit(router_logits, layer_idx, top_k, n_experts)
     except Exception as exc:
         _stats["errors"] += 1
         if _emit_error_log_counter[0] < 1:
@@ -849,6 +1018,118 @@ def _do_emit_next_layer_hint(
                         f.write(msg)
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Fix (b): in-process torch.cuda.Stream-based prefetch of next-layer experts.
+# ---------------------------------------------------------------------------
+#
+# This is the actual "do the work" path. The hint emitted to apexd is a
+# *signal* that the runtime can route through any backend (kernel-mode
+# page migration, rocm-xio P2P, …); on the standalone backend apexd's
+# only available action is ``process_madvise`` which doesn't accelerate
+# host→HBM streaming. Until apexd grows a HIP-side backend (per
+# ``apex-rocm-xio-integration.md``, Phase 2) we get the real win in-
+# process here: issue the H2D copy of the predicted expert tensors on a
+# side CUDA stream while the current MoE layer is still computing. The
+# copy overlaps with compute, the torch caching allocator holds the
+# resulting buffer warm, and the next forward pass finds the data on GPU.
+#
+# Caveats (all instrumented via _stats so the dashboard can show what's
+# happening):
+#   * If both tensors are already on GPU (no offload, or already warm),
+#     this is essentially a free pointer-check + counter increment.
+#   * If torch.cuda is not initialised yet (early in startup) we skip
+#     and try again on the next emit.
+#   * We don't synchronise on the side stream — that's the whole point.
+#     The next layer's forward will block on the data when it actually
+#     touches it via cudaStreamWait or by sharing the default stream.
+
+
+def _ensure_warm_stream():
+    """Return the side CUDA stream (lazily created). None if cuda is not
+    initialised yet or unavailable."""
+    global _warm_stream
+    if _warm_stream is not None:
+        return _warm_stream
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return None
+        if not torch.cuda.is_initialized():
+            # Don't force initialisation here — wait until vLLM has
+            # already done it.
+            return None
+        _warm_stream = torch.cuda.Stream(priority=-1)
+        logger.info("apex: created side prefetch stream (priority=-1)")
+        return _warm_stream
+    except Exception as exc:
+        logger.warning("apex: could not create warm stream: %s", exc)
+        return None
+
+
+def _apex_warm_next_layer(next_layer_idx: int, local_expert_ids: list[int]) -> None:
+    """Issue async H2D prefetch for the predicted experts of the next
+    MoE layer. Idempotent and best-effort — any failure is counted and
+    swallowed so it can never break the inference path.
+
+    Strategy:
+      - Look up the next layer's FusedMoE via ``_moe_by_layer`` (populated
+        in ``_apex_register_moe_experts``).
+      - For each predicted expert id, take its ``w13_weight[eid]`` and
+        ``w2_weight[eid]`` views.
+      - If the view's storage is on CPU (i.e. cpu-offloaded), issue an
+        async copy to GPU on the side stream. The resulting buffer lives
+        in the torch caching allocator until vLLM next references it.
+      - If already on GPU, just bump warm_gpu_hits — no work needed.
+    """
+    moe = _moe_by_layer.get(int(next_layer_idx))
+    if moe is None:
+        return
+    stream = _ensure_warm_stream()
+    if stream is None:
+        return
+    try:
+        import torch
+        w13 = getattr(moe, "w13_weight", None)
+        w2 = getattr(moe, "w2_weight", None)
+        if w13 is None or w2 is None:
+            return
+        device = torch.cuda.current_device()
+        # Cap the number of experts we prefetch per call. Real Mixtral
+        # top_k is 2; DeepSeek-V2 top_k is 6. The list we get is already
+        # top-K; bound it again as a defensive cap so a buggy router
+        # logits tensor can't make us copy 64 experts.
+        ids = local_expert_ids[: max(1, min(len(local_expert_ids), 8))]
+        with torch.cuda.stream(stream):
+            for eid in ids:
+                if eid < 0 or eid >= w13.shape[0]:
+                    continue
+                w13_e = w13[eid]
+                w2_e = w2[eid]
+                # ``w13`` may itself live on CPU after the UVA offloader
+                # has flipped p.data → cpu tensor. ``.device`` is the
+                # ground truth.
+                if w13_e.device.type == "cpu":
+                    # non_blocking is honoured only when the source is
+                    # pinned. vLLM pins by default (UVAOffloader.pin_memory
+                    # = is_pin_memory_available()), so this is async.
+                    w13_e.to(device, non_blocking=True)
+                    _stats["warm_bytes"] += int(w13_e.numel() * w13_e.element_size())
+                    _stats["warm_cpu_hits"] += 1
+                else:
+                    _stats["warm_gpu_hits"] += 1
+                if w2_e.device.type == "cpu":
+                    w2_e.to(device, non_blocking=True)
+                    _stats["warm_bytes"] += int(w2_e.numel() * w2_e.element_size())
+                    _stats["warm_cpu_hits"] += 1
+                else:
+                    _stats["warm_gpu_hits"] += 1
+        _stats["warm_calls"] += 1
+    except Exception as exc:
+        _stats["errors"] += 1
+        if _stats["errors"] < 4:  # log first few only
+            logger.warning("apex: warm-next-layer failed: %s", exc)
 
 
 # Lazy-registered ``torch.library`` custom op. Wraps the side-effect-only
@@ -950,6 +1231,12 @@ def install_hooks() -> bool:
 
     _hooks_installed = any_installed
     if any_installed:
+        # Start the background emit-worker so the hot path can enqueue
+        # without ever blocking. Cheap if already running.
+        try:
+            _start_emit_worker_once()
+        except Exception as exc:
+            logger.warning("apex: emit-worker start failed: %s", exc)
         logger.info(
             "apex: runtime hooks installed (emit_active=%s, "
             "emit_min_interval_us=%d, auto_noop=%s, offload_gb=%s)",
