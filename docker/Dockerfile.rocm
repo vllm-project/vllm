@@ -135,13 +135,18 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
+ENV CARGO_NET_RETRY=10
+ENV RUSTUP_MAX_RETRIES=10
 
-# Build the release binary. Cache cargo registry/git, and copy the binary out
-# so it persists into the image layer for later COPY --from=rust-build.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+# Build the release binary. Cargo's registry/git caches can be written by
+# concurrent BuildKit jobs on shared workers, so lock those cache mounts while
+# keeping the cache benefit. Copy the binary out so it persists into the image
+# layer for later COPY --from=rust-build.
+RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
-    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh
+    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh \
+    && test -x /tmp/vllm-rs
 
 # -----------------------
 # vLLM build stages
