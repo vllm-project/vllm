@@ -31,7 +31,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
         self, old_quant_method: FusedMoEMethodBase, moe_kernel: FusedMoEKernel
     ):
-        super().__init__(old_quant_method.moe)
+        super().__init__(moe_kernel.moe_config)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = moe_kernel
         self.disable_expert_map = getattr(
@@ -42,19 +42,21 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
+    @property
+    def wraps_legacy_quant_method(self) -> bool:
+        return not self.old_quant_method.supports_internal_mk
+
     @staticmethod
     def make(
         moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
             FusedMoEKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-                inplace=inplace,
             ),
         )
 

@@ -239,7 +239,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "/host/engines/cohere-moe",
+        "CohereLabs/command-a-plus-05-2026",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -335,7 +335,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
-        trust_remote_code=True,
+        min_transformers_version="5.9.0",
     ),
     "InternLMForCausalLM": _HfExamplesInfo(
         "internlm/internlm-chat-7b", trust_remote_code=True
@@ -363,7 +363,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
-    "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
         "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
     ),
@@ -846,6 +845,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
+    "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Nano",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        is_available_online=False,
+    ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
         extras={"fork": "Isotr0py/deepseek-vl2-tiny"},
@@ -987,6 +992,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+    ),
+    "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Preview",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
@@ -1198,6 +1208,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             )
         },
     ),
+    "OpenVLAForActionPrediction": _HfExamplesInfo(
+        "openvla/openvla-7b",
+        trust_remote_code=True,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,
@@ -1334,7 +1348,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
-        "Skywork/Skywork-R1V-38B", trust_remote_code=True
+        "Skywork/Skywork-R1V-38B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "SkyworkChatModel.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
+            )
+        },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"

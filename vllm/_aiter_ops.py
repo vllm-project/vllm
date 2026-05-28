@@ -144,6 +144,7 @@ def _rocm_aiter_fused_moe_impl(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -171,6 +172,7 @@ def _rocm_aiter_fused_moe_impl(
         intermediate_pad=intermediate_pad,
         bias1=bias1,
         bias2=bias2,
+        moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
     )
 
 
@@ -194,6 +196,7 @@ def _rocm_aiter_fused_moe_fake(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -414,17 +417,32 @@ _AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
 
 
 def check_aiter_fused_qk_rmsnorm() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
+    """Check if aiter provides fused_qk_rmsnorm.
+
+    Supports both the new private name ``_fused_qk_rmsnorm``
+    (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
+    (AITER >= PR #2442).
+
+    TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
+    AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
+    """
     global _AITER_HAS_FUSED_QK_RMSNORM
     if _AITER_HAS_FUSED_QK_RMSNORM is None:
         try:
             from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                fused_qk_rmsnorm,
+                _fused_qk_rmsnorm,
             )
 
             _AITER_HAS_FUSED_QK_RMSNORM = True
         except (ImportError, ModuleNotFoundError, AttributeError):
-            _AITER_HAS_FUSED_QK_RMSNORM = False
+            try:
+                from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
+                    fused_qk_rmsnorm,
+                )
+
+                _AITER_HAS_FUSED_QK_RMSNORM = True
+            except (ImportError, ModuleNotFoundError, AttributeError):
+                _AITER_HAS_FUSED_QK_RMSNORM = False
     return _AITER_HAS_FUSED_QK_RMSNORM
 
 
@@ -744,7 +762,11 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
     token_num = input_.shape[0]
-    hidden_ok = hidden_dim in (512, 1024, 2048, 4096, 7168)
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
     token_ok = token_num <= 80
     world_size = aiter_ar.world_size
     full_nvlink = aiter_ar.fully_connected
@@ -913,6 +935,50 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused gated-RMSNorm + FP8 group quantization via aiter Triton kernel."""
+    from aiter.ops.triton.quant import fused_rms_gated_fp8_group_quant
+
+    return fused_rms_gated_fp8_group_quant(
+        x,
+        weight,
+        bias,
+        z,
+        eps,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+        out_dtype=FP8_DTYPE,
+        group_size=group_size,
+    )
+
+
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -1018,21 +1084,42 @@ def _fused_mla_dual_rms_norm_impl(
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     try:
-        from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
-    except (ImportError, ModuleNotFoundError) as exc:
+        import aiter.ops.fused_qk_norm_rope_cache_quant as aiter_ops
+    except (ImportError, ModuleNotFoundError, AttributeError) as exc:
         raise ImportError(
-            "fused_qk_rmsnorm requires a newer AITer version "
-            "(>= PR #2442). Please upgrade aiter or disable the "
+            "fused_qk_rmsnorm requires AITer >= PR #2442. "
+            "Please upgrade aiter or disable the "
             "fuse_mla_dual_rms_norm pass."
         ) from exc
 
-    return fused_qk_rmsnorm(
-        q=x1,
-        q_weight=x1_weight,
-        q_eps=x1_epsilon,
-        k=x2,
-        k_weight=x2_weight,
-        k_eps=x2_epsilon,
+    if hasattr(aiter_ops, "_fused_qk_rmsnorm"):
+        return aiter_ops._fused_qk_rmsnorm(
+            q_out=None,
+            q=x1,
+            q_weight=x1_weight,
+            q_eps=x1_epsilon,
+            k_out=None,
+            k=x2,
+            k_weight=x2_weight,
+            k_eps=x2_epsilon,
+        )
+
+    # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
+    # AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
+    if hasattr(aiter_ops, "fused_qk_rmsnorm"):
+        return aiter_ops.fused_qk_rmsnorm(
+            q=x1,
+            q_weight=x1_weight,
+            q_eps=x1_epsilon,
+            k=x2,
+            k_weight=x2_weight,
+            k_eps=x2_epsilon,
+        )
+
+    raise ImportError(
+        "fused_qk_rmsnorm requires AITer >= PR #2442. "
+        "Please upgrade aiter or disable the "
+        "fuse_mla_dual_rms_norm pass."
     )
 
 
@@ -1197,6 +1284,18 @@ class rocm_aiter_ops:
         - Quantization: per_tensor_quant, per_token_quant, group_fp8_quant
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
+
+    _MOE_DISPATCH_POLICY: int | None = None
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_dispatch_policy(cls) -> int:
+        """Cached MoE sorting dispatch policy."""
+        if cls._MOE_DISPATCH_POLICY is None:
+            import vllm.envs as envs
+
+            cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        return cls._MOE_DISPATCH_POLICY
 
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
@@ -1480,6 +1579,9 @@ class rocm_aiter_ops:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
             import aiter.ops.triton.gated_delta_net  # noqa: F401
+            from aiter.ops.triton.quant import (  # noqa: F401
+                fused_rms_gated_fp8_group_quant,
+            )
 
             return True
         except (ImportError, ModuleNotFoundError):
@@ -1599,6 +1701,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
+                op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
@@ -1688,6 +1796,11 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+
+    @staticmethod
+    def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
+        """Return the fused gated-RMSNorm + FP8 group quant custom op."""
+        return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
 
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
@@ -1792,6 +1905,7 @@ class rocm_aiter_ops:
         intermediate_pad: int = 0,
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
+        moe_sorting_dispatch_policy: int = 0,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -1813,6 +1927,7 @@ class rocm_aiter_ops:
             intermediate_pad,
             bias1,
             bias2,
+            moe_sorting_dispatch_policy,
         )
 
     @staticmethod
