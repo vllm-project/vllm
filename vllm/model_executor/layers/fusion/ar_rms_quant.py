@@ -169,30 +169,19 @@ def _flashinfer_ar_rms(
     max_token_num: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert flashinfer_trtllm_fused_allreduce_norm is not None
-    if residual is not None:
-        flashinfer_trtllm_fused_allreduce_norm(
-            allreduce_in=x,
-            residual=residual,
-            norm_out=None,
-            quant_out=None,
-            scale_out=None,
-            rms_gamma=norm.weight.data,
-            rms_eps=norm.variance_epsilon,
-            pattern_code=ar_fusion_patterns.kARResidualRMSNorm,
-            scale_factor=None,
-            world_size=get_tensor_model_parallel_world_size(),
-            launch_with_pdl=True,
-            fp32_acc=True,
-            max_token_num=max_token_num,
+    if residual is None:
+        # Zero residual makes the add a no-op; the AR'd input (left in x)
+        # becomes the downstream residual, so norm_out needs its own buffer.
+        kernel_residual, norm_out, out_residual = (
+            torch.zeros_like(x),
+            torch.empty_like(x),
+            x,
         )
-        return x, residual
-
-    # No residual: zero residual + dedicated norm_out; the AR'd input (left in
-    # x) becomes the downstream residual.
-    norm_out = torch.empty_like(x)
+    else:
+        kernel_residual, norm_out, out_residual = residual, None, residual
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
-        residual=torch.zeros_like(x),
+        residual=kernel_residual,
         norm_out=norm_out,
         quant_out=None,
         scale_out=None,
@@ -205,7 +194,8 @@ def _flashinfer_ar_rms(
         fp32_acc=True,
         max_token_num=max_token_num,
     )
-    return norm_out, x
+    # Norm result lands in norm_out when allocated (no residual), else in x.
+    return (norm_out if norm_out is not None else x), out_residual
 
 
 # vLLM fused kernels for (add +) RMSNorm + activation-quant.
@@ -262,8 +252,6 @@ def fused_ar_rms_norm_quant(
     Otherwise, returns a plain tensor and the downstream linear quantizes
     its own input.
     """
-    # The fused kernels apply `gamma * x_normed` directly; norms with other
-    # semantics (e.g. Gemma's `(1 + gamma)`) are not supported here.
     assert type(norm) is RMSNorm, (
         f"fused_ar_rms_norm_quant requires a plain RMSNorm, got {type(norm).__name__}"
     )
