@@ -39,11 +39,11 @@ constexpr uint32_t kNumStages8 =
 constexpr uint32_t kMaxSeqLen8 = kNumStages8 * kSizePerStage * 8;  // 262144
 
 // Register path
-constexpr uint32_t kRegHistBits = 12;
-constexpr uint32_t kRegHistBins = 1 << kRegHistBits;  // 4096
-constexpr uint32_t kRegVecsPerThread = 4;
-constexpr uint32_t kRegMaxLen = kRegVecsPerThread * 4 * kBlockSize;  // 16384
-constexpr uint32_t kRegHistItems = kRegHistBins / kBlockSize;        // 4
+constexpr uint32_t kHist4096Bits = 12;
+constexpr uint32_t kHist4096Bins = 1 << kHist4096Bits;  // 4096
+constexpr uint32_t kHist4096VecsPerThread = 4;
+constexpr uint32_t kHist4096MaxLen = kHist4096VecsPerThread * 4 * kBlockSize;  // 16384
+constexpr uint32_t kHist4096Items = kHist4096Bins / kBlockSize;        // 4
 
 // CS=4 single-pass path
 constexpr uint32_t kMaxSinglePassStages = 3;
@@ -400,7 +400,7 @@ __device__ __forceinline__ void find_threshold(uint32_t* histogram,
 // ============================================================================
 
 template <uint32_t TopK, uint32_t HIST_BITS>
-struct RegisterTopKSmem {
+struct Histogram4096Smem {
   static constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
   alignas(128) uint32_t counter_gt;
   alignas(128) uint32_t counter_eq;
@@ -415,8 +415,8 @@ struct RegisterTopKSmem {
 };
 
 template <uint32_t TopK, uint32_t HIST_BITS,
-          uint32_t VECS_PER_THREAD = kRegVecsPerThread>
-__device__ void register_topk(const float* __restrict__ scores,
+          uint32_t VECS_PER_THREAD = kHist4096VecsPerThread>
+__device__ void histogram_4096_topk(const float* __restrict__ scores,
                               int32_t* __restrict__ output, uint32_t length,
                               void* _smem) {
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
@@ -424,7 +424,7 @@ __device__ void register_topk(const float* __restrict__ scores,
   static_assert(HIST_BINS >= kBlockSize,
                 "HIST_BITS must give >= kBlockSize bins");
 
-  using Smem = RegisterTopKSmem<TopK, HIST_BITS>;
+  using Smem = Histogram4096Smem<TopK, HIST_BITS>;
   auto* smem = static_cast<Smem*>(_smem);
   const auto tx = threadIdx.x;
   const auto lane_id = tx % kWarpSize;
@@ -628,7 +628,7 @@ struct StreamSmem {
   MatchBin match;
   uint32_t warp_sum[kNumWarps];
   union {
-    uint32_t histogram[kRegHistBins];
+    uint32_t histogram[kHist4096Bins];
     Tie tie_buffer[kMaxTies];
   };
   alignas(128) float score_buffer[kStreamNumStages][kSizePerStage];
@@ -987,11 +987,11 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
     return;
   }
 
-  // Short-Medium path: register_topk on rank 0 only - all data fits in RF
-  if (sl <= static_cast<int32_t>(kRegMaxLen)) {
+  // Short-Medium path: histogram_4096_topk on rank 0 only - all data fits in RF
+  if (sl <= static_cast<int32_t>(kHist4096MaxLen)) {
     if (rank == 0) {
       extern __shared__ uint8_t sr[];
-      register_topk<TopK, 12>(in, out, sl, sr);  // 4096-bin (12-bit) histogram
+      histogram_4096_topk<TopK, 12>(in, out, sl, sr);  // 4096-bin (12-bit) histogram
     }
     return;
   }
@@ -1173,7 +1173,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   // Short path
   if (length <= 32768) {
     extern __shared__ uint8_t _smem_reg[];
-    cooperative::register_topk<MAX_K, 12, 8>(score, dst, length, _smem_reg);
+    cooperative::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length, _smem_reg);
     return;
   }
 
