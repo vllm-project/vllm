@@ -112,13 +112,27 @@ class UVAOffloader(BaseOffloader):
 
             def forward(*args, **kwargs):
                 module.forward = original_forward
-                device_state = {
-                    # here we blindly call `to(device)`
-                    # if the parameter is already on the device,
-                    # it will be a no-op
-                    k: v.to(device, non_blocking=True)
-                    for k, v in module.state_dict().items()
-                }
+                apex_state = None
+                try:
+                    from vllm import _apex as apex
+
+                    apex_state = apex.apex_state_for_module(module)
+                except Exception:
+                    apex_state = None
+
+                device_state = {}
+                for k, v in module.state_dict().items():
+                    cached = apex_state.get(k) if apex_state else None
+                    if (
+                        cached is not None
+                        and tuple(cached.shape) == tuple(v.shape)
+                        and cached.dtype == v.dtype
+                    ):
+                        device_state[k] = cached
+                    else:
+                        # If the parameter is already on the device this is a
+                        # no-op; otherwise it is the normal non-UVA H2D path.
+                        device_state[k] = v.to(device, non_blocking=True)
 
                 # set `tie_weights=False` as tied weights in original model
                 # become untied when calling .to(device) individually

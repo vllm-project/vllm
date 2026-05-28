@@ -100,6 +100,13 @@ _stats = {
     "warm_bytes": 0,        # bytes scheduled for prefetch
     "warm_cpu_hits": 0,     # how often the predicted expert was on CPU
     "warm_gpu_hits": 0,     # already on GPU — no copy needed
+    "warm_cache_bytes": 0,  # resident bytes held in the warm layer cache
+    "warm_cache_entries": 0,
+    "warm_cache_stores": 0,
+    "warm_cache_evictions": 0,
+    "warm_hit_used": 0,     # cached layer tensors consumed by UVAOffloader
+    "warm_miss": 0,         # UVAOffloader asked but no usable cache entry
+    "warm_resident_layers": 0,  # distinct layers currently GPU-resident in cache
 }
 
 # Registry built during ``_apex_register_moe_experts``: maps layer_idx
@@ -115,6 +122,69 @@ _moe_by_layer: dict[int, object] = {}
 # emit path itself vs the emit+prefetch path).
 _warm_stream: object | None = None
 _warm_disabled = os.environ.get("APEX_DISABLE_WARM", "0") == "1"
+_use_warm_cache = os.environ.get("VLLM_APEX_USE_WARM_CACHE", "0") == "1"
+# ``APEX_DISABLE_HINT_EMIT=1`` skips the async hint enqueue → worker → ctypes
+# pipeline entirely while keeping the in-process warm-cache prefetch path. On
+# platforms where ``apexd`` cannot act on hints (no rocm-xio kernel module,
+# stub HIP planner) the round-trip is pure overhead and hurts measured TPOT;
+# this knob lets us measure / ship the warm-cache benefit on its own.
+_disable_hint_emit = os.environ.get("APEX_DISABLE_HINT_EMIT", "0") == "1"
+try:
+    _warm_cache_max_bytes = int(float(os.environ.get("APEX_WARM_CACHE_GB", "8")) * 1024**3)
+except ValueError:
+    _warm_cache_max_bytes = 8 * 1024**3
+
+# Prefetch depth: how many *future* MoE layers to stage per emit. The
+# original behaviour staged only layer N+1 while layer N computes. For a
+# big-MoE model under heavy CPU offload, one layer of decode compute
+# (~ms) is far too little headroom to hide a multi-GB H2D copy (~tens to
+# hundreds of ms). Staging a window [N+1 .. N+depth] (a) gives later
+# layers enough lead time and, more importantly, (b) lets the persistent
+# resident cache self-populate across *all* layers within the first
+# token so subsequent tokens reuse GPU-resident weights instead of
+# re-streaming them from host. Resident layers are never re-copied (the
+# in-cache fast-path early-returns), so a large depth is cheap after the
+# cache is warm.
+try:
+    _prefetch_depth = max(1, int(os.environ.get("APEX_PREFETCH_DEPTH", "1")))
+except ValueError:
+    _prefetch_depth = 1
+
+# Persistent-resident mode: when set, the warm cache is meant to hold a
+# large slice of the offloaded weights GPU-resident for the whole run
+# (filling HBM that vLLM's gpu_memory_utilization left idle). This is
+# purely informational today — residency is achieved by sizing
+# APEX_WARM_CACHE_GB to cover the offloaded set and by the in-cache
+# fast-path that never re-copies a layer already resident — but the flag
+# lets the stats/dashboard report intent and guards future eviction
+# policy tweaks.
+_warm_cache_resident = os.environ.get("APEX_WARM_CACHE_RESIDENT", "0") == "1"
+
+# Warm-cache population gate. vLLM sizes its KV cache during a startup
+# *profiling* forward that measures peak GPU memory. If the warm cache
+# starts allocating during that profiling run, vLLM sees the cache's
+# bytes as "used" and computes negative free memory for the KV cache,
+# aborting with "No available memory for the cache blocks". To avoid
+# this we gate population behind a sentinel file the orchestrator
+# touches only *after* the server is health-ready (profiling done).
+# When APEX_WARM_GATE_FILE is unset, population is always allowed
+# (back-compatible). Once the file is observed we latch open so we never
+# stat() on the hot path again.
+_warm_gate_file = os.environ.get("APEX_WARM_GATE_FILE", "")
+_warm_gate_open = not bool(_warm_gate_file)
+
+
+def _warm_population_allowed() -> bool:
+    global _warm_gate_open
+    if _warm_gate_open:
+        return True
+    try:
+        if os.path.exists(_warm_gate_file):
+            _warm_gate_open = True
+            return True
+    except Exception:
+        return False
+    return False
 
 # --- async emit worker -----------------------------------------------------
 #
@@ -133,6 +203,202 @@ _emit_queue_lock = threading.Lock()
 _emit_queue_event = threading.Event()
 _emit_thread: threading.Thread | None = None
 _emit_thread_started = False
+
+# Layer-level warm cache consumed by UVAOffloader's non-UVA path. The offloader
+# functional_call wants full parameter tensors for the transformer layer, not
+# individual expert slices, so each entry stores the warmed FusedMoE tensors for
+# one layer. Values are (state_dict_fragment, bytes, event_or_none) — the event
+# is recorded on the warm side stream after the H2D copies for that specific
+# layer; the consumer waits only on its own layer's event instead of doing a
+# blanket ``wait_stream`` on the whole side-stream queue. This avoids serialising
+# the consumer with not-yet-needed prefetches of layers N+2…N+k.
+_warm_layer_cache: "_collections.OrderedDict[int, tuple[dict[str, object], int, object]]" = (
+    _collections.OrderedDict()
+)
+_warm_cache_lock = threading.Lock()
+_warm_cache_debug = os.environ.get("APEX_DEBUG_WARM_CACHE", "0") == "1"
+_warm_cache_debug_logs = 0
+
+
+def _tensor_nbytes(tensor) -> int:
+    try:
+        return int(tensor.numel() * tensor.element_size())
+    except Exception:
+        return 0
+
+
+def _evict_warm_cache_locked() -> None:
+    """Evict oldest warm-cache entries until the configured byte cap holds."""
+    total = int(_stats.get("warm_cache_bytes", 0))
+    while (
+        _warm_cache_max_bytes > 0
+        and total > _warm_cache_max_bytes
+        and _warm_layer_cache
+    ):
+        _, (_, nbytes, _ev) = _warm_layer_cache.popitem(last=False)
+        total = max(0, total - int(nbytes))
+        _stats["warm_cache_evictions"] += 1
+    _stats["warm_cache_bytes"] = total
+    _stats["warm_cache_entries"] = len(_warm_layer_cache)
+
+
+def _store_warm_layer(
+    layer_idx: int, state: dict[str, object], event: object | None = None
+) -> None:
+    global _warm_cache_debug_logs
+    if not _use_warm_cache or _warm_cache_max_bytes <= 0 or not state:
+        return
+    nbytes = sum(_tensor_nbytes(t) for t in state.values())
+    if nbytes <= 0:
+        return
+    with _warm_cache_lock:
+        already = int(layer_idx) in _warm_layer_cache
+        # --- pinned / resident mode --------------------------------------
+        # Decode walks the MoE layers cyclically (0→N→0→…). A byte-capped
+        # LRU smaller than the working set is *pessimal* under cyclic
+        # access: prefetching layer N+k evicts a layer we are about to
+        # reuse, so nothing stays resident and every layer re-streams.
+        # In resident mode we instead PIN a fixed working set: once the
+        # cache is full we stop admitting *new* layers (the already-pinned
+        # ones are reused for free across all tokens). This guarantees a
+        # deterministic per-token byte reduction equal to the pinned set.
+        if _warm_cache_resident and not already:
+            cur = int(_stats.get("warm_cache_bytes", 0))
+            if cur + nbytes > _warm_cache_max_bytes and _warm_layer_cache:
+                # Cache full → keep the existing pinned set, drop this one.
+                return
+        old = _warm_layer_cache.pop(int(layer_idx), None)
+        if old is not None:
+            _stats["warm_cache_bytes"] = max(
+                0, int(_stats.get("warm_cache_bytes", 0)) - old[1]
+            )
+        _warm_layer_cache[int(layer_idx)] = (state, nbytes, event)
+        _stats["warm_cache_bytes"] = int(_stats.get("warm_cache_bytes", 0)) + nbytes
+        _stats["warm_cache_stores"] += 1
+        if not _warm_cache_resident:
+            _evict_warm_cache_locked()
+        else:
+            _stats["warm_cache_entries"] = len(_warm_layer_cache)
+        # Track the resident-layer high-water mark so the dashboard can show
+        # how much of the offloaded set APEX is keeping GPU-resident.
+        if len(_warm_layer_cache) > int(_stats.get("warm_resident_layers", 0)):
+            _stats["warm_resident_layers"] = len(_warm_layer_cache)
+        if _warm_cache_debug and _warm_cache_debug_logs < 12:
+            _warm_cache_debug_logs += 1
+            logger.info(
+                "apex: warm-cache store layer=%s entries=%s keys=%s",
+                layer_idx,
+                len(_warm_layer_cache),
+                list(_warm_layer_cache.keys()),
+            )
+
+
+def apex_state_for_module(module) -> dict[str, object] | None:
+    """Return cached FusedMoE tensors matching a UVA-offloaded layer module.
+
+    The public-ish helper is imported by ``offloader/uva.py``. It is deliberately
+    best-effort and side-effect safe: shape mismatches return ``None`` and are
+    counted as misses instead of raising into inference.
+    """
+    if not _use_warm_cache:
+        return None
+    global _warm_cache_debug_logs
+    try:
+        import torch
+
+        merged: dict[str, object] = {}
+        events_to_wait: list[object] = []
+        # Cache the (prefix, child, layer_idx) list for this module after the
+        # first call: ``named_modules()`` walks the whole subtree on every call
+        # and on a Mixtral DecoderLayer that's the dominant Python cost in the
+        # per-token hot path. The first call still iterates; subsequent calls
+        # use the stamped list directly.
+        moe_children = getattr(module, "_apex_moe_children", None)
+        if moe_children is None:
+            moe_children = []
+            for _prefix, _child in module.named_modules():
+                _idx = getattr(_child, "_apex_layer_idx", None)
+                if _idx is not None:
+                    moe_children.append((_prefix, _child, int(_idx)))
+            try:
+                module._apex_moe_children = moe_children
+            except Exception:
+                pass
+        if not moe_children:
+            return None
+        for prefix, child, layer_idx in moe_children:
+            with _warm_cache_lock:
+                cached = _warm_layer_cache.get(layer_idx)
+                if cached is None:
+                    _stats["warm_miss"] += 1
+                    if _warm_cache_debug and _warm_cache_debug_logs < 12:
+                        _warm_cache_debug_logs += 1
+                        logger.info(
+                            "apex: warm-cache miss layer=%s prefix=%s keys=%s",
+                            layer_idx,
+                            prefix,
+                            list(_warm_layer_cache.keys()),
+                        )
+                    continue
+                state, nbytes, event = cached
+                _warm_layer_cache.move_to_end(layer_idx)
+                _stats["warm_cache_entries"] = len(_warm_layer_cache)
+            w13 = getattr(child, "w13_weight", None)
+            w2 = getattr(child, "w2_weight", None)
+            if w13 is None or w2 is None:
+                _stats["warm_miss"] += 1
+                continue
+            cached_w13 = state.get("w13_weight")
+            cached_w2 = state.get("w2_weight")
+            if (
+                cached_w13 is None
+                or cached_w2 is None
+                or tuple(cached_w13.shape) != tuple(w13.shape)
+                or tuple(cached_w2.shape) != tuple(w2.shape)
+            ):
+                _stats["warm_miss"] += 1
+                continue
+            key_prefix = f"{prefix}." if prefix else ""
+            merged[f"{key_prefix}w13_weight"] = cached_w13
+            merged[f"{key_prefix}w2_weight"] = cached_w2
+            if event is not None:
+                events_to_wait.append(event)
+            _stats["warm_hit_used"] += 1
+            if _warm_cache_debug and _warm_cache_debug_logs < 12:
+                _warm_cache_debug_logs += 1
+                logger.info(
+                    "apex: warm-cache hit layer=%s prefix=%s keys=%s",
+                    layer_idx,
+                    prefix,
+                    list(_warm_layer_cache.keys()),
+                )
+            _stats["warm_cache_bytes"] = int(_stats.get("warm_cache_bytes", nbytes))
+        if merged:
+            # Per-layer event wait: only synchronise with the H2D copy that
+            # actually produced *this* layer's cached tensors, instead of
+            # ``wait_stream`` on the whole side-stream queue (which would
+            # block on not-yet-needed prefetches of later layers and erase
+            # the prefetch's benefit). ``record_stream(current)`` then tells
+            # the caching allocator the tensor is safe to reuse on the
+            # consumer's stream.
+            if torch.cuda.is_available():
+                cur = torch.cuda.current_stream()
+                for ev in events_to_wait:
+                    try:
+                        cur.wait_event(ev)
+                    except Exception:
+                        pass
+                for _t in merged.values():
+                    try:
+                        _t.record_stream(cur)
+                    except Exception:
+                        pass
+            return merged
+    except Exception as exc:
+        _stats["errors"] += 1
+        if _stats["errors"] < 4:
+            logger.warning("apex: warm-cache lookup failed: %s", exc)
+    return None
 
 
 def _enqueue_for_async_emit(
@@ -193,7 +459,14 @@ def _emit_worker() -> None:
             prefetch_experts(global_ids, top_k=top_k)
 
             if not _warm_disabled:
+                # Stage the predicted next layer plus a deeper window so the
+                # resident cache covers more of the offloaded set ahead of
+                # consumption. Only the first uses the routed-id prediction;
+                # deeper layers warm the full layer state (the offloader
+                # consumes whole-layer state dicts anyway).
                 _apex_warm_next_layer(next_layer, [int(e) for e in local_ids])
+                for _d in range(2, _prefetch_depth + 1):
+                    _apex_warm_next_layer(layer_idx + _d, [])
         except Exception as exc:
             _stats["errors"] += 1
             if _stats["errors"] < 4:
@@ -990,6 +1263,20 @@ def _do_emit_next_layer_hint(
     # New path: enqueue (router_logits, metadata) to a background worker
     # thread. The worker does the GPU sync, topk, and ctypes round-trip
     # asynchronously. The hot path never blocks the decode pipeline.
+    #
+    # The full-layer warm cache does not need the routed expert ids: the
+    # non-UVA CPU offload wrapper consumes the whole next MoE state dict. Queue
+    # that side-stream copy immediately so it is available before the next
+    # layer's offload wrapper asks for it; leave hint emission on the async
+    # worker where the top-k sync belongs.
+    if _use_warm_cache and not _warm_disabled:
+        for _d in range(1, _prefetch_depth + 1):
+            try:
+                _apex_warm_next_layer(int(layer_idx) + _d, [])
+            except Exception:
+                _stats["errors"] += 1
+    if _disable_hint_emit:
+        return
     try:
         _enqueue_for_async_emit(router_logits, layer_idx, top_k, n_experts)
     except Exception as exc:
@@ -1086,6 +1373,11 @@ def _apex_warm_next_layer(next_layer_idx: int, local_expert_ids: list[int]) -> N
     moe = _moe_by_layer.get(int(next_layer_idx))
     if moe is None:
         return
+    # Don't allocate cache memory during vLLM's startup KV-profiling forward
+    # (would make vLLM under-size / abort the KV cache). Latches open once
+    # the orchestrator signals startup is complete.
+    if not _warm_population_allowed():
+        return
     stream = _ensure_warm_stream()
     if stream is None:
         return
@@ -1096,10 +1388,75 @@ def _apex_warm_next_layer(next_layer_idx: int, local_expert_ids: list[int]) -> N
         if w13 is None or w2 is None:
             return
         device = torch.cuda.current_device()
-        # Cap the number of experts we prefetch per call. Real Mixtral
-        # top_k is 2; DeepSeek-V2 top_k is 6. The list we get is already
-        # top-K; bound it again as a defensive cap so a buggy router
-        # logits tensor can't make us copy 64 experts.
+
+        # The non-UVA offloader consumes full state_dict tensors via
+        # functional_call. When the cache is enabled, warm the whole MoE tensor
+        # for the predicted next layer once and reuse it on the actual forward.
+        if _use_warm_cache:
+            with _warm_cache_lock:
+                if int(next_layer_idx) in _warm_layer_cache:
+                    _warm_layer_cache.move_to_end(int(next_layer_idx))
+                    _stats["warm_cache_entries"] = len(_warm_layer_cache)
+                    _stats["warm_calls"] += 1
+                    return
+                # Resident/pinned mode: once the pin set is full, do NOT
+                # copy layers we won't admit — that H2D would just compete
+                # for bandwidth with the consumer and be discarded. Let
+                # those layers stream on the critical path (same as vanilla).
+                if _warm_cache_resident and _warm_layer_cache:
+                    cur = int(_stats.get("warm_cache_bytes", 0))
+                    # estimate this layer's size from an already-pinned entry
+                    _, est_bytes, _ev = next(iter(_warm_layer_cache.values()))
+                    if cur + int(est_bytes) > _warm_cache_max_bytes:
+                        _stats["warm_calls"] += 1
+                        return
+            # In resident/pinned mode, only spend cache budget on layers that
+            # are actually CPU-offloaded — caching an already-GPU-resident
+            # layer saves no future H2D copy and just wastes a pin slot that
+            # an offloaded layer could use.
+            if (
+                _warm_cache_resident
+                and w13.device.type != "cpu"
+                and w2.device.type != "cpu"
+            ):
+                _stats["warm_gpu_hits"] += 1
+                _stats["warm_calls"] += 1
+                return
+            state: dict[str, object] = {}
+            event = None
+            with torch.cuda.stream(stream):
+                if w13.device.type == "cpu":
+                    w13_gpu = w13.to(device, non_blocking=True)
+                    _stats["warm_bytes"] += _tensor_nbytes(w13)
+                    _stats["warm_cpu_hits"] += 1
+                else:
+                    w13_gpu = w13
+                    _stats["warm_gpu_hits"] += 1
+                if w2.device.type == "cpu":
+                    w2_gpu = w2.to(device, non_blocking=True)
+                    _stats["warm_bytes"] += _tensor_nbytes(w2)
+                    _stats["warm_cpu_hits"] += 1
+                else:
+                    w2_gpu = w2
+                    _stats["warm_gpu_hits"] += 1
+                state["w13_weight"] = w13_gpu
+                state["w2_weight"] = w2_gpu
+                # Per-layer event recorded immediately after the H2D copies for
+                # this layer. The consumer waits on this specific event so it
+                # only synchronises with the H2D it actually depends on
+                # (instead of the whole side-stream queue).
+                try:
+                    event = torch.cuda.Event()
+                    event.record(stream)
+                except Exception:
+                    event = None
+            _store_warm_layer(int(next_layer_idx), state, event)
+            _stats["warm_calls"] += 1
+            return
+
+        # Legacy best-effort path: warm only the predicted expert slices. This
+        # is useful for overhead comparisons but cannot be consumed by
+        # UVAOffloader's full-layer functional_call.
         ids = local_expert_ids[: max(1, min(len(local_expert_ids), 8))]
         with torch.cuda.stream(stream):
             for eid in ids:
@@ -1107,21 +1464,15 @@ def _apex_warm_next_layer(next_layer_idx: int, local_expert_ids: list[int]) -> N
                     continue
                 w13_e = w13[eid]
                 w2_e = w2[eid]
-                # ``w13`` may itself live on CPU after the UVA offloader
-                # has flipped p.data → cpu tensor. ``.device`` is the
-                # ground truth.
                 if w13_e.device.type == "cpu":
-                    # non_blocking is honoured only when the source is
-                    # pinned. vLLM pins by default (UVAOffloader.pin_memory
-                    # = is_pin_memory_available()), so this is async.
                     w13_e.to(device, non_blocking=True)
-                    _stats["warm_bytes"] += int(w13_e.numel() * w13_e.element_size())
+                    _stats["warm_bytes"] += _tensor_nbytes(w13_e)
                     _stats["warm_cpu_hits"] += 1
                 else:
                     _stats["warm_gpu_hits"] += 1
                 if w2_e.device.type == "cpu":
                     w2_e.to(device, non_blocking=True)
-                    _stats["warm_bytes"] += int(w2_e.numel() * w2_e.element_size())
+                    _stats["warm_bytes"] += _tensor_nbytes(w2_e)
                     _stats["warm_cpu_hits"] += 1
                 else:
                     _stats["warm_gpu_hits"] += 1
@@ -1239,10 +1590,15 @@ def install_hooks() -> bool:
             logger.warning("apex: emit-worker start failed: %s", exc)
         logger.info(
             "apex: runtime hooks installed (emit_active=%s, "
-            "emit_min_interval_us=%d, auto_noop=%s, offload_gb=%s)",
+            "emit_min_interval_us=%d, auto_noop=%s, offload_gb=%s, "
+            "warm_cache=%s, warm_cache_gb=%.1f, prefetch_depth=%d, resident=%s)",
             emit_active(),
             _EMIT_MIN_INTERVAL_US,
             _EMIT_NOOP,
             os.environ.get("APEX_OFFLOAD_GB", "0"),
+            _use_warm_cache,
+            _warm_cache_max_bytes / 1024**3,
+            _prefetch_depth,
+            _warm_cache_resident,
         )
     return any_installed
