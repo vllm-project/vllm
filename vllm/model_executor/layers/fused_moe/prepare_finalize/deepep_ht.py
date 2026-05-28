@@ -383,7 +383,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
-                # Respect inplace outputs.
                 output.copy_(combined_x, non_blocking=True)
 
                 # TODO(lucas): refactor the modular kernel so this will be
@@ -394,7 +393,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         else:
             # TODO(lucas): support this case with the refactored modular kernel
             assert not dbo_enabled()
-            # Respect inplace outputs.
             output.copy_(combined_x, non_blocking=True)
             return None
 
