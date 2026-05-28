@@ -34,8 +34,7 @@ def _import_unpack_from_int32():
 
 
 class ZentorchWNA16LinearKernel(CPUWNA16LinearKernel):
-    """W4A16 GPTQ kernel backed by ``torch.ops.zentorch.zentorch_woq_linear``.
-    """
+    """W4A16 GPTQ kernel backed by ``torch.ops.zentorch.zentorch_woq_linear``."""
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

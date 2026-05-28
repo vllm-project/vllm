@@ -551,5 +551,6 @@ def test_zentorch_da8w8_numerical_equivalence():
         f"torchao reference ({sqnr_ref:.2f} dB)"
     )
 
+
 if __name__ == "__main__":
     pytest.main([__file__])

@@ -139,6 +139,7 @@ def _load_platform_optimizer():
         from vllm.model_executor.layers.quantization.zentorch_torchao import (
             get_optimized_method,
         )
+
         return get_optimized_method
     except ModuleNotFoundError as exc:
         if exc.name != "vllm.model_executor.layers.quantization.zentorch_torchao":
