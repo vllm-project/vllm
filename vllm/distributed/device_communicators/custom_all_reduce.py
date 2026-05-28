@@ -31,12 +31,12 @@ logger = init_logger(__name__)
 
 @contextmanager
 def _disable_expandable_segments_for_cuda_ipc(active: bool):
-    # Custom allreduce shares CUDA graph buffers across TP ranks via
-    # cudaIpcGetMemHandle, which rejects pointers backed by PyTorch's
-    # expandable_segments (CUDA VMM) allocator with "invalid argument"
-    # (https://github.com/vllm-project/vllm/issues/42609). Temporarily disable
-    # expandable_segments so graph buffers use the legacy allocator, mirroring
-    # CuMemAllocator's handling of the sleep-mode pool (see #40812).
+    # Custom allreduce exports its CUDA graph buffers to peer TP ranks via
+    # cudaIpcGetMemHandle, which only accepts cudaMalloc allocations. With
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True those buffers come from
+    # CUDA VMM segments instead, so the export fails with "invalid argument".
+    # Disabling expandable_segments during capture keeps the buffers on
+    # cudaMalloc, mirroring CuMemAllocator's handling of the sleep-mode pool.
     conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
     should_disable = (
         active and current_platform.is_cuda() and "expandable_segments:True" in conf
