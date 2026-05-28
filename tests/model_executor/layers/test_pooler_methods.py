@@ -332,16 +332,40 @@ class TestAllPool:
         expected = torch.cat([chunk1, chunk2], dim=0)
         assert torch.equal(out2[0], expected)
 
+    def test_chunked_prefill_single_shot_matches_non_chunked(self):
+        pooler = self._make_all_pool(chunked=True)
+        hidden = torch.tensor(
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 10.0]]
+        )
+        metadata = _make_metadata([2, 3])
+        out = pooler(hidden, metadata)
+        assert len(out) == 2
+        assert torch.equal(out[0], hidden[:2])
+        assert torch.equal(out[1], hidden[2:])
+
+    def test_chunked_prefill_mixed_finished_unfinished(self):
+        pooler = self._make_all_pool(chunked=True)
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+        metadata = _make_metadata(
+            [2, 4],
+            num_scheduled_tokens=[2, 1],
+            seq_lens=[2, 1],
+        )
+        out = pooler(hidden, metadata)
+        assert len(out) == 2
+        assert torch.equal(out[0], hidden[:2])
+        assert out[1] is None
+
 
 # ---------------------------------------------------------------------------
 # StepPool
 # ---------------------------------------------------------------------------
 class TestStepPool:
     @staticmethod
-    def _make_step_pool() -> StepPool:
+    def _make_step_pool(*, chunked: bool = False) -> StepPool:
         fake_config = _FakeVllmConfig(
             scheduler_config=_FakeSchedulerConfig(
-                enable_chunked_prefill=False,
+                enable_chunked_prefill=chunked,
             ),
         )
         with patch(
@@ -408,6 +432,33 @@ class TestStepPool:
         out = pooler(hidden, metadata)
         assert len(out) == 1
         assert out[0].shape == (0, 2)
+
+    def test_chunked_prefill_propagates_none_for_unfinished(self):
+        pooler = self._make_step_pool(chunked=True)
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        token_ids = [[10, 20, 30, 40]]
+        params = [PoolingParams(task="token_classify", step_tag_id=10)]
+        metadata = _make_metadata(
+            [4],
+            token_ids=token_ids,
+            pooling_params=params,
+            num_scheduled_tokens=[2],
+            seq_lens=[2],
+        )
+        out = pooler(hidden, metadata)
+        assert len(out) == 1
+        assert out[0] is None
+
+    def test_chunked_prefill_filters_when_finished(self):
+        pooler = self._make_step_pool(chunked=True)
+        hidden = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        token_ids = [[10, 99, 10, 20]]
+        params = [PoolingParams(task="token_classify", step_tag_id=10)]
+        metadata = _make_metadata([4], token_ids=token_ids, pooling_params=params)
+        out = pooler(hidden, metadata)
+        assert len(out) == 1
+        expected = torch.tensor([[1.0, 2.0], [5.0, 6.0]])
+        assert torch.equal(out[0], expected)
 
     def test_requires_token_ids_update(self):
         pooler = self._make_step_pool()
