@@ -15,7 +15,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -60,7 +59,6 @@ from vllm.models.deepseek_v4.attention import (
 )
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class DeepseekV4MLP(nn.Module):
@@ -209,13 +207,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
         self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
-        # Register in the static forward context so the custom-op wrapper
-        # can look up this module by name from within a torch.compile graph.
-        compilation_config = vllm_config.compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
     def _map_global_expert_id(self, expert_id: int) -> int:
         if expert_id < self.experts_start_idx or expert_id >= self.experts_end_idx:
             return -1
@@ -349,12 +340,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        torch.ops.vllm.deepseek_v4_mega_moe_experts(
+        self._run_mega_moe(
             hidden_states,
             topk_weights,
             topk_ids,
             y,
-            self.prefix,
             activation_clamp,
             fast_math,
         )
@@ -400,46 +390,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
 
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
-
-
-def _deepseek_v4_mega_moe_experts_op(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    self = get_forward_context().no_compile_layers[layer_name]
-    self._run_mega_moe(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        out,
-        activation_clamp,
-        fast_math,
-    )
-
-
-def _deepseek_v4_mega_moe_experts_op_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_mega_moe_experts",
-    op_func=_deepseek_v4_mega_moe_experts_op,
-    mutates_args=["out"],
-    fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
-)
 
 
 class DeepseekV4MoE(nn.Module):
