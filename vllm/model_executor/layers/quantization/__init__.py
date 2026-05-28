@@ -34,7 +34,6 @@ QuantizationMethods = Literal[
     "mxfp4",
     "gpt_oss_mxfp4",
     "deepseek_v4_fp8",
-    "cpu_awq",
     "online",
     # Below are online quant shorthand names (see vllm.config.quantization).
     # Listed here as strings to avoid a circular import; kept in sync with
