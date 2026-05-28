@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Tests for Gemma4 chat template rendering."""
+"""Tests for Gemma4 chat template rendering and invariants."""
 
 from pathlib import Path
+from typing import Any
 
 import jinja2.sandbox
 import pytest
+
+from tests.renderers.chat_templates.conversation_builder import create_conversation
+from tests.renderers.chat_templates.invariant_checks import (
+    BASIC_CASES,
+    PARALLEL_TOOL_CALL_CASES,
+    PARALLEL_TOOL_CALL_W_REASONING_CASES,
+    REASONING_CASES,
+    TOOL_CALL_CASES,
+    TOOL_CALL_W_REASONING_CASES,
+    TestChatTemplateInvariants,
+    delimiter_state,
+)
 
 TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent.parent
@@ -343,3 +356,112 @@ class TestGemma4ChatTemplate:
         assert '<|"|>Alice<|"|>' in result
         assert "active:true" in result
         assert "count:42" in result
+
+
+SUPPORTED_CASES = {
+    **BASIC_CASES,
+    **TOOL_CALL_CASES,
+    **PARALLEL_TOOL_CALL_CASES,
+    **REASONING_CASES,
+    **TOOL_CALL_W_REASONING_CASES,
+    **PARALLEL_TOOL_CALL_W_REASONING_CASES,
+}
+
+
+class TestGemma4ChatTemplateInvariants(TestChatTemplateInvariants):
+    turn_delimiter = ("<|turn>", "<turn|>")
+    reasoning_delimiter = ("<|channel>", "<channel|>")
+    tool_call_delimiter = ("<|tool_call>", "<tool_call|>")
+    tool_response_delimiter = ("<|tool_response>", "<tool_response|>")
+
+    @classmethod
+    def _build_markers(cls, messages: list[dict[str, Any]]) -> list[str]:
+        markers = []
+        turn_start, turn_end = cls.turn_delimiter
+        reasoning_start, reasoning_end = cls.reasoning_delimiter
+        tool_call_start, tool_call_end = cls.tool_call_delimiter
+        tool_response_start, tool_response_end = cls.tool_response_delimiter
+
+        last_non_assistant_or_tool_message_idx = 0
+        for idx, msg in enumerate(messages):
+            if msg.get("role") not in ("assistant", "tool"):
+                last_non_assistant_or_tool_message_idx = idx
+
+        for idx, msg in enumerate(messages):
+            msg_role = msg.get("role")
+            if msg_role == "tool":
+                markers.append(tool_response_start)
+            elif msg_role != "assistant":
+                markers.append(turn_start)
+
+            if idx > last_non_assistant_or_tool_message_idx:
+                reasoning = msg.get("reasoning")
+                if reasoning is not None:
+                    markers.append(reasoning_start)
+                    markers.append(reasoning)
+                    markers.append(reasoning_end)
+
+            content = msg.get("content")
+            if content is not None:
+                markers.append(content)
+
+            tool_calls = msg.get("tool_calls", ())
+            for tool_call in tool_calls:
+                tool_call_name = tool_call.get("function", {}).get("name")
+                if tool_call_name is not None:
+                    markers.append(tool_call_start)
+                    markers.append(tool_call_name)
+                    markers.append(tool_call_end)
+
+            if msg_role == "tool":
+                markers.append(tool_response_end)
+            elif msg_role != "assistant":
+                markers.append(turn_end)
+
+        return markers
+
+    @classmethod
+    def _check_delimiters(cls, messages: list[dict[str, Any]], result: str):
+        turn_state = delimiter_state(result, cls.turn_delimiter)
+
+        last_msg_role = messages[-1].get("role")
+        last_msg_tool_calls = messages[-1].get("tool_calls")
+        if (
+            last_msg_role == "tool"
+            or last_msg_role == "assistant"
+            and last_msg_tool_calls
+        ):
+            # Gemma 4 keeps the final model turn open across tool-call flows.
+            assert turn_state == 1
+        else:
+            assert turn_state == 0
+
+        reasoning_state = delimiter_state(result, cls.reasoning_delimiter)
+        assert reasoning_state == 0
+
+        tool_call_state = delimiter_state(result, cls.tool_call_delimiter)
+        assert tool_call_state == 0
+
+        tool_response_state = delimiter_state(result, cls.tool_response_delimiter)
+        if last_msg_tool_calls:
+            # Gemma 4 inserts a tool_call end marker after a tool call
+            assert tool_response_state == 1
+        else:
+            assert tool_response_state == 0
+
+    @pytest.mark.skip(
+        reason="Temporarily disabled until gemma 4 chat template is updated"
+    )
+    @pytest.mark.parametrize(
+        "test_case",
+        SUPPORTED_CASES.values(),
+        ids=SUPPORTED_CASES.keys(),
+    )
+    def test_invariants(
+        self,
+        gemma4_template,
+        test_case,
+    ):
+        messages = create_conversation(*test_case)
+        result = _render(gemma4_template, messages)
+        self._test_case(messages, result)
