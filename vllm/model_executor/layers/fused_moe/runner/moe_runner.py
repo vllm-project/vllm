@@ -275,12 +275,12 @@ class MoERunner(MoERunnerInterface):
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
+            can_overlap = lambda: self._quant_method.mk_can_overlap_shared_experts
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
-                # TODO: use lambda?
-                mk_can_overlap_shared_experts=routed_experts.quant_method.mk_can_overlap_shared_experts,
+                mk_can_overlap_shared_experts=can_overlap,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.
@@ -315,10 +315,6 @@ class MoERunner(MoERunnerInterface):
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         self.routed_experts.quant_method = quant_method
-        if self.shared_experts is not None:
-            self.shared_experts._mk_can_overlap_shared_experts = (
-                quant_method.mk_can_overlap_shared_experts
-            )
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.
@@ -801,11 +797,11 @@ class MoERunner(MoERunnerInterface):
                 hidden_states,
             )
 
-    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    #########################################################
     #
-    # Old methods from FusedMoE layer
+    # Old methods from FusedMoE layer. Remove when possible.
     #
-    # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+    #########################################################
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.

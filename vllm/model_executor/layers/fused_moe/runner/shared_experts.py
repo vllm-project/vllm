@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from enum import IntEnum
 
 import torch
@@ -41,7 +42,7 @@ class SharedExperts(torch.nn.Module):
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         enable_dbo: bool,
-        mk_can_overlap_shared_experts: bool,
+        mk_can_overlap_shared_experts: Callable[[], bool],
     ):
         super().__init__()
 
@@ -54,7 +55,6 @@ class SharedExperts(torch.nn.Module):
         self._layer = layer
         self._moe_config = moe_config
 
-        # TODO: Make sure MK is constructed before this is accessed!!!!!!!!!!!!!!
         self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
 
         # Allow disabling of the separate shared experts stream for
@@ -89,7 +89,7 @@ class SharedExperts(torch.nn.Module):
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
-        if self._mk_can_overlap_shared_experts:
+        if self._mk_can_overlap_shared_experts():
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (

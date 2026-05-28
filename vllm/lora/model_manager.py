@@ -1097,11 +1097,11 @@ class LoRAModelManager:
         )
         if module is None:
             return None
-        base = module.base_layer
+        # base = module.base_layer
         return MoEEPLoadSpec(
-            ep_rank=base.ep_rank,
-            local_num_experts=base.local_num_experts,
-            global_num_experts=base.global_num_experts,
+            ep_rank=module.ep_rank,
+            local_num_experts=module.local_num_experts,
+            global_num_experts=module.global_num_experts,
         )
 
     def _get_lora_layer_weights(

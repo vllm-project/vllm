@@ -319,10 +319,10 @@ def FusedMoE(
         max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
-        swiglu_limit=swiglu_limit,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
+        swiglu_limit=swiglu_limit,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)

@@ -67,7 +67,6 @@ def get_humming_moe_gemm_type() -> str:
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
-        # TODO(bnell): this should not be passed to the MK.
         layer: "RoutedExperts",
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,

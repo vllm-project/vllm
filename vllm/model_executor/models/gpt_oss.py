@@ -380,7 +380,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
-        # Use centralized weight remapping for MoE expert parameters (Solution 7)
+        # Use centralized weight remapping for MoE expert parameters
         for name, weight in remap_moe_expert_weights(weights, params_dict):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):

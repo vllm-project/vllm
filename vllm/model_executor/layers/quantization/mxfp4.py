@@ -158,6 +158,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
 
+    # TODO(bnell): move to MK/expert_class?
     @property
     def has_unpadded_output(self) -> bool:
         return self.mxfp4_backend in [
@@ -499,6 +500,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
 
+    # TODO(bnell): move to MK/expert_class?
     @property
     def has_unpadded_output(self) -> bool:
         return self.mxfp4_backend in [

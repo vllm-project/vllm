@@ -28,6 +28,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def __init__(self, base_layer: MoERunner) -> None:
         super().__init__()
         self.base_layer = base_layer
+        self.moe_config = base_layer.moe_config
         self._shared_experts = base_layer._shared_experts
         self._ep_check()
 
@@ -36,11 +37,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
 
-        moe_parallel_config = base_layer.moe_config.moe_parallel_config
-
         # Use the MoE-aware TP rank/size: when EP is active, FusedMoE collapses
         # moe_parallel_config.tp_size to 1 (experts are sharded across the
         # TP group instead).
+        moe_parallel_config = self.moe_config.moe_parallel_config
         self.tp_size = moe_parallel_config.tp_size
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
@@ -80,29 +80,27 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     @property
     def hidden_size(self) -> int:
-        return self.base_layer.moe_config.hidden_dim
+        return self.moe_config.hidden_dim
 
     @property
     def local_num_experts(self) -> int:
-        return self.base_layer.moe_config.num_local_experts
+        return self.moe_config.num_local_experts
 
     @property
     def global_num_experts(self) -> int:
-        return self.base_layer.moe_config.num_experts
+        return self.moe_config.num_experts
 
     @property
     def ep_rank(self) -> int:
-        moe_config = self.base_layer.moe_config
-        return moe_config.moe_parallel_config.ep_rank
+        return self.moe_config.moe_parallel_config.ep_rank
 
     @property
-    def use_ep(self) -> int:
-        moe_config = self.base_layer.moe_config
-        return moe_config.moe_parallel_config.use_ep
+    def use_ep(self) -> bool:
+        return self.moe_config.moe_parallel_config.use_ep
 
     @property
     def intermediate_size_per_partition(self) -> int:
-        return self.base_layer.moe_config.intermediate_size_per_partition
+        return self.moe_config.intermediate_size_per_partition
 
     def _init_lora_stream_context(self) -> None:
         self._lora_stream: torch.cuda.Stream | None = None
@@ -118,7 +116,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._events = tuple(torch.cuda.Event() for _ in range(4))
 
     def _build_lora_context(self):
-        moe_config = self.base_layer.moe_config
         use_dual_stream = (
             self._enable_aux_cuda_stream
             and not self.fully_sharded
@@ -131,7 +128,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             w2_lora_b_stacked=self.w2_lora_b_stacked,
             adapter_enabled=self.adapter_enabled,
             max_loras=self.max_loras,
-            top_k=moe_config.experts_per_token,
+            # top_k=self.moe_config.experts_per_token,
+            top_k=self.base_layer.routed_experts.top_k,
             w13_num_slices=self._w13_slices,
             fully_sharded=self.fully_sharded,
             tp_rank=self.tp_rank,
@@ -206,9 +204,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         )
 
     def _ep_check(self):
-        routed_experts = self.base_layer.routed_experts
-        if routed_experts.use_ep:
-            moe_config = routed_experts.moe_config
+        if self.use_ep:
+            moe_config = self.moe_config
             all2all_backend = moe_config.moe_parallel_config.all2all_backend
             assert all2all_backend == "allgather_reducescatter", (
                 "Fused MoE LoRA with EP currently only supports "
@@ -221,8 +218,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # EP on the expert dim, fully_sharded on the LoRA rank dim — with
         # mutually contradictory assumptions about which rank holds which
         # expert's rank-shard.
-        routed_experts = self.base_layer.routed_experts
-        assert not (routed_experts.use_ep and lora_config.fully_sharded_loras), (
+        assert not (self.use_ep and lora_config.fully_sharded_loras), (
             "Fused MoE LoRA does not support enable_expert_parallel=True "
             "together with fully_sharded_loras=True. Disable one of them."
         )

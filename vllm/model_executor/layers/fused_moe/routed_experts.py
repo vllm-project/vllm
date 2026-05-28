@@ -78,7 +78,11 @@ class RoutedExperts(PluggableLayer):
 
         self.rocm_aiter_fmoe_enabled = moe_config.rocm_aiter_fmoe_enabled
 
-        # Bit of hack until things are settled
+        # Set any remaining kwargs as attributes. This is necessary because
+        # it is not simple to track all the layer attributes queried by
+        # quantization methods and various utilities.
+        # It would be good to eventually codify these in the FusedMoEConfig
+        # or some other config.
         self.__dict__.update(kwargs)
 
         self.quant_method = self._get_quant_method(
