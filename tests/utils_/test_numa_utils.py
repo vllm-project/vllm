@@ -394,11 +394,13 @@ def test_configure_subprocess_rejects_unknown_process_kind():
     else must raise ValueError instead of silently routing to the worker
     path."""
     vllm_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
-    with pytest.raises(ValueError, match="process_kind"):
-        with numa_utils.configure_subprocess(
+    with (
+        pytest.raises(ValueError, match="process_kind"),
+        numa_utils.configure_subprocess(
             vllm_config, local_rank=0, process_kind="bogus"
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_log_numactl_show(monkeypatch):
