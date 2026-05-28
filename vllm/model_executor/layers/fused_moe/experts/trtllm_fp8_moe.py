@@ -62,11 +62,13 @@ class TrtLlmFp8ExpertsBase:
 
     @staticmethod
     def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
+        """Supports SM_10x (datacenter Blackwell) and SM_12x (consumer/DGX Spark)."""
         p = current_platform
         return (
             p.is_cuda()
-            and p.is_device_capability_family(100)
+            and (
+                p.is_device_capability_family(100) or p.is_device_capability_family(120)
+            )
             and has_flashinfer_trtllm_fused_moe()
         )
 
