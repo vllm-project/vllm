@@ -171,7 +171,9 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
-            self._request_trackers.pop(req_id, None)
+            self.load_specs.pop(req_id, None)
+            if request_tracker := self._request_trackers.get(req_id):
+                request_tracker.reset()
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -355,8 +357,10 @@ class MooncakeStoreScheduler:
         if self.kv_role == "kv_consumer":
             return False, None
         tracker = self._request_trackers.get(request.request_id)
-        assert tracker is not None
-        if tracker.num_saved_tokens <= 0:
+        # Missing tracker can happen when the request is aborted before the
+        # connector observes the normal finished lifecycle or is preempted
+        # before finishing.
+        if tracker is None or tracker.num_saved_tokens <= 0:
             return False, None
         total_blocks = sum(len(g) for g in block_ids)
         delay_free_blocks = total_blocks > 0
@@ -367,3 +371,30 @@ class MooncakeStoreScheduler:
                 request.request_id,
             )
         return delay_free_blocks, None
+
+    def reset_store(self) -> bool:
+        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+
+        Routes through the existing LookupKey ZMQ admin channel to worker
+        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+
+        Ordering assumption: caller (typically
+        ``Scheduler.reset_connector_cache``, invoked via
+        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        in-flight Mooncake lookups or transfers. For RL workflows this is
+        satisfied at the step boundary after weight updates and rollout
+        drain. Violating this can allow stale KV to be served on the next
+        request, defeating the hard-reset guarantee.
+
+        Returns True on ACK from worker, False on NACK or RPC error.
+        """
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("Mooncake store reset via remove_all succeeded.")
+            else:
+                logger.warning("Mooncake store reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("Mooncake reset_store RPC failed: %s", e)
+            return False

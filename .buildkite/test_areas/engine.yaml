@@ -38,7 +38,7 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd

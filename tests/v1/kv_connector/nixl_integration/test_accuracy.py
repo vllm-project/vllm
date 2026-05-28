@@ -64,12 +64,12 @@ def test_accuracy():
     measured_value = results["results"][TASK][FILTER]
     expected_value = EXPECTED_VALUES.get(MODEL_NAME)
 
+    print(f"Measured accuracy value: {measured_value}\n")
     if expected_value is None:
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
         )
-        print(f"Measured value: {measured_value}")
         return
 
     assert (
