@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
+    VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -115,6 +116,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -215,10 +217,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
-    VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
-    VLLM_MORIIO_QP_PER_TRANSFER: int = 1
-    VLLM_MORIIO_POST_BATCH_SIZE: int = -1
-    VLLM_MORIIO_NUM_WORKERS: int = 1
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
@@ -676,6 +674,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
     ),
+    # If true, replace the Rust BPE backend that powers HF fast tokenizers
+    # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
+    # Applies to any tokenizer mode that loads an HF fast tokenizer
+    # (`hf`, `deepseek_v32`, `deepseek_v4`, `qwen_vl`, …). The `fastokens`
+    # Python package must be installed.
+    "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
@@ -1099,6 +1103,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # MoE sorting dispatch policy for AITER fused MoE kernels.
+    #   0 = auto (default): single-pass for small batches, multi-pass
+    #       for large batches
+    #   1 = always single-pass: one kernel launch, no workspace,
+    #       may be preferred for low-concurrency decode workloads
+    #   2 = always multi-pass: can be faster for MoE-heavy models
+    #       (e.g., +2-5% on Qwen3-Next, +1.5% on DeepSeek-V3 at TP4,
+    #       see PR #39177 for benchmarks)
+    "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
@@ -1635,20 +1650,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "Use --linear-backend emulation.",
         lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
     ),
-    # Controls the read mode for the Mori-IO connector
-    "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
-        os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
-    ),
-    # Controls the QP (Queue Pair) per transfer configuration for the Mori-IO connector
-    "VLLM_MORIIO_QP_PER_TRANSFER": lambda: int(
-        os.getenv("VLLM_MORIIO_QP_PER_TRANSFER", "1")
-    ),
-    # Controls the post-processing batch size for the Mori-IO connector
-    "VLLM_MORIIO_POST_BATCH_SIZE": lambda: int(
-        os.getenv("VLLM_MORIIO_POST_BATCH_SIZE", "-1")
-    ),
-    # Controls the number of workers for Mori operations for the Mori-IO connector
-    "VLLM_MORIIO_NUM_WORKERS": lambda: int(os.getenv("VLLM_MORIIO_NUM_WORKERS", "1")),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
@@ -1737,7 +1738,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
         int(os.getenv("VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", "0"))
     ),
-    # Allows vllm to find tuned config under customized folder
+    # User override folder for tuned Triton-kernel configs. Shared by MoE,
+    # Mamba SSU, and LoRA. Filenames are distinct so one folder can hold all.
+    # Each component first checks this folder, then the configs shipped with
+    # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
@@ -1961,6 +1965,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
     # Whether to enable dual cuda streams for LoRA computation
+    # (used by both BaseLinearLayerWithLoRA and FusedMoEWithLoRA to
+    # overlap the base layer compute with the LoRA fast path).
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),

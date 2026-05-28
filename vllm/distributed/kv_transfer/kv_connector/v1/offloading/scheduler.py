@@ -65,6 +65,12 @@ class GroupOffloadConfig(NamedTuple):
     hash_block_size_factor: int
     # None below means full attention
     sliding_window_size_in_blocks: int | None
+    # Number of this group's offloaded blocks per full-attention alignment
+    # segment. Used to skip storing SWA blocks that can never serve a load
+    # hit (e.g. DeepSeek V4 where SWA groups have much smaller block sizes
+    # than the MLA full-attention group).
+    # None for full-attention groups or when the optimization doesn't apply.
+    alignment_block_count: int | None = None
 
 
 def get_sliding_window_size_in_blocks(
@@ -89,6 +95,41 @@ class SchedulerOffloadConfig(NamedTuple):
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
+        # Determine the alignment token count from the full-attention group(s).
+        # This is the offloaded_block_size of the full-attention group; load
+        # hits are always aligned to this boundary, so SWA blocks earlier in
+        # each segment can never serve a load hit. Relevant for hybrid
+        # architectures like DeepSeek V4 (MLA + SWA groups).
+        full_attn_offloaded_block_sizes: set[int] = set()
+        for idx, gpu_block_size in enumerate(spec.gpu_block_size):
+            kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+            sw = get_sliding_window_size_in_blocks(
+                kv_spec, gpu_block_size * spec.block_size_factor
+            )
+            if sw is None:
+                full_attn_offloaded_block_sizes.add(
+                    gpu_block_size * spec.block_size_factor
+                )
+
+        # Only apply the optimization if there's a single consistent
+        # full-attention alignment size.
+        alignment_tokens: int | None = None
+        if len(full_attn_offloaded_block_sizes) == 1:
+            alignment_tokens = full_attn_offloaded_block_sizes.pop()
+
+        def _alignment_block_count(
+            offloaded_block_size: int,
+            sliding_window_size_in_blocks: int | None,
+        ) -> int | None:
+            if alignment_tokens is None or sliding_window_size_in_blocks is None:
+                return None
+            if alignment_tokens <= offloaded_block_size:
+                return None
+            per_segment = alignment_tokens // offloaded_block_size
+            if sliding_window_size_in_blocks >= per_segment:
+                return None
+            return per_segment
+
         return cls(
             num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
@@ -100,9 +141,14 @@ class SchedulerOffloadConfig(NamedTuple):
                         (gpu_block_size * spec.block_size_factor)
                         // spec.hash_block_size
                     ),
-                    sliding_window_size_in_blocks=get_sliding_window_size_in_blocks(
-                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                        gpu_block_size * spec.block_size_factor,
+                    sliding_window_size_in_blocks=(
+                        sw := get_sliding_window_size_in_blocks(
+                            spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                            gpu_block_size * spec.block_size_factor,
+                        )
+                    ),
+                    alignment_block_count=_alignment_block_count(
+                        gpu_block_size * spec.block_size_factor, sw
                     ),
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
@@ -128,6 +174,8 @@ class RequestOffloadState:
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     req_context: ReqContext = field(init=False)
+    # upper bound on tokens to offload for this request; None means no cap
+    max_offload_tokens: int | None = None
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -142,6 +190,21 @@ class RequestOffloadState:
             req_id=self.req.request_id,
             kv_transfer_params=self.req.kv_transfer_params,
         )
+        params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_offload_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_offload_tokens = raw
+            logger.debug(
+                "Request %s: max_offload_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -637,8 +700,12 @@ class OffloadingConnectorScheduler:
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
             # with async scheduling, some tokens may be missing
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
+            max_offload_tokens = req_status.max_offload_tokens
+            if max_offload_tokens is not None:
+                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
 
             # Filter out blocks skipped due to sliding window attention / SSM
+            # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
@@ -663,9 +730,26 @@ class OffloadingConnectorScheduler:
                 ]
                 assert len(offload_keys) == len(offload_block_ids)
 
-                for offload_key, block_id in zip(offload_keys, offload_block_ids):
-                    if block_id != 0:
-                        new_offload_keys.append(offload_key)
+                alignment_block_count = group_config.alignment_block_count
+                tail = group_config.sliding_window_size_in_blocks
+
+                for key_idx, (offload_key, block_id) in enumerate(
+                    zip(offload_keys, offload_block_ids)
+                ):
+                    if block_id == 0:
+                        continue
+                    # Skip SWA blocks that can never serve a load hit:
+                    # within each full-attention alignment segment, only the
+                    # trailing `tail` blocks are reachable by
+                    # _sliding_window_lookup. For DeepSeek V4 with 100K
+                    # tokens this reduces SWA stores by ~78%.
+                    if alignment_block_count is not None:
+                        assert tail is not None
+                        abs_block_idx = start_block_idx + key_idx
+                        pos_in_segment = abs_block_idx % alignment_block_count
+                        if pos_in_segment < alignment_block_count - tail:
+                            continue
+                    new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens)

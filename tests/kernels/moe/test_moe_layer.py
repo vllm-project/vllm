@@ -92,7 +92,7 @@ PARALLEL_COMBOS = [
 BACKENDS = ["allgather_reducescatter"]
 
 if has_mori():
-    BACKENDS += ["mori"]
+    BACKENDS += ["mori_high_throughput", "mori_low_latency"]
 
 if has_flashinfer_nvlink_two_sided():
     BACKENDS += ["flashinfer_nvlink_two_sided"]
@@ -118,7 +118,8 @@ QUANT_METHODS = [
 # fmt: off
 BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
-    "mori":                        {None,         "fp8", "modelopt_fp8"},
+    "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
+    "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "flashinfer_nvlink_one_sided": {None,                                "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
@@ -129,7 +130,8 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
 BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "allgather_reducescatter":     (True,  True,  True,  True),
-    "mori":                        (True, False, False,  True),
+    "mori_high_throughput":        (True, False, False,  True),
+    "mori_low_latency":            (True, False, False,  True),
     "flashinfer_nvlink_two_sided": (False, True, False, False),
     "flashinfer_nvlink_one_sided": (False, True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
@@ -1163,7 +1165,6 @@ def make_fake_moe_layer(
             quant_config=quant_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
