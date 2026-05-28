@@ -11,7 +11,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_einsum
-from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -272,23 +271,3 @@ def deepseek_v4_fp8_einsum(
             return
 
     fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
-
-
-def deepseek_v4_fp8_einsum_fake(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_fp8_einsum",
-    op_func=deepseek_v4_fp8_einsum,
-    mutates_args=["out"],
-    fake_impl=deepseek_v4_fp8_einsum_fake,
-)

@@ -35,6 +35,23 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+_SM12X_TUNED_CONFIG_DEVICE_ALIASES = {
+    "NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition": (
+        "NVIDIA_RTX_PRO_6000_Blackwell_Workstation_Edition",
+    ),
+    "NVIDIA_RTX_PRO_6000_Blackwell_Server_Edition": (
+        "NVIDIA_RTX_PRO_6000_Blackwell_Workstation_Edition",
+    ),
+}
+
+
+def _tuned_config_device_names() -> tuple[str, ...]:
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    if "H200" in device_name.split("_"):
+        return ("NVIDIA_H200",)
+    return (device_name, *_SM12X_TUNED_CONFIG_DEVICE_ALIASES.get(device_name, ()))
+
+
 @triton.jit
 def write_zeros_to_output(
     c_ptr,
@@ -999,10 +1016,30 @@ def zero_experts_compute_triton(
 def get_config_file_name(
     E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> str:
-    device_name = current_platform.get_device_name().replace(" ", "_")
-    # Set device_name to H200 if a device from the H200 family is detected
-    if "H200" in device_name.split("_"):
-        device_name = "NVIDIA_H200"
+    device_name = _tuned_config_device_names()[0]
+    dtype_selector = "" if not dtype else f",dtype={dtype}"
+    block_shape_selector = (
+        "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
+    ).replace(" ", "")
+    return f"E={E},N={N},device_name={device_name}{dtype_selector}{block_shape_selector}.json"  # noqa: E501
+
+
+def _get_config_file_names(
+    E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
+) -> tuple[str, ...]:
+    return tuple(
+        _get_config_file_name_for_device(E, N, dtype, device_name, block_shape)
+        for device_name in _tuned_config_device_names()
+    )
+
+
+def _get_config_file_name_for_device(
+    E: int,
+    N: int,
+    dtype: str | None,
+    device_name: str,
+    block_shape: list[int] | None = None,
+) -> str:
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
         "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
@@ -1035,22 +1072,26 @@ def get_moe_configs(
     # First look up if an optimized configuration is available in the configs
     # directory
     block_shape = [block_n, block_k] if block_n and block_k else None
-    json_file_name = get_config_file_name(E, N, dtype, block_shape)
+    json_file_names = _get_config_file_names(E, N, dtype, block_shape)
 
     config_file_paths = []
 
     # note that we prioritize user defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
-        user_defined_config_file_path = os.path.join(
-            user_defined_config_folder, json_file_name
+        config_file_paths.extend(
+            os.path.join(user_defined_config_folder, json_file_name)
+            for json_file_name in json_file_names
         )
-        config_file_paths.append(user_defined_config_file_path)
 
-    default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
+    config_file_paths.extend(
+        os.path.join(
+            os.path.dirname(os.path.realpath(__file__)),
+            "configs",
+            json_file_name,
+        )
+        for json_file_name in json_file_names
     )
-    config_file_paths.append(default_config_file_path)
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
