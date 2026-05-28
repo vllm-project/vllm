@@ -1828,22 +1828,6 @@ class VllmConfig:
                         compile_range_end,
                     )
 
-        if compilation_config.pass_config.fuse_minimax_qk_norm:
-            from vllm.compilation.passes.fusion.minimax_qk_norm_fusion import (
-                MAX_TOKEN_NUM,
-            )
-
-            max_token_num = min(
-                MAX_TOKEN_NUM, self.scheduler_config.max_num_batched_tokens
-            )
-            if compile_range_end is not None and max_token_num < compile_range_end:
-                computed_compile_ranges_endpoints.append(max_token_num)
-            else:
-                logger.debug(
-                    "Max num batched tokens below MiniMax QK norm fusion threshold, "
-                    "MiniMax QK norm fusion enabled for all num_tokens."
-                )
-
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
@@ -1962,8 +1946,12 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if model_config is not None and model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
+        if (
+            model_config is not None
+            and model_config.has_inner_state
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            unsupported.append("hybrid/mamba models with align cache mode")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")

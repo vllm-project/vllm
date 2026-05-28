@@ -92,8 +92,7 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'pip install modelscope &&
       cd tests &&
-      pytest -v -s test_regression.py 
-      --deselect "test_regression.py::test_max_tokens_none[distilbert/distilgpt2]"'
+      pytest -v -s test_regression.py'
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
