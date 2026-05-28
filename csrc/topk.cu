@@ -11,8 +11,13 @@ namespace ct = vllm::cooperative;
 template <uint32_t TopK, uint32_t CS>
 void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                                 size_t smem, cudaStream_t stream) {
-  auto kernel = (CS == 8) ? &ct::cooperative_topk_cs8<TopK>
+  auto kernel = (CS == 16) ? &ct::cooperative_topk_cs16<TopK>
+             : (CS == 8)  ? &ct::cooperative_topk_cs8<TopK>
                           : &ct::cooperative_topk_cs4<TopK>;
+  if (CS > 8) {
+    cudaFuncSetAttribute(kernel,
+                         cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+  }
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);
 
@@ -54,12 +59,14 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
     return;
   }
 
-  // TODO (roberto): TMA (cp.aync.bulk) requires the source address to be 16-byte aligned
-  // instead of exiting otherwise, we can either fallback to persistent topk v1, add padding 
-  // to the logits tensor, or use FilteredTopKRaggedTransform (probably not recommended)
+  // TODO (roberto): TMA (cp.aync.bulk) requires the source address to be
+  // 16-byte aligned instead of exiting otherwise, we can either fallback to
+  // persistent topk v1, add padding to the logits tensor, or use
+  // FilteredTopKRaggedTransform (probably not recommended)
   TORCH_CHECK(stride % 4 == 0,
               "cooperative_topk: stride must be multiple of 4 for TMA "
-              "alignment, got stride (max_model_len)=", stride);
+              "alignment, got stride (max_model_len)=",
+              stride);
 
   TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
   TORCH_CHECK(workspace.dtype() == torch::kUInt8, "workspace must be uint8");
@@ -79,7 +86,9 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
           static_cast<int64_t>(num_rows * ct::kMaxTies * sizeof(ct::Tie)),
       "workspace too small");
 
-  if (num_rows <= 8) {
+  if (num_rows <= 4) {
+    launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
+  } else if (num_rows <= 8) {
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
   } else {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4, stream);
@@ -88,8 +97,8 @@ void launch_cooperative_topk_impl(const torch::Tensor& logits,
 #endif  // USE_ROCM
 
 void cooperative_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
-                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
-                     int64_t max_seq_len) {
+                      torch::Tensor& output, torch::Tensor& workspace,
+                      int64_t k, int64_t max_seq_len) {
 #ifndef USE_ROCM
   TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");

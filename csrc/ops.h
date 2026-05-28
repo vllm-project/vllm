@@ -122,8 +122,8 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t topK);
 
 void cooperative_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
-                      torch::Tensor& output, torch::Tensor& workspace, int64_t k,
-                      int64_t max_seq_len);
+                      torch::Tensor& output, torch::Tensor& workspace,
+                      int64_t k, int64_t max_seq_len);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,

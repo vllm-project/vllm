@@ -37,6 +37,8 @@ constexpr uint32_t kNumStages8 =
     2;  // 2 stages × 16K = 32K per block (enough for CS=8)
 // Max data per block with CS=8: ceil(262144/8) = 32768 ≤ 4 × 8192 = 32768
 constexpr uint32_t kMaxSeqLen8 = kNumStages8 * kSizePerStage * 8;  // 262144
+constexpr uint32_t kNumStages16 = 2;  // double-buffer for CS=16
+constexpr uint32_t kMaxSeqLen16 = kNumStages16 * kSizePerStage * 16;  // 524288
 
 // Register path
 constexpr uint32_t kHist4096Bits = 12;
@@ -739,6 +741,7 @@ struct SmemFused {
 };
 
 using Smem8 = SmemFused<kNumStages8>;
+using Smem16 = SmemFused<kNumStages16>;
 using Smem4 = SmemFused<kNumStages4, 2>;
 using SmemSinglePass = SmemFused<kMaxSinglePassStages>;
 
@@ -1000,14 +1003,14 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
   const uint32_t per_block =
       (params.stride + CS - 1) / CS;  // how many elements per block
   constexpr uint32_t kFusedMax =
-      ((CS == 8) ? kNumStages8 : kMaxSinglePassStages) * kSizePerStage;
+      ((CS == 16) ? kNumStages16 : (CS == 8) ? kNumStages8 : kMaxSinglePassStages) * kSizePerStage;
   const bool use_singlepass =
       per_block <=
       kFusedMax;  // single pass or TMA streaming: histogram+scatter
 
   // Select smem type and stage count at compile time based on CS
   constexpr uint32_t kFusedStages =
-      (CS == 8) ? kNumStages8 : kMaxSinglePassStages;
+      (CS == 16) ? kNumStages16 : (CS == 8) ? kNumStages8 : kMaxSinglePassStages;
   using FusedSmem = SmemFused<kFusedStages>;
 
   extern __shared__ uint8_t sr[];
@@ -1049,6 +1052,12 @@ template <uint32_t TopK>
 __global__ void __launch_bounds__(kBlockSize, 1) __cluster_dims__(1, 8, 1)
     cooperative_topk_cs8(CooperativeTopKParams<TopK> params) {
   cooperative_topk_body<TopK, 8>(params);
+}
+
+template <uint32_t TopK>
+__global__ void __launch_bounds__(kBlockSize, 1) __cluster_dims__(1, 16, 1)
+    cooperative_topk_cs16(CooperativeTopKParams<TopK> params) {
+  cooperative_topk_body<TopK, 16>(params);
 }
 
 constexpr size_t kSmemSize4_base =
