@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import is_dataclass
 from datetime import datetime
@@ -499,14 +500,14 @@ class VllmConfig:
 
         if not HAS_TRITON:
             logger.warning_once(
-                "Model runner v2 requires Triton; using the v1 model runner instead."
+                "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
             return False
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             logger.warning_once(
-                "Model runner v2 does not yet support %s; using the v1 model "
+                "Model Runner V2 does not yet support %s; using the V1 model "
                 "runner instead.",
                 ", ".join(unsupported),
             )
@@ -733,6 +734,17 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
+        # Check if KV connector requires chunked prefill to be disabled.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
+            and self.scheduler_config.enable_chunked_prefill
+        ):
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
+            )
+
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
@@ -1394,7 +1406,7 @@ class VllmConfig:
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
-        # - No preference: auto-disable for unsupported features (e.g. kv connector)
+        # - No preference: auto-disable for unsupported features or connector configs
         # - Explicit disable (--disable-kv-cache-manager): always respect it
         need_disable_hybrid_kv_cache_manager = False
         # logger should only print warning message for hybrid models. As we
@@ -1426,43 +1438,25 @@ class VllmConfig:
                 need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
+            # Auto-disable HMA only when the connector config does not support it.
             if self.kv_transfer_config is not None:
-                from vllm.config.kv_transfer import KVTransferConfig
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
-                from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                    supports_hma,
-                )
 
-                connector_cls = KVConnectorFactory.get_connector_class(
-                    self.kv_transfer_config
-                )
-                all_support_hma = supports_hma(connector_cls)
-                # MultiConnector subclasses SupportsHMA; only effectively
-                # supports HMA when every sub-connector does.
-                if all_support_hma and connector_cls.__name__ == "MultiConnector":
-                    sub_ktcs = self.kv_transfer_config.kv_connector_extra_config.get(
-                        "connectors", []
-                    )
-                    all_support_hma = all(
-                        supports_hma(
-                            KVConnectorFactory.get_connector_class(
-                                KVTransferConfig(**sub)
-                            )
-                        )
-                        for sub in sub_ktcs
-                    )
-                if not all_support_hma:
+                if not KVConnectorFactory.supports_hma_config(self.kv_transfer_config):
                     need_disable_hybrid_kv_cache_manager = True
                     logger.warning(
                         "Turning off hybrid kv cache manager because "
-                        "connector %s does not subclass `SupportsHMA`. "
-                        "This will reduce performance on models with "
-                        "sliding window or Mamba attention. See "
-                        "kv_connector/v1/base.py for details.",
-                        connector_cls.__name__,
+                        "`--kv-transfer-config` selects a KV connector that "
+                        "does not support it. Impact: hybrid SSM models "
+                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "startup without it; models with sliding window "
+                        "attention will run with reduced performance. "
+                        "To add HMA support to a KV connector, subclass "
+                        "`SupportsHMA` defined in kv_connector/v1/base.py "
+                        "(for MultiConnector, all child connectors must "
+                        "support HMA)."
                     )
             self.scheduler_config.disable_hybrid_kv_cache_manager = (
                 need_disable_hybrid_kv_cache_manager
@@ -1834,22 +1828,6 @@ class VllmConfig:
                         compile_range_end,
                     )
 
-        if compilation_config.pass_config.fuse_minimax_qk_norm:
-            from vllm.compilation.passes.fusion.minimax_qk_norm_fusion import (
-                MAX_TOKEN_NUM,
-            )
-
-            max_token_num = min(
-                MAX_TOKEN_NUM, self.scheduler_config.max_num_batched_tokens
-            )
-            if compile_range_end is not None and max_token_num < compile_range_end:
-                computed_compile_ranges_endpoints.append(max_token_num)
-            else:
-                logger.debug(
-                    "Max num batched tokens below MiniMax QK norm fusion threshold, "
-                    "MiniMax QK norm fusion enabled for all num_tokens."
-                )
-
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)
@@ -1968,8 +1946,12 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if model_config is not None and model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
+        if (
+            model_config is not None
+            and model_config.has_inner_state
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            unsupported.append("hybrid/mamba models with align cache mode")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
@@ -1999,10 +1981,6 @@ class VllmConfig:
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
-
-        if self.reasoning_config is not None:
-            # TODO: add reasoning budget enforcement to ModelRunnerV2.
-            unsupported.append("reasoning budget enforcement")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
@@ -2045,13 +2023,18 @@ class VllmConfig:
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
-            raise ValueError("VLLM_USE_V2_MODEL_RUNNER requires Triton.")
+            raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
-                "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
-                + ", ".join(unsupported)
+                f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
+            )
+
+        if self.reasoning_config is not None:
+            logger.warning_once(
+                "Model Runner V2 does not yet support the thinking_token_budget "
+                "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
             )
 
     def validate_block_size(self) -> None:
@@ -2220,7 +2203,7 @@ T = TypeVar("T")
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
-    layer_names: list[str] | None = None,
+    layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.
@@ -2231,14 +2214,12 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
+    if layer_names is None:
+        layer_names = forward_context.keys()
 
     return {
-        layer_name: forward_context[layer_name]
+        layer_name: layer
         for layer_name in layer_names
-        if layer_name in forward_context
-        and isinstance(forward_context[layer_name], layer_type)
+        if isinstance(layer := forward_context.get(layer_name), layer_type)
     }
