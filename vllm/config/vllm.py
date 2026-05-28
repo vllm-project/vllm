@@ -500,14 +500,14 @@ class VllmConfig:
 
         if not HAS_TRITON:
             logger.warning_once(
-                "Model runner v2 requires Triton; using the v1 model runner instead."
+                "Model Runner V2 requires Triton; using the V1 model runner instead."
             )
             return False
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             logger.warning_once(
-                "Model runner v2 does not yet support %s; using the v1 model "
+                "Model Runner V2 does not yet support %s; using the V1 model "
                 "runner instead.",
                 ", ".join(unsupported),
             )
@@ -1946,8 +1946,12 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if model_config is not None and model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
+        if (
+            model_config is not None
+            and model_config.has_inner_state
+            and self.cache_config.mamba_cache_mode == "align"
+        ):
+            unsupported.append("hybrid/mamba models with align cache mode")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
@@ -1977,10 +1981,6 @@ class VllmConfig:
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
-
-        if self.reasoning_config is not None:
-            # TODO: add reasoning budget enforcement to ModelRunnerV2.
-            unsupported.append("reasoning budget enforcement")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
@@ -2023,13 +2023,18 @@ class VllmConfig:
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
         if not HAS_TRITON:
-            raise ValueError("VLLM_USE_V2_MODEL_RUNNER requires Triton.")
+            raise ValueError("Model Runner V2 requires Triton.")
 
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
-                "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
-                + ", ".join(unsupported)
+                f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
+            )
+
+        if self.reasoning_config is not None:
+            logger.warning_once(
+                "Model Runner V2 does not yet support the thinking_token_budget "
+                "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
             )
 
     def validate_block_size(self) -> None:
