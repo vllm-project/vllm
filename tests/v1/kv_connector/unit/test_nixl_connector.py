@@ -533,6 +533,12 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.local_registered_layer_indices = [0]
         self.local_seen_layer_names = ["model.layers.0.self_attn"]
+        # register_kv_caches() also builds the layer-name -> NIXL region map that
+        # the handshake validation resolves producer members against; mirror it
+        # here since this mock bypasses register_kv_caches().
+        self._local_layer_name_to_region_indices = {
+            name: [i] for i, name in enumerate(self.local_seen_layer_names)
+        }
         self._local_kv_cache_key = (0, self.tp_rank)
         self.kv_caches_base_addr[self.engine_id][self._local_kv_cache_key] = [0]
 
@@ -1021,6 +1027,12 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
             worker.local_registered_layer_indices = [0]
             worker.local_seen_layer_names = ["model.layers.0.self_attn"]
+            # register_kv_caches() builds the layer-name -> NIXL region map the
+            # handshake validation resolves producer members against; mirror it
+            # here since this test sets local registration state by hand.
+            worker._local_layer_name_to_region_indices = {
+                name: [i] for i, name in enumerate(worker.local_seen_layer_names)
+            }
             worker._local_kv_cache_key = (0, worker.tp_rank)
             worker.kv_caches_base_addr[worker.engine_id][worker._local_kv_cache_key] = [
                 0
@@ -1091,6 +1103,12 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
             worker.local_registered_layer_indices = [0]
             worker.local_seen_layer_names = ["model.layers.0.self_attn"]
+            # register_kv_caches() builds the layer-name -> NIXL region map the
+            # handshake validation resolves producer members against; mirror it
+            # here since this test sets local registration state by hand.
+            worker._local_layer_name_to_region_indices = {
+                name: [i] for i, name in enumerate(worker.local_seen_layer_names)
+            }
             worker._local_kv_cache_key = (0, worker.tp_rank)
             worker.kv_caches_base_addr[worker.engine_id][worker._local_kv_cache_key] = [
                 0

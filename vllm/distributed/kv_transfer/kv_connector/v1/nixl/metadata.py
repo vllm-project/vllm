@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -39,8 +39,15 @@ GET_META_MSG = b"get_meta_msg"
 #      registered_layer_names) and per-request pp_size. NIXL regions are
 #      advertised per layer-name so HMA pool composition may differ across PP
 #      producer shards and the decode consumer.
+#   6: Add region_members so each advertised NIXL region declares ALL the
+#      (global_layer_index, kv_group_index) members sharing it — including HMA
+#      cross-group pooled members (e.g. an swa_cache pooled onto a later layer's
+#      main-attn region) that are dedup'd out of registered_layer_names. Without
+#      this, a pooled member belonging to a different kv group than the region's
+#      representative is never transferred (its blocks are dropped), corrupting
+#      KV under PP+HMA disaggregation.
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -62,6 +69,19 @@ class NixlAgentMetadata:
     end_layer: int
     registered_layer_indices: list[int]
     registered_layer_names: list[str]
+    # Parallel to the advertised regions (registered_layer_names order): for
+    # each NIXL region, the full list of layer names whose transfer caches
+    # physically share that region. Captures HMA cross-group pooled members
+    # that registered_layer_names (representatives only) omits, so the transfer
+    # can cover every member's blocks in a shared region. Keyed by layer name
+    # (not (layer_index, kv_group_index)) because distinct caches can merge into
+    # one kv group via UniformTypeKVCacheSpecs (e.g. an MLA layer's main latent
+    # and its indexer k_cache both land in the full-attention group): a
+    # (layer_index, group) pair is then non-unique across regions, whereas the
+    # layer name uniquely identifies the region and is stable across the PP
+    # producer shard and the full-model consumer. Defaults to empty for backward
+    # construction; populated in register_kv_caches.
+    region_members: list[list[str]] = field(default_factory=list)
 
 
 @dataclass

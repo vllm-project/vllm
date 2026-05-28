@@ -24,6 +24,7 @@ def _meta(
     pp_size: int = 4,
     registered_layer_indices: list[int] | None = None,
     registered_layer_names: list[str] | None = None,
+    region_members: list[list[str]] | None = None,
 ) -> NixlAgentMetadata:
     if registered_layer_indices is None:
         registered_layer_indices = list(range(start_layer, end_layer))
@@ -31,6 +32,10 @@ def _meta(
         registered_layer_names = [
             f"model.layers.{idx}.self_attn" for idx in registered_layer_indices
         ]
+    if region_members is None:
+        # Default: each advertised region holds exactly its representative
+        # layer name (the non-pooled / no-HMA shape).
+        region_members = [[name] for name in registered_layer_names]
     return NixlAgentMetadata(
         engine_id="engine",
         agent_metadata=b"agent",
@@ -49,6 +54,7 @@ def _meta(
         end_layer=end_layer,
         registered_layer_indices=registered_layer_indices,
         registered_layer_names=registered_layer_names,
+        region_members=region_members,
     )
 
 
@@ -94,8 +100,8 @@ def _fake_vllm_config(pipeline_parallel_size: int = 1) -> SimpleNamespace:
     )
 
 
-def test_nixl_connector_version_is_bumped_to_v5():
-    assert NIXL_CONNECTOR_VERSION == 5
+def test_nixl_connector_version_is_bumped_to_v6():
+    assert NIXL_CONNECTOR_VERSION == 6
 
 
 def test_pp_layer_map_round_trip_queries():

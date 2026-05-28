@@ -91,6 +91,9 @@ def _make_worker(total_layers: int = 32) -> NixlConnectorWorker:
     worker.local_seen_layer_names = [
         f"model.layers.{layer}.self_attn" for layer in range(total_layers)
     ]
+    worker._local_layer_name_to_region_indices = defaultdict(list)
+    for idx, name in enumerate(worker.local_seen_layer_names):
+        worker._local_layer_name_to_region_indices[name].append(idx)
     worker._layer_name_to_kv_group_index = {
         layer_name: 0 for layer_name in worker.local_seen_layer_names
     }

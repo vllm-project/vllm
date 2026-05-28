@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
     ReadSpec,
 )
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 class _InlineThread:
@@ -206,15 +207,8 @@ def test_background_nixl_handshake_submits_remote_pp_size(pp_size: int):
     assert future.add_done_callback.call_count == 2
 
 
-def test_hma_pp_assertion_guard_in_read_blocks() -> None:
-    """NIXL PR1 must reject HMA × PP combinations with AssertionError.
-
-    This guard is the PR1↔PR2 split point. When NIXL PR2 lands per-layer-name
-    HMA × PP routing, the ``assert not self._is_hma_required`` checks inside
-    ``_read_blocks`` and friends will be lifted. Until then, configuring NIXL
-    with HMA enabled and a heterogeneous block-size remote (the path that
-    co-occurs under ``pp_size > 1`` with multi-group KV caches) must fail loud.
-    """
+def test_hma_pp_read_blocks_maps_each_kv_group() -> None:
+    """HMA reads map block-size ratios independently per KV group."""
     import numpy as np
 
     worker = NixlConnectorWorker.__new__(NixlConnectorWorker)
@@ -222,6 +216,14 @@ def test_hma_pp_assertion_guard_in_read_blocks() -> None:
     worker.world_size = 1
     worker.block_size = 16
     worker._remote_agents = {"remote-engine": {(0, 0): "agent-0-0"}}
+    worker._group_spec_types = (FullAttentionSpec, FullAttentionSpec)
+    worker.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
+    worker._recving_transfers = {"req": []}
+    worker._log_failure = MagicMock()
+    worker._handle_failed_transfer = MagicMock()
+    worker.xfer_stats = MagicMock()
+    worker.nixl_wrapper = MagicMock()
+    worker.nixl_wrapper.make_prepped_xfer.return_value = 99
 
     transfer_topo = MagicMock()
     transfer_topo.get_engine_info.return_value = SimpleNamespace(
@@ -230,16 +232,35 @@ def test_hma_pp_assertion_guard_in_read_blocks() -> None:
     )
     transfer_topo.block_size_ratio.return_value = 2
     worker.transfer_topo = transfer_topo
-    worker.get_mapped_blocks = MagicMock(return_value=np.asarray([0, 1, 2, 3]))
-
-    spec = ReadSpec(remote_rank=0, local_block_ids=[[0]], remote_block_ids=[[1]])
-    with pytest.raises(AssertionError):
-        worker._read_blocks(
-            read_spec=spec,
-            request_id="req",
-            dst_engine_id="remote-engine",
-            remote_request_id="rreq",
-            remote_pp_rank=0,
-            local_xfer_side_handle=0,
-            remote_xfer_side_handle=0,
+    worker.get_mapped_blocks = NixlConnectorWorker.get_mapped_blocks.__get__(worker)
+    worker._apply_prefix_caching = MagicMock(
+        side_effect=lambda local, remote, _: (
+            local,
+            remote,
         )
+    )
+    worker._get_block_descs_ids_for_shard = MagicMock(
+        side_effect=[np.asarray([10, 11, 12, 20, 21]), np.asarray([0, 1, 2, 6, 7])]
+    )
+
+    spec = ReadSpec(
+        remote_rank=0,
+        local_block_ids=[[0, 1], [3]],
+        remote_block_ids=[[5, 6, 7], [8, 9]],
+    )
+    worker._read_blocks(
+        read_spec=spec,
+        request_id="req",
+        dst_engine_id="remote-engine",
+        remote_request_id="rreq",
+        remote_pp_rank=0,
+        local_xfer_side_handle=0,
+        remote_xfer_side_handle=0,
+    )
+
+    worker._apply_prefix_caching.assert_called_once_with(
+        [[0, 1, 2], [6, 7]],
+        [[5, 6, 7], [8, 9]],
+        1,
+    )
+    assert worker._recving_transfers["req"] == [99]
