@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from typing_extensions import Self, override
 
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.collection_utils import full_groupby
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -533,7 +534,7 @@ class SweepPlotArgs:
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
             "EXPERIMENT_DIR",
             type=str,
@@ -684,7 +685,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepPlotArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepPlotArgs.parser_help)
     SweepPlotArgs.add_cli_args(parser)
 
     main(parser.parse_args())
