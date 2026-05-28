@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -516,7 +515,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.is_contiguous()
             and result.is_contiguous()
             and output._base is None
-            and disable_inplace()
         ):
             output.set_(result)
         else:
