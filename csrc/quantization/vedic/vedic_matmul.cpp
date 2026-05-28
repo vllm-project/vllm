@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include <algorithm>
+#include <limits>
 
 inline void unpack8(int32_t packed, int8_t* out) {
     out[0] = packed & 0xF;
@@ -21,7 +22,6 @@ inline int32_t vedic_dot8(const int8_t* a, const int8_t* b) {
 torch::Tensor vedic_4bit_matmul(
     torch::Tensor A, torch::Tensor B_packed, float B_scale)
 {
-    // Validate dimensions
     TORCH_CHECK(A.dim() == 2, "A must be 2D [M, K]");
     TORCH_CHECK(B_packed.dim() == 2, "B_packed must be 2D [N, K/8]");
     TORCH_CHECK(A.size(1) % 8 == 0, "K (A.size(1)) must be divisible by 8, got ", A.size(1));
@@ -30,11 +30,12 @@ torch::Tensor vedic_4bit_matmul(
 
     int64_t M = A.size(0), K = A.size(1), N = B_packed.size(0), K8 = K / 8;
 
-    // Safe allocation with overflow check
-    int64_t B_unpacked_size = N * K;
-    TORCH_CHECK(B_unpacked_size / K == N, "Integer overflow: N * K exceeds int64_t range");
+    // Safe allocation with UB-proof overflow check
+    int64_t B_unpacked_size = static_cast<int64_t>(N) * static_cast<int64_t>(K);
+    TORCH_CHECK(B_unpacked_size >= 0 && B_unpacked_size <= std::numeric_limits<int64_t>::max(),
+        "Integer overflow in N * K allocation size");
     int8_t* B_unpacked = new (std::nothrow) int8_t[B_unpacked_size];
-    TORCH_CHECK(B_unpacked != nullptr, "Failed to allocate memory for B_unpacked (", B_unpacked_size, " bytes)");
+    TORCH_CHECK(B_unpacked != nullptr, "Failed to allocate memory for B_unpacked");
 
     auto C = torch::empty({M, N}, A.options());
     auto A_acc = A.accessor<float,2>();
