@@ -1360,7 +1360,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
     ),
     "Step3p7ForConditionalGeneration": _HfExamplesInfo(
-        "stepfun-ai/Step-3.7-Flash", trust_remote_code=True
+        "stepfun-ai/Step-3.7-Flash", is_available_online=False, trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
