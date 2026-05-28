@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
@@ -239,7 +239,7 @@ pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
-    model_dtype: Option<ModelDtype>,
+    model_dtype: ModelDtype,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     if !request.has_multimodal() {
         return Ok((rendered.prompt, None));
@@ -249,16 +249,6 @@ pub(crate) async fn finalize_rendered_prompt(
         bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
     };
     let media_parts = extract_media_parts(request)?;
-    let model_dtype = model_dtype.unwrap_or_else(|| {
-        static WARN_ONCE: Once = Once::new();
-        WARN_ONCE.call_once(|| {
-            warn!(
-                "engine handshake did not report model dtype; \
-                 falling back to float32 for multimodal tensor encoding"
-            );
-        });
-        ModelDtype::Float32
-    });
 
     let mut prompt_token_ids = info
         .context
