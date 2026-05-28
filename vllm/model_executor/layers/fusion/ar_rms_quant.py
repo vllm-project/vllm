@@ -12,6 +12,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -76,16 +77,26 @@ def _to_nvfp4_qa(
 def _flashinfer_ar_rms_fp8(
     norm: torch.nn.Module,
     x: torch.Tensor,
-    residual: torch.Tensor,
+    residual: torch.Tensor | None,
     linear: torch.nn.Module,
     max_token_num: int,
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     assert flashinfer_trtllm_fused_allreduce_norm is not None
     out_q = torch.empty(x.shape, dtype=current_platform.fp8_dtype(), device=x.device)
+    if residual is None:
+        # Zero residual makes the add a no-op; the AR'd input (left in x)
+        # becomes the downstream residual, so norm_out needs its own buffer.
+        kernel_residual, norm_out, out_residual = (
+            torch.zeros_like(x),
+            torch.empty_like(x),
+            x,
+        )
+    else:
+        kernel_residual, norm_out, out_residual = residual, None, residual
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
-        residual=residual,
-        norm_out=None,
+        residual=kernel_residual,
+        norm_out=norm_out,
         quant_out=out_q,
         scale_out=None,
         rms_gamma=norm.weight.data,
@@ -97,27 +108,37 @@ def _flashinfer_ar_rms_fp8(
         fp32_acc=True,
         max_token_num=max_token_num,
     )
-    return _to_fp8_qa(out_q, x, linear), residual
+    return _to_fp8_qa(out_q, x, linear), out_residual
 
 
 def _flashinfer_ar_rms_nvfp4(
     norm: torch.nn.Module,
     x: torch.Tensor,
-    residual: torch.Tensor,
+    residual: torch.Tensor | None,
     linear: torch.nn.Module,
     max_token_num: int,
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     assert flashinfer_trtllm_fused_allreduce_norm is not None
     from vllm._custom_ops import create_fp4_output_tensors
 
+    if residual is None:
+        # Zero residual makes the add a no-op; the AR'd input (left in x)
+        # becomes the downstream residual, so norm_out needs its own buffer.
+        kernel_residual, norm_out, out_residual = (
+            torch.zeros_like(x),
+            torch.empty_like(x),
+            x,
+        )
+    else:
+        kernel_residual, norm_out, out_residual = residual, None, residual
     m, n = x.shape
     out_q, scale_out = create_fp4_output_tensors(
         m, n, x.device, is_sf_swizzled_layout=True
     )
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
-        residual=residual,
-        norm_out=None,
+        residual=kernel_residual,
+        norm_out=norm_out,
         quant_out=out_q,
         scale_out=scale_out,
         rms_gamma=norm.weight.data,
@@ -129,7 +150,7 @@ def _flashinfer_ar_rms_nvfp4(
         fp32_acc=True,
         max_token_num=max_token_num,
     )
-    return _to_nvfp4_qa(out_q, scale_out, x), residual
+    return _to_nvfp4_qa(out_q, scale_out, x), out_residual
 
 
 _FUSED_AR_RMS_QUANT_IMPLS: dict[QuantKey, Callable] = {
@@ -166,13 +187,12 @@ def _flashinfer_ar_rms(
         )
         return x, residual
 
-    # No residual: feed a zero residual + dedicated norm_out so the kernel's
-    # AR'd input becomes the downstream residual.
-    zero_residual = torch.zeros_like(x)
+    # No residual: zero residual + dedicated norm_out; the AR'd input (left in
+    # x) becomes the downstream residual.
     norm_out = torch.empty_like(x)
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
-        residual=zero_residual,
+        residual=torch.zeros_like(x),
         norm_out=norm_out,
         quant_out=None,
         scale_out=None,
@@ -242,6 +262,12 @@ def fused_ar_rms_norm_quant(
     Otherwise, returns a plain tensor and the downstream linear quantizes
     its own input.
     """
+    # The fused kernels apply `gamma * x_normed` directly; norms with other
+    # semantics (e.g. Gemma's `(1 + gamma)`) are not supported here.
+    assert type(norm) is RMSNorm, (
+        f"fused_ar_rms_norm_quant requires a plain RMSNorm, got {type(norm).__name__}"
+    )
+
     world_size = get_tensor_model_parallel_world_size()
     # Get the potential quantization key to fuse from the consumer linear.
     quant_key: QuantKey | None = (
@@ -249,7 +275,6 @@ def fused_ar_rms_norm_quant(
         if consumer_linear is not None
         else None
     )
-    has_residual = residual is not None
 
     # Check if fused all-reduce kernel can be used.
     can_fuse_ar = (
@@ -269,11 +294,10 @@ def fused_ar_rms_norm_quant(
         _FUSED_RMS_QUANT_IMPLS.get(quant_key) if quant_key is not None else None
     )
 
-    # Dispatch to the appropriate implementation based.
+    # Dispatch to the highest-fusion path that applies.
 
-    # AR + add + RMSNorm + activation quant.
-    # TODO: Add support for no residual.
-    if fused_ar_rms_quant_impl is not None and has_residual:
+    # AR + (add +) RMSNorm + activation quant.
+    if fused_ar_rms_quant_impl is not None:
         return fused_ar_rms_quant_impl(
             norm, hidden_states, residual, consumer_linear, max_token_num
         )
@@ -282,14 +306,13 @@ def fused_ar_rms_norm_quant(
     if can_fuse_ar:
         return _flashinfer_ar_rms(norm, hidden_states, residual, max_token_num)
 
-    # Handle explicit AR if required, and continue.
+    # No fused-AR kernel: do the all-reduce explicitly, then fall through to
+    # fused RMSNorm+quant or plain RMSNorm.
     if do_allreduce:
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
     # RMSNorm + activation quant.
     if fused_rms_quant_impl is not None:
-        if do_allreduce:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return fused_rms_quant_impl(norm, hidden_states, residual, consumer_linear)
 
     # Plain RMSNorm.

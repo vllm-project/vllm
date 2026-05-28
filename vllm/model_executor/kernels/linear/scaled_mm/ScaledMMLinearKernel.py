@@ -141,6 +141,7 @@ class FP8ScaledMMLinearKernel(
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
 
         if isinstance(x, QuantizedActivation):
+            assert x.quant_key == self.input_quant_key()
             x_data, x_s = x.data, x.scale
             orig_shape, orig_dtype = x.orig_shape, x.orig_dtype
             assert x_data.dtype == fp8_dtype

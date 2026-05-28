@@ -72,6 +72,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
         if isinstance(x, QuantizedActivation):
+            assert x.quant_key == self.input_quant_key()
             x_fp4, x_blockscale = x.data, x.scale
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
             output_dtype = x.orig_dtype

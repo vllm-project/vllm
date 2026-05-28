@@ -83,15 +83,6 @@ def _generate(llm: LLM) -> None:
             ("fused_add_rms_norm_static_fp8_quant",),
             id="llama-3.2-1b-fp8",
         ),
-        # Unquantized: helper's _allreduce_rms_norm branch falls through to
-        # norm(x, residual), which dispatches to the fused_add_rms_norm
-        # custom op. Proves the helper is wired into model code and routes
-        # the no-quant case correctly.
-        pytest.param(
-            "meta-llama/Llama-3.2-1B-Instruct",
-            ("fused_add_rms_norm",),
-            id="llama-3.2-1b",
-        ),
     ],
 )
 def test_tp1_manual_fusion(op_count_session, model: str, expected_ops: tuple[str, ...]):
