@@ -477,7 +477,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     # Weight mapping from checkpoint format to vLLM format
     # Different from parent class due to different vision model structure
-    weight_mapper = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # Language model mapping
             "language_model.layers.": "language_model.model.layers.",
@@ -533,7 +533,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Override to use different weight mapping for SigLIP."""
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.weight_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LlamaNemotronVLForSequenceClassification(
@@ -543,8 +543,8 @@ class LlamaNemotronVLForSequenceClassification(
 
     # Reranker checkpoint places base model weights under `model.*`,
     # while `score.*` remains at the top level.
-    weight_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""}) | (
-        LlamaNemotronVLForEmbedding.weight_mapper
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""}) | (
+        LlamaNemotronVLForEmbedding.hf_to_vllm_mapper
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
