@@ -45,6 +45,29 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
+### NIXL metrics aggregation semantics
+
+NIXL connector metrics are emitted from transfer events on worker processes and
+are then aggregated before they are exposed on `/metrics`.
+
+- **Aggregation scope:** For each scheduler update, worker-level NIXL transfer
+  stats are merged into a single engine-level payload.
+- **Histograms:** Every transfer observation is recorded; histogram buckets are
+  cumulative by definition in Prometheus.
+- **Counters:** Failure counters (`*_failed_*`, `*_kv_expired_reqs`) are
+  increment-only and accumulate over the process lifetime.
+- **Metric labels:** NIXL metrics are tracked per engine label set. To compute a
+  service-wide value, sum across engine label values in your PromQL query.
+- **Time window behavior:** The in-memory transfer stats buffers used for
+  periodic logging are reset after they are consumed, but Prometheus counters
+  and histograms remain cumulative across scrapes.
+
+Example PromQL (sum across all engines):
+
+```promql
+sum by (model_name) (rate(vllm:nixl_num_failed_transfers[5m]))
+```
+
 ## Model Flops Utilization (MFU) Performance Metrics
 
 These metrics are available via `--enable-mfu-metrics`:
