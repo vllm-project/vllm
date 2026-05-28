@@ -148,7 +148,7 @@ class DualQueueThreadPool:
                 job_finished, success = state.task_done(True)
             except Exception as exc:
                 logger.error(
-                    "FileSystemTierManagerPython: job %s block I/O failed: %s",
+                    "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
