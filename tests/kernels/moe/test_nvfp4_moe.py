@@ -287,5 +287,93 @@ def test_cutlass_fp4_moe_swiglustep(
         torch.testing.assert_close(torch_output, cutlass_output, atol=1e-1, rtol=1e-1)
 
 
+@torch.inference_mode()
+def test_cutlass_fp4_moe_router_weight_on_input(workspace_init):
+    set_random_seed(7)
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        m, n, k, e = 4, 1024, 1024, 8
+        dtype = torch.bfloat16
+
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = (
+            make_test_weights(
+                e,
+                n,
+                k,
+                in_dtype=dtype,
+                quant_dtype="nvfp4",
+                block_shape=None,
+                per_out_ch_quant=False,
+            )
+        )
+
+        topk_ids = torch.arange(m, device="cuda", dtype=torch.int32).view(m, 1)
+        topk_weights = torch.tensor(
+            [[0.25], [0.5], [0.75], [0.875]], device="cuda", dtype=torch.float32
+        )
+        unit_topk_weights = torch.ones_like(topk_weights)
+        preweighted_a = (a * topk_weights.to(a.dtype)).contiguous()
+
+        a1_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a2_gs = torch.ones((e,), device="cuda", dtype=torch.float32)
+
+        assert w1_gs is not None
+        assert w2_gs is not None
+        assert w1_blockscale is not None
+        assert w2_blockscale is not None
+
+        quant_config = nvfp4_moe_quant_config(
+            g1_alphas=(1 / w1_gs),
+            g2_alphas=(1 / w2_gs),
+            a1_gscale=a1_gs,
+            a2_gscale=a2_gs,
+            w1_scale=w1_blockscale,
+            w2_scale=w2_blockscale,
+        )
+        moe_config = make_dummy_moe_config(
+            num_experts=e,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            in_dtype=dtype,
+        )
+        kernel = mk.FusedMoEKernel(
+            make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=False),
+            CutlassExpertsFp4(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+        output_apply_on_input = kernel.apply(
+            hidden_states=a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=True,
+        )
+        output_preweighted = kernel.apply(
+            hidden_states=preweighted_a,
+            w1=w1_q,
+            w2=w2_q,
+            topk_weights=unit_topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+        torch.testing.assert_close(
+            output_apply_on_input, output_preweighted, atol=1e-1, rtol=1e-1
+        )
+
+
 if __name__ == "__main__":
     test_cutlass_fp4_moe_no_graph((2, 1024, 1024), 40, 1, torch.half)
