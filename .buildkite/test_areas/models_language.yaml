@@ -50,7 +50,7 @@ steps:
   mirror:
     torch_nightly: {}
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
       commands:
