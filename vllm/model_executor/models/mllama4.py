@@ -863,9 +863,6 @@ class Llama4ForConditionalGeneration(
     ) -> str:
         return "image"
 
-    def get_max_frames_per_video(self) -> int:
-        return 0
-
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: VllmConfig,
@@ -877,25 +874,20 @@ class Llama4ForConditionalGeneration(
         )
         return (min_budget, max_budget)
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(mm_kwargs["patches_per_image"])
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         patches_per_chunk = self.get_image_patches_per_chunk()
-        chunks_per_image = mm_kwargs["patches_per_image"]
-        return [n * patches_per_chunk for n in chunks_per_image.tolist()]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        return mm_kwargs["patches_per_image"].tolist()
+        return [
+            EncoderItemSpec(
+                input_size=num_chunks,
+                output_tokens=num_chunks * patches_per_chunk,
+            )
+            for num_chunks in mm_kwargs["patches_per_image"].tolist()
+        ]
 
     def select_encoder_cudagraph_items(
         self,

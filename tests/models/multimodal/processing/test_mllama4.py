@@ -111,11 +111,10 @@ def test_encoder_cudagraph_metadata():
         patches_per_chunk,
         20,
     )
-    assert model.get_encoder_cudagraph_num_items(mm_kwargs) == 2
-    assert model.get_encoder_cudagraph_per_item_input_sizes(mm_kwargs) == [2, 3]
-    assert model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs) == [
-        2 * patches_per_chunk,
-        3 * patches_per_chunk,
+    item_specs = model.get_encoder_cudagraph_item_specs(mm_kwargs)
+    assert [(spec.input_size, spec.output_tokens) for spec in item_specs] == [
+        (2, 2 * patches_per_chunk),
+        (3, 3 * patches_per_chunk),
     ]
 
 
