@@ -44,6 +44,10 @@
 
 #include "qdq_4_rdna3.cuh"
 
+#if defined(__HIPCC__) && defined(__gfx1100__)
+  #define __HIP__RDNA3__
+#endif
+
 namespace vllm {
 namespace gptq_rdna3 {
 
@@ -62,6 +66,10 @@ namespace gptq_rdna3 {
 // fp32 dequant rewrite alone.
 #define BLOCK_KN_SIZE 256
 #define THREADS_X 256
+
+// Device code below is RDNA3-only; non-RDNA3 device passes fall through to
+// the empty __global__ stub at the #else below for symbol parity.
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ---------------------------------------------------------------------------
 // Per-dtype helpers. We avoid heavy template metaprogramming and just provide
@@ -100,7 +108,7 @@ __forceinline__ __device__ float dot22_8_f(half2 (&dq)[4], const half* a_ptr) {
   // which could lose ~3 bits of precision on borderline magnitudes.
   float result = 0.0f;
   const half2* a2_ptr = (const half2*)a_ptr;
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; i++) {
     result = __builtin_amdgcn_fdot2(dq[i], *a2_ptr++, result, /*clamp=*/false);
   }
@@ -124,7 +132,7 @@ __forceinline__ __device__ float dot22_8_f(bf162_t (&dq)[4],
   // throughout instead of bf16, which is also numerically more accurate
   // (no compounding bf16-rounding inside the dot loop).
   float result = 0.0f;
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; i++) {
     uint32_t aw, dw;
     __builtin_memcpy(&aw, a_ptr + 2 * i, sizeof(uint32_t));
@@ -150,7 +158,7 @@ __forceinline__ __device__ float dot22_8_f(bf162_t (&dq)[4],
 __forceinline__ __device__ float dot22_8_f(float (&dq)[8],
                                            const bf16_t* a_ptr) {
   float result = 0.0f;
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; i++) {
     uint32_t aw;
     __builtin_memcpy(&aw, a_ptr + 2 * i, sizeof(uint32_t));
@@ -285,7 +293,7 @@ __global__ void gemm_q4_kernel_rdna3(
   constexpr bool USE_LDS_A = (M_COUNT > 1) || std::is_same<T, half>::value;
   if constexpr (USE_LDS_A) {
     if (offset_k + t < end_k) {
-#pragma unroll
+  #pragma unroll
       for (int m = 0; m < M_COUNT; ++m) {
         T av;
         if (offset_m + m < size_m) {
@@ -342,13 +350,13 @@ __global__ void gemm_q4_kernel_rdna3(
     load4_zeros(qz_row, n, zeros);
     load4_scales<T>(sc_row, n, scales);
     if constexpr (std::is_same<T, half>::value) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 4; ++i) {
         prep_zero_scale_fp16((uint32_t)(zeros[i] + zero_offset), scales[i],
                              z1z16_h[i], y1y16_h[i]);
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 4; ++i) {
         prep_zero_scale_bf16_f32((uint32_t)(zeros[i] + zero_offset), scales[i],
                                  z_b_f[i], y_b_f[i]);
@@ -359,9 +367,9 @@ __global__ void gemm_q4_kernel_rdna3(
   refresh_group(group);
 
   float block_c[M_COUNT][4];
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) block_c[m][j] = 0.0f;
   }
 
@@ -389,13 +397,13 @@ __global__ void gemm_q4_kernel_rdna3(
     // global_load_b128 instructions back-to-back; the dependent dequant +
     // FMA work below hides their latency.
     int4 b_w[4];
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       b_w[j] = *(const int4*)(b_ptr + j * size_n);
     }
     b_ptr += 4 * size_n;
 
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 4; ++j) {
       const int a_off = (k - offset_k) + 8 * j;
 
@@ -406,7 +414,7 @@ __global__ void gemm_q4_kernel_rdna3(
         dequant_4bit_8_fp16((uint32_t)b_w[j].z, dq[2], z1z16_h[2], y1y16_h[2]);
         dequant_4bit_8_fp16((uint32_t)b_w[j].w, dq[3], z1z16_h[3], y1y16_h[3]);
 
-#pragma unroll
+  #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
           const half* a_ptr = reinterpret_cast<const half*>(&block_a[m][a_off]);
           block_c[m][0] += dot22_8_f(dq[0], a_ptr);
@@ -463,7 +471,7 @@ __global__ void gemm_q4_kernel_rdna3(
         // No fp32 widening of activations: the bytes go straight from LDS
         // through v_dot2 into the fp32 accumulator.
         float sum_a = 0.0f;
-#pragma unroll
+  #pragma unroll
         for (int b = 0; b < 4; ++b) {
           sum_a = __builtin_amdgcn_fdot2_f32_bf16(
               *((bf16x2_t*)(&a_pack.f[b])), *((const bf16x2_t*)&BF16_ONES),
@@ -473,7 +481,7 @@ __global__ void gemm_q4_kernel_rdna3(
         // unroll 1 keeps q_pack alive only one col at a time (8 fp32 VGPRs
         // recycled across cols), avoiding straight-line expansion that
         // would inflate live-range to 32 VGPRs.
-#pragma unroll 1
+  #pragma unroll 1
         for (int col = 0; col < 4; ++col) {
           // Build dequant magic values bf16(128 + nibble) directly into a
           // fp32-aliased union via uint32 stores. No fp32 in the data flow
@@ -487,7 +495,7 @@ __global__ void gemm_q4_kernel_rdna3(
 
           // partial = Σ (128 + nibble[i]) · a[i], via 4× v_dot2_f32_bf16.
           float partial = 0.0f;
-#pragma unroll
+  #pragma unroll
           for (int b = 0; b < 4; ++b) {
             partial = __builtin_amdgcn_fdot2_f32_bf16(
                 *((bf16x2_t*)(&a_pack.f[b])), *((bf16x2_t*)(&q_pack.f[b])),
@@ -526,7 +534,7 @@ __global__ void gemm_q4_kernel_rdna3(
         // InstCombine fold). At M_COUNT=8 this is 32 fp32 VGPRs — within RDNA3
         // budget.
         pack4 a_pack[M_COUNT];
-#pragma unroll
+  #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
           const uint32_t* a_words =
               reinterpret_cast<const uint32_t*>(&block_a[m][a_off]);
@@ -538,10 +546,10 @@ __global__ void gemm_q4_kernel_rdna3(
 
         // sum_a[m] = Σ a[m][i] via 4× v_dot2 with bf162(1,1) — no fp32 widen.
         float sum_a[M_COUNT];
-#pragma unroll
+  #pragma unroll
         for (int m = 0; m < M_COUNT; ++m) {
           float s = 0.0f;
-#pragma unroll
+  #pragma unroll
           for (int b = 0; b < 4; ++b) {
             s = __builtin_amdgcn_fdot2_f32_bf16(*((bf16x2_t*)(&a_pack[m].f[b])),
                                                 *((const bf16x2_t*)&BF16_ONES),
@@ -553,7 +561,7 @@ __global__ void gemm_q4_kernel_rdna3(
         // Per col: build magic-value pack, dot against all M activations.
         // unroll 1 keeps q_pack live one col at a time (8 fp32 VGPRs recycled)
         // — same register-pressure trick as the previous fp32 path.
-#pragma unroll 1
+  #pragma unroll 1
         for (int col = 0; col < 4; ++col) {
           pack4 q_pack;
           const uint32_t qa = w[col];
@@ -562,10 +570,10 @@ __global__ void gemm_q4_kernel_rdna3(
           q_pack.u[2] = ((qa >> 8) & 0x000F000Fu) | BF16_MAGIC;
           q_pack.u[3] = ((qa >> 12) & 0x000F000Fu) | BF16_MAGIC;
 
-#pragma unroll
+  #pragma unroll
           for (int m = 0; m < M_COUNT; ++m) {
             float partial = 0.0f;
-#pragma unroll
+  #pragma unroll
             for (int b = 0; b < 4; ++b) {
               partial = __builtin_amdgcn_fdot2_f32_bf16(
                   *((bf16x2_t*)(&a_pack[m].f[b])), *((bf16x2_t*)(&q_pack.f[b])),
@@ -588,7 +596,7 @@ __global__ void gemm_q4_kernel_rdna3(
   // (caller pre-zeros it). On gfx11 the packed atomic is a CAS-loop, but with
   // a single b64 op we halve the atomic instruction count vs two b32 CAS
   // calls, AND save the FP32 buffer + memset + cast pass entirely.
-#pragma unroll
+  #pragma unroll
   for (int m = 0; m < M_COUNT; ++m) {
     if (offset_m + m >= size_m) continue;  // skip padding rows past size_m
     T* out = c + (offset_m + m) * size_n + n;
@@ -609,6 +617,16 @@ __global__ void gemm_q4_kernel_rdna3(
     }
   }
 }
+
+#else  // non-RDNA3 device pass: empty __global__ for symbol parity.
+
+template <typename T, int M_COUNT>
+__global__ void gemm_q4_kernel_rdna3(const T*, const uint32_t*, const uint32_t*,
+                                     const T*, T*, const int, const int,
+                                     const int, const int, const int,
+                                     const int*) {}
+
+#endif  // __HIP__RDNA3__ || !__HIP_DEVICE_COMPILE__
 
 // ---------------------------------------------------------------------------
 // Launcher.

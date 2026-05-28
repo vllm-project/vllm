@@ -44,12 +44,21 @@
 
 #include "qdq_4_rdna3.cuh"
 
+#if defined(__HIPCC__) && defined(__gfx1100__)
+  #define __HIP__RDNA3__
+#endif
+
 namespace vllm {
 namespace gptq_rdna3_wmma {
 
 // Pull dequant types from the sibling namespace.
 using vllm::gptq_rdna3::bf162_t;
 using vllm::gptq_rdna3::bf16_t;
+
+// Device code below uses RDNA3-only __builtin_amdgcn_wmma_* intrinsics;
+// non-RDNA3 device passes fall through to empty __global__ stubs at the
+// #else block at the end of this TU.
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // PRECISE dequant variants live HERE, not in the shared qdq_4_rdna3.cuh
 // header. Reason: hipcc takes different register/scheduling decisions when
@@ -215,6 +224,9 @@ __forceinline__ __device__ void atomic_add_pk_bf16(bf162_t* addr, bf162_t val) {
   }
 }
 
+#endif  // helpers guard; K-split heuristics below are pure host/device
+        // arithmetic, called from launch_* on non-RDNA3 device passes too.
+
 // K-split factor heuristic. Returns the gridDim.z to use for a given K.
 // Aim: each block does at least ~16 K-tiles (= K=256) so the per-block
 // constant overhead (LDS init, kernel prologue) is amortised. Upper
@@ -268,6 +280,8 @@ __host__ __device__ static inline int compute_wmma_k_split_mn(
   return compute_wmma_k_split(size_k);
 }
 
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
+
 // Native AMDGPU vector types expected by the WMMA built-ins.
 using v16fp16 = _Float16 __attribute__((ext_vector_type(16)));
 using v16bf16 = __bf16 __attribute__((ext_vector_type(16)));
@@ -316,6 +330,11 @@ template <>
 __device__ __forceinline__ bf16_t tzero<bf16_t>() {
   return __float2bfloat16(0.0f);
 }
+
+#endif  // helpers guard (each __global__ below has its own guard so launch_*
+        // host code remains visible to the parser on non-RDNA3 device passes)
+
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ===========================================================================
 // WMMA kernel: 16M × 16N tile per block, 1 wave, full K traversal.
@@ -454,7 +473,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
         // Permuted (act-order): scattered global reads, no vectorization.
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -472,7 +491,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
@@ -480,18 +499,18 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     // slot, N-axis in lane). This is the AMD WMMA convention for the right
     // operand of a matrix multiply — K-axis aligns with A's K-axis (also
     // in slot), enabling per-lane inner products.
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<T, E>(b_lds[i][lane_lo]);
     }
 
-#ifdef VLLM_WMMA_LAYOUT_DEBUG
+  #ifdef VLLM_WMMA_LAYOUT_DEBUG
     // Diagnostic: skip WMMA, force c_acc to encode (lane, slot) so the
     // store pattern reveals the C-output lane→matrix mapping. Compile with
     // -DVLLM_WMMA_LAYOUT_DEBUG to enable. Output: c[m][n] = lane + slot/16.
     (void)a_frag;
     (void)b_frag;
-  #pragma unroll
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
       c_acc[i] = (float)lane + (float)i / 16.0f;
     }
@@ -499,9 +518,9 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     if (k_tile == 0) {
       k_tile = size_k;  // exit loop on next check
     }
-#else
+  #else
     c_acc = wmma_mma(a_frag, b_frag, c_acc);
-#endif
+  #endif
 
     // No __syncthreads() needed before the next iter overwrites b_lds:
     // single-wave block, and the next iter's ds_write to b_lds is preceded
@@ -527,7 +546,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     // (gridDim.z-way per cell) remains and is the residual atomic cost.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;  // valid only on even lane
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; i++) {
       // Wave-wide shuffle: every lane participates so the side-effect is
       // visible. Only even lanes use the result. shfl_xor with mask 1
@@ -557,7 +576,7 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     // assigned exactly once.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -572,6 +591,15 @@ __global__ void gemm_q4_wmma_kernel_16x16_1w(
     }
   }
 }
+
+#else  // non-RDNA3 device pass: empty kernel for symbol parity.
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_16x16_1w(const T*, const uint32_t*,
+                                             const uint32_t*, const T*, T*,
+                                             const int, const int, const int,
+                                             const int, const int, const int*) {
+}
+#endif
 
 template <typename T>
 void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
@@ -589,6 +617,8 @@ void launch_gemm_q4_wmma_16x16_1w(const T* a, const uint32_t* b_q_weight,
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
+
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ===========================================================================
 // 32x16_2w kernel: 2 waves per block, 32M × 16N tile, double-buffered LDS.
@@ -728,7 +758,7 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -738,12 +768,12 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
     // Load B from current buffer (both waves read identical data).
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo]);
     }
@@ -769,7 +799,7 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     // own pairing — the two waves don't interact during the store.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; i++) {
       float other_f = __shfl_xor(c_acc[i], 1);
       if (!is_even_lane) continue;
@@ -793,7 +823,7 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     // Single writer per cell, direct non-atomic write.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -808,6 +838,15 @@ __global__ void gemm_q4_wmma_kernel_32x16_2w(
     }
   }
 }
+
+#else  // non-RDNA3 device pass: empty kernel for symbol parity.
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_32x16_2w(const T*, const uint32_t*,
+                                             const uint32_t*, const T*, T*,
+                                             const int, const int, const int,
+                                             const int, const int, const int*) {
+}
+#endif
 
 template <typename T>
 void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
@@ -840,6 +879,8 @@ void launch_gemm_q4_wmma_32x16_2w(const T* a, const uint32_t* b_q_weight,
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
+
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ===========================================================================
 // 64x16_4w kernel: 4 waves per block, 64M × 16N tile, double-buffered LDS.
@@ -979,7 +1020,7 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -989,12 +1030,12 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
     // Load B from current buffer (all 4 waves read identical data).
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo]);
     }
@@ -1014,7 +1055,7 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     // K-split atomic path. Pair-shuffle within wave to halve atomic count.
     const bool is_even_lane = (lane_lo & 1) == 0;
     const int out_n_pair = n_tile + lane_lo;
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; i++) {
       float other_f = __shfl_xor(c_acc[i], 1);
       if (!is_even_lane) continue;
@@ -1038,7 +1079,7 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     // Single writer per cell, direct non-atomic write.
     const int out_n = n_tile + lane_lo;
     if (out_n < size_n) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1053,6 +1094,15 @@ __global__ void gemm_q4_wmma_kernel_64x16_4w(
     }
   }
 }
+
+#else  // non-RDNA3 device pass: empty kernel for symbol parity.
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_64x16_4w(const T*, const uint32_t*,
+                                             const uint32_t*, const T*, T*,
+                                             const int, const int, const int,
+                                             const int, const int, const int*) {
+}
+#endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
@@ -1076,6 +1126,8 @@ void launch_gemm_q4_wmma_64x16_4w(const T* a, const uint32_t* b_q_weight,
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
+
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ===========================================================================
 // 64x32_4w kernel: 4 waves per block, 64M × 32N tile, double-buffered LDS.
@@ -1213,7 +1265,7 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -1223,12 +1275,12 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
     // Load B for cols [0..15] and cols [16..31]. Both halves of the 32N tile.
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo]);
       b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 16]);
@@ -1253,7 +1305,7 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         float other_f = __shfl_xor(acc[i], 1);
         if (!is_even_lane) continue;
@@ -1276,7 +1328,7 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
     } else {
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1294,6 +1346,15 @@ __global__ void gemm_q4_wmma_kernel_64x32_4w(
   store_acc(c_acc0, n_tile);
   store_acc(c_acc1, n_tile + 16);
 }
+
+#else  // non-RDNA3 device pass: empty kernel for symbol parity.
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_64x32_4w(const T*, const uint32_t*,
+                                             const uint32_t*, const T*, T*,
+                                             const int, const int, const int,
+                                             const int, const int, const int*) {
+}
+#endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
@@ -1319,6 +1380,8 @@ void launch_gemm_q4_wmma_64x32_4w(const T* a, const uint32_t* b_q_weight,
       a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
       zero_offset, b_q_perm);
 }
+
+#if defined(__HIP__RDNA3__) || !defined(__HIP_DEVICE_COMPILE__)
 
 // ===========================================================================
 // 64x64_4w kernel: 4 waves per block, 64M × 64N tile, 4 wmmas per wave per
@@ -1448,7 +1511,7 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     if (m_row < size_m) {
       const T* a_row = a + m_row * size_k;
       if (b_q_perm) {
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           T v = a_row[b_q_perm[k_tile + i]];
           a_frag[i] = bitcast_elem<T, E>(v);
@@ -1458,12 +1521,12 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
         __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
       }
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
     // Load B for all four 16-col halves.
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 16; i++) {
       b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 0]);
       b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 16]);
@@ -1487,7 +1550,7 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         float other_f = __shfl_xor(acc[i], 1);
         if (!is_even_lane) continue;
@@ -1510,7 +1573,7 @@ __global__ void gemm_q4_wmma_kernel_64x64_4w(
     } else {
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1655,7 +1718,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
     if (a_row_ptr) {
       __builtin_memcpy(&a_frag, a_row_ptr + k_tile, sizeof(a_frag));
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
@@ -1681,7 +1744,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         float other_f = __shfl_xor(acc[i], 1);
         if (!is_even_lane) continue;
@@ -1704,7 +1767,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k16(
     } else {
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1854,9 +1917,9 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
       __builtin_memcpy(&a_frag_lo, a_row_ptr + k_tile, sizeof(V16));
       __builtin_memcpy(&a_frag_hi, a_row_ptr + k_tile + 16, sizeof(V16));
     } else {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag_lo[i] = (E)0;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 16; i++) a_frag_hi[i] = (E)0;
     }
 
@@ -1893,7 +1956,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
     if (gridDim.z > 1) {
       const bool is_even_lane = (lane_lo & 1) == 0;
       const int out_n_pair = n_base + lane_lo;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         float other_f = __shfl_xor(acc[i], 1);
         if (!is_even_lane) continue;
@@ -1916,7 +1979,7 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
     } else {
       const int out_n = n_base + lane_lo;
       if (out_n >= size_n) return;
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; i++) {
         const int out_m = m_tile_wave + 2 * i + lane_hi;
         if (out_m < size_m) {
@@ -1936,6 +1999,28 @@ __global__ void gemm_q4_wmma_kernel_128x64_k32(
   store_acc(c_acc2, n_tile + 32);
   store_acc(c_acc3, n_tile + 48);
 }
+
+#else  // non-RDNA3 device pass: empty kernels for symbol parity (covers the
+       // three kernels that share this launcher).
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_64x64_4w(const T*, const uint32_t*,
+                                             const uint32_t*, const T*, T*,
+                                             const int, const int, const int,
+                                             const int, const int, const int*) {
+}
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_128x64_k16(const T*, const uint32_t*,
+                                               const uint32_t*, const T*, T*,
+                                               const int, const int, const int,
+                                               const int, const int,
+                                               const int*) {}
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_128x64_k32(const T*, const uint32_t*,
+                                               const uint32_t*, const T*, T*,
+                                               const int, const int, const int,
+                                               const int, const int,
+                                               const int*) {}
+#endif
 
 template <typename T>
 void launch_gemm_q4_wmma_64x64_4w(const T* a, const uint32_t* b_q_weight,
