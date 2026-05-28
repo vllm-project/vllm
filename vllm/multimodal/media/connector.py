@@ -347,7 +347,9 @@ class MediaConnector:
             data = connection.get_bytes(
                 url_spec.url,
                 timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                allow_redirects=False
+                if forbid_private_networks_access
+                else envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
 
             self._put_cached_bytes(url, data)
@@ -397,7 +399,9 @@ class MediaConnector:
             data = await connection.async_get_bytes(
                 url_spec.url,
                 timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                allow_redirects=False
+                if forbid_private_networks_access
+                else envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
 
             await loop.run_in_executor(
