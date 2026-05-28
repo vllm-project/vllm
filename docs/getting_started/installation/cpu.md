@@ -160,32 +160,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 ### Which `dtype` should be used?
 
 - Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
-
-### How do I enable AMD Zen optimizations?
-
-On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so
-vLLM pulls the tested `zentorch` version for that release:
-
-```bash
-export VLLM_VERSION=0.20.2
-pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
-    --extra-index-url https://download.pytorch.org/whl/cpu
-```
-
-This is safer than installing `zentorch` separately, because the `zen` extra
-keeps the vLLM wheel and ZenDNN plugin on the tested version combination.
-
-vLLM auto-detects the platform and routes linear layers through
-ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with
-INFO-level logs and look for the activation banner:
-
-```bash
-VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
-    2>&1 | grep -E "ZenCpuPlatform activated|CPU unquantized GEMM dispatch"
-```
-
-See [AMD Zen optimizations](#amd-zen-optimizations) for details on detection
-rules, supported dtypes, and the `VLLM_ZENTORCH_WEIGHT_PREPACK` knob.
+- On AMD Zen CPUs (`ZenCpuPlatform`), `float16` is **not** supported. Only `bfloat16` and `float32` are accepted; models declared with `float16` are auto-downcast to `bfloat16` at model load time. See [AMD Zen optimizations](#amd-zen-optimizations).
 
 ### How to launch a vLLM service on CPU?
 
@@ -257,6 +232,25 @@ By providing MODEL_FILTER and DTYPE_FILTER, only commands for related model ID a
 ```bash
 ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
+
+### How do I enable AMD Zen optimizations? {#how-do-i-enable-amd-zen-optimizations}
+
+On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so vLLM pulls the tested `zentorch` version for that release:
+
+```bash
+export VLLM_VERSION=0.20.2
+pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with INFO-level logs and look for the activation banner:
+
+```bash
+VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
+    2>&1 | grep -E "ZenCpuPlatform activated|CPU unquantized GEMM dispatch"
+```
+
+See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, supported dtypes, and the `VLLM_ZENTORCH_WEIGHT_PREPACK` knob.
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
