@@ -10,6 +10,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -220,6 +221,99 @@ class TestExtractToolCalls:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"value": 42}
         assert isinstance(args["value"], int)
+
+    @pytest.mark.skip_global_cleanup
+    def test_composed_schema_converts_object_and_array_params(self):
+        """Composed JSON Schema types must still drive DSML type coercion."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "until"},
+                                        "date": {"type": "string"},
+                                    },
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "for"},
+                                        "minutes": {"type": "number"},
+                                    },
+                                },
+                            ],
+                        },
+                        "patches": {
+                            "oneOf": [
+                                {"type": "array", "items": {"type": "object"}},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="false">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f'{PARAM_START}patches" string="false">'
+            f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {
+            "wait": {"type": "for", "minutes": 2880},
+            "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+        }
+        assert isinstance(args["wait"], dict)
+        assert isinstance(args["patches"], list)
+
+    @pytest.mark.skip_global_cleanup
+    def test_string_attr_true_preserves_literal_for_composed_schema(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="true">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"wait": '{"type":"for","minutes":2880}'}
 
     def test_arguments_wrapper_repaired(self):
         """A single 'arguments' wrapper parameter must be unwrapped when it
@@ -581,6 +675,125 @@ class TestExtractToolCallsStreaming:
         assert args == {"value": "42"}
         assert isinstance(args["value"], str)
 
+    @pytest.mark.skip_global_cleanup
+    def test_composed_schema_conversion_in_streaming(self):
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="set_timer",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "wait": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "patches": {
+                            "oneOf": [
+                                {"type": "array", "items": {"type": "object"}},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}set_timer">\n'
+            f'{PARAM_START}wait" string="false">'
+            f'{{"type":"for","minutes":2880}}'
+            f"{PARAM_END}\n"
+            f'{PARAM_START}patches" string="false">'
+            f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+        assert args == {
+            "wait": {"type": "for", "minutes": 2880},
+            "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+        }
+
+    def test_responses_function_tool_schema_in_streaming(self):
+        """Responses API FunctionTool schemas must drive streaming conversion."""
+        tool = FunctionTool(
+            type="function",
+            name="toggle",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "count": {"type": "integer"},
+                },
+            },
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}toggle">\n'
+            f'{PARAM_START}enabled" string="false">true{PARAM_END}\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+
+        assert args == {"enabled": True, "count": 42}
+        assert isinstance(args["enabled"], bool)
+        assert isinstance(args["count"], int)
+
+    def test_streaming_matches_non_streaming_conversion_fallbacks(self):
+        """Streaming must reuse conversion fallback semantics for string=false."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="coerce",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "union_value": {"type": ["null", "string"]},
+                        "bad_int": {"type": "integer"},
+                        "nullable_string": {"type": ["null", "string"]},
+                        "null_string": {"type": "string"},
+                        "whole_number": {"type": "number"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}coerce">\n'
+            f'{PARAM_START}union_value" string="false">hello{PARAM_END}\n'
+            f'{PARAM_START}bad_int" string="false">abc{PARAM_END}\n'
+            f'{PARAM_START}nullable_string" string="false">null{PARAM_END}\n'
+            f'{PARAM_START}null_string" string="false">null{PARAM_END}\n'
+            f'{PARAM_START}whole_number" string="false">3.0{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+
+        non_stream = parser.extract_tool_calls(full_text, None)
+        non_stream_args = json.loads(non_stream.tool_calls[0].function.arguments)
+
+        deltas = self._stream(parser, full_text)
+        stream_args = json.loads(self._reconstruct_args(deltas))
+
+        assert stream_args == non_stream_args
+        assert stream_args == {
+            "union_value": "hello",
+            "bad_int": "abc",
+            "nullable_string": None,
+            "null_string": "null",
+            "whole_number": 3,
+        }
+
     def test_multiple_tools_streaming(self, parser):
         full_text = (
             f"{FC_START}\n"
@@ -753,8 +966,8 @@ class TestExtractToolCallsStreaming:
         assert json.loads(self._reconstruct_args(deltas, tool_index=0)) == {"p": "v1"}
         assert json.loads(self._reconstruct_args(deltas, tool_index=1)) == {"q": "v2"}
 
-    def test_no_emission_while_incomplete(self, parser):
-        """No tool calls should be emitted until an invoke block completes."""
+    def test_emits_arguments_before_invoke_completes(self, parser):
+        """Argument deltas should stream before the invoke block closes."""
         # Stream only a partial invoke (no closing tag)
         partial_text = (
             f"{FC_START}\n"
@@ -762,8 +975,13 @@ class TestExtractToolCallsStreaming:
             f'{PARAM_START}k" string="true">val{PARAM_END}\n'
         )
         deltas = self._stream(parser, partial_text)
-        # Should have no tool call deltas yet
-        assert all(not d.tool_calls for d in deltas)
+        arg_chunks = [
+            tc.function.arguments
+            for delta in deltas
+            for tc in delta.tool_calls or []
+            if tc.function and tc.function.arguments is not None
+        ]
+        assert "".join(arg_chunks) == '{"k":"val"'
 
     def test_no_marker_leak_chunked(self, parser):
         """Chunked streaming must NOT leak DSML start-marker fragments

@@ -189,6 +189,8 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
+# NOTE: `moe_forward` and `moe_forward_shared` being opaque custom ops is a
+# load-bearing assumption for the MoE-LoRA dual-stream path.
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
@@ -840,7 +842,6 @@ class MoERunner(MoERunnerInterface):
                     self,
                     base_quant_method,
                     prepare_finalize,
-                    inplace=not base_quant_method.moe.disable_inplace,
                 )
             )
 

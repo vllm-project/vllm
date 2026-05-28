@@ -232,7 +232,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             td.w2_quantized,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
@@ -320,7 +319,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             td.w2_quantized,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
@@ -362,7 +360,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         flashinfer_cutlass_output = kernel.apply(

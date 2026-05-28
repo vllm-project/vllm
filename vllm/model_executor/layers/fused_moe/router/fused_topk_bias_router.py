@@ -56,6 +56,52 @@ def vllm_topk_sigmoid(
     return topk_weights, topk_indices
 
 
+def _topk_softplus_sqrt_torch(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
+) -> tuple[torch.Tensor, ...]:
+    """Pure PyTorch fallback for topk_softplus_sqrt (XPU/CPU)."""
+    # scores = sqrt(softplus(gating_output))
+    scores = torch.sqrt(F.softplus(gating_output.float()))
+
+    # Bias is used for expert SELECTION only, not for weight computation.
+    # Using biased scores as weights flattens the distribution when the bias
+    # is near-uniform (e.g., DSv4-Flash where all biases ≈ 8.08).
+    if e_score_correction_bias is not None:
+        scores_for_choice = scores + e_score_correction_bias.float()
+    else:
+        scores_for_choice = scores
+
+    topk = topk_weights.shape[-1]
+
+    if hash_indices_table is not None and input_tokens is not None:
+        # Hash MoE: expert indices predetermined by lookup table
+        # hash_indices_table: [vocab_size, topk] mapping token_id -> expert_ids
+        expert_ids = hash_indices_table[input_tokens.long()]  # [M, topk]
+        topk_indices.copy_(expert_ids)
+        # Gather weights from unbiased scores
+        weights = scores.gather(1, expert_ids.long())
+    else:
+        # Standard topk selection using biased scores
+        _, indices = torch.topk(scores_for_choice, k=topk, dim=-1)
+        topk_indices.copy_(indices)
+        # Gather weights from unbiased scores
+        weights = scores.gather(1, indices)
+
+    if renormalize:
+        weights = weights / (weights.sum(dim=-1, keepdim=True).clamp(min=1e-20))
+
+    topk_weights.copy_(weights * routed_scaling_factor)
+    return topk_weights, topk_indices
+
+
 def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -67,6 +113,21 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return _topk_softplus_sqrt_torch(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,

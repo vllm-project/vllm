@@ -68,7 +68,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             "Number of tokens mismatch"
         )
 
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             aiter_topK_meta_data,
         )
 
@@ -122,7 +122,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         )
 
         if aiter_topK_meta_data is not None:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
                 inject_shared_expert_weights,
             )
 

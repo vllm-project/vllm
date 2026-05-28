@@ -33,9 +33,6 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
     MoERunner,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -322,11 +319,10 @@ def FusedMoE(
         max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
+        swiglu_limit=swiglu_limit,
         activation=moe_activation,
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
-        # TODO: in_dtype == out_dtype?
-        disable_inplace=disable_inplace() or shared_experts is not None,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)

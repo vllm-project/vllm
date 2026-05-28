@@ -430,6 +430,7 @@ def has_triton_kernels() -> bool:
     return is_available
 
 
+@cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")

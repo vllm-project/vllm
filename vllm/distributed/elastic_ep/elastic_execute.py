@@ -4,6 +4,8 @@ import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -37,13 +39,21 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.eep_reconfigure import (
+    make_eep_staged_quant_method,
+)
 from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+        FusedMoEMethodBase,
+    )
 
 
 def batch_transfer_weights(
@@ -134,6 +144,7 @@ class ElasticEPScalingExecutor:
     def __init__(self, worker):
         self.worker_ref = weakref.ref(worker)
         self.reconfig_request = None
+        self._staged_moe_quant_methods: dict[nn.Module, FusedMoEMethodBase] = {}
 
     @property
     def worker(self):
@@ -196,6 +207,8 @@ class ElasticEPScalingExecutor:
             )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
+        elif new_dp_size < old_dp_size:
+            self._stage_standby_moe_quant_methods()
 
     def transfer_weights(self, old_dp_size: int, new_dp_size: int) -> None:
         standby_dp_group = get_standby_dp_group()
@@ -262,6 +275,58 @@ class ElasticEPScalingExecutor:
             src_rank=0,
             device=self.worker.device,
         )
+        # New workers enter load_model after receiving the expert mapping.
+        # Stage replacement MoE kernels before returning to the state machine
+        # so existing ranks can participate in collective EP comm creation.
+        self._stage_standby_moe_quant_methods()
+
+    def _make_eep_moe_config(self, module, dp_group, ep_group):
+        parallel_config = self.worker.vllm_config.parallel_config
+        tp_size = get_tp_group().world_size
+        sp_size = tp_size if parallel_config.use_sequence_parallel_moe else 1
+        moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=tp_size,
+            pcp_size_=get_pcp_group().world_size,
+            dp_size_=dp_group.world_size,
+            sp_size_=sp_size,
+            vllm_parallel_config=parallel_config,
+        )
+        return replace(
+            module.moe_config,
+            num_experts=module.moe_config.num_local_experts * ep_group.world_size,
+            moe_parallel_config=moe_parallel_config,
+        )
+
+    def _stage_standby_moe_quant_methods(self) -> None:
+        standby_dp_group = get_standby_dp_group()
+        standby_ep_group = get_standby_ep_group()
+        model = self.worker.model_runner.get_model()
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
+        self._staged_moe_quant_methods.clear()
+        with set_current_vllm_config(self.worker.vllm_config):
+            for module in moe_modules:
+                staged_quant_method = make_eep_staged_quant_method(
+                    module,
+                    self._make_eep_moe_config(
+                        module,
+                        standby_dp_group,
+                        standby_ep_group,
+                    ),
+                )
+                if staged_quant_method is not None:
+                    self._staged_moe_quant_methods[module] = staged_quant_method
+
+    def _commit_staged_moe_quant_methods(self) -> None:
+        model = self.worker.model_runner.get_model()
+        moe_modules = [module for module in model.modules() if is_moe_layer(module)]
+        for module in moe_modules:
+            staged_quant_method = self._staged_moe_quant_methods.pop(module, None)
+            if staged_quant_method is None:
+                continue
+            assert staged_quant_method.moe_kernel is not None
+            module._replace_quant_method(staged_quant_method)
+            staged_quant_method.moe_kernel.prepare_finalize.on_commit()
+        self._staged_moe_quant_methods.clear()
 
     def _release_cuda_graphs(self) -> None:
         if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
@@ -327,19 +392,13 @@ class ElasticEPScalingExecutor:
             module.moe_config.num_local_experts == num_local_experts
             for module in moe_modules
         ), "All MoE modules must have the same number of experts"
+        dp_group = get_dp_group()
+        ep_group = get_ep_group()
         for module in moe_modules:
-            module.moe_config.num_experts = num_local_experts * new_ep_size
+            new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
+            module.moe_config.num_experts = new_moe_config.num_experts
             module.global_num_experts = module.moe_config.num_experts
-            tp_size = get_tp_group().world_size
-            is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-            sp_size = tp_size if is_sequence_parallel else 1
-            module.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=tp_size,
-                pcp_size_=get_pcp_group().world_size,
-                dp_size_=get_dp_group().world_size,
-                sp_size_=sp_size,
-                vllm_parallel_config=parallel_config,
-            )
+            module.moe_parallel_config = new_moe_config.moe_parallel_config
             module.moe_config.moe_parallel_config = module.moe_parallel_config
 
         # Update EPLB state
@@ -404,12 +463,10 @@ class ElasticEPScalingExecutor:
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
             )
-            # Force re-creation of the modular kernel (and all2all manager)
-            # for the new EP size by resetting quant_method to base
-            # TODO(bnell): this is a hack and will not work for MKs created in
-            # the new style.
+            self._commit_staged_moe_quant_methods()
+            # Legacy modular methods need to be recreated for the new EP size.
             for module in moe_modules:
-                if hasattr(module.quant_method, "old_quant_method"):
+                if getattr(module.quant_method, "wraps_legacy_quant_method", False):
                     module._replace_quant_method(module.quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 

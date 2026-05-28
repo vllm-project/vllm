@@ -95,10 +95,8 @@ _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
 )
 
 
-# XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 def is_moe_model(model: nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers and warns the user."""
-    # Use MoERunner or RoutedExperts?
+    """Checks if the model contains MoERunner layers and warns the user."""
     if any(isinstance(module, MoERunner) for module in model.modules()):
         logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
         return True

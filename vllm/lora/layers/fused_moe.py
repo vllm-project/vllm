@@ -19,8 +19,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
+from vllm.platforms import current_platform
 
-from .utils import _get_lora_device
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -43,6 +44,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = moe_parallel_config.tp_size
         self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
+
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._init_lora_stream_context()
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
@@ -100,8 +104,26 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def intermediate_size_per_partition(self) -> int:
         return self.base_layer.moe_config.intermediate_size_per_partition
 
+    def _init_lora_stream_context(self) -> None:
+        self._lora_stream: torch.cuda.Stream | None = None
+        self._events: tuple[torch.cuda.Event, ...] | None = None
+        if not self._enable_aux_cuda_stream:
+            return
+        if not current_platform.is_cuda_alike():
+            return
+        self._lora_stream = _get_lora_aux_cuda_stream()
+        # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
+        # the same event objects; reuse-within-a-pair is fine because the
+        # second pair starts only after intermediate_cache1.add_() has joined.
+        self._events = tuple(torch.cuda.Event() for _ in range(4))
+
     def _build_lora_context(self):
         moe_config = self.base_layer.moe_config
+        use_dual_stream = (
+            self._enable_aux_cuda_stream
+            and not self.fully_sharded
+            and self._lora_stream is not None
+        )
         return MoELoRAContext(
             w13_lora_a_stacked=self.w13_lora_a_stacked,
             w13_lora_b_stacked=self.w13_lora_b_stacked,
@@ -117,6 +139,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             local_num_experts=self.local_num_experts,
             punica_wrapper=self.punica_wrapper,
             use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
+            aux_stream=self._lora_stream if use_dual_stream else None,
+            events=self._events if use_dual_stream else None,
         )
 
     def _create_lora_a_weights(
