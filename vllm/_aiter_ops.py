@@ -2170,6 +2170,7 @@ class rocm_aiter_ops:
         use_shuffle_layout: bool,
         block_size: int,
         x: int,
+        rotary_dim: int = 0,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
@@ -2200,6 +2201,7 @@ class rocm_aiter_ops:
             use_shuffle_layout,
             block_size,
             x,
+            rotary_dim,
         )
 
     @staticmethod

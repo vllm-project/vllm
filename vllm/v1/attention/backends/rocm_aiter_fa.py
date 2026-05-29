@@ -1440,7 +1440,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
 
         is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
         if is_fp8_kv_cache:
@@ -1454,6 +1454,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
         use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         x = 16 // key_cache.element_size()
         block_size = key_cache.shape[1]
+        # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a
+        # prefix of each head's channel dim).
+        rotary_dim = cos_sin_cache.shape[-1]
+        kernel_rotary_dim = 0 if rotary_dim == head_dim else rotary_dim
 
         rocm_aiter_ops.fused_qk_norm_rope_and_cache(
             qkv=qkv,
@@ -1479,6 +1483,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             use_shuffle_layout=use_shuffle_layout,
             block_size=block_size,
             x=x,
+            rotary_dim=kernel_rotary_dim,
         )
 
     def do_rope_and_kv_cache_update(
