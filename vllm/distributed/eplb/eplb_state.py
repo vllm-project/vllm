@@ -491,17 +491,41 @@ class EplbState:
         safe_name = eplb_model_state.model_name.replace("/", "_")
         file_path = dump_path / f"{safe_name}_expert_load.jsonl"
 
+        # tokens: per-layer per-rank token counts; consumed by
+        # ``OFFLINE_EPLB/eplb_static/moe_report.py`` for per-step imbalance.
+        tokens = (
+            latest_load.reshape(latest_load.shape[0], ep_size, -1)
+            .sum(dim=-1)
+            .cpu()
+            .tolist()
+        )
+        # experts_per_rank: [start, end] physical-expert range per EP rank;
+        # used by the HTML viewer for chart sublabels.
+        experts_per_rank_count = model.num_physical_experts // ep_size
+        experts_per_rank = [
+            [r * experts_per_rank_count, (r + 1) * experts_per_rank_count - 1]
+            for r in range(ep_size)
+        ]
+        next_rearrange = (
+            self.expert_rearrangement_step_interval
+            - self.expert_rearrangement_step
+        )
         record = {
+            "record_type": "eplb_load_stats",
+            "model": eplb_model_state.model_name,
             "model_name": eplb_model_state.model_name,
-            "world_size": ep_size,
-            "num_moe_layers": model.num_moe_layers,
+            "num_ranks": ep_size,
+            "num_layers": model.num_moe_layers,
             "num_physical_experts": model.num_physical_experts,
             "num_logical_experts": model.num_logical_experts,
             "num_redundant_experts": model.num_redundant_experts,
+            "experts_per_rank": experts_per_rank,
+            "next_rearrange": next_rearrange,
             "window_size": self.expert_load_window_size,
             "step": self.expert_rearrangement_step,
+            "tokens": tokens,
+            "expert_load": latest_load.cpu().tolist(),
             "window_expert_load": window_load.cpu().tolist(),
-            "latest_expert_load": latest_load.cpu().tolist(),
             "physical_to_logical_map": (
                 eplb_model_state.physical_to_logical_map.cpu().tolist()
             ),
