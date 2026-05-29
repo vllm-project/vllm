@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::{EngineCoreClient, TransportMode};
 
-use crate::config::Config;
+use crate::config::{Config, CoordinatorMode, HttpListenerMode};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const SENSITIVE_VLLM_ENV_PATTERNS: &[&str] =
@@ -46,17 +46,17 @@ impl ServerInfoSnapshot {
     /// Capture the runtime configuration fields available to the Rust frontend.
     pub(crate) fn from_config(config: &Config) -> Self {
         let vllm_config_json = json!({
-            "transport_mode": format!("{:?}", config.transport_mode),
-            "coordinator_mode": format!("{:?}", config.coordinator_mode),
+            "transport_mode": transport_mode_config(&config.transport_mode),
+            "coordinator_mode": coordinator_mode_config(&config.coordinator_mode),
             "model": config.model.clone(),
             "served_model_name": config.served_model_name.clone(),
-            "listener_mode": format!("{:?}", config.listener_mode),
-            "tool_call_parser": format!("{:?}", config.tool_call_parser),
-            "reasoning_parser": format!("{:?}", config.reasoning_parser),
-            "renderer": format!("{:?}", config.renderer),
+            "listener_mode": listener_mode_config(&config.listener_mode),
+            "tool_call_parser": config.tool_call_parser.to_string(),
+            "reasoning_parser": config.reasoning_parser.to_string(),
+            "renderer": config.renderer.to_string(),
             "chat_template": config.chat_template.clone(),
             "default_chat_template_kwargs": config.default_chat_template_kwargs.clone(),
-            "chat_template_content_format": format!("{:?}", config.chat_template_content_format),
+            "chat_template_content_format": config.chat_template_content_format.to_string(),
             "enable_log_requests": config.enable_log_requests,
             "disable_log_stats": config.disable_log_stats,
             "grpc_port": config.grpc_port,
@@ -83,6 +83,68 @@ impl ServerInfoSnapshot {
             "vllm_env": self.vllm_env.clone(),
             "system_env": self.system_env.clone(),
         })
+    }
+}
+
+fn transport_mode_config(transport_mode: &TransportMode) -> Value {
+    match transport_mode {
+        TransportMode::HandshakeOwner {
+            handshake_address,
+            advertised_host,
+            engine_count,
+            ready_timeout,
+            local_input_address,
+            local_output_address,
+        } => json!({
+            "mode": "handshake_owner",
+            "handshake_address": handshake_address,
+            "advertised_host": advertised_host,
+            "engine_count": engine_count,
+            "ready_timeout_secs": ready_timeout.as_secs_f64(),
+            "local_input_address": local_input_address,
+            "local_output_address": local_output_address,
+        }),
+        TransportMode::Bootstrapped {
+            input_address,
+            output_address,
+            engine_count,
+            ready_timeout,
+        } => json!({
+            "mode": "bootstrapped",
+            "input_address": input_address,
+            "output_address": output_address,
+            "engine_count": engine_count,
+            "ready_timeout_secs": ready_timeout.as_secs_f64(),
+        }),
+    }
+}
+
+fn coordinator_mode_config(coordinator_mode: &CoordinatorMode) -> Value {
+    match coordinator_mode {
+        CoordinatorMode::None => json!("none"),
+        CoordinatorMode::MaybeInProc => json!("maybe_in_proc"),
+        CoordinatorMode::External { address } => json!({
+            "mode": "external",
+            "address": address,
+        }),
+    }
+}
+
+fn listener_mode_config(listener_mode: &HttpListenerMode) -> Value {
+    match listener_mode {
+        HttpListenerMode::BindTcp { host, port } => json!({
+            "mode": "bind_tcp",
+            "host": host,
+            "port": port,
+        }),
+        HttpListenerMode::BindUnix { path } => json!({
+            "mode": "bind_unix",
+            "path": path,
+        }),
+        HttpListenerMode::InheritedFd { fd } => json!({
+            "mode": "inherited_fd",
+            "fd": fd,
+        }),
     }
 }
 
@@ -251,7 +313,14 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
+    use vllm_engine_core_client::TransportMode;
+
     use super::is_public_vllm_env_key;
+    use super::{ServerInfoConfigFormat, ServerInfoSnapshot};
+    use crate::config::{Config, CoordinatorMode, HttpListenerMode};
 
     #[test]
     fn server_info_env_filter_excludes_sensitive_vllm_keys() {
@@ -272,5 +341,47 @@ mod tests {
         assert!(is_public_vllm_env_key("VLLM_LOGGING_LEVEL"));
         assert!(is_public_vllm_env_key("VLLM_USE_MODELSCOPE"));
         assert!(!is_public_vllm_env_key("OTHER_ENV"));
+    }
+
+    #[test]
+    fn server_info_config_json_uses_stable_values() {
+        let config = Config {
+            transport_mode: TransportMode::Bootstrapped {
+                input_address: "tcp://127.0.0.1:0".to_string(),
+                output_address: "tcp://127.0.0.1:1".to_string(),
+                engine_count: 2,
+                ready_timeout: Duration::from_secs(5),
+            },
+            coordinator_mode: CoordinatorMode::MaybeInProc,
+            model: "test-model".to_string(),
+            served_model_name: vec!["served-model".to_string()],
+            listener_mode: HttpListenerMode::BindTcp {
+                host: "127.0.0.1".to_string(),
+                port: 8000,
+            },
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::None,
+            renderer: RendererSelection::Hf,
+            chat_template: None,
+            default_chat_template_kwargs: None,
+            chat_template_content_format: ChatTemplateContentFormatOption::OpenAi,
+            enable_log_requests: true,
+            disable_log_stats: false,
+            grpc_port: Some(9000),
+            shutdown_timeout: Duration::from_secs(10),
+        };
+
+        let snapshot = ServerInfoSnapshot::from_config(&config);
+        let response = snapshot.response(ServerInfoConfigFormat::Json);
+        let vllm_config = &response["vllm_config"];
+
+        assert_eq!(vllm_config["transport_mode"]["mode"], "bootstrapped");
+        assert_eq!(vllm_config["transport_mode"]["engine_count"], 2);
+        assert_eq!(vllm_config["coordinator_mode"], "maybe_in_proc");
+        assert_eq!(vllm_config["listener_mode"]["mode"], "bind_tcp");
+        assert_eq!(vllm_config["tool_call_parser"], "auto");
+        assert_eq!(vllm_config["reasoning_parser"], "none");
+        assert_eq!(vllm_config["renderer"], "hf");
+        assert_eq!(vllm_config["chat_template_content_format"], "openai");
     }
 }
