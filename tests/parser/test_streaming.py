@@ -235,3 +235,50 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert "Hello" in content
     assert "assist" in content
     assert len(tool_calls) == 0
+
+
+def test_parse_delta_finished_flushes_remaining(tokenizer, request_obj):
+    """When finished=True and the tool parser has unstreamed args,
+    parse_delta must flush the remaining arguments."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    _, _, tool_calls = collect_fields(results)
+    assert len(tool_calls) > 0
+
+    streamed = parser._tool_parser.streamed_args_for_tool[0]
+    assert len(streamed) > 5
+    truncated_suffix = streamed[-5:]
+    parser._tool_parser.streamed_args_for_tool[0] = streamed[:-5]
+
+    # Prevent normal extraction from catching the gap — only the
+    # finished flush path should fill it.
+    parser._tool_parser.extract_tool_calls_streaming = lambda *a, **kw: None
+
+    flush_result = parser.parse_delta("", [], request_obj, finished=True)
+    assert flush_result is not None
+    assert flush_result.tool_calls is not None
+    flushed_args = flush_result.tool_calls[-1].function.arguments
+    assert flushed_args == truncated_suffix
+
+
+def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, request_obj):
+    """When all args have been streamed, finished=True must not
+    produce extra or duplicate arguments."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    _, _, tool_calls = collect_fields(results)
+
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_weather"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {"city": "Dallas"}
+
+    flush_result = parser.parse_delta("", [], request_obj, finished=True)
+    assert flush_result is None or flush_result.tool_calls is None

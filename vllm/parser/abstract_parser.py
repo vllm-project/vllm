@@ -28,7 +28,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
@@ -320,6 +322,7 @@ class Parser:
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
@@ -656,12 +659,40 @@ class DelegatingParser(Parser):
             return False
         return state.reasoning_ended
 
+    def _append_unstreamed_tool_args(
+        self,
+        delta_message: DeltaMessage | None,
+    ) -> DeltaMessage | None:
+        """Append parsed-but-unstreamed tool-call arguments to *delta_message*."""
+        if self._tool_parser is None:
+            return delta_message
+        remaining = self._tool_parser.get_remaining_unstreamed_args()
+        if not remaining:
+            return delta_message
+        index = len(self._tool_parser.prev_tool_call_arr) - 1
+        if delta_message and delta_message.tool_calls:
+            last_tc = delta_message.tool_calls[-1]
+            if last_tc.function:
+                last_tc.function.arguments = (
+                    last_tc.function.arguments or ""
+                ) + remaining
+                return delta_message
+        tc = DeltaToolCall(
+            index=index,
+            function=DeltaFunctionCall(arguments=remaining),
+        )
+        if delta_message is None:
+            return DeltaMessage(tool_calls=[tc])
+        delta_message.tool_calls = [tc]
+        return delta_message
+
     def parse_delta(
         self,
         delta_text: str,
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         state = self._stream_state
 
@@ -745,6 +776,10 @@ class DelegatingParser(Parser):
 
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids
+
+        if finished:
+            delta_message = self._append_unstreamed_tool_args(delta_message)
+
         return delta_message
 
 
