@@ -223,9 +223,9 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not rocm_aiter_ops.is_linear_hipbmm_enabled():
             return (
                 False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`. ",
+                "requires setting `VLLM_ROCM_USE_AITER=1`, "
+                "`VLLM_ROCM_USE_AITER_LINEAR=1`, "
+                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`.",
             )
         try:
             import aiter  # noqa: F401
