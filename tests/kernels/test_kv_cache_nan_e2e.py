@@ -15,6 +15,9 @@ import torch
 
 from vllm import _custom_ops as ops
 
+METRIC_NAME = "vllm:kv_cache_nans"
+SAMPLE_NAME = "vllm:kv_cache_nans_total"
+
 CUDA_AVAILABLE = torch.accelerator.device_count() >= 1
 
 _orig_concat_and_cache_mla = ops.concat_and_cache_mla
@@ -86,10 +89,10 @@ class TestKVCacheNanE2E:
         prom_total = 0
         prom_layers = 0
         for metric in REGISTRY.collect():
-            if "kv_cache_nans" not in metric.name:
+            if metric.name != METRIC_NAME:
                 continue
             for sample in metric.samples:
-                if sample.name.endswith("_total") and sample.value > 0:
+                if sample.name == SAMPLE_NAME and sample.value > 0:
                     prom_layers += 1
                     prom_total += sample.value
 
@@ -134,10 +137,10 @@ class TestKVCacheNanE2E:
 
         prom_total = 0
         for metric in REGISTRY.collect():
-            if "kv_cache_nans" not in metric.name:
+            if metric.name != METRIC_NAME:
                 continue
             for sample in metric.samples:
-                if sample.name.endswith("_total"):
+                if sample.name == SAMPLE_NAME:
                     prom_total += sample.value
 
         assert prom_total == 0, (
