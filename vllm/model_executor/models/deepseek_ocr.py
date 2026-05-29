@@ -54,6 +54,7 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
+    MAX_CROPS,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -656,9 +657,6 @@ class DeepseekOCRForCausalLM(
         # in the cuda graph.
         num_output_tokens = global_h * global_w
         self.global_image_output_token = num_output_tokens  # 256
-        # Min output tokens: only global image tokens (without local patch).
-        # Ditto, we don't consider view separator token in the cuda graph.
-        self.min_num_output_tokens = num_output_tokens
 
         local_h = local_w = math.ceil(local_input_side / downsample_ratio)
         self.patch_side = local_h
@@ -690,7 +688,9 @@ class DeepseekOCRForCausalLM(
         self,
         vllm_config,
     ) -> tuple[int, int]:
-        min_budget = self.min_num_output_tokens
+        min_budget = (
+            self.global_image_output_token + MAX_CROPS * self.single_patch_output_token
+        )
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
@@ -756,15 +756,11 @@ class DeepseekOCRForCausalLM(
         device: torch.device,
         dtype: torch.dtype,
     ):
-        # Determine max patches from remaining budget after allocating
-        # space for global images.
-        patch_token_budget = (
-            token_budget - max_batch_size * self.global_image_output_token
+        token_budget_per_image = (
+            self.global_image_output_token + MAX_CROPS * self.single_patch_output_token
         )
-        max_num_patches = max(
-            0,
-            patch_token_budget // self.single_patch_output_token,
-        )
+        max_num_images = token_budget // token_budget_per_image
+        max_batch_size = min(max_batch_size, max_num_images)
 
         dummy_pixel_values = torch.randn(
             max_batch_size,
@@ -775,7 +771,7 @@ class DeepseekOCRForCausalLM(
             dtype=dtype,
         )
         dummy_images_crop = torch.randn(
-            max_num_patches,
+            MAX_CROPS * max_batch_size,
             3,
             IMAGE_SIZE,
             IMAGE_SIZE,
