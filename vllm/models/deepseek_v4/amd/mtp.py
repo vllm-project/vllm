@@ -155,7 +155,10 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if self.has_tilelang:
+        # The fused post+pre path (tilelang, on CUDA or ROCm) defers the final
+        # hc_post and returns the residual streams; the unfused path (aiter /
+        # torch on ROCm) applies hc_post inline and returns None.
+        if residual is not None:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix
             )

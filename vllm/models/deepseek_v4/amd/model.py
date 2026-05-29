@@ -24,6 +24,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC,
     HCHeadOp,
     MHCFusedPostPreOp,
     MHCPostOp,
@@ -595,7 +596,13 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        if not self.has_tilelang:
+        # Select the mHC path:
+        # - aiter unfused pre/post (preferred ROCm path when aiter is available),
+        #   or the torch/triton fallback when tilelang is unavailable ->
+        #   _forward_unfused_post_pre
+        # - tilelang fused post+pre (CUDA, or ROCm without aiter) ->
+        #   _forward_fused_post_pre
+        if not self.has_tilelang or HAS_AITER_MHC:
             return self._forward_unfused_post_pre(
                 x, positions, input_ids, post_mix, res_mix, residual
             )
@@ -750,7 +757,10 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        if layer is not None and self.has_tilelang:
+        # The fused post+pre path (tilelang) defers the final hc_post and
+        # returns the residual streams; the unfused path (aiter / torch on
+        # ROCm) applies hc_post inline and returns None, so skip it here.
+        if layer is not None and residual is not None:
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
