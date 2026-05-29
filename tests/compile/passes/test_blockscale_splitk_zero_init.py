@@ -154,7 +154,7 @@ class _BaseP2Module(torch.nn.Module):
 
 
 class _BaseP3Module(torch.nn.Module):
-    """P3 (ATOM HIP gated): gated RMSNorm + FP8 group quant -> blockscale GEMM.
+    """P3: gated RMSNorm + FP8 group quant -> blockscale GEMM.
 
     The AITER ``gated_rmsnorm_fp8_group_quant`` kernel only supports
     ``head_dim == 128`` and expects 3D ``[T, H, D]`` inputs with a weight of
@@ -195,8 +195,8 @@ class _BaseP3Module(torch.nn.Module):
 
 # ---------------------------------------------------------------------------
 # Per-producer test modules for the *new* registered ProducerSpec entries.
-# These exercise the Phase-2 plumbing (P1 HIP per-1x128, P2 / P2-add Triton
-# rmsnorm-quant, P3 PR#40710 fused gated, P4 silu+mul + quant). Each module
+# These exercise the producer plumbing (P1 HIP per-1x128, P2 / P2-add Triton
+# rmsnorm-quant, P3 fused gated, P4 silu+mul + quant). Each module
 # emits the *same* keyword-style call that the upstream producer fusion
 # pass produces in the real Qwen3-Next FX graph, so the pattern matcher
 # sees an FX node whose arg layout matches what we register.
@@ -206,9 +206,9 @@ class _BaseP3Module(torch.nn.Module):
 class _NewP1GroupQuantModule(torch.nn.Module):
     """Upstream P1 producer: `rocm_aiter_group_fp8_quant(x, group_size)`.
 
-    HIP per-1x128 group FP8 quant. Distinct from the ATOM per-token quant
+    HIP per-1x128 group FP8 quant. Distinct from the per-token quant
     used in `_BaseP1Module`; this is the producer that actually fires in
-    Qwen3-Next-class models on gfx950 post-PR #41825.
+    Qwen3-Next-class models on gfx950.
     """
 
     def __init__(self, K: int, N: int):
@@ -526,7 +526,7 @@ def test_pass_rewrites_new_producer_specs(
     expected_replaced_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Each of the Phase-2 new ProducerSpec entries must rewrite its producer
+    """Each of the new ProducerSpec entries must rewrite its producer
     -> blockscale-GEMM chain into the ``_with_zero_init`` + ``_splitk``
     pair. The test asserts ``matched_count >= 1`` (i.e. the FX rewriter
     actually fired) and verifies the post-pass graph contains the
@@ -600,13 +600,12 @@ def test_per_pair_attribution_counts(monkeypatch: pytest.MonkeyPatch):
     pairs each ``auto_functionalized(producer.with_zero_init_op)`` HOP with
     its downstream ``auto_functionalized(gemm.splitk_op)`` consumer.
 
-    This is the regression guard against an earlier dict-keying bug that
-    keyed the lookup table on ``producer.with_zero_init_op`` alone, which
-    caused every (producer, *) match to be attributed to the
-    last-registered ``gemm`` overload in the registry (i.e. the triton
-    variant ate every legacy-CK match). The bug was diagnostic-only -- it
-    didn't change the matched_count -- but it produced misleading
-    per-pair logs that hid which backend the rewrite landed on.
+    This verifies the attribution keys on the (producer, gemm) pair rather
+    than on ``producer.with_zero_init_op`` alone. Keying on the producer op
+    alone would attribute every (producer, *) match to the last-registered
+    ``gemm`` overload in the registry (the triton variant would absorb every
+    CK match), producing misleading per-pair logs even though it leaves
+    ``matched_count`` unchanged.
     """
     torch._dynamo.reset()
     vllm_config = _build_vllm_config()
@@ -633,12 +632,12 @@ def test_per_pair_attribution_counts(monkeypatch: pytest.MonkeyPatch):
         assert counts.get(ck_key, 0) == 1, (
             f"Expected exactly 1 match attributed to {ck_key}, got {counts}"
         )
-        # Triton variant shares the producer.with_zero_init_op overload
-        # with the CK variant. A regression of the dict-keying bug would
-        # show up as triton_key=1 / ck_key=0.
+        # The triton variant shares the producer.with_zero_init_op overload
+        # with the CK variant; mis-keying the attribution would show up as
+        # triton_key=1 / ck_key=0.
         assert counts.get(triton_key, 0) == 0, (
             f"Triton-gemm key {triton_key} should be 0 for a CK-only graph "
-            f"(would indicate the dict-keying regression), got {counts}"
+            f"(would indicate mis-keyed per-pair attribution), got {counts}"
         )
         # Sanity: the total per-pair count must equal the global match
         # count tracked by the pattern matcher pass.

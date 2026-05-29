@@ -720,11 +720,11 @@ def _rocm_aiter_gemm_a8w8_blockscale_splitk_impl(
     """Blockscale GEMM into a caller-provided output buffer.
 
     Kernel + SplitK selection are handled entirely by the AITER dispatcher
-    via the tuned CSV (``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE``).  AITER
-    main's C++ cktile dispatch is now keyed by ``kernelName`` resolved on
-    the Python side: any short-circuit that bypasses the CSV would lose
-    both the tuned splitK and the tuned kernel (the latter falling back to
-    a non-tuned default heuristic kernel).
+    via the tuned CSV (``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE``).  AITER's
+    C++ cktile dispatch is keyed by ``kernelName`` resolved on the Python
+    side: any short-circuit that bypasses the CSV would lose both the tuned
+    splitK and the tuned kernel (the latter falling back to a non-tuned
+    default heuristic kernel).
 
     ``split_k`` is accepted for ABI compatibility but ignored - the CSV is
     authoritative.  ``y_is_zeroed`` is propagated to the cktile invoker so
@@ -1082,7 +1082,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """P2 producer with zero-init prologue.
+    """RMSNorm + FP8 group-quant producer with zero-init prologue.
 
     Same contract as `_rocm_aiter_rmsnorm_fp8_group_quant_impl`, plus the
     Triton kernel pre-zeros `gemm_out_zero_init` as a grid-strided prologue
@@ -1128,7 +1128,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """P2-add producer with zero-init prologue.
+    """Residual-add + RMSNorm + FP8 group-quant producer with zero-init prologue.
 
     Same as `_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl` but also
     pre-zeros the downstream GEMM output buffer in the Triton kernel.
@@ -1222,7 +1222,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_impl(
     activation: str,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """P3 (gated RMSNorm + FP8 group quant) with zero-init prologue.
+    """Gated RMSNorm + FP8 group quant with zero-init prologue.
 
     The triton kernel pre-zeros ``gemm_out_zero_init`` as a grid-strided
     prologue so a downstream SplitK blockscale GEMM can run with
@@ -1371,7 +1371,7 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
     gemm_out_zero_init: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """P4 (silu+mul + FP8 group quant) with zero-init prologue.
+    """silu+mul + FP8 group quant with zero-init prologue.
 
     The triton kernel pre-zeros ``gemm_out_zero_init`` as a grid-strided
     prologue so a downstream SplitK blockscale GEMM can run with
@@ -1491,7 +1491,7 @@ def _rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Functional Gemma RMSNorm + FP8 group quant via AITER fused_qk_rmsnorm_group_quant.
 
-    Equivalent to ATOM's GemmaRMSNorm fused-fp8 path (gemma_norm=True).
+    Drives the kernel's ``gemma_norm=True`` path for Gemma-style RMSNorm.
     """
     from aiter.ops.fused_qk_rmsnorm_group_quant import fused_qk_rmsnorm_group_quant
 
@@ -1583,7 +1583,8 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Functional Gated RMSNorm + FP8 group quant via AITER gated_rmsnorm_fp8_group_quant.
 
-    Equivalent to ATOM's RMSNormGated fused-fp8 path used by Qwen3-Next GDN out_proj.
+    Implements the gated RMSNorm + FP8 group quant used by the Qwen3-Next
+    GDN out_proj path.
     """
     from aiter.ops.gated_rmsnorm_fp8_group_quant import gated_rmsnorm_fp8_group_quant
 
@@ -2375,7 +2376,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
             )
 
-            # P2: RMSNorm + FP8 group quant with zero-init prologue.
+            # RMSNorm + FP8 group quant with zero-init prologue.
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl,
@@ -2389,7 +2390,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
             )
 
-            # P3: gated RMSNorm + FP8 group quant with zero-init prologue.
+            # gated RMSNorm + FP8 group quant with zero-init prologue.
             direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_impl,
@@ -2403,7 +2404,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
             )
 
-            # P2-add: residual-add + RMSNorm + FP8 group quant with zero-init.
+            # residual-add + RMSNorm + FP8 group quant with zero-init.
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl,
@@ -2417,7 +2418,7 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
             )
 
-            # P4: silu+mul + FP8 group quant with zero-init prologue.
+            # silu+mul + FP8 group quant with zero-init prologue.
             direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl,
@@ -2465,7 +2466,7 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
-            # P1 (HIP per-1x128 group FP8 quant) - mutating variant that
+            # HIP per-1x128 group FP8 quant - mutating variant that
             # pre-zeros a downstream GEMM output buffer. The aiter HIP kernel
             # already supports the `gemm_out_zero_init=` kwarg.
             direct_register_custom_op(
@@ -2475,9 +2476,9 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_group_fp8_quant_with_zero_init_fake,
             )
 
-            # P2 (Gemma RMSNorm + FP8 group quant) - functional and mutating
+            # Gemma RMSNorm + FP8 group quant - functional and mutating
             # variants. Wraps AITER fused_qk_rmsnorm_group_quant with
-            # gemma_norm=True; matches ATOM's GemmaRMSNorm._forward_fused_fp8.
+            # gemma_norm=True.
             direct_register_custom_op(
                 op_name="rocm_aiter_gemma_rmsnorm_fp8_group_quant",
                 op_func=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_impl,
@@ -2491,10 +2492,9 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init_fake,
             )
 
-            # P3 (Gated RMSNorm + FP8 group quant) - functional and mutating
-            # variants. Wraps AITER gated_rmsnorm_fp8_group_quant; matches
-            # ATOM's RMSNormGated.forward_fused_fp8 used by Qwen3-Next GDN
-            # out_proj.
+            # Gated RMSNorm + FP8 group quant - functional and mutating
+            # variants. Wraps AITER gated_rmsnorm_fp8_group_quant, as used
+            # by the Qwen3-Next GDN out_proj.
             direct_register_custom_op(
                 op_name="rocm_aiter_gated_rmsnorm_fp8_group_quant",
                 op_func=_rocm_aiter_gated_rmsnorm_fp8_group_quant_impl,

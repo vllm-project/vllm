@@ -149,8 +149,9 @@ def test_full_pass_register_then_compile_dyn_model():
     """End-to-end smoke: instantiate `BlockScaleSplitKZeroInitFusionPass`
     (which registers all 16 patterns), then compile a tiny model whose
     only op is `rocm_aiter_rmsnorm_fp8_group_quant` with dynamic M, then
-    invoke it. Reproduces the ConstraintViolationError from server boot
-    if our pattern registration introduces a global shape specialization.
+    invoke it. Guards against pattern registration introducing a global
+    shape specialization that would surface as a ConstraintViolationError
+    under dynamic batch sizes.
     """
     from vllm.compilation.passes.fusion.blockscale_splitk_zero_init import (
         BlockScaleSplitKZeroInitFusionPass,

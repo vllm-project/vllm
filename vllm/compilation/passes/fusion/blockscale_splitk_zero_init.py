@@ -15,10 +15,9 @@ into
 
 The producer kernel does a grid-strided uint4 zero-fill of Y as its prologue,
 the SplitK GEMM skips its internal hipMemsetAsync, and only one
-``torch.empty`` survives DCE. This is the vLLM analogue of the ATOM
-``preallocate_y`` + ``external_y`` plumbing that was wired through
-``Qwen3NextDecoderLayer``; in vLLM the rewrite is purely FX-level, so no
-model code touches.
+``torch.empty`` survives DCE. The rewrite is performed entirely at the FX
+level, so no model code has to change to thread the preallocated output
+buffer through the producer.
 
 Generic-ness comes from two registries:
 
@@ -116,10 +115,10 @@ def _default_pick_split_k(M: int, N: int, K: int, dtype: torch.dtype) -> int:
     """
     if M <= 0 or K < 4096:
         return 0
-    # M-skinny / K-fat region observed to benefit from SplitK on the
-    # Qwen3-Next-80B-A3B-Instruct-FP8 tuning sweep (see
-    # qwen3_next_80b_a3b_per1x128_cktile_splitk_yz_gfx950.csv in the aiter
-    # configs/zero_init_demo/robust directory).
+    # Small-M / large-K GEMMs are K-reduction bound: a single M-tile leaves
+    # most compute units idle, so splitting the K reduction across them
+    # improves occupancy. This only gates whether SplitK is attempted; the
+    # actual SplitK count is chosen by AITER's tuned CSV at kernel launch.
     if M <= 128:
         return 1
     return 0
@@ -163,7 +162,7 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # P1: aiter HIP per-1x128 group FP8 quant.
+    # aiter HIP per-1x128 group FP8 quant.
     try:
         group_quant_functional = rocm_aiter_ops.get_group_quant_op()
         group_quant_with_zero_init = (
@@ -182,7 +181,7 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # P2: aiter Triton-fused RMSNorm + per-1x128 group FP8 quant.
+    # aiter Triton-fused RMSNorm + per-1x128 group FP8 quant.
     try:
         rmsnorm_quant_functional = (
             rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
@@ -203,7 +202,7 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # P2-add: residual-add + RMSNorm + group quant. Returns 3 outputs.
+    # residual-add + RMSNorm + group quant. Returns 3 outputs.
     try:
         rmsnorm_add_functional = (
             rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
@@ -225,7 +224,7 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # P4: silu+mul + FP8 group quant (MLP down-proj path: gate_up_proj
+    # silu+mul + FP8 group quant (MLP down-proj path: gate_up_proj
     # produces (M, 2K), this op applies silu * mul + quant to give (M, K)
     # FP8 feeding down_proj).
     try:
@@ -248,7 +247,7 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # P3: PR #40710 fused gated-RMSNorm + group quant (GDN linear attn).
+    # fused gated-RMSNorm + group quant (GDN linear attn).
     try:
         gated_fused_functional = (
             rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_op()
@@ -309,10 +308,10 @@ def build_default_registries() -> (
     except AttributeError:
         pass
 
-    # The two ATOM-style HIP producers above (gemma/gated) are kept in the
-    # registry for future-proofing -- vLLM never inserts them into the FX
-    # graph for Qwen3-Next-class models, but they're cheap and protect
-    # future ATOM-style ports.
+    # The two HIP fused-RMSNorm producers above (gemma/gated) are kept in
+    # the registry for future-proofing -- current Qwen3-Next-class models
+    # never emit them into the FX graph, but registering them is cheap and
+    # lets the fusion cover those producers if a model starts using them.
 
     try:
         gemms.append(
@@ -458,10 +457,10 @@ def _make_extra_check(
             return False
         # K comes from the weight tensor B (shape [N, K]). Using B.shape[1]
         # (instead of x.shape[-1]) keeps the gate correct for producers
-        # where x's last dim is not K -- e.g. P4 (silu+mul) takes x with
-        # last dim 2*K, and the upstream RMSNormGated fusion (P3) can wrap
-        # x into a head-aware (M, H*D) view where H*D == K. B.shape[1] is
-        # always the GEMM's true K and is concrete at FX rewrite time.
+        # where x's last dim is not K -- e.g. the silu+mul producer takes x
+        # with last dim 2*K, and the gated-RMSNorm producer can wrap x into
+        # a head-aware (M, H*D) view where H*D == K. B.shape[1] is always
+        # the GEMM's true K and is concrete at FX rewrite time.
         K = _concrete_int(b_shape[1])
         N = _concrete_int(b_shape[0])
         if K is None or N is None:
@@ -477,11 +476,9 @@ def _make_extra_check(
         # AITER's runtime CSV lookup pick SplitK at kernel launch.
         # ``y_is_zeroed=True`` semantics are safe regardless: when AITER
         # ends up not using SplitK at a given M, the GEMM simply
-        # overwrites a buffer the producer pre-zeroed, costing one extra
-        # M*N*sizeof(out) write per GEMM (us-scale and well within
-        # MoE/attention noise). K < 2048 GEMMs are never SplitK
-        # candidates in our tuning sweep -- those wouldn't benefit even
-        # if fused, so the K bound matters most for filtering.
+        # overwrites a buffer the producer pre-zeroed, costing at most one
+        # extra M*N*sizeof(out) write per GEMM. Small-K GEMMs never benefit
+        # from SplitK, so the K bound is the most useful static filter.
         if K < 2048:
             return False
         # Only run pick_split_k when M is statically known (e.g. captured
@@ -519,8 +516,8 @@ def _make_2_input_producer_pattern(
     producer that takes exactly two tensor inputs (x, weight) plus
     optional static kwargs (e.g. group_size=128).
 
-    Covers the P2/P3-style RMSNorm + group-quant producers; P1 (per_token_quant)
-    uses a slightly different builder below.
+    Covers the RMSNorm + group-quant producers; the per-token-quant
+    producer uses a slightly different builder below.
     """
 
     static_kwargs = dict(producer.static_kwargs)
@@ -530,9 +527,9 @@ def _make_2_input_producer_pattern(
     scales_idx = producer.scales_output_index
 
     def pattern(x, weight, B, Bs):
-        # P2-style producers are emitted by the upstream RMSNormQuant fusion
+        # These producers are emitted by the upstream RMSNormQuant fusion
         # pass with ALL kwargs (x=..., weight=..., variance_epsilon=...,
-        # group_size=...). Our pattern must use the same call shape so the
+        # group_size=...). The pattern must use the same call shape so the
         # FX node structure matches; mixing positional + kwarg would
         # produce a node with different arg layout and never match.
         prod_out = producer.op(x=x, weight=weight, variance_epsilon=eps, **static_kwargs)
@@ -608,7 +605,7 @@ def _make_2_input_with_residual_producer_pattern(
     scales_idx = producer.scales_output_index
     residual_idx = producer.residual_output_index
     assert residual_idx is not None, (
-        f"residual_output_index must be set for P2-add producer {producer.name!r}"
+        f"residual_output_index must be set for residual-add producer {producer.name!r}"
     )
 
     def pattern(x, residual, weight, B, Bs):
@@ -683,9 +680,9 @@ def _make_act_mul_group_quant_producer_pattern(
 ) -> tuple[object, object, list[torch.Tensor], object]:
     """Builder for `rocm_aiter_act_mul_and_fp8_group_quant(x, group_size)`.
 
-    Same shape as P1 but the producer halves the last dim of ``x`` (silu+mul
-    gating: ``x.shape[-1] == 2 * K``). Example inputs reflect that so the
-    pattern matcher synthesizes shape-valid placeholders.
+    Same shape as the group-quant producer, but it halves the last dim of
+    ``x`` (silu+mul gating: ``x.shape[-1] == 2 * K``). Example inputs reflect
+    that so the pattern matcher synthesizes shape-valid placeholders.
 
     Upstream `RocmAiterSiluMulFp8GroupQuantFusionPass` emits this op with
     all kwargs (`x=..., group_size=...`), so the pattern uses the same call
@@ -811,7 +808,7 @@ def _make_per_token_producer_pattern(
     gemm: GemmSpec,
     output_dtype: torch.dtype,
 ) -> tuple[object, object, list[torch.Tensor], object]:
-    """Builder for P1-style producers: `per_token_quant(x, quant_dtype)`.
+    """Builder for per-token-quant producers: `per_token_quant(x, quant_dtype)`.
 
     The functional op signature is `(x, quant_dtype, scale=None) -> (out, scale)`.
     We pass scale=None explicitly so the pattern matches the standalone
@@ -875,7 +872,7 @@ def _make_fused_rms_gated_producer_pattern(
     gemm: GemmSpec,
     output_dtype: torch.dtype,
 ) -> tuple[object, object, list[torch.Tensor], object]:
-    """Builder for the upstream PR #40710 gated producer.
+    """Builder for the fused gated-RMSNorm producer.
 
     The functional op signature is:
 
@@ -903,8 +900,9 @@ def _make_fused_rms_gated_producer_pattern(
         # upstream also inserts a `.reshape(-1, hidden_dim)` between the
         # producer and any downstream GEMM consumer, so this pattern as-is
         # only matches the (rare) producer-direct-to-gemm case; Qwen3-Next
-        # actually goes through reshape and won't match. P3 is kept in the
-        # registry as future-proofing for models that don't reshape.
+        # actually goes through reshape and won't match. This producer is
+        # kept in the registry as future-proofing for models that don't
+        # reshape.
         prod_out = producer.op(
             x=x,
             weight=weight,
@@ -973,7 +971,7 @@ def _make_gated_producer_pattern(
     gemm: GemmSpec,
     output_dtype: torch.dtype,
 ) -> tuple[object, object, list[torch.Tensor], object]:
-    """Builder for P3-style gated producers: `(x, z, weight, eps, group_size)`.
+    """Builder for gated producers: `(x, z, weight, eps, group_size)`.
 
     Mirrors ``_make_2_input_producer_pattern`` but threads the extra ``z``
     gate tensor through both pattern and replacement.
