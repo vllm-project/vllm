@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -45,7 +45,10 @@ fn runtime_lora_allowed_path_prefixes() -> Option<Vec<PathBuf>> {
 
 fn looks_like_local_lora_path(lora_path: &str) -> bool {
     let path = Path::new(lora_path);
-    path.is_absolute() || lora_path.starts_with('~') || lora_path.starts_with('.')
+    path.is_absolute()
+        || lora_path.starts_with('~')
+        || lora_path.starts_with('.')
+        || path.components().any(|component| matches!(component, Component::ParentDir))
 }
 
 fn validate_lora_path_access(
@@ -227,6 +230,7 @@ mod tests {
         assert!(validate_lora_path_access("/tmp/adapter-a", None).is_err());
         assert!(validate_lora_path_access("./adapter-a", None).is_err());
         assert!(validate_lora_path_access("~/adapter-a", None).is_err());
+        assert!(validate_lora_path_access("subdir/../../../etc/sensitive", None).is_err());
     }
 
     #[test]
