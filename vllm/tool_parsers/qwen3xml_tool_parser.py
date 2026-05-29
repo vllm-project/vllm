@@ -1174,6 +1174,12 @@ class Qwen3XMLToolParser(ToolParser):
         # Add missing attributes for compatibility with serving_chat.py
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        # Track which call ids have already had their first (id-bearing) delta
+        # sent, so subsequent deltas for the same call have id=None.
+        # This satisfies the OpenAI streaming convention that message_stream_converter
+        # relies on: id != None means "open a new content_block", id == None means
+        # "append to current content_block".
+        self._sent_ids: set[str] = set()
 
         logger.info(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
@@ -1260,6 +1266,7 @@ class Qwen3XMLToolParser(ToolParser):
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
+            self._sent_ids = set()
             if request:
                 self.parser.set_tools(request.tools)
 
@@ -1315,4 +1322,19 @@ class Qwen3XMLToolParser(ToolParser):
                         self.streamed_args_for_tool[tool_index] += (
                             tool_call.function.arguments
                         )
+
+            # Enforce OpenAI streaming convention expected by message_stream_converter:
+            # the *first* delta for each call_id carries the id (signals "open a new
+            # content_block"); every subsequent delta for the same id must have id=None
+            # (signals "append to current content_block").
+            # Qwen3XML parser sets id on every delta internally, which causes
+            # message_stream_converter to open a new content_block for every argument
+            # fragment, splitting one tool_use input across many content_blocks.
+            for tool_call in result.tool_calls:
+                if tool_call.id is not None:
+                    if tool_call.id in self._sent_ids:
+                        tool_call.id = None
+                    else:
+                        self._sent_ids.add(tool_call.id)
+
         return result
