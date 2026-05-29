@@ -13,6 +13,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{MethodRouter, get, post};
+use itertools::Itertools as _;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -63,30 +64,21 @@ where
 const GET_HEAD: &[&str] = &["GET", "HEAD"];
 const POST: &[&str] = &["POST"];
 
-fn route_log_lines(routes: &[RouteInfo]) -> Vec<String> {
-    routes
-        .iter()
-        .map(|route| {
-            format!(
-                "Route: {}, Methods: {}",
-                route.path,
-                route.methods.join(", ")
-            )
-        })
-        .collect()
-}
-
 pub(crate) fn log_available_routes(app: &WrapperRouter) {
     info!("Available routes are:");
-    for line in route_log_lines(&app.routes) {
-        info!("{line}");
+    for route in &app.routes {
+        info!(
+            "Route: {}, Methods: {}",
+            route.path,
+            route.methods.iter().format(", ")
+        );
     }
 }
 
 /// Build the minimal OpenAI-compatible router for one configured model.
-#[cfg(test)]
-fn build_router(state: Arc<AppState>) -> Router {
-    build_router_with_dev_mode(state, server_dev_mode_enabled())
+#[allow(dead_code)]
+pub(crate) fn build_router(state: Arc<AppState>) -> Router {
+    build_router_with_dev_mode_and_routes(state, server_dev_mode_enabled()).router
 }
 
 #[cfg(test)]
