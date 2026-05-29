@@ -774,7 +774,7 @@ def fp8_mqa_logits_torch(
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
-    k = k_fp8.to(torch.bfloat16)
+    k = (k_fp8.to(torch.float32) * scale).to(torch.bfloat16)
     q = q.to(torch.bfloat16)
     device = q.device
 
@@ -786,13 +786,10 @@ def fp8_mqa_logits_torch(
     )
     mask = mask_lo & mask_hi
 
-    # ``score`` is [H, M, N]; ``scale`` is the per-KV-token scale, which
-    # vLLM callers hand us as ``[N, 1]`` (a ``[N, 4]`` uint8 buffer cast
-    # to fp32). PyTorch right-aligns dimensions for broadcasting, so a
-    # naked ``score * scale`` would align ``scale``'s leading dim with
-    # ``score``'s M dim and raise a shape mismatch. Flatten to ``[N]`` so
-    # broadcasting lines up with the last dim of ``score``.
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale.reshape(-1)
+    # Scale is already folded into ``k`` above (k_fp8 * scale before the
+    # bf16 cast), so no post-einsum scale here. Equivalent to upstream's
+    # ``* scale.reshape(-1)`` but applied K-side.
+    score = torch.einsum("mhd,nd->hmn", q, k).float()
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
     logits = logits.masked_fill(~mask, float("-inf"))
 
