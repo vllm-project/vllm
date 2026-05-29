@@ -13,6 +13,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    ConversationMessage,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
@@ -2724,16 +2725,20 @@ def test_postprocess_messages_null_arguments_string():
     tc.arguments.items() to raise 'None' has no attribute 'items'.
     The function should coerce it to {} instead.
     """
-    messages = [
+    messages: list[ConversationMessage] = [
         {
             "role": "assistant",
             "content": None,
-            "tool_calls": [{
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "get_current_time", "arguments": "null"},
-            }],
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": "null"},
+                }
+            ],
         }
     ]
     _postprocess_messages(messages)
-    assert messages[0]["tool_calls"][0]["function"]["arguments"] == {}
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["arguments"] == {}
