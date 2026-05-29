@@ -4228,6 +4228,9 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
+            # copy mamba state based on previously collected metadata
+            if self.cache_config.mamba_cache_mode == "align":
+                mamba_utils.do_mamba_copy_block(self._get_mamba_bufs().preprocess)
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
