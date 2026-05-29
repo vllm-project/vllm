@@ -43,6 +43,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
     PrepareStoreOutput,
+    RequestOffloadingContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.worker.worker import (
@@ -119,6 +120,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.lookup.return_value = 0
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = False
+        self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
