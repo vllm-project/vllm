@@ -195,23 +195,6 @@ class XPUPlatform(Platform):
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
-        elif parallel_config.world_size_across_dp > 1:
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
-                "XPU Graph doesn't support capture communication ops, "
-                "disabling cudagraph_mode."
-            )
-        else:
-            if (
-                attention_config.backend == AttentionBackendEnum.FLASH_ATTN
-                and compilation_config.cudagraph_mode
-                not in {CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE}
-            ):
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                logger.warning(
-                    "FMHA sycl-tla kernels cannot be captured with XPU graphs, "
-                    "falling back to PIECEWISE graph mode on XPU platform."
-                )
 
         # Disable fusion passes not yet supported on XPU.
         pass_config = compilation_config.pass_config
@@ -391,8 +374,8 @@ class XPUPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -403,8 +386,8 @@ class XPUPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

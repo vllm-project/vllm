@@ -11,6 +11,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     random_sample,
 )
 from vllm.v1.sample.sampler import Sampler
+from vllm.triton_utils import HAS_TRITON
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -189,7 +190,7 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif("cpu" in DEVICE_TYPE, reason="CUDA/XPU not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
@@ -357,6 +358,56 @@ class TestTritonTopkTopp:
         p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
 
         self._compare_results(logits, k, p)
+
+    @pytest.mark.parametrize(
+        "mode",
+        ["topk_only", "topp_only", "topk_and_topp"],
+    )
+    def test_noncontiguous_logits_match_contiguous(self, mode: str):
+        """Non-contiguous logits views should behave like contiguous inputs."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        device = torch.device(DEVICE_TYPE)
+        batch_size, vocab_size, pad = 16, 4096, 8
+        backing = torch.full(
+            (batch_size, vocab_size + pad),
+            -1000.0,
+            device=device,
+            dtype=torch.float32,
+        )
+        base = torch.linspace(
+            10.0, -10.0, vocab_size, device=device, dtype=torch.float32
+        )
+        source = base[None, :] + (
+            torch.arange(batch_size, device=device, dtype=torch.float32)[:, None]
+            / 1000.0
+        )
+
+        logits = backing[:, :vocab_size]
+        logits.copy_(source)
+        contig_logits = source.clone()
+        pytorch_logits = source.clone()
+
+        assert logits.shape == (batch_size, vocab_size)
+        assert logits.stride() == (vocab_size + pad, 1)
+        assert not logits.is_contiguous()
+
+        k: torch.Tensor | None = None
+        p: torch.Tensor | None = None
+        if mode in ("topk_only", "topk_and_topp"):
+            k = torch.full((batch_size,), 154, device=device, dtype=torch.int32)
+        if mode in ("topp_only", "topk_and_topp"):
+            p = torch.full((batch_size,), 0.95, device=device, dtype=torch.float32)
+
+        noncontig_out = apply_top_k_top_p_triton(logits, k, p)
+        contig_out = apply_top_k_top_p_triton(contig_logits, k, p)
+        pytorch_out = apply_top_k_top_p_pytorch(pytorch_logits, k, p)
+
+        assert noncontig_out.data_ptr() == logits.data_ptr()
+        assert not noncontig_out.is_contiguous()
+        assert torch.equal(logits, noncontig_out)
+        assert torch.equal(torch.isfinite(noncontig_out), torch.isfinite(contig_out))
+        assert torch.equal(torch.isfinite(noncontig_out), torch.isfinite(pytorch_out))
 
     # -----------------------------------------------------------------
     # Tests for -inf logits (e.g. from grammar / structured output masks)

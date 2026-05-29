@@ -112,8 +112,51 @@ ONBUILD RUN git clone ${VLLM_REPO} \
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
+# Rust build stage
+# Builds the `vllm-rs` frontend in a dedicated stage so the wheel build stages
+# don't need the rust toolchain or protoc. Runs in parallel with the main wheel
+# build for faster end-to-end builds.
+FROM fetch_vllm AS rust-build
+ARG COMMON_WORKDIR
+
+# protoc is used by tonic-build/prost-build.
+RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
+        ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+ENV CARGO_NET_RETRY=10
+ENV RUSTUP_MAX_RETRIES=10
+
+# Build the release binary. Cargo's registry/git caches can be written by
+# concurrent BuildKit jobs on shared workers, so lock those cache mounts while
+# keeping the cache benefit. Copy the binary out so it persists into the image
+# layer for later COPY --from=rust-build.
+RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
+    cd ${COMMON_WORKDIR}/vllm \
+    && VLLM_RS_TARGET_PATH=/tmp/vllm-rs bash build_rust.sh \
+    && test -x /tmp/vllm-rs
+
+# -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+ARG COMMON_WORKDIR
+
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /tmp/vllm-rs ${COMMON_WORKDIR}/vllm/vllm/vllm-rs
+
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
@@ -292,6 +335,10 @@ RUN /bin/bash -lc 'set -euo pipefail; \
 FROM fetch_vllm AS build_vllm_wheel_release
 
 ARG COMMON_WORKDIR
+
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /tmp/vllm-rs ${COMMON_WORKDIR}/vllm/vllm/vllm-rs
 
 # Create /install directory for custom wheels
 RUN mkdir -p /install

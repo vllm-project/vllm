@@ -13,7 +13,7 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -23,7 +23,7 @@ from vllm.v1.kv_offload.tiering.base import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
@@ -37,7 +37,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
         custom_param: int = 0,
@@ -49,7 +49,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             custom_param: Dummy parameter demonstrating custom args.
         """
         super().__init__(
-            vllm_config=vllm_config,
+            offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
         )
@@ -61,7 +61,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         # key -> True (only care about presence)
         self.blocks: dict[OffloadKey, bool] = {}
 
-        # Completed jobs waiting to be retrieved by get_finished()
+        # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -120,7 +120,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Poll for finished jobs.
 
@@ -131,6 +131,9 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""
