@@ -205,8 +205,9 @@ def create_and_prepopulate_kv_cache(
         else:
             kv_entry_size = head_size
 
+        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, head_size)
         kv_cache = torch.zeros(
-            num_blocks, block_size, kv_entry_size, dtype=torch.uint8, device=device
+            num_blocks, 1, block_size, kv_entry_size, dtype=torch.uint8, device=device
         )
         scale_tensor = (
             scale
@@ -215,9 +216,9 @@ def create_and_prepopulate_kv_cache(
         )
         scale_tensor = scale_tensor.to(device=device, dtype=torch.float32)
     else:
-        # Create MLA KV cache: (num_blocks, block_size, head_size)
+        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, head_size)
         kv_cache = torch.zeros(
-            num_blocks, block_size, head_size, dtype=dtype, device=device
+            num_blocks, 1, block_size, head_size, dtype=dtype, device=device
         )
         kv_cache_flat = kv_cache.view(-1, head_size)
 
@@ -238,7 +239,7 @@ def create_and_prepopulate_kv_cache(
             ops.concat_and_cache_mla(
                 kv_c_context,
                 k_pe_context.squeeze(1),
-                kv_cache,
+                kv_cache.squeeze(1),
                 slots,
                 kv_cache_dtype=kv_cache_dtype,
                 scale=scale_tensor,
@@ -361,7 +362,7 @@ class MockSparseMLAAttentionLayer:
             ops.concat_and_cache_mla(
                 kv_c,
                 k_pe.squeeze(1),
-                kv_cache,
+                kv_cache.squeeze(1),
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,
@@ -497,7 +498,7 @@ class MockMLAAttentionLayer(MLAAttention):
             ops.concat_and_cache_mla(
                 kv_c,
                 k_pe.squeeze(1),
-                kv_cache,
+                kv_cache.squeeze(1),
                 attn_metadata.slot_mapping.flatten(),
                 kv_cache_dtype=kv_cache_dtype,
                 scale=self._k_scale,
