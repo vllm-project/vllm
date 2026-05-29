@@ -112,9 +112,9 @@ def mla_decode_kv_split(
     sm_scale: torch.Tensor,  # normalising scale for attention product
     B_seq_len: torch.Tensor,  # seq_len of each request (batch,)
     Req_to_Tokens: torch.Tensor,  # page table mapping
+    HEADS_PER_BLOCK: int,  # heads per thread block
     NUM_KV_SPLITS: int,  # no. of splits of kv_cache; determines -1 dim of launch grid
     PAGE_SIZE: int,  # page size: 16
-    BLOCK_KV: int,  # kv cache to be processed in one iteration
     latent_dim: int,  # 512
     rope_dim: int,  # 64
     logit_cap: float,
@@ -123,71 +123,93 @@ def mla_decode_kv_split(
     assert latent_kv.ndim == 3 and latent_kv.dtype == torch.float8_e4m3fn
     batch = q_absorbed.shape[0]
     heads = q_absorbed.shape[1]
+    heads_group = cdiv(heads, HEADS_PER_BLOCK)
 
-    grid = (batch, heads, NUM_KV_SPLITS)
+    grid = (batch, heads_group, NUM_KV_SPLITS)
 
-    for seq, head, kv_split in hl.tile(grid, block_size=[1, 1, None]):
-        q = q_absorbed[seq, head, :]
+    for seq, head_group, kv_splits in hl.tile(grid, block_size=[1, 1, None]):
+        q_heads = head_group * HEADS_PER_BLOCK + hl.arange(HEADS_PER_BLOCK)
+        mask_h = q_heads < heads
+        q = hl.load(q_absorbed, [seq, q_heads, slice(None)], extra_mask=mask_h[:, None])
         if rope_dim > 0:
-            q_latent = q[:latent_dim]
-            q_rope = q[latent_dim : latent_dim + rope_dim]
+            q_latent = q[:, :latent_dim]
+            q_rope = q[:, latent_dim : latent_dim + rope_dim]
         else:
             q_latent = q
 
         cur_batch_seq_len = B_seq_len[seq]
         kv_len_per_split = cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
 
-        split_kv_start = kv_len_per_split * kv_split
-        split_kv_end = torch.min(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+        e_max = hl.zeros([HEADS_PER_BLOCK], dtype=torch.float32) - float("inf")
+        e_sum = hl.zeros([HEADS_PER_BLOCK], dtype=torch.float32)
+        acc = hl.zeros([HEADS_PER_BLOCK, latent_dim], dtype=torch.float32)
 
-        e_max = hl.zeros([], dtype=torch.float32) - float("inf")
-        e_sum = hl.zeros([], dtype=torch.float32)
-        acc = hl.zeros([latent_dim], dtype=torch.float32)
+        for split in hl.tile(kv_splits.begin, kv_splits.end, block_size=1):
+            split_kv_start = kv_len_per_split * split
+            split_kv_end = torch.min(
+                split_kv_start + kv_len_per_split, cur_batch_seq_len
+            )
 
-        if split_kv_end > split_kv_start:
-            for start in range(split_kv_start, split_kv_end, BLOCK_KV):
-                offs_n = start + hl.arange(0, BLOCK_KV)
-                log_page_offs = offs_n // PAGE_SIZE
-                kv_page_number = hl.load(
-                    Req_to_Tokens,
-                    [seq, log_page_offs],
-                    extra_mask=offs_n < split_kv_end,
-                )
+            if split_kv_end > split_kv_start:
+                for kv_block in hl.tile(split_kv_start, split_kv_end, block_size=None):
+                    offs_n = kv_block + hl.arange(0, kv_block.block_size)
+                    log_page_offs = offs_n // PAGE_SIZE
+                    kv_page_number = hl.load(
+                        Req_to_Tokens,
+                        [seq, log_page_offs],
+                        extra_mask=offs_n < split_kv_end,
+                    )
 
-                page_offs = offs_n % PAGE_SIZE
+                    page_offs = offs_n % PAGE_SIZE
 
-                k = hl.load(
-                    latent_kv,
-                    [kv_page_number, page_offs, slice(None)],
-                    extra_mask=offs_n < split_kv_end,
-                )
-                if k.dtype == torch.float8_e4m3fn:
-                    k = (k.to(torch.float32) * kv_dequant).to(q.dtype)
+                    k = hl.load(
+                        latent_kv,
+                        [kv_page_number, page_offs, slice(None)],
+                        extra_mask=offs_n < split_kv_end,
+                    )
+                    if k.dtype == torch.float8_e4m3fn:
+                        k = (k.to(torch.float32) * kv_dequant).to(q.dtype)
 
-                if rope_dim > 0:
-                    k_latent = k[:latent_dim]
-                    qk = hl.dot(q_latent, torch.transpose(k_latent))
-                    k_rope = k[latent_dim : latent_dim + rope_dim]
+                    if rope_dim > 0:
+                        k_latent = k[:, :latent_dim]
+                        qk = hl.dot(q_latent, torch.transpose(k_latent, 0, 1))
+                        k_rope = k[:, latent_dim : latent_dim + rope_dim]
 
-                    qk = hl.dot(q_rope, torch.transpose(k_rope), qk)
-                else:
-                    qk = hl.dot(q_latent, torch.transpose(k_latent))
+                        qk = hl.dot(q_rope, torch.transpose(k_rope, 0, 1), qk)
+                    else:
+                        qk = hl.dot(q_latent, torch.transpose(k_latent, 0, 1))
 
-                qk *= sm_scale
-                if logit_cap > 0:
-                    qk = logit_cap * torch.tanh(qk / logit_cap)
-                qk = torch.where(offs_n < split_kv_end, qk, float("-inf"))
+                    qk *= sm_scale
+                    if logit_cap > 0:
+                        qk = logit_cap * torch.tanh(qk / logit_cap)
+                    token_mask = offs_n < split_kv_end
+                    qk = torch.where(
+                        mask_h[:, None] & token_mask[None, :], qk, float("-inf")
+                    )
 
-                v = k_latent
+                    v = k_latent
 
-                n_e_max = torch.max(torch.max(qk), e_max)
-                re_scale = torch.exp(e_max - n_e_max)
-                p = torch.exp(qk - n_e_max)
-                acc *= re_scale
-                acc += hl.dot(p.to(v.dtype), v)
+                    tile_max = torch.max(qk, dim=-1).values
+                    n_e_max = torch.max(tile_max, e_max)
+                    re_scale = torch.exp(e_max - n_e_max)
+                    p = torch.exp(qk - n_e_max)
+                    acc *= re_scale[:, None]
+                    acc += hl.dot(p.to(v.dtype), v)
 
-                e_sum = e_sum * re_scale + torch.sum(p)
-                e_max = n_e_max
-
-            hl.store(attn_out, [seq, head, kv_split, slice(None)], acc / e_sum)
-            hl.store(logsum_exp, [seq, head, kv_split], e_max + torch.log(e_sum))
+                    e_sum = e_sum * re_scale + torch.sum(p, dim=-1)
+                    e_max = n_e_max
+        # TODO: can we let autotuner handle number of kv_splits per thread block?
+        # this will need dynamic memory allocation
+        # output tensors needs to be created inside helion kernel
+        hl.store(
+            attn_out,
+            [seq, q_heads, split, slice(None)],
+            acc / e_sum[:, None],
+            extra_mask=mask_h,
+        )
+        hl.store(
+            logsum_exp,
+            [seq, q_heads, split],
+            e_max + torch.log(e_sum),
+            extra_mask=mask_h,
+        )
