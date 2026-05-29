@@ -8,7 +8,6 @@ import gguf
 import regex as re
 import torch
 import torch.nn as nn
-from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from vllm.config import ModelConfig, VllmConfig
@@ -27,6 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     gguf_quant_weights_iterator_multi,
 )
 from vllm.transformers_utils.gguf_utils import detect_gguf_multimodal
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if TYPE_CHECKING:
@@ -57,7 +57,12 @@ class GGUFModelLoader(BaseModelLoader):
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
-            return hf_hub_download(repo_id=repo_id, filename=filename)
+            return hf_api().hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                revision=model_config.revision,
+                cache_dir=self.load_config.download_dir,
+            )
         # repo_id:quant_type
         elif "/" in model_name_or_path and ":" in model_name_or_path:
             repo_id, quant_type = model_name_or_path.rsplit(":", 1)

@@ -36,7 +36,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import transformers
 from einops import rearrange
+from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.models.glm4v.configuration_glm4v import (
     Glm4vTextConfig,
@@ -121,6 +123,15 @@ logger = init_logger(__name__)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
+
+TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
+
+
+def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
+    return VideoMetadata(
+        **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
+    )
+
 
 # === Vision Inputs === #
 
@@ -723,6 +734,7 @@ class Glm4vVisionTransformer(nn.Module):
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
+        pos_ids = pos_ids.to(cos.device, non_blocking=True)
         cos_combined = cos[pos_ids].flatten(1)
         sin_combined = sin[pos_ids].flatten(1)
         return cos_combined, sin_combined, pos_ids
@@ -830,6 +842,46 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
 
     def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int] | None:
+        processor = self.get_hf_processor()
+        if isinstance(processor, Glm4vProcessor):
+            return None
+
+        result: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            result["image"] = self.get_max_image_tokens()
+
+        if mm_counts.get("video", 0) > 0:
+            video_processor = self.get_video_processor()
+            max_pixels = video_processor.size["longest_edge"]
+
+            vision_config = self.get_hf_config().vision_config
+            temporal_patch_size = vision_config.temporal_patch_size
+            patch_size = vision_config.patch_size
+            merge_size = vision_config.spatial_merge_size
+
+            max_vision_tokens = max_pixels // (
+                temporal_patch_size * patch_size**2 * merge_size**2
+            )
+
+            # GLMGA supports up to 640 frames (max_frames).
+            max_grid_t = 640 // temporal_patch_size
+
+            tokenizer = self.get_tokenizer()
+            max_ts_tokens = max(
+                len(tokenizer.encode(f"{t:.1f} seconds", add_special_tokens=False))
+                for t in range(min(max_grid_t, 300))
+            )
+
+            result["video"] = max_vision_tokens + max_grid_t * (2 + max_ts_tokens) + 2
+
+        return result
 
     def get_data_parser(self):
         return MultiModalDataParser(
@@ -1103,12 +1155,83 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             selected_timestamps.append(timestamps_list[idx])
         return selected_timestamps
 
+    def _is_glmga_model(self, processor: object) -> bool:
+        """Detect GLMGA variant via its Glmga sub-processors."""
+        for attr in ("image_processor", "video_processor"):
+            sub = getattr(processor, attr, None)
+            if sub and "Glmga" in type(sub).__name__:
+                return True
+        return False
+
+    def _get_video_second_idx_glmga(
+        self, metadata: dict[str, Any], total_frames: int
+    ) -> list[int]:
+        """Fixed fps=2 frame selection matching GlmgaVideoProcessor.sample_frames."""
+        video_processor = self.get_video_processor()
+
+        video_fps = metadata["fps"]
+        meta_frames = metadata.get("total_num_frames", total_frames)
+        max_frame_idx = meta_frames - 1
+        duration = metadata.get("duration", round(max_frame_idx / video_fps) + 1)
+
+        do_sample_frames = metadata.get("do_sample_frames", True)
+        if not do_sample_frames:
+            frame_indices = metadata["frames_indices"]
+        else:
+            target_fps = 2
+            max_frames = getattr(video_processor, "max_frames", 640)
+            extract_t = int(duration * target_fps)
+            extract_t = min(extract_t, max_frames)
+
+            duration_per_frame = 1 / video_fps
+            timestamps = [i * duration_per_frame for i in range(meta_frames)]
+
+            if meta_frames < extract_t:
+                frame_indices = [
+                    math.floor(i * meta_frames / extract_t) for i in range(extract_t)
+                ]
+            else:
+                frame_indices = []
+                current_second = 0.0
+                inv_fps = 1 / target_fps
+                for frame_index in range(meta_frames):
+                    if timestamps[frame_index] >= current_second:
+                        current_second += inv_fps
+                        frame_indices.append(frame_index)
+                        if current_second >= duration - inv_fps:
+                            break
+
+            if len(frame_indices) < extract_t:
+                if len(frame_indices) == 0:
+                    start, end = 0, max(meta_frames - 1, 0)
+                else:
+                    start, end = frame_indices[0], frame_indices[-1]
+                frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+            elif len(frame_indices) > extract_t:
+                frame_indices = np.linspace(
+                    0, meta_frames - 1, extract_t, dtype=int
+                ).tolist()
+
+        seen, uniq = set(), []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        if len(uniq) & 1:
+            uniq.append(uniq[-1])
+
+        frame_indices = uniq
+        full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
+        timestamps_list = full_second_idxs[::2]
+        return list(timestamps_list)
+
     def _construct_video_placeholder(
         self,
         video_array: np.ndarray,
         metadata: dict[str, Any],
         grid_thw: torch.Tensor,
-    ) -> str:
+    ) -> list[int]:
         hf_processor = self.get_hf_processor()
         tokenizer = self.get_tokenizer()
         image_processor = hf_processor.image_processor
@@ -1121,11 +1244,13 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         merge_length = image_processor.merge_size**2
 
         assert isinstance(grid_thw, torch.Tensor)
-        timestamps = (
-            self._get_video_second_idx_glm4v(metadata, len(video_array))
-            if isinstance(hf_processor, Glm4vProcessor)
-            else self._get_video_second_idx_glm46v(metadata, len(video_array))
-        )
+
+        if isinstance(hf_processor, Glm4vProcessor):
+            timestamps = self._get_video_second_idx_glm4v(metadata, len(video_array))
+        elif self._is_glmga_model(hf_processor):
+            timestamps = self._get_video_second_idx_glmga(metadata, len(video_array))
+        else:
+            timestamps = self._get_video_second_idx_glm46v(metadata, len(video_array))
 
         timestamp_format = (
             "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
@@ -1138,9 +1263,16 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         num_tokens_per_frame = int(H * W) // merge_length
         placeholder = []
         placeholder.append(bov_token_id)
+        # Glm46VProcessor uses image_token_id for video frame embeddings;
+        # Glm4vProcessor uses video_token_id.
+        frame_embed_token_id = (
+            hf_processor.video_token_id
+            if isinstance(hf_processor, Glm4vProcessor) or not TRANSFORMERS_WITH_GA
+            else hf_processor.image_token_id
+        )
         for frame_idx in frames_idx_token:
             placeholder.append(boi_token_id)
-            placeholder.extend([hf_processor.video_token_id] * num_tokens_per_frame)
+            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
             placeholder.append(eoi_token_id)
             placeholder.extend(frame_idx)
         placeholder.append(eov_token_id)
@@ -1240,6 +1372,47 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
 
 class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
+    @staticmethod
+    def _get_direct_path_inputs(
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        prepared_data = dict(mm_data)
+        prepared_kwargs = dict(mm_kwargs)
+
+        videos = prepared_data.get("videos")
+        if not (isinstance(videos, list) and len(videos) > 0):
+            return prepared_data, prepared_kwargs
+
+        hf_videos = []
+        hf_video_metadata = []
+        for item in videos:
+            if isinstance(item, tuple) and len(item) == 2:
+                video_array, metadata = item
+                hf_videos.append(video_array)
+                if isinstance(metadata, VideoMetadata):
+                    hf_video_metadata.append(metadata)
+                elif isinstance(metadata, Mapping):
+                    hf_video_metadata.append(_to_video_metadata(metadata))
+                    if "do_sample_frames" in metadata:
+                        prepared_kwargs["do_sample_frames"] = metadata[
+                            "do_sample_frames"
+                        ]
+                elif metadata is not None:
+                    raise TypeError(
+                        "Video metadata must be a mapping or VideoMetadata, "
+                        f"got {type(metadata)}"
+                    )
+            else:
+                hf_videos.append(item)
+
+        prepared_data["videos"] = hf_videos
+        if hf_video_metadata:
+            prepared_data["video_metadata"] = hf_video_metadata
+            prepared_kwargs["return_metadata"] = True
+
+        return prepared_data, prepared_kwargs
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1248,11 +1421,32 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
+        if not mm_data:
+            tokenizer = self.info.get_tokenizer()
+            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+
         processor = self.info.get_hf_processor(**mm_kwargs)
 
-        # GLM-4.1V use `image_token_id` as video placeholder, we need to
-        # replace it with `video_token_id` for video processing. So we
-        # separate video processing from image processing.
+        # Glm46VProcessor and GLMGA handle image/video placeholders together
+        # via the direct path. Only Glm4vProcessor (GLM-4.1V) needs the
+        # split-video path because it uses image_token_id as the video
+        # placeholder.  The direct path requires transformers >= 5.5.0
+        # (Glm46VProcessor / GlmgaVideoProcessor support).
+        use_direct_path = (
+            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
+        )
+        if use_direct_path:
+            prepared_data, prepared_kwargs = self._get_direct_path_inputs(
+                mm_data, mm_kwargs
+            )
+            return super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=prepared_data,
+                mm_kwargs=prepared_kwargs,
+                tok_kwargs=tok_kwargs,
+            )
+
         if (
             "videos" in mm_data
             and isinstance(mm_data["videos"], list)
@@ -1271,19 +1465,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-
-                unuse_metadata = ["do_sample_frames"]
-                video_mm_data["video_metadata"] = [
-                    [
-                        VideoMetadata(
-                            **{
-                                k: metadata[k]
-                                for k in metadata
-                                if k not in unuse_metadata
-                            }
-                        )
-                    ]
-                ]
+                video_mm_data["video_metadata"] = [[_to_video_metadata(metadata)]]
 
                 video_outputs = super()._call_hf_processor(
                     prompt="<|begin_of_video|><|video|><|end_of_video|>",
@@ -1365,6 +1547,22 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                 embed_token_id=hf_processor.video_token_id,
             )
 
+        def get_video_replacement_glm46v(item_idx: int):
+            out_item = out_mm_kwargs["video"][item_idx]
+            grid_thw = out_item["video_grid_thw"].data
+            assert isinstance(grid_thw, torch.Tensor)
+
+            video, metadata = mm_items["video"][item_idx]
+            placeholder = self.info._construct_video_placeholder(
+                video, metadata, grid_thw
+            )
+            return PromptUpdateDetails.select_token_id(
+                placeholder,
+                embed_token_id=hf_processor.image_token_id,
+            )
+
+        is_glm46v = not isinstance(hf_processor, Glm4vProcessor)
+
         return [
             PromptReplacement(
                 modality="image",
@@ -1374,7 +1572,11 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             PromptReplacement(
                 modality="video",
                 target="<|begin_of_video|><|video|><|end_of_video|>",
-                replacement=get_video_replacement_glm4v,
+                replacement=(
+                    get_video_replacement_glm46v
+                    if is_glm46v and TRANSFORMERS_WITH_GA
+                    else get_video_replacement_glm4v
+                ),
             ),
         ]
 
@@ -1435,7 +1637,7 @@ class Glm4vForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        if config.model_type in ("glm4v", "glm_ocr"):
+        if config.model_type in ("glm4v", "glm_ocr", "glmga"):
             architectures = ["Glm4ForCausalLM"]
         elif config.model_type == "glm4v_moe":
             architectures = ["Glm4MoeForCausalLM"]
@@ -1599,19 +1801,27 @@ class Glm4vForConditionalGeneration(
         hf_config = self.config
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
-            offset = mm_feature.mm_position.offset
+            embed_ranges = mm_feature.mm_position.extract_embeds_range()
             if mm_feature.modality == "image":
                 t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
+                assert len(embed_ranges) == 1
+                offset, end = embed_ranges[0]
+                assert end - offset + 1 == h * w // spatial_merge_size**2
                 yield offset, t, h // spatial_merge_size, w // spatial_merge_size
             elif mm_feature.modality == "video":
                 t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
-                yield (
-                    offset,
-                    t,
-                    h // spatial_merge_size,
-                    w // spatial_merge_size,
-                )
+                llm_grid_h = h // spatial_merge_size
+                llm_grid_w = w // spatial_merge_size
+                num_tokens_per_frame = llm_grid_h * llm_grid_w
+
+                if len(embed_ranges) == t:
+                    for offset, end in embed_ranges:
+                        assert end - offset + 1 == num_tokens_per_frame
+                        yield offset, 1, llm_grid_h, llm_grid_w
+                else:
+                    offset = mm_feature.mm_position.offset
+                    yield offset, t, llm_grid_h, llm_grid_w
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 

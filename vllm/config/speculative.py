@@ -67,7 +67,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
-DraftSampleMethod = Literal["greedy", "gumbel"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
@@ -256,10 +256,10 @@ class SpeculativeConfig:
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
-    draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
 
     def compute_hash(self) -> str:
         """
@@ -467,6 +467,17 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
+        if hf_config.model_type == "intern_s2_preview":
+            text_config = getattr(hf_config, "text_config", None)
+            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -474,7 +485,16 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
 
-        if hf_config.model_type == "step3p5":
+        if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[
+            0
+        ] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration"):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
@@ -694,21 +714,15 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
+                    if (
+                        self.num_speculative_tokens > 1
+                        and self.draft_model_config.hf_config.model_type
+                        != "step3p5_mtp"
+                    ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
-                        )
-                elif self.draft_model_config.hf_config.model_type in (
-                    "longcat_flash_mtp"
-                ):
-                    self.method = "longcat_flash_mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                            "LongCat MTP models only have "
-                            "one layer. Might need some code changes "
-                            "to support multiple layers."
                         )
                 elif self.method == "draft_model":
                     pass
@@ -1043,6 +1057,14 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "gemma4_mtp"
+        )
+
+    def use_step3p5_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "step3p5_mtp"
         )
 
     def use_eagle(self) -> bool:

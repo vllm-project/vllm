@@ -60,10 +60,9 @@ class MoeWNA16Config(QuantizationConfig):
         # Avoid circular import
         from vllm.model_executor.layers.quantization.awq import AWQConfig
         from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-        from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
         if self.linear_quant_method == "gptq":
-            self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
+            pass
         elif self.linear_quant_method in ("awq", "awq_marlin"):
             capability_tuple = current_platform.get_device_capability()
             device_capability = (
@@ -172,24 +171,18 @@ class MoeWNA16Config(QuantizationConfig):
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             # Avoid circular import
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQConfig,
+            )
             from vllm.model_executor.layers.quantization.awq import AWQConfig
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,
             )
-            from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-            from vllm.model_executor.layers.quantization.gptq_marlin import (
-                GPTQMarlinConfig,
-            )
 
             if self.linear_quant_method == "gptq":
-                if self.use_marlin:
-                    return GPTQMarlinConfig.from_config(
-                        self.full_config
-                    ).get_quant_method(layer, prefix)
-                else:
-                    return GPTQConfig.from_config(self.full_config).get_quant_method(
-                        layer, prefix
-                    )
+                return AutoGPTQConfig.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
             elif self.linear_quant_method in ("awq", "awq_marlin"):
                 if self.use_marlin and check_marlin_supports_layer(
                     layer, self.group_size
@@ -384,7 +377,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             layer.w2_qweight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,

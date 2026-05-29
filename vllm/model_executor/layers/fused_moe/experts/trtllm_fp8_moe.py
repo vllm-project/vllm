@@ -88,9 +88,6 @@ class TrtLlmFp8ExpertsBase:
             or moe_parallel_config.use_ag_rs_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -263,7 +260,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return True
+        return router_logits_dtype != torch.float32
 
     @staticmethod
     def _supports_routing_method(
