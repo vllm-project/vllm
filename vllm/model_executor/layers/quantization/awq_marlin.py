@@ -332,7 +332,7 @@ class AWQMarlinConfig(QuantizationConfig):
         group_size = quant_config.get("group_size")
         zero_point = quant_config.get("zero_point")
 
-        if not current_platform.is_cuda_alike():
+        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
             return False
 
         if quant_method != "awq":

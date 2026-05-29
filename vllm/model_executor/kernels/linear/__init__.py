@@ -336,6 +336,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
     ],
     PlatformEnum.ROCM: [
         TritonW4A16LinearKernel,
