@@ -10,7 +10,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
-use crate::protocol::lora::LoRARequest;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::utility::EngineCoreUtilityRequest;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
@@ -661,7 +661,7 @@ impl EngineCoreClient {
     }
 
     /// Load or refresh one LoRA adapter on every connected engine.
-    pub async fn add_lora(&self, lora_request: &LoRARequest) -> Result<bool> {
+    pub async fn add_lora(&self, lora_request: &LoraRequest) -> Result<bool> {
         Ok(self
             .call_utility::<bool, _>("add_lora", (lora_request,))
             .await?

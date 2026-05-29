@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_engine_core_client::protocol::lora::LoRARequest;
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
 pub use vllm_tool_parser::Tool as ChatTool;
@@ -429,7 +429,7 @@ pub struct ChatRequest {
     pub data_parallel_rank: Option<u32>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
-    pub lora_request: Option<LoRARequest>,
+    pub lora_request: Option<LoraRequest>,
 }
 
 impl ChatRequest {

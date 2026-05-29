@@ -141,6 +141,13 @@ fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason
     ]
 }
 
+fn assert_adapter_a_lora_request(request: &EngineCoreRequest) {
+    let lora = request.lora_request.as_ref().expect("lora request");
+    assert_eq!(lora.lora_name, "adapter-a");
+    assert_eq!(lora.lora_int_id, 1);
+    assert_eq!(lora.lora_path, "org/adapter-a");
+}
+
 fn sse_data_payloads(text: &str) -> Vec<&str> {
     text.lines().filter_map(|line| line.strip_prefix("data: ")).collect()
 }
@@ -1041,11 +1048,32 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
             assert_eq!(add[0].as_ref(), &[0x00]);
             let request: EngineCoreRequest =
                 rmp_serde::from_slice(&add[1]).expect("decode engine request");
-            let lora =
-                request.lora_request.as_ref().and_then(Value::as_array).expect("lora request");
-            assert_eq!(lora[0], Value::from("adapter-a"));
-            assert_eq!(lora[1], Value::from(1));
-            assert_eq!(lora[2], Value::from("org/adapter-a"));
+            assert_adapter_a_lora_request(&request);
+
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+
+            let add = recv_engine_message(dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            assert_adapter_a_lora_request(&request);
+
+            send_outputs(
+                push,
+                engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+            )
+            .await;
+
+            let add = recv_engine_message(dealer).await;
+            assert_eq!(add[0].as_ref(), &[0x00]);
+            let request: EngineCoreRequest =
+                rmp_serde::from_slice(&add[1]).expect("decode engine request");
+            assert_eq!(request.prompt_token_ids.as_deref(), Some(&[11, 22][..]));
+            assert_adapter_a_lora_request(&request);
 
             send_outputs(
                 push,
@@ -1120,11 +1148,55 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
         .call(
             Request::builder()
                 .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "adapter-a",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "adapter-a",
+                        "token_ids": [11, 22],
+                        "stream": false,
+                        "sampling_params": {
+                            "max_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
                 .uri("/v1/unload_lora_adapter")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
-                        "lora_name": "adapter-a"
+                        "lora_name": "adapter-a",
+                        "lora_int_id": 1
                     })
                     .to_string(),
                 ))
@@ -1161,6 +1233,74 @@ async fn load_lora_adapter_registers_model_and_forwards_lora_request() {
         .await
         .expect("call app");
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    drop(app);
+    engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unload_lora_adapter_rejects_mismatched_lora_int_id() {
+    let (mut app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+            assert_eq!(array[2], Value::from("add_lora"));
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/load_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_path": "org/adapter-a"
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/unload_lora_adapter")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "lora_name": "adapter-a",
+                        "lora_int_id": 99
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let models = app
+        .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["data"][1]["id"], "adapter-a");
 
     drop(app);
     engine_task.finish().await;

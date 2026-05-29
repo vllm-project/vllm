@@ -350,7 +350,7 @@ pub struct EngineCoreRequest {
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
     #[serde(default)]
-    pub lora_request: Option<OpaqueValue>,
+    pub lora_request: Option<lora::LoraRequest>,
     #[serde(default)]
     pub cache_salt: Option<String>,
     #[serde(default)]

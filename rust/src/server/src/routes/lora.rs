@@ -7,14 +7,15 @@ use thiserror_ext::AsReport;
 use validator::Validate;
 
 use crate::error::ApiError;
+use crate::lora::{LoadLoraError, UnloadLoraError};
 use crate::routes::openai::utils::types::Normalizable;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::state::{AppState, LoadLoRAError, UnloadLoRAError};
+use crate::state::AppState;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
 #[derive(Debug, Deserialize, Validate)]
-pub(crate) struct LoadLoRAAdapterRequest {
+pub(crate) struct LoadLoraAdapterRequest {
     lora_name: String,
     lora_path: String,
     #[serde(default)]
@@ -23,16 +24,16 @@ pub(crate) struct LoadLoRAAdapterRequest {
     is_3d_lora_weight: bool,
 }
 
-impl Normalizable for LoadLoRAAdapterRequest {}
+impl Normalizable for LoadLoraAdapterRequest {}
 
 #[derive(Debug, Deserialize, Validate)]
-pub(crate) struct UnloadLoRAAdapterRequest {
+pub(crate) struct UnloadLoraAdapterRequest {
     lora_name: String,
     #[serde(default)]
     lora_int_id: Option<u64>,
 }
 
-impl Normalizable for UnloadLoRAAdapterRequest {}
+impl Normalizable for UnloadLoraAdapterRequest {}
 
 fn runtime_lora_allowed_path_prefixes() -> Option<Vec<PathBuf>> {
     let prefixes = std::env::var_os(RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV)?;
@@ -74,7 +75,24 @@ fn validate_lora_path_access(
         ));
     }
 
-    if !allowed_prefixes.iter().any(|prefix| path.starts_with(prefix)) {
+    let canonical_path = path.canonicalize().map_err(|_| {
+        ApiError::invalid_request(
+            "Local LoRA adapter path must exist and be accessible.".to_string(),
+            Some("lora_path"),
+        )
+    })?;
+    let canonical_prefixes = allowed_prefixes
+        .iter()
+        .map(|prefix| {
+            prefix.canonicalize().map_err(|_| {
+                ApiError::server_error(format!(
+                    "configured {RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV} path prefix must exist and be accessible"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if !canonical_prefixes.iter().any(|prefix| canonical_path.starts_with(prefix)) {
         return Err(ApiError::invalid_request(
             "Local LoRA adapter path is outside the configured allowed prefixes.".to_string(),
             Some("lora_path"),
@@ -87,7 +105,7 @@ fn validate_lora_path_access(
 /// Dynamically load one LoRA adapter and expose it as an OpenAI model id.
 pub async fn load_lora_adapter(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(request): ValidatedJson<LoadLoRAAdapterRequest>,
+    ValidatedJson(request): ValidatedJson<LoadLoraAdapterRequest>,
 ) -> Result<String, ApiError> {
     if request.lora_name.is_empty() || request.lora_path.is_empty() {
         return Err(ApiError::invalid_request(
@@ -108,21 +126,21 @@ pub async fn load_lora_adapter(
         )
         .await
         .map_err(|error| match error {
-            LoadLoRAError::AlreadyLoaded { lora_name } => ApiError::invalid_request(
+            LoadLoraError::AlreadyLoaded { lora_name } => ApiError::invalid_request(
                 format!(
                     "The lora adapter '{lora_name}' has already been loaded. If you want to load the adapter in place, set 'load_inplace' to true."
                 ),
                 Some("lora_name"),
             ),
-            LoadLoRAError::BaseModelName { lora_name } => ApiError::invalid_request(
+            LoadLoraError::BaseModelName { lora_name } => ApiError::invalid_request(
                 format!("The lora adapter name '{lora_name}' conflicts with a served base model."),
                 Some("lora_name"),
             ),
-            LoadLoRAError::Engine(error) => ApiError::server_error(format!(
+            LoadLoraError::Engine(error) => ApiError::server_error(format!(
                 "failed to load LoRA adapter '{lora_name}': {}",
                 error.to_report_string()
             )),
-            LoadLoRAError::NotLoaded { lora_name } => ApiError::server_error(format!(
+            LoadLoraError::NotLoaded { lora_name } => ApiError::server_error(format!(
                 "failed to load LoRA adapter '{lora_name}': engine rejected the adapter"
             )),
         })?;
@@ -135,9 +153,8 @@ pub async fn load_lora_adapter(
 /// Remove one LoRA adapter from the engine and frontend registry.
 pub async fn unload_lora_adapter(
     State(state): State<Arc<AppState>>,
-    ValidatedJson(request): ValidatedJson<UnloadLoRAAdapterRequest>,
+    ValidatedJson(request): ValidatedJson<UnloadLoraAdapterRequest>,
 ) -> Result<String, ApiError> {
-    let _ = request.lora_int_id;
     if request.lora_name.is_empty() {
         return Err(ApiError::invalid_request(
             "'lora_name' needs to be provided to unload a LoRA adapter.".to_string(),
@@ -145,15 +162,27 @@ pub async fn unload_lora_adapter(
         ));
     }
 
-    let lora_request =
-        state.unload_lora(&request.lora_name).await.map_err(|error| match error {
-            UnloadLoRAError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
-            UnloadLoRAError::Engine(error) => ApiError::server_error(format!(
+    let lora_request = state
+        .unload_lora(&request.lora_name, request.lora_int_id)
+        .await
+        .map_err(|error| match error {
+            UnloadLoraError::NotFound { lora_name } => ApiError::model_not_found(lora_name),
+            UnloadLoraError::IntIdMismatch {
+                lora_name,
+                expected,
+                actual,
+            } => ApiError::invalid_request(
+                format!(
+                    "The requested lora_int_id {actual} does not match loaded adapter '{lora_name}' with id {expected}."
+                ),
+                Some("lora_int_id"),
+            ),
+            UnloadLoraError::Engine(error) => ApiError::server_error(format!(
                 "failed to unload LoRA adapter '{}': {}",
                 request.lora_name,
                 error.to_report_string()
             )),
-            UnloadLoRAError::NotRemoved {
+            UnloadLoraError::NotRemoved {
                 lora_name,
                 lora_int_id,
             } => ApiError::server_error(format!(
@@ -169,9 +198,24 @@ pub async fn unload_lora_adapter(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::validate_lora_path_access;
+
+    fn temp_lora_dir(test_name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "vllm-lora-{test_name}-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("create temp lora dir");
+        path
+    }
 
     #[test]
     fn lora_path_allows_hf_repo_ids_without_prefixes() {
@@ -187,9 +231,33 @@ mod tests {
 
     #[test]
     fn lora_path_allows_absolute_paths_under_configured_prefixes() {
-        let prefixes = [PathBuf::from("/srv/vllm-loras")];
-        validate_lora_path_access("/srv/vllm-loras/adapter-a", Some(&prefixes))
+        let root = temp_lora_dir("allowed-prefix");
+        let allowed = root.join("allowed");
+        let adapter = allowed.join("adapter-a");
+        fs::create_dir_all(&adapter).expect("create adapter dir");
+
+        let prefixes = [allowed];
+        validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), Some(&prefixes))
             .expect("path under configured prefix should be allowed");
-        assert!(validate_lora_path_access("/tmp/adapter-a", Some(&prefixes)).is_err());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn lora_path_rejects_parent_escape_from_configured_prefixes() {
+        let root = temp_lora_dir("parent-escape");
+        let allowed = root.join("allowed");
+        let private_adapter = root.join("private").join("adapter-a");
+        fs::create_dir_all(&allowed).expect("create allowed dir");
+        fs::create_dir_all(&private_adapter).expect("create private adapter dir");
+
+        let escaped = allowed.join("../private/adapter-a");
+        let prefixes = [allowed];
+        assert!(
+            validate_lora_path_access(escaped.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .is_err()
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 }

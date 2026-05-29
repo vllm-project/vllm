@@ -363,28 +363,6 @@ fn frontend_args_json_accepts_noop_fields() {
 }
 
 #[test]
-fn frontend_args_json_accepts_enable_lora_engine_field() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "frontend",
-        "--listen-fd",
-        "3",
-        "--input-address",
-        "ipc:///tmp/input.sock",
-        "--output-address",
-        "ipc:///tmp/output.sock",
-        "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_lora":true}"#,
-    ])
-    .unwrap();
-
-    let Command::Frontend(args) = cli.command else {
-        panic!("expected frontend args");
-    };
-    assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
-}
-
-#[test]
 fn frontend_args_json_rejects_unsupported_fields() {
     let error = Cli::try_parse_from([
         "vllm-rs",

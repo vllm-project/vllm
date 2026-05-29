@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue};
+use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams};
 
 use crate::error::{Error, Result};
 
@@ -34,7 +35,7 @@ pub struct GenerateRequest {
     pub priority: i32,
     pub data_parallel_rank: Option<u32>,
     pub reasoning_ended: Option<bool>,
-    pub lora_request: Option<OpaqueValue>,
+    pub lora_request: Option<LoraRequest>,
 }
 
 #[derive(Debug)]
