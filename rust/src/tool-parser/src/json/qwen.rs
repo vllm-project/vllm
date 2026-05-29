@@ -1,5 +1,5 @@
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Qwen XML",
@@ -40,7 +40,6 @@ impl Qwen3XmlToolParser {
 }
 
 impl ToolParser for Qwen3XmlToolParser {
-    /// Create a boxed Qwen XML tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -48,14 +47,16 @@ impl ToolParser for Qwen3XmlToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    /// Push one decoded text chunk through the Qwen XML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.inner.push(chunk)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.inner.parse_into(chunk, output)
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.inner.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.inner.reset()
     }
 }
 
@@ -66,7 +67,7 @@ mod tests {
 
     use super::Qwen3XmlToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
-    use crate::{ToolParseResult, ToolParser};
+    use crate::{ToolParser, ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
         format!(
@@ -77,37 +78,37 @@ mod tests {
     #[test]
     fn qwen_xml_parse_complete_without_tool_call_keeps_text() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn qwen_xml_parse_complete_extracts_raw_json_arguments() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let arguments = r#"{ "location": "Tokyo", "days": "3" }"#;
-        let result = parser
+        let output = parser
             .parse_complete(&format!(
                 "Let me check.\n{}",
                 build_tool_call("get_weather", arguments)
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "Let me check.\n");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.normal_text, "Let me check.\n");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn qwen_xml_does_not_validate_or_normalize_arguments() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let arguments = r#"{"location":"Tokyo",}"#;
-        let result = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
+        let output = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
@@ -122,23 +123,23 @@ mod tests {
             "}\n</tool_call>",
         ];
 
-        let mut result = ToolParseResult::default();
+        let mut output = ToolParserOutput::default();
         let mut observed_arguments = Vec::new();
         for chunk in chunks {
-            let next = parser.push(chunk).unwrap();
+            let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
                 next.calls
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
             );
-            result.append(next);
+            output.append(next);
         }
-        result.append(parser.finish().unwrap());
+        output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
         assert_eq!(
-            result.coalesce_calls().calls[0].arguments,
+            output.coalesce_calls().calls[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -152,27 +153,27 @@ mod tests {
         let chunks = split_by_chars(&input, 5);
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert_eq!(output.normal_text, "hello ");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]
     fn qwen_xml_keeps_end_marker_literal_inside_json_string() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let arguments = r#"{"text":"literal </tool_call> inside"}"#;
-        let result = parser.parse_complete(&build_tool_call("echo", arguments)).unwrap();
+        let output = parser.parse_complete(&build_tool_call("echo", arguments)).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].arguments, arguments);
     }
 
     #[test]
     fn qwen_xml_decodes_escaped_function_name() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(
                 r#"<tool_call>
 {"name":"say_\"hi","arguments":{}}
@@ -180,7 +181,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.calls[0].name.as_deref(), Some("say_\"hi"));
+        assert_eq!(output.calls[0].name.as_deref(), Some("say_\"hi"));
     }
 
     #[test]
@@ -189,10 +190,10 @@ mod tests {
         let input = r#"<tool_call>{"name":"get_weather","arguments":{}}
 </tool_call>"#;
 
-        let result = parser.parse_complete(input).unwrap();
+        let output = parser.parse_complete(input).unwrap();
 
-        assert_eq!(result.normal_text, input);
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, input);
+        assert!(output.calls.is_empty());
     }
 
     #[test]
@@ -218,10 +219,10 @@ mod tests {
         let chunks = split_by_chars(&input, 7);
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
 
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
         expect![[r#"
-            ToolParseResult {
+            ToolParserOutput {
                 normal_text: "",
                 calls: [
                     ToolCallDelta {
@@ -241,14 +242,14 @@ mod tests {
                 ],
             }
         "#]]
-        .assert_debug_eq(&result);
+        .assert_debug_eq(&output);
     }
 
     #[test]
     fn qwen_xml_finish_fails_incomplete_tool_call() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         parser
-            .push(
+            .parse_chunk(
                 r#"<tool_call>
 {"name":"get_weather","arguments":{"location""#,
             )
@@ -264,7 +265,7 @@ mod tests {
     fn qwen_xml_malformed_field_order_fails_fast() {
         let mut parser = Qwen3XmlToolParser::new(&test_tools());
         let error = parser
-            .push(
+            .parse_chunk(
                 r#"<tool_call>
 {"arguments":{},"name":"get_weather"}
 </tool_call>"#,

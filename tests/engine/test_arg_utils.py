@@ -613,3 +613,31 @@ def test_ir_op_priority():
 )
 def test_expand_json_human_readable_numbers(input_json, expected_json):
     assert _expand_json_human_readable_numbers(input_json) == expected_json
+
+
+@pytest.mark.parametrize(
+    "uri",
+    ["s3://bucket/model", "gs://bucket/model", "az://container/model"],
+)
+def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
+    """Cloud storage URIs should not be passed to get_model_path()
+    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model=uri)
+    # model should remain the original cloud URI, not raise
+    assert args.model == uri
+
+
+def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
+    """Cloud storage tokenizer URI should not be passed to
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
+    assert args.model == "s3://bucket/model"
+    assert args.tokenizer == "s3://bucket/tokenizer"
