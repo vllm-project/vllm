@@ -8,10 +8,12 @@ from dataclasses import dataclass
 import pytest
 import torch
 
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_eplb_group,
     get_tp_group,
 )
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -185,9 +187,12 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     # to expert parallel)
     set_env_vars_and_device(env)
 
-    vllm_config = VllmConfig()
-    vllm_config.parallel_config.tensor_parallel_size = world_size
-    vllm_config.parallel_config.enable_expert_parallel = True
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=world_size,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+    )
+    vllm_config = VllmConfig(parallel_config=parallel_config)
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -213,12 +218,19 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=vllm_config.parallel_config.eplb_config.communicator,
+            expert_weights=rank_expert_weights[0],
+        )
+
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
             ep_group,
             is_profile=False,
+            communicator=communicator,
         )
 
         num_local_experts = test_config.num_local_experts

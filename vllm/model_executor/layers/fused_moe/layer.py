@@ -338,7 +338,8 @@ def FusedMoE(
         expert_map_manager=expert_map_manager,
         expert_mapping=expert_mapping,
         # Extra params that are needed by quant_methods, pass along for now
-        top_k=top_k,  # TODO: can get from moe_config
+        # Prefer getting these from other sources, e.g. moe_config or
+        # router object
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
@@ -349,7 +350,6 @@ def FusedMoE(
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        activation=moe_activation,
         **routed_experts_args if routed_experts_args is not None else {},
     )
 

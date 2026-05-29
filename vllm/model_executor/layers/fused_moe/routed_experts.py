@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
@@ -61,7 +61,20 @@ class RoutedExperts(PluggableLayer):
         quant_config: QuantizationConfig | None,
         expert_map_manager: ExpertMapManager,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
-        **kwargs,
+        #
+        # Extra params that are needed by quant_methods, pass along for now
+        # Prefer getting these from other sources, e.g. moe_config or
+        # router object
+        #
+        use_grouped_topk: bool = False,
+        num_expert_group: int | None = None,
+        topk_group: int | None = None,
+        custom_routing_function: Callable | None = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        swiglu_limit: float | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
     ):
         super().__init__()
         self.layer_name = layer_name
@@ -78,12 +91,20 @@ class RoutedExperts(PluggableLayer):
 
         self.rocm_aiter_fmoe_enabled = moe_config.rocm_aiter_fmoe_enabled
 
-        # Set any remaining kwargs as attributes. This is necessary because
-        # it is not simple to track all the layer attributes queried by
-        # quantization methods and various utilities.
-        # It would be good to eventually codify these in the FusedMoEConfig
+        # It would be good to eventually codify these in FusedMoEConfig
         # or some other config.
-        self.__dict__.update(kwargs)
+        self.top_k = self.moe_config.experts_per_token
+        self.activation = self.moe_config.activation
+        self.use_grouped_topk = use_grouped_topk
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
+        self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
+        self.swiglu_limit = swiglu_limit
+        self.e_score_correction_bias = e_score_correction_bias
+        self.apply_router_weight_on_input = apply_router_weight_on_input
+        # End random parameters
 
         self.quant_method = self._get_quant_method(
             self.layer_name,
