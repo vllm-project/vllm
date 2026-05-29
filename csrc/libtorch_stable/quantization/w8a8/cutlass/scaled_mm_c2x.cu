@@ -3,11 +3,11 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include "cutlass/cutlass.h"
 
-#include "scaled_mm_c2x.cuh"
-#include "scaled_mm_c2x_sm75_dispatch.cuh"
-#include "scaled_mm_c2x_sm80_dispatch.cuh"
-#include "scaled_mm_c2x_sm89_fp8_dispatch.cuh"
-#include "scaled_mm_c2x_sm89_int8_dispatch.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x_sm75_dispatch.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x_sm80_dispatch.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x_sm89_fp8_dispatch.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x_sm89_int8_dispatch.cuh"
 
 #include "core/batch_invariant.hpp"
 #include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c2x.hpp"

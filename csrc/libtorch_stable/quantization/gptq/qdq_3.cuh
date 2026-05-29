@@ -1,7 +1,7 @@
 #ifndef _qdq_3_cuh
 #define _qdq_3_cuh
 
-#include "qdq_util.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_util.cuh"
 
 namespace vllm {
 namespace gptq {

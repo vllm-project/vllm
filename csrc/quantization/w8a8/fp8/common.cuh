@@ -11,7 +11,7 @@
 // this is only done for _C_stable_libtorch and not for _C, so we use the
 // non stable at::cuda::getCurrentDeviceProperties for _C for now.
 #ifdef TORCH_TARGET_VERSION
-  #include "../../../libtorch_stable/torch_utils.h"
+  #include "libtorch_stable/torch_utils.h"
 #else
   #ifdef USE_ROCM
     #include <ATen/hip/HIPContext.h>

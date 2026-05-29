@@ -1,5 +1,5 @@
-#include "c3x/scaled_mm_helper.hpp"
-#include "c3x/scaled_mm_kernels.hpp"
+#include "libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_helper.hpp"
+#include "libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_kernels.hpp"
 
 /*
    This file defines quantized GEMM operations using the CUTLASS 3.x API, for

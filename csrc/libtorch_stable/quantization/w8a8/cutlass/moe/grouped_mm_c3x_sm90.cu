@@ -5,7 +5,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "cutlass/cutlass.h"
-#include "grouped_mm_c3x.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/moe/grouped_mm_c3x.cuh"
 
 using namespace cute;
 

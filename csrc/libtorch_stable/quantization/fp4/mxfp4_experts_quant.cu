@@ -30,7 +30,7 @@
 #include "../../cuda_vec_utils.cuh"
 #include "cuda_utils.h"
 
-#include "nvfp4_utils.cuh"
+#include "libtorch_stable/quantization/fp4/nvfp4_utils.cuh"
 static_assert(CVT_FP4_ELTS_PER_THREAD == 16,
               "MXFP4 experts quant requires PACK16 mode (CUDA >= 12.9)");
 

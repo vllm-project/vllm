@@ -1,4 +1,4 @@
-#include "w4a8_utils.cuh"
+#include "libtorch_stable/quantization/cutlass_w4a8/w4a8_utils.cuh"
 
 #include <array>
 #include <cuda_runtime.h>

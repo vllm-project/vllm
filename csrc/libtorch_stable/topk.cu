@@ -4,10 +4,10 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 
-#include "torch_utils.h"
+#include "libtorch_stable/torch_utils.h"
 
 #ifndef USE_ROCM
-  #include "persistent_topk.cuh"
+  #include "libtorch_stable/persistent_topk.cuh"
 #endif
 
 namespace {

@@ -51,8 +51,8 @@
 #include "cutlass/trace.h"
 #endif // !defined(__CUDACC_RTC__)
 
-#include "../kernel/sm100_fmha_mla_tma_warpspecialized.hpp"
-#include "../kernel/sm100_fmha_mla_reduction.hpp"
+#include "libtorch_stable/attention/mla/cutlass_sm100_mla/kernel/sm100_fmha_mla_tma_warpspecialized.hpp"
+#include "libtorch_stable/attention/mla/cutlass_sm100_mla/kernel/sm100_fmha_mla_reduction.hpp"
 
 ////////////////////////////////////////////////////////////////////////////////
 

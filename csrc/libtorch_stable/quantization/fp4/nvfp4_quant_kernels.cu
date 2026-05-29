@@ -31,7 +31,7 @@
 // Define before including nvfp4_utils.cuh so the header
 // can use this macro during compilation.
 #define NVFP4_ENABLE_ELTS16 1
-#include "nvfp4_utils.cuh"
+#include "libtorch_stable/quantization/fp4/nvfp4_utils.cuh"
 
 namespace vllm {
 

@@ -7,7 +7,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "cutlass_extensions/torch_utils.hpp"
-#include "w4a8_utils.cuh"
+#include "libtorch_stable/quantization/cutlass_w4a8/w4a8_utils.cuh"
 
 #include "cutlass/cutlass.h"
 #include <limits>

@@ -2,7 +2,7 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
-#include "scaled_mm_c2x.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x.cuh"
 
 /**
  * This file defines Gemm kernel configurations for SM75 based on the Gemm

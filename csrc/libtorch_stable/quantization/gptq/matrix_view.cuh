@@ -9,7 +9,7 @@ https://github.com/turboderp/exllama
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-#include "qdq_util.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_util.cuh"
 
 namespace vllm {
 namespace gptq {

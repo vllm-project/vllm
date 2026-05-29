@@ -6,17 +6,17 @@ https://github.com/qwopqwop200/GPTQ-for-LLaMa
 #include <cstdint>
 #include <cstdio>
 
-#include "../../torch_utils.h"
+#include "libtorch_stable/torch_utils.h"
 #include <torch/csrc/stable/ops.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
-#include "compat.cuh"
-#include "matrix_view.cuh"
-#include "qdq_2.cuh"
-#include "qdq_3.cuh"
-#include "qdq_4.cuh"
-#include "qdq_8.cuh"
+#include "libtorch_stable/quantization/gptq/compat.cuh"
+#include "libtorch_stable/quantization/gptq/matrix_view.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_2.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_3.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_4.cuh"
+#include "libtorch_stable/quantization/gptq/qdq_8.cuh"
 
 namespace vllm {
 namespace gptq {

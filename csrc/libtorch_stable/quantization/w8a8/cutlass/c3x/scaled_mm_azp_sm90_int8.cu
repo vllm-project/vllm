@@ -1,5 +1,5 @@
-#include "scaled_mm_kernels.hpp"
-#include "scaled_mm_sm90_int8_dispatch.cuh"
+#include "libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_kernels.hpp"
+#include "libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm_sm90_int8_dispatch.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 namespace vllm {

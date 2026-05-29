@@ -5,8 +5,8 @@
 
 #include "../cuda_compat.h"
 #include "cuda_vec_utils.cuh"
-#include "dispatch_utils.h"
-#include "torch_utils.h"
+#include "libtorch_stable/dispatch_utils.h"
+#include "libtorch_stable/torch_utils.h"
 
 namespace vllm {
 

@@ -28,8 +28,8 @@ limitations under the License.
 #include <cute/tensor.hpp>
 #include <iostream>
 
-#include "cutlass_sm100_mla/device/sm100_mla.hpp"
-#include "cutlass_sm100_mla/kernel/sm100_mla_tile_scheduler.hpp"
+#include "libtorch_stable/attention/mla/cutlass_sm100_mla/device/sm100_mla.hpp"
+#include "libtorch_stable/attention/mla/cutlass_sm100_mla/kernel/sm100_mla_tile_scheduler.hpp"
 
 // clang-format off
 #if !defined(CUDA_VERSION) || CUDA_VERSION < 12040
