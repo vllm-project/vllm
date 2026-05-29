@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import errno
 import logging
 import os
 import random
@@ -49,27 +50,36 @@ def store_block(
     # Write block atomically. Cast to a flat byte view so the slice uses byte
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
-    try:
-        fd = os.open(
-            tmp_path,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC | O_DIRECT,
-            0o644,
-        )
+
+    use_direct = bool(O_DIRECT)
+    while True:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC
+        if use_direct:
+            flags |= O_DIRECT
         try:
-            written = os.write(fd, view_slice)
-            if written < len(view_slice):
-                raise OSError(
-                    f"Short write: expected {len(view_slice)} bytes, wrote {written}"
+            fd = os.open(tmp_path, flags, 0o644)
+            try:
+                written = os.write(fd, view_slice)
+                if written < len(view_slice):
+                    raise OSError(
+                        f"Short write: expected {len(view_slice)} bytes,"
+                        f" wrote {written}"
+                    )
+            finally:
+                os.close(fd)
+            os.replace(tmp_path, dest_path)
+            return
+        except OSError as exc:
+            try:
+                os.remove(tmp_path)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove temp file %s: %s", tmp_path, cleanup_exc
                 )
-        finally:
-            os.close(fd)
-        os.replace(tmp_path, dest_path)
-    except Exception:
-        try:
-            os.remove(tmp_path)
-        except OSError as cleanup_exc:
-            logger.warning("Failed to remove temp file %s: %s", tmp_path, cleanup_exc)
-        raise
+            if use_direct and exc.errno == errno.EINVAL:
+                use_direct = False
+                continue
+            raise
 
 
 def load_block(
@@ -81,21 +91,33 @@ def load_block(
     """
     Load callback: read one KV block from disk. Remove the file on failure.
     """
-    fd: int | None = None
     view_slice = view.cast("B")[offset : offset + block_size]
-    try:
-        fd = os.open(source_path, os.O_RDONLY | O_DIRECT)
-        bytes_read = os.readv(fd, [view_slice])
-        if bytes_read < block_size:
-            raise OSError(f"Short read: expected {block_size} bytes, read {bytes_read}")
-    except Exception:
+
+    use_direct = bool(O_DIRECT)
+    while True:
+        flags = os.O_RDONLY | (O_DIRECT if use_direct else 0)
+        fd: int | None = None
         try:
-            os.remove(source_path)
-        except OSError as cleanup_exc:
-            logger.warning(
-                "Failed to remove unreadable file %s: %s", source_path, cleanup_exc
-            )
-        raise
-    finally:
-        if fd is not None:
-            os.close(fd)
+            fd = os.open(source_path, flags)
+            bytes_read = os.readv(fd, [view_slice])
+            if bytes_read < block_size:
+                raise OSError(
+                    f"Short read: expected {block_size} bytes, read {bytes_read}"
+                )
+            return
+        except OSError as exc:
+            if use_direct and exc.errno == errno.EINVAL:
+                use_direct = False
+                continue
+            try:
+                os.remove(source_path)
+            except OSError as cleanup_exc:
+                logger.warning(
+                    "Failed to remove unreadable file %s: %s",
+                    source_path,
+                    cleanup_exc,
+                )
+            raise
+        finally:
+            if fd is not None:
+                os.close(fd)
