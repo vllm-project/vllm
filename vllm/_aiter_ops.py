@@ -808,6 +808,18 @@ def _rocm_aiter_per_tensor_quant_impl(
     quant_dtype: torch.dtype,
     scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Fused single-launch kernel for dynamic FP8-e4m3 (gfx950); else aiter.
+    if (
+        envs.VLLM_ROCM_USE_AITER_FUSED_PER_TENSOR_QUANT
+        and scale is None
+        and quant_dtype == torch.float8_e4m3fn
+    ):
+        from vllm.model_executor.layers.quantization.utils.fused_pertensor_fp8_quant import (  # noqa: E501
+            fused_per_tensor_dynamic_fp8_quant,
+        )
+
+        return fused_per_tensor_dynamic_fp8_quant(x)
+
     from aiter.ops.quant import per_tensor_quant_hip
 
     return per_tensor_quant_hip(x, scale, quant_dtype)
