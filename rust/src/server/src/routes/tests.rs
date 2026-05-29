@@ -1017,6 +1017,58 @@ async fn version_returns_engine_vllm_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn server_info_endpoint_returns_text_config_by_default() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/server_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    let config = json["vllm_config"].as_str().expect("text config");
+
+    assert!(config.contains("served_model_name"));
+    assert!(json["vllm_env"].is_object());
+    assert_eq!(json["system_env"]["arch"], std::env::consts::ARCH);
+    assert_eq!(json["system_env"]["family"], std::env::consts::FAMILY);
+    assert_eq!(json["system_env"]["os"], std::env::consts::OS);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn server_info_endpoint_returns_json_config_when_requested() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/server_info?config_format=json")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(
+        json["vllm_config"]["served_model_name"],
+        json!(["Qwen/Qwen1.5-0.5B-Chat"])
+    );
+    assert!(json["vllm_env"].is_object());
+    assert!(json["system_env"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn http_metrics_record_list_models_requests() {
     let mut app = test_app().await;
     let before = METRICS.render().unwrap();

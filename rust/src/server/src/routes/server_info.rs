@@ -1,0 +1,42 @@
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Query, State};
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::state::{AppState, ServerInfoConfigFormat};
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ConfigFormat {
+    Text,
+    Json,
+}
+
+impl From<ConfigFormat> for ServerInfoConfigFormat {
+    fn from(value: ConfigFormat) -> Self {
+        match value {
+            ConfigFormat::Text => Self::Text,
+            ConfigFormat::Json => Self::Json,
+        }
+    }
+}
+
+fn default_config_format() -> ConfigFormat {
+    ConfigFormat::Text
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ServerInfoParams {
+    #[serde(default = "default_config_format")]
+    config_format: ConfigFormat,
+}
+
+/// Get server configuration and environment metadata.
+pub async fn server_info(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ServerInfoParams>,
+) -> Json<Value> {
+    Json(state.server_info_response(params.config_format.into()))
+}

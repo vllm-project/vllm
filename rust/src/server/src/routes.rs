@@ -5,6 +5,7 @@ mod inference;
 mod load;
 mod metrics;
 pub(crate) mod openai;
+mod server_info;
 mod sleep;
 mod version;
 
@@ -37,6 +38,7 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
+        .route("/server_info", get(server_info::server_info))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))

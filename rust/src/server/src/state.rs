@@ -1,12 +1,100 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::{Value, json};
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 
+use crate::config::Config;
+
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerInfoConfigFormat {
+    Text,
+    Json,
+}
+
+/// Snapshot returned by `/server_info`.
+#[derive(Debug, Clone)]
+pub(crate) struct ServerInfoSnapshot {
+    vllm_config_text: String,
+    vllm_config_json: Value,
+    vllm_env: BTreeMap<String, String>,
+    system_env: BTreeMap<String, String>,
+}
+
+impl ServerInfoSnapshot {
+    fn from_served_model_names(served_model_names: &[String]) -> Self {
+        Self {
+            vllm_config_text: format!("served_model_name={served_model_names:?}"),
+            vllm_config_json: json!({
+                "served_model_name": served_model_names,
+            }),
+            vllm_env: collect_vllm_env(),
+            system_env: collect_system_env(),
+        }
+    }
+
+    /// Capture the runtime configuration fields available to the Rust frontend.
+    pub(crate) fn from_config(config: &Config) -> Self {
+        let vllm_config_json = json!({
+            "transport_mode": format!("{:?}", config.transport_mode),
+            "coordinator_mode": format!("{:?}", config.coordinator_mode),
+            "model": config.model.clone(),
+            "served_model_name": config.served_model_name.clone(),
+            "listener_mode": format!("{:?}", config.listener_mode),
+            "tool_call_parser": format!("{:?}", config.tool_call_parser),
+            "reasoning_parser": format!("{:?}", config.reasoning_parser),
+            "renderer": format!("{:?}", config.renderer),
+            "chat_template": config.chat_template.clone(),
+            "default_chat_template_kwargs": config.default_chat_template_kwargs.clone(),
+            "chat_template_content_format": format!("{:?}", config.chat_template_content_format),
+            "enable_log_requests": config.enable_log_requests,
+            "disable_log_stats": config.disable_log_stats,
+            "grpc_port": config.grpc_port,
+            "shutdown_timeout_secs": config.shutdown_timeout.as_secs_f64(),
+            "engine_count": config.engine_count(),
+        });
+
+        Self {
+            vllm_config_text: format!("{config:#?}"),
+            vllm_config_json,
+            vllm_env: collect_vllm_env(),
+            system_env: collect_system_env(),
+        }
+    }
+
+    pub(crate) fn response(&self, config_format: ServerInfoConfigFormat) -> Value {
+        let vllm_config = match config_format {
+            ServerInfoConfigFormat::Text => Value::String(self.vllm_config_text.clone()),
+            ServerInfoConfigFormat::Json => self.vllm_config_json.clone(),
+        };
+
+        json!({
+            "vllm_config": vllm_config,
+            "vllm_env": self.vllm_env.clone(),
+            "system_env": self.system_env.clone(),
+        })
+    }
+}
+
+fn collect_vllm_env() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(key, _)| key.starts_with("VLLM_") && !key.contains("KEY"))
+        .collect()
+}
+
+fn collect_system_env() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("arch".to_string(), std::env::consts::ARCH.to_string()),
+        ("family".to_string(), std::env::consts::FAMILY.to_string()),
+        ("os".to_string(), std::env::consts::OS.to_string()),
+    ])
+}
 
 /// Shared router state for the minimal single-model OpenAI server.
 pub struct AppState {
@@ -17,6 +105,8 @@ pub struct AppState {
     pub chat: ChatLlm,
     /// Whether to log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Runtime server information returned by `/server_info`.
+    server_info: ServerInfoSnapshot,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
 }
@@ -35,10 +125,12 @@ impl AppState {
             !served_model_names.is_empty(),
             "served_model_names must not be empty"
         );
+        let server_info = ServerInfoSnapshot::from_served_model_names(&served_model_names);
         Self {
             served_model_names,
             chat,
             enable_log_requests: false,
+            server_info,
             server_load: AtomicU64::new(0),
         }
     }
@@ -47,6 +139,17 @@ impl AppState {
     pub fn with_log_requests(mut self, enabled: bool) -> Self {
         self.enable_log_requests = enabled;
         self
+    }
+
+    /// Attach the runtime server information snapshot used by `/server_info`.
+    pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
+        self.server_info = server_info;
+        self
+    }
+
+    /// Build a `/server_info` response payload.
+    pub(crate) fn server_info_response(&self, config_format: ServerInfoConfigFormat) -> Value {
+        self.server_info.response(config_format)
     }
 
     /// The primary model name echoed back in API responses (the first served

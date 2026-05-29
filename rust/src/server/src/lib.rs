@@ -29,7 +29,7 @@ use vllm_text::TextLlm;
 
 use crate::listener::Listener;
 use crate::routes::build_router;
-use crate::state::AppState;
+use crate::state::{AppState, ServerInfoSnapshot};
 
 /// Build the shared application state for one configured model and one engine
 /// client.
@@ -85,7 +85,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     };
 
     Ok(Arc::new(
-        AppState::new(served_model_names, chat).with_log_requests(config.enable_log_requests),
+        AppState::new(served_model_names, chat)
+            .with_log_requests(config.enable_log_requests)
+            .with_server_info(ServerInfoSnapshot::from_config(config)),
     ))
 }
 
