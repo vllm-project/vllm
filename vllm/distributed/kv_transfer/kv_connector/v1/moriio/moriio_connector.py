@@ -537,7 +537,14 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
-        transfer_id = params["transfer_id"]
+        # LLM-D sidecar compat: the routing-sidecar (--kv-connector=nixlv2)
+        # emits NIXL-shaped kv_transfer_params that do not include MoRI-IO's
+        # transfer_id. Synthesize one deterministically from request_id so the
+        # producer and consumer (both downstream of the same sidecar fan-out)
+        # observe the same transfer_id without requiring a wire-protocol
+        # change in the sidecar.
+        transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
+        params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
