@@ -107,6 +107,7 @@ def indexer_k_quant_and_cache_triton(
     kv_cache_value = kv_cache[:, : block_size * head_dim].view(fp8_dtype)
     kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
     head_tile_size = head_tile_size // kv_cache.element_size()
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     grid = (num_tokens,)
     _indexer_k_quant_and_cache_kernel[grid](
         k,
@@ -118,7 +119,7 @@ def indexer_k_quant_and_cache_triton(
         block_size,
         num_tokens,
         head_dim,
-        "SHUFFLE",
+        layout,
         block_tile_size,
         head_tile_size,
         IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
@@ -229,6 +230,7 @@ def cp_gather_indexer_k_quant_cache_triton(
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
+    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     _cp_gather_indexer_quant_cache_kernel[grid](
         k_cache_value,
         k_cache_scale,
@@ -241,7 +243,7 @@ def cp_gather_indexer_k_quant_cache_triton(
         block_table_stride,
         k_cache_value.stride(0),
         k_cache_scale.stride(0),
-        "SHUFFLE",
+        layout,
         head_dim,
         block_tile_size,
         head_tile_size,
@@ -433,7 +435,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size == 64,
+                Preshuffle=block_size > 1,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )

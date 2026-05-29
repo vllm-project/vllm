@@ -305,14 +305,10 @@ endif()
 #
 
 set(VLLM_EXT_SRC
-  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
   "csrc/cache_kernels.cu"
   "csrc/cache_kernels_fused.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
-  "csrc/attention/merge_attn_states.cu"
-  "csrc/sampler.cu"
-  "csrc/topk.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
@@ -369,16 +365,30 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
 
   # marlin arches for fp16 output
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
+  # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
   # marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
-  cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
   # marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
   # marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
 
@@ -633,7 +643,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"
     "csrc/libtorch_stable/layernorm_kernels.cu"
     "csrc/libtorch_stable/layernorm_quant_kernels.cu"
-    "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu")
+    "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+    "csrc/libtorch_stable/attention/merge_attn_states.cu"
+    "csrc/libtorch_stable/sampler.cu"
+    "csrc/libtorch_stable/topk.cu"
+    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -1121,7 +1135,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # moe marlin arches
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
+  endif()
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
   # moe marlin arches for fp8 input
@@ -1240,16 +1258,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
     list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
     message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
-
-    # DeepSeek V4 fused RMSNorm + router GEMV - same arch gating as DSV3.
-    set(DSV4_NORM_ROUTER_GEMM_SRC
-      "csrc/moe/dsv4_norm_router_gemm_entry.cu"
-      "csrc/moe/dsv4_norm_router_gemm_kernel.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${DSV4_NORM_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
-    list(APPEND VLLM_MOE_EXT_SRC "${DSV4_NORM_ROUTER_GEMM_SRC}")
-    message(STATUS "Building DSV4 norm+router GEMV kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
   else()
     message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
