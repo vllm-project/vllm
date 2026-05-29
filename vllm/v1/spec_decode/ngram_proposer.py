@@ -84,8 +84,6 @@ class NgramProposer:
                 A list where each element is a list of proposed
                 token IDs for the corresponding request.
         """
-        draft_token_ids: list[list[int]] = []
-
         # Only run batch propose if there are requests needing ngram proposals.
         # avoid calling numba function with empty list which causes error
         # ValueError: cannot compute fingerprint of empty list
@@ -118,13 +116,11 @@ class NgramProposer:
             # Restore original number of threads.
             set_num_threads(original_num_numba_threads)
 
-        for i in range(num_requests):
-            if i in valid_ngram_requests and self.valid_ngram_num_drafts[i] > 0:
-                draft_token_ids.append(
-                    self.valid_ngram_draft[i, : self.valid_ngram_num_drafts[i]].tolist()
-                )
-            else:
-                draft_token_ids.append([])
+        draft_token_ids: list[list[int]] = [[] for _ in range(num_requests)]
+        for i in valid_ngram_requests:
+            num_drafts = self.valid_ngram_num_drafts[i]
+            if num_drafts > 0:
+                draft_token_ids[i] = self.valid_ngram_draft[i, :num_drafts].tolist()
 
         return draft_token_ids
 
