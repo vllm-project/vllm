@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections.abc import Sequence
 
 import vllm.envs as envs
-
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -457,28 +456,7 @@ class SingleTypeKVCacheManager(ABC):
         # range), so we must cap to the number of blocks that currently exist for
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
-        # Split removed blocks into pinned (most-recent N) vs freed (older).
-        # pin_blocks is the number of MOST-RECENT blocks (closest to current
-        # window) to pin at each call — controlled by VLLM_PIN_SWA_TOKENS.
-        pin_blocks = 0
-        if envs.VLLM_PIN_PREFIX_BLOCKS and envs.VLLM_PIN_SWA_TOKENS > 0:
-            from vllm.v1.kv_cache_interface import SlidingWindowSpec
-            if isinstance(self.kv_cache_spec, SlidingWindowSpec):
-                pin_blocks = envs.VLLM_PIN_SWA_TOKENS // self.block_size
-        # Decode-step drops (small) contain unique-tail hashes; skip pinning.
-        # Count how many NEW blocks are being dropped this call
-        # (i.e., non-null blocks in the range [0, num_skipped_blocks-1]).
-        num_new_drops = 0
-        for _j in range(num_skipped_blocks - 1, -1, -1):
-            if blocks[_j] == self._null_block:
-                break
-            num_new_drops += 1
-        if num_new_drops < envs.VLLM_PIN_MIN_DROP_SIZE:
-            pin_blocks = 0
-        pin_threshold = max(0, num_skipped_blocks - pin_blocks)
-
-        to_free: list[KVCacheBlock] = []
-        to_pin: list[KVCacheBlock] = []
+        removed_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
         for i in range(num_skipped_blocks - 1, -1, -1):
@@ -487,21 +465,9 @@ class SingleTypeKVCacheManager(ABC):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
-            if pin_blocks > 0 and i >= pin_threshold:
-                to_pin.append(blocks[i])
-            else:
-                to_free.append(blocks[i])
+            removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        # is_pinned design: mark pin candidates before freeing. free_blocks
-        # routes ref_cnt==0 blocks to pinned_free_deque if is_pinned=True,
-        # otherwise to the regular free queue. All deltas are 1 (standard).
-        for b in to_pin:
-            b.is_pinned = True
-        # to_pin and to_free both go through free_blocks (delta=1). The
-        # is_pinned flag determines which tier the freed block lands in.
-        all_released = to_free + to_pin
-        if all_released:
-            self.block_pool.free_blocks(all_released)
+        self.block_pool.free_blocks(removed_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -684,6 +650,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def _cache_block_mask(
         self, num_cached_blocks: int, num_full_blocks: int, alignment_tokens: int
     ) -> list[bool] | None:
+        # When SWA-pinning is enabled (PR #40676), the pinned older blocks need
+        # to be in the prefix-cache hash map so future requests can hit them.
+        # The default mask skips them, defeating the pinning. Cache everything
+        # so the SWA-pin path can do its job.
+        if envs.VLLM_PIN_PREFIX_BLOCKS or envs.VLLM_PIN_SWA_TOKENS > 0:
+            return None
         assert alignment_tokens > self.block_size
         per_segment = alignment_tokens // self.block_size
         tail = cdiv(self.sliding_window - 1, self.block_size)
@@ -721,6 +693,53 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             The number of tokens that will be skipped for attention computation.
         """
         return max(0, num_computed_tokens - self.sliding_window + 1)
+
+    def remove_skipped_blocks(
+        self, request_id: str, total_computed_tokens: int
+    ) -> None:
+        """Sliding-window block release with prefix-cache pinning.
+
+        As the window advances, the oldest in-window blocks fall out of
+        window. With VLLM_PIN_PREFIX_BLOCKS + VLLM_PIN_SWA_TOKENS>0, the most
+        recent VLLM_PIN_SWA_TOKENS of those out-of-window blocks are PINNED
+        (kept as reusable prefix cache); everything else falls back to the
+        base free-all path.
+        """
+        pin_blocks = 0
+        if envs.VLLM_PIN_PREFIX_BLOCKS and envs.VLLM_PIN_SWA_TOKENS > 0:
+            pin_blocks = envs.VLLM_PIN_SWA_TOKENS // self.block_size
+        if pin_blocks == 0:
+            return super().remove_skipped_blocks(request_id, total_computed_tokens)
+
+        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        if num_skipped_tokens <= 0:
+            return
+        blocks = self.req_to_blocks[request_id]
+        num_skipped_blocks = min(num_skipped_tokens // self.block_size, len(blocks))
+
+        # Small decode-step drops carry unique-tail hashes (no reuse value).
+        num_new_drops = 0
+        for j in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[j] == self._null_block:
+                break
+            num_new_drops += 1
+        if num_new_drops < envs.VLLM_PIN_MIN_DROP_SIZE:
+            return super().remove_skipped_blocks(request_id, total_computed_tokens)
+
+        pin_threshold = max(0, num_skipped_blocks - pin_blocks)
+        to_free: list[KVCacheBlock] = []
+        to_pin: list[KVCacheBlock] = []
+        for i in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                break
+            if i >= pin_threshold:
+                blocks[i].is_pinned = True
+                to_pin.append(blocks[i])
+            else:
+                to_free.append(blocks[i])
+            blocks[i] = self._null_block
+        if to_free or to_pin:
+            self.block_pool.free_blocks(to_free + to_pin)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

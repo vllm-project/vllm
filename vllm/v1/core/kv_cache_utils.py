@@ -133,7 +133,7 @@ class KVCacheBlock:
     is_null: bool = False
 
     # Whether the block is pinned as a prefix-cache retention candidate.
-    # Pinned blocks at ref_cnt=0 live in BlockPool.pinned_free_deque
+    # Pinned blocks at ref_cnt=0 live in BlockPool.pinned_block_queue
     # instead of the normal free queue; they are only reissued by
     # get_new_blocks after being demoted via pressure release.
     is_pinned: bool = False

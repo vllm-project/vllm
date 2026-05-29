@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
+import vllm.envs as envs
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -10,7 +11,6 @@ from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
 )
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -182,12 +182,9 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
-        # Oldest-first deque of blocks at ref_cnt=0 AND is_pinned=True.
-        # These blocks are prefix-cache retention candidates. They are
-        # NOT drained by get_new_blocks directly; demote_n() under
-        # pressure flips is_pinned=False and moves them to free_block_queue.
-        from collections import deque as _deque
-        self.pinned_free_deque: _deque = _deque()
+        # For Sliding Window block when VLLM_PIN_PREFIX_BLOCKS=1.
+        # The queue where the pinned blocks are stored
+        self.pinned_block_queue: FreeKVCacheBlockQueue = FreeKVCacheBlockQueue([])
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -411,22 +408,20 @@ class BlockPool:
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
-        the block from whichever free tier it is in (regular or pinned).
-        This is used when a block is hit by another request with the same
-        prefix.
+        the block from the free queue. This is used when a block is hit by
+        another request with the same prefix.
 
         Args:
             blocks: A list of blocks to touch.
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in some free tier (regular
-            # queue if is_pinned=False, pinned_free_deque if is_pinned=True).
+            # ref_cnt=0 means this block is in the free list (i.e. eviction
+            # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
+                # block is only pinned when it belongs to Sliding Window
+                # attention with VLLM_PIN_PREFIX_BLOCKS=1.
                 if block.is_pinned:
-                    # Stale entries are common after demote_n; avoid O(n)
-                    # removal by leaving the stale entry in place — demote_n
-                    # will skip it on the next pop.
-                    pass
+                    self.pinned_block_queue.remove(block)
                 else:
                     self.free_block_queue.remove(block)
             block.ref_cnt += 1
@@ -434,53 +429,48 @@ class BlockPool:
                 self.metrics_collector.on_block_accessed(block)
 
     def demote_n(self, n: int) -> int:
-        """Under memory pressure, move up to n oldest pinned blocks to
-        the normal free queue by setting is_pinned=False. Their hashes
-        survive until _maybe_evict_cached_block fires on physical reuse.
-        Returns the number actually demoted."""
+        """Only used for Sliding Window attention with VLLM_PIN_PREFIX_BLOCKS=1.
+
+        When free blocks are needed but blocks are pinned, move up to n oldest
+        pinned blocks to the normal free queue by flipping is_pinned=False.
+        Their hashes survive until _maybe_evict_cached_block fires on physical
+        reuse. Returns the number actually demoted.
+        """
         if n <= 0:
             return 0
-        demoted = 0
-        while demoted < n and self.pinned_free_deque:
-            block = self.pinned_free_deque.popleft()
-            # Valid pinned entries satisfy ref_cnt==0 and is_pinned.
-            # Stale entries (e.g., re-touched since being queued) are
-            # just skipped.
-            if block.ref_cnt == 0 and block.is_pinned and not block.is_null:
-                block.is_pinned = False
-                self.free_block_queue.append_n([block])
-                demoted += 1
-        return demoted
+        num_to_demote = min(n, self.pinned_block_queue.num_free_blocks)
+        if num_to_demote <= 0:
+            return 0
+        blocks = self.pinned_block_queue.popleft_n(num_to_demote)
+        for block in blocks:
+            block.is_pinned = False
+        self.free_block_queue.append_n(blocks)
+        return num_to_demote
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
-        """Decrement ref_cnt by 1 on each block. Blocks whose ref_cnt
-        reaches 0 are routed to either the normal free queue or the
-        pinned_free_deque based on their is_pinned flag.
+        """Free a list of blocks. The blocks should be ordered by their
+        eviction priority, where the first block will be evicted first.
 
         Args:
-            ordered_blocks: list of blocks to free, ordered by eviction
-                priority (first = evicted first within its tier).
+            ordered_blocks: A list of blocks to free ordered by their eviction
+                priority.
         """
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
-            # null_block is a shared singleton; its ref_cnt has no real meaning.
-            # Pre-patch code let it drift negative silently. Skip decrement here
-            # so the invariant holds for real blocks.
-            if block.is_null:
-                continue
             block.ref_cnt -= 1
-            assert block.ref_cnt >= 0, (
-                f"negative ref_cnt on block {block.block_id}"
-            )
-        # Route ref_cnt==0 blocks to the correct tier.
-        regular_free = []
-        for block in blocks_list:
-            if block.ref_cnt == 0 and not block.is_null:
-                if block.is_pinned:
-                    self.pinned_free_deque.append(block)
-                else:
-                    regular_free.append(block)
-        self.free_block_queue.append_n(regular_free)
+
+        freed = [b for b in blocks_list if b.ref_cnt == 0 and not b.is_null]
+        if not envs.VLLM_PIN_PREFIX_BLOCKS:
+            self.free_block_queue.append_n(freed)
+        else:
+            # Pinning enabled: route freed blocks to the regular vs pinned tier by
+            # is_pinned (pinned blocks are released later via demote_n).
+            regular_free = [b for b in freed if not b.is_pinned]
+            pinned_free = [b for b in freed if b.is_pinned]
+            if regular_free:
+                self.free_block_queue.append_n(regular_free)
+            if pinned_free:
+                self.pinned_block_queue.append_n(pinned_free)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

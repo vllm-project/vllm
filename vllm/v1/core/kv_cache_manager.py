@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
-from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 import vllm.envs as envs
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -162,6 +162,43 @@ class KVCacheManager:
             for group in kv_cache_config.kv_cache_groups
         )
 
+        # Surface a startup hint describing what prefix-cache pinning does,
+        # so operators can confirm the feature is active and how to tune it.
+        if envs.VLLM_PIN_PREFIX_BLOCKS:
+            tokens_per_block = self.block_pool.hash_block_size
+            # Reuse the per-group (kind, sliding_window) metadata computed above
+            # to report the SWA window size(s) without re-walking the groups.
+            swa_windows = sorted({sw for _, sw in self.kv_cache_event_metadata if sw})
+            swa_window_str = (
+                "/".join(str(w) for w in swa_windows) if swa_windows else "none"
+            )
+            pin_tokens = envs.VLLM_PIN_SWA_TOKENS
+            pin_blocks = pin_tokens // tokens_per_block if tokens_per_block else 0
+            # Total reusable span pinned per SWA layer = the in-window tokens
+            # attention keeps plus VLLM_PIN_SWA_TOKENS of out-of-window history.
+            pinned_total_str = (
+                "/".join(str(w + pin_tokens) for w in swa_windows)
+                if swa_windows
+                else str(pin_tokens)
+            )
+            logger.info(
+                "Prefix-cache pinning (VLLM_PIN_PREFIX_BLOCKS) is now ENABLED. "
+                "SWA layers keep a %s-tok sliding window and additionally PIN "
+                "the most-recent %d tok (%d blocks x %d tok) of out-of-window "
+                "history at higher priority, for %s tok pinned per layer "
+                "(window + VLLM_PIN_SWA_TOKENS); out-of-window blocks past the "
+                "pinned span are evicted first. When requests share "
+                "similar-length prefixes, this keeps the commonly reused "
+                "prefix blocks resident and evicts the uniformly unneeded tail "
+                "first, improving prefix-cache reuse. Tune with "
+                "VLLM_PIN_SWA_TOKENS.",
+                swa_window_str,
+                pin_tokens,
+                pin_blocks,
+                tokens_per_block,
+                pinned_total_str,
+            )
+
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
         # overhead.
@@ -233,54 +270,6 @@ class KVCacheManager:
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
-
-    def can_fit_full_sequence(
-        self,
-        request: Request,
-        num_new_computed_tokens: int = 0,
-        new_computed_blocks: KVCacheBlocks | None = None,
-        num_external_computed_tokens: int = 0,
-        num_encoder_tokens: int = 0,
-    ) -> bool:
-        """Check if the KV cache has enough free blocks to hold the full
-        sequence, accounting for prefix cache hits and sliding window.
-
-        This is used as an admission gate to prevent over-admitting requests
-        when chunked prefill would otherwise only check the first chunk.
-        """
-        if new_computed_blocks is not None:
-            new_computed_block_list = new_computed_blocks.blocks
-        else:
-            new_computed_block_list = self.empty_kv_cache_blocks.blocks
-
-        num_local_computed_tokens = (
-            request.num_computed_tokens + num_new_computed_tokens
-        )
-        total_computed_tokens = min(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.max_model_len,
-        )
-        full_num_tokens = min(request.num_tokens, self.max_model_len)
-
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=full_num_tokens,
-            new_computed_blocks=new_computed_block_list,
-            num_encoder_tokens=num_encoder_tokens,
-            total_computed_tokens=total_computed_tokens,
-            num_tokens_main_model=full_num_tokens,
-        )
-
-        num_free = self.block_pool.get_num_free_blocks()
-        if num_blocks_to_allocate > num_free and envs.VLLM_PIN_PREFIX_BLOCKS:
-            # Under pressure: demote oldest pinned blocks to make room.
-            # can_fit_full_sequence is called before allocate_slots and
-            # gates admission independently; without this hook the
-            # scheduler would stall even if demotable pins exist.
-            deficit = num_blocks_to_allocate - num_free
-            self.block_pool.demote_n(deficit)
-            num_free = self.block_pool.get_num_free_blocks()
-        return num_blocks_to_allocate <= num_free
 
     def allocate_slots(
         self,
@@ -405,7 +394,17 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
-            if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+            num_free = self.block_pool.get_num_free_blocks()
+            if envs.VLLM_PIN_PREFIX_BLOCKS and num_blocks_to_allocate > num_free:
+                # Under pressure: demote oldest pinned blocks to make room.
+                # The full_sequence_must_fit admission gate otherwise
+                # rejects without giving the pinned tier a chance to release,
+                # deadlocking once pinned blocks fill the pool. demote_n is
+                # best-effort, so re-check free space afterwards.
+                deficit = num_blocks_to_allocate - num_free
+                self.block_pool.demote_n(deficit)
+                num_free = self.block_pool.get_num_free_blocks()
+            if num_blocks_to_allocate > num_free:
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -434,15 +433,16 @@ class KVCacheManager:
         )
 
         num_free_blocks = self.block_pool.get_num_free_blocks()
-        if num_blocks_to_allocate > num_free_blocks:
+        if envs.VLLM_PIN_PREFIX_BLOCKS and num_blocks_to_allocate > num_free_blocks:
             # Under pressure: demote oldest pinned blocks to make room.
             # Hashes survive until physically recycled, so demoted blocks
-            # remain prefix-cache candidates.
+            # remain prefix-cache candidates. demote_n is best-effort, so
+            # re-check free space afterwards.
             deficit = num_blocks_to_allocate - num_free_blocks
             self.block_pool.demote_n(deficit)
             num_free_blocks = self.block_pool.get_num_free_blocks()
-            if num_blocks_to_allocate > num_free_blocks:
-                return None
+        if num_blocks_to_allocate > num_free_blocks:
+            return None
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
@@ -492,7 +492,7 @@ class KVCacheManager:
         """
         # is_pinned design: when prefix-cache pinning is enabled, mark
         # all of this request's remaining (non-null) blocks as pinned so
-        # they land in the pinned_free_deque instead of the regular free
+        # they land in the pinned_block_queue instead of the regular free
         # queue. Full-attention blocks protect the full prefix; SWA
         # window blocks protect the last-window hashes.
         if envs.VLLM_PIN_PREFIX_BLOCKS:

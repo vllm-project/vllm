@@ -1864,7 +1864,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Pin prefix-cached blocks by starting ref_cnt=2 and making SWA-DROP
     # decrement by 2. End-of-request free() decrements by 1, leaving blocks
     # at ref_cnt=1 (pinned, not in free queue). OOW blocks drain first.
-    "VLLM_PIN_PREFIX_BLOCKS": lambda: bool(int(os.getenv("VLLM_PIN_PREFIX_BLOCKS", "0"))),
+    "VLLM_PIN_PREFIX_BLOCKS": lambda: bool(
+        int(os.getenv("VLLM_PIN_PREFIX_BLOCKS", "0"))
+    ),
     # Number of tokens per SWA group to pin at each SWA-DROP (most-recent-N).
     # When > 0 and VLLM_PIN_PREFIX_BLOCKS=1, the most recent
     # (VLLM_PIN_SWA_TOKENS // block_size) blocks being dropped stay pinned
