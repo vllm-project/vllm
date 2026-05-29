@@ -168,7 +168,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -310,8 +310,9 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    # Keep CPU logits on the PyTorch path to avoid invoking Triton kernels.
     if current_platform.is_cpu():
+        if HAS_TRITON:
+            return apply_top_k_top_p_triton(logits, k, p)
         return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
 
     if HAS_TRITON and logits.shape[0] >= 8:
