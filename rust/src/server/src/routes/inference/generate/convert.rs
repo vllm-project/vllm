@@ -32,11 +32,12 @@ pub fn prepare_generate_request(
         .as_ref()
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
-    let include_continuous_usage = request
-        .stream_options
-        .as_ref()
-        .and_then(|options| options.continuous_usage_stats)
-        .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let include_logprobs = request.sampling_params.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
     let mut sampling_params = request.sampling_params;
@@ -125,5 +126,29 @@ mod tests {
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
         );
+    }
+
+    #[test]
+    fn prepare_generate_request_gates_continuous_usage_on_include_usage() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "stream": true,
+            "stream_options": {
+                "continuous_usage_stats": true
+            },
+            "sampling_params": {}
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(!prepared.include_usage);
+        assert!(!prepared.include_continuous_usage);
     }
 }
