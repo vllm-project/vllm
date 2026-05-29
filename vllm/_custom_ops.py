@@ -534,22 +534,24 @@ def silu_and_mul_per_block_quant(
             scale_ub,
             is_scale_transposed,
         )
-    # Compatibility fallback for older XPU kernel packs that only expose
-    # per-token quant.
-    elif hasattr(torch.ops._C, "silu_and_mul_quant"):
-        token_scales = torch.empty((num_tokens, 1),
-                                   device=input.device,
-                                   dtype=torch.float32)
-        torch.ops._C.silu_and_mul_quant(output, input, token_scales)
-        if scales.shape[1] == 1:
-            scales.copy_(token_scales)
-        else:
-            scales.copy_(token_scales.expand(num_tokens, scales.shape[1]))
     else:
-        raise RuntimeError(
-            "Missing both _C.silu_and_mul_per_block_quant and "
-            "_C.silu_and_mul_quant custom ops."
-        )
+        # Pure-PyTorch fallback: SiLU+Mul then true per-block FP8 quantize.
+        # The old silu_and_mul_quant fallback only computed 1 scale per row
+        # and broadcast it, destroying precision for block-scaled MoE matmuls.
+        half = input.shape[-1] // 2
+        gate = input[:, :half]
+        up = input[:, half:]
+        activated = torch.nn.functional.silu(gate) * up  # bf16/fp16
+
+        fp8_max = torch.finfo(quant_dtype).max
+        for g in range(num_groups):
+            start = g * group_size
+            end = start + group_size
+            block = activated[:, start:end]
+            amax = block.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+            block_scale = amax / fp8_max
+            scales[:, g:g+1] = block_scale
+            output[:, start:end] = (block / block_scale).to(quant_dtype)
 
     return output, scales
 
