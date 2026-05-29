@@ -961,9 +961,6 @@ class Gemma4ForConditionalGeneration(
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config, config.text_config
             )
-        # Lazy-initialized on first encoder call (see _encoder_max_batch).
-        self._encoder_budget_bytes = 0
-        self._encoder_bytes_per_patch = 0
 
         # ---- Audio tower (variants with audio_config) ----
         if config.audio_config is not None:
@@ -1104,18 +1101,36 @@ class Gemma4ForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    def _encoder_max_batch(self, patches_per_item: int) -> int:
-        """Max items per encoder call given per-item patch count."""
-        if self._encoder_budget_bytes == 0:
-            total_mem = current_platform.get_device_total_memory()
-            self._encoder_budget_bytes = int(total_mem * 0.05)
-            logger.info(
-                "Encoder memory budget: %.1fGB (total=%.1fGB)",
-                self._encoder_budget_bytes / 1024**3,
-                total_mem / 1024**3,
-            )
-        cost = patches_per_item * self._encoder_bytes_per_patch
-        return max(1, self._encoder_budget_bytes // cost) if cost > 0 else 1
+    @staticmethod
+    def _encoder_chunk(
+        patches_per_item: int,
+        free_bytes: int,
+        total_bytes: int,
+        position_embedding_size: int,
+    ) -> int:
+        """Max chunk size whose F.one_hot transient fits in the budget.
+
+        The dominant transient inside HF's ``Gemma4VisionPatchEmbedder.
+        _position_embeddings`` is
+        ``F.one_hot(clamped_positions, num_classes=position_embedding_size)``
+        with shape ``(chunk, patches, 2, position_embedding_size)``,
+        int64, plus its simultaneous cast to the position embedding
+        table dtype. That, not the encoder residual stream, sets peak
+        memory.
+        """
+        if patches_per_item <= 0:
+            return 1
+        # Half of currently-free, capped at 10% of total so we leave room
+        # for the rest of profile_run / the subsequent encoder + pooler.
+        budget = min(free_bytes // 2, total_bytes // 10)
+        if budget <= 0:
+            return 1
+        # F.one_hot allocates (chunk, patches, 2, pos_emb_size) int64
+        # (the inner 2 is the (x, y) coordinate axis, 8 is sizeof(int64)).
+        # Outer 2x covers the int64 buffer and its concurrent bf16 cast
+        # plus the matmul output that live alongside it at peak.
+        cost = patches_per_item * 4 * position_embedding_size * 8
+        return max(1, budget // cost) if cost > 0 else 1
 
     # ------------------------------------------------------------------ #
     # Image processing
@@ -1136,7 +1151,8 @@ class Gemma4ForConditionalGeneration(
         pixel_position_ids = image_input["pixel_position_ids"]
 
         vt = self.vision_tower
-        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        vision_cfg = self.config.vision_config
+        pooling_k2 = vision_cfg.pooling_kernel_size**2
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1153,10 +1169,18 @@ class Gemma4ForConditionalGeneration(
             pp = pixel_position_ids[idx]
             buckets.setdefault(pv.shape[0], []).append((idx, pv, pp))
 
-        # Encode each resolution bucket in memory-safe chunks.
+        # Encode each resolution bucket in memory-safe chunks. Re-read
+        # free memory per bucket because the previous bucket's encoder
+        # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            max_batch_size = min(len(items), self._encoder_max_batch(patches))
+            free, total = current_platform.mem_get_info()
+            max_batch_size = min(
+                len(items),
+                self._encoder_chunk(
+                    patches, free, total, vision_cfg.position_embedding_size
+                ),
+            )
 
             for chunk_idx in range(0, len(items), max_batch_size):
                 chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
@@ -1247,7 +1271,8 @@ class Gemma4ForConditionalGeneration(
         frame_counts = video_input["video_frame_counts"]
 
         vt = self.vision_tower
-        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        vision_cfg = self.config.vision_config
+        pooling_k2 = vision_cfg.pooling_kernel_size**2
         target_dtype = self.embed_vision.embedding_projection.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
@@ -1256,13 +1281,20 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
+        free, total = current_platform.mem_get_info()
         max_batch_size = min(
-            total_frames, self._encoder_max_batch(pixel_values.shape[1])
+            total_frames,
+            self._encoder_chunk(
+                pixel_values.shape[1],
+                free,
+                total,
+                vision_cfg.position_embedding_size,
+            ),
         )
 
         padding_positions = (pixel_position_ids == -1).all(dim=-1)
 
-        # Encode frames in chunks bounded by _encoder_max_batch.
+        # Encode frames in chunks bounded by _encoder_chunk.
         last_hidden_states_list: list[torch.Tensor] = []
         for i in range(0, total_frames, max_batch_size):
             pv_chunk = pixel_values[i : i + max_batch_size]
@@ -1538,15 +1570,7 @@ class Gemma4ForConditionalGeneration(
             self,
             ignore_unexpected_prefixes=ignore_prefixes,
         )
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-
-        # Per-patch activation cost for dynamic encoder batch sizing.
-        vis_cfg = self.config.vision_config
-        self._encoder_bytes_per_patch = (
-            vis_cfg.hidden_size * 2 * vis_cfg.num_hidden_layers
-        )
-
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     # ------------------------------------------------------------------ #
     # LoRA / multimodal mapping

@@ -263,13 +263,100 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
 
+  // Merge attn states
+  // Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
+  // can be used to combine partial attention results (in the split-KV case)
+  ops.def(
+      "merge_attn_states("
+      "    Tensor! output,"
+      "    Tensor!? output_lse,"
+      "    Tensor prefix_output,"
+      "    Tensor prefix_lse,"
+      "    Tensor suffix_output,"
+      "    Tensor suffix_lse,"
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
+
   // Hadamard transforms
   // conditionally compiled so impl registration is in source file
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "float epsilon) -> ()");
+
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
+  ops.def(
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> "
+      "()");
+
+  // In-place fused Add and RMS Normalization.
+  ops.def(
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
+      "Tensor scale, float epsilon) -> ()");
+
+  // Fused Layernorm + Quant kernels
+  ops.def(
+      "rms_norm_dynamic_per_token_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual) -> ()");
+
+  // Fused Layernorm + Block quant kernels
+  ops.def(
+      "rms_norm_per_block_quant(Tensor! result, Tensor input, "
+      "Tensor weight, Tensor! scale, float epsilon, "
+      "Tensor? scale_ub, Tensor!? residual, int group_size, "
+      "bool is_scale_transposed) -> ()");
+
+  // Rotary embedding
+  // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
+  ops.def(
+      "rotary_embedding(Tensor positions, Tensor! query,"
+      "                 Tensor!? key, int head_size,"
+      "                 Tensor cos_sin_cache, bool is_neox, int "
+      "rope_dim_offset=0, bool inverse=False) -> ()");
+
+  // Function for fused QK Norm and RoPE
+  ops.def(
+      "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
+      "int num_heads_k, int num_heads_v, int head_dim, float eps, "
+      "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
+      "bool is_neox, Tensor position_ids, "
+      "int forced_token_heads_per_warp=-1) -> ()");
+
+  // Apply repetition penalties to logits in-place.
+  ops.def(
+      "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
+      "Tensor output_mask, Tensor repetition_penalties) -> ()");
+
+  // Optimized top-k per row operations.
+  ops.def(
+      "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
+      "Tensor! indices, int numRows, int stride0, "
+      "int stride1, int topK) -> ()");
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+
+  ops.def(
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
+
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
@@ -369,6 +456,51 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int type, SymInt row, SymInt tokens) -> Tensor");
 
   ops.def("ggml_moe_get_block_size(int type) -> int");
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int null_block_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx,"
+      "Tensor? cu_chunk_seqlen,"
+      "Tensor? last_chunk_indices) -> ()");
+
+  // Attention ops
+  // Compute the attention between an input query and the cached
+  // keys/values using PagedAttention.
+  ops.def(
+      "paged_attention_v1("
+      "    Tensor! out, Tensor query, Tensor key_cache,"
+      "    Tensor value_cache, int num_kv_heads, float scale,"
+      "    Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
+
+  // PagedAttention V2.
+  ops.def(
+      "paged_attention_v2("
+      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
+      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
+      "    Tensor value_cache, int num_kv_heads, float scale,"
+      "    Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -416,6 +548,33 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 
+  ops.impl("merge_attn_states", TORCH_BOX(&merge_attn_states));
+
+  // Layernorm kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm", TORCH_BOX(&rms_norm));
+  ops.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
+
+  // Layernorm-quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
+  ops.impl("fused_add_rms_norm_static_fp8_quant",
+           TORCH_BOX(&fused_add_rms_norm_static_fp8_quant));
+
+  // Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
+  ops.impl("rms_norm_dynamic_per_token_quant",
+           TORCH_BOX(&rms_norm_dynamic_per_token_quant));
+  ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+
+  // Positional encoding kernels (shared CUDA/ROCm)
+  ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+
+  // Sampler kernels (shared CUDA/ROCm)
+  ops.impl("apply_repetition_penalties_",
+           TORCH_BOX(&apply_repetition_penalties_));
+  ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
+  ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+  ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
@@ -448,6 +607,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+  ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
+
+  ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
+  ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
@@ -468,6 +631,117 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
 
   // GGML block size lookup (no tensor args)
   ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
+}
+
+// Cache ops
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
+  // Swap in (out) the cache blocks from src to dst.
+  ops.def(
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
+
+  // Batch swap: submit all block copies in a single driver call.
+  ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes,"
+      "                  bool is_src_access_order_any=False) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache(Tensor key, Tensor value,"
+      "                  Tensor! key_cache, Tensor! value_cache,"
+      "                  Tensor slot_mapping,"
+      "                  str kv_cache_dtype,"
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache_flash(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor slot_mapping,"
+      "                        str kv_cache_dtype,"
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Concat kv_c and k_pe and cache them.
+  ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+
+  // Rotate Q and K, then write to kv cache for MLA
+  ops.def(
+      "concat_and_cache_mla_rope_fused("
+      "                     Tensor positions,"
+      "                     Tensor! q_pe,"
+      "                     Tensor! k_pe,"
+      "                     Tensor kv_c,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor! kv_cache,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor kv_cache_scale) -> ()");
+
+  // Convert the key and value cache to fp8 data type.
+  ops.def(
+      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
+      "str kv_cache_dtype) -> ()");
+
+  // Gather cache blocks from src_cache to dst, dequantizing from
+  // src_cache's dtype to dst's dtype if necessary.
+  ops.def(
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "                               Tensor block_table, Tensor cu_seq_lens, "
+      "                               Tensor token_to_seq, "
+      "                               int num_tokens, "
+      "                               str kv_cache_dtype, "
+      "                               Tensor scale, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
+      "batch_size) -> ()");
+
+  ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
+      "slot_mapping, "
+      "int quant_block_size, str kv_cache_dtype) -> ()");
+
+  ops.def("concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
+
+  ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CPU, ops) {
+  ops.impl("swap_blocks_batch", TORCH_BOX(&swap_blocks_batch));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
+  ops.impl("swap_blocks", TORCH_BOX(&swap_blocks));
+  ops.impl("reshape_and_cache", TORCH_BOX(&reshape_and_cache));
+  ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
+  ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
+  ops.impl("concat_and_cache_mla_rope_fused",
+           TORCH_BOX(&concat_and_cache_mla_rope_fused));
+  ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
+  ops.impl("gather_and_maybe_dequant_cache",
+           TORCH_BOX(&gather_and_maybe_dequant_cache));
+  ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
+  ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
+           TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));
+  ops.impl("indexer_k_quant_and_cache", TORCH_BOX(&indexer_k_quant_and_cache));
+  ops.impl("concat_mla_q", TORCH_BOX(&concat_mla_q));
+  ops.impl("cp_gather_indexer_k_quant_cache",
+           TORCH_BOX(&cp_gather_indexer_k_quant_cache));
 }
 
 REGISTER_EXTENSION(_C_stable_libtorch)
