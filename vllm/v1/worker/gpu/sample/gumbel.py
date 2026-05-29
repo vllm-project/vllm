@@ -115,8 +115,8 @@ def gumbel_block_argmax(
             mask=mask,
         )
 
-    # fp32 is the default reduction dtype for throughput; fp64 preserves the
-    # lower tail of the Gumbel noise when use_fp64_gumbel is enabled.
+    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
+    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
     if USE_FP64:
         logits = logits.to(tl.float64)
     if temp != 0.0:
