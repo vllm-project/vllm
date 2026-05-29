@@ -15,7 +15,7 @@ use crate::Result;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
 use crate::output::generate_tool_call_id;
-use crate::parser::tool::{ToolCallDelta, ToolParseResult, ToolParser};
+use crate::parser::tool::{ToolCallDelta, ToolParser, ToolParserOutput};
 
 /// Per-stream tool parsing state.
 struct ToolState {
@@ -57,46 +57,52 @@ impl ToolState {
             return Ok(events);
         }
 
-        let parse_result = self.parser.push(&delta);
+        let mut output = ToolParserOutput::default();
+        let parse_result = self.parser.parse_into(&delta, &mut output);
 
         match parse_result {
-            Ok(result) => self.process_parse_result(kind, result, &mut events)?,
+            Ok(()) => self.process_parser_output(kind, output, &mut events)?,
             Err(error) => {
-                if !self.parser_failed {
-                    warn!(
-                        error = %error.as_report(),
-                        "tool parser failed; falling back to plain text deltas"
-                    );
-                    self.parser_failed = true;
-                }
+                warn!(
+                    error = %error.as_report(),
+                    "tool parser failed; falling back to plain text deltas"
+                );
+                // Permanently mark this parser as failed.
+                // TODO: we may consider recovering from parsing errors in the future.
+                self.parser_failed = true;
+
+                // On parsing failure, we still apply the partial parser output if any, but we close
+                // any open tool calls and emit the remaining buffered text as a plain-text delta to
+                // preserve as much of the output as possible.
+                self.process_parser_output(kind, output, &mut events)?;
                 self.open_call_index = None;
-                events.push(AssistantEvent::TextDelta { kind, delta });
+                push_text_delta(&mut events, kind, self.parser.reset());
             }
         }
 
         Ok(events)
     }
 
-    /// Apply one parsed tool result to the current stream state.
-    fn process_parse_result(
+    /// Apply one parsed tool output to the current stream state.
+    fn process_parser_output(
         &mut self,
         kind: AssistantBlockKind,
-        result: ToolParseResult,
+        output: ToolParserOutput,
         events: &mut Vec<AssistantEvent>,
     ) -> Result<()> {
         // When we are not currently streaming a tool call, preserve plain
         // text first and then surface any new tool call items.
         if self.open_call_index.is_none() {
-            push_text_delta(events, kind, result.normal_text);
-            self.process_tool_items(result.calls, events)?;
+            push_text_delta(events, kind, output.normal_text);
+            self.process_tool_items(output.calls, events)?;
         } else {
             // Once a tool call is open, prioritize tool deltas first. If the
             // parser emits normal text again, close the tool call and resume
             // plain text output.
-            self.process_tool_items(result.calls, events)?;
-            if !result.normal_text.is_empty() {
+            self.process_tool_items(output.calls, events)?;
+            if !output.normal_text.is_empty() {
                 self.open_call_index = None;
-                push_text_delta(events, kind, result.normal_text);
+                push_text_delta(events, kind, output.normal_text);
             }
         }
         Ok(())
@@ -158,8 +164,8 @@ impl ToolState {
         }
 
         match self.parser.finish() {
-            Ok(result) => {
-                self.process_parse_result(AssistantBlockKind::Text, result, &mut events)?
+            Ok(output) => {
+                self.process_parser_output(AssistantBlockKind::Text, output, &mut events)?
             }
             Err(error) => {
                 warn!(
@@ -265,17 +271,24 @@ mod tests {
     use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::output::structured::structured_chat_event_stream;
-    use crate::parser::tool::{ToolParseResult, ToolParser, ToolParserError};
+    use crate::parser::tool::{
+        DeepSeekV4ToolParser, ToolParser, ToolParserError, ToolParserOutput,
+    };
     use crate::request::ChatTool;
-    use crate::stream::ChatEventStream;
+    use crate::stream::{ChatEventStream, CollectedAssistantMessage};
 
     struct FailingParser {
         fail_next: bool,
+        buffered: String,
     }
 
     struct ScriptedParser {
-        push_results: Vec<ToolParseResult>,
-        finish_result: ToolParseResult,
+        push_outputs: Vec<ToolParserOutput>,
+        finish_output: ToolParserOutput,
+    }
+
+    struct PartialThenFailParser {
+        buffered: String,
     }
 
     impl ToolParser for FailingParser {
@@ -283,10 +296,14 @@ mod tests {
         where
             Self: Sized + 'static,
         {
-            Ok(Box::new(Self { fail_next: false }))
+            Ok(Box::new(Self {
+                fail_next: false,
+                buffered: String::new(),
+            }))
         }
 
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+        fn parse_into(&mut self, chunk: &str, _output: &mut ToolParserOutput) -> Result<()> {
+            self.buffered.push_str(chunk);
             if self.fail_next {
                 self.fail_next = false;
                 return Err(ToolParserError::ParsingFailed {
@@ -294,7 +311,16 @@ mod tests {
                 });
             }
 
-            Ok(ToolParseResult::default())
+            self.buffered.clear();
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<ToolParserOutput> {
+            Ok(ToolParserOutput::default())
+        }
+
+        fn reset(&mut self) -> String {
+            std::mem::take(&mut self.buffered)
         }
     }
 
@@ -304,18 +330,215 @@ mod tests {
             Self: Sized + 'static,
         {
             Ok(Box::new(Self {
-                push_results: Vec::new(),
-                finish_result: ToolParseResult::default(),
+                push_outputs: Vec::new(),
+                finish_output: ToolParserOutput::default(),
             }))
         }
 
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
-            Ok(self.push_results.pop().unwrap_or_default())
+        fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+            let mut next = self.push_outputs.pop().unwrap_or_default();
+            output.normal_text.push_str(&next.normal_text);
+            output.calls.append(&mut next.calls);
+            Ok(())
         }
 
-        fn finish(&mut self) -> Result<ToolParseResult> {
-            Ok(std::mem::take(&mut self.finish_result))
+        fn finish(&mut self) -> Result<ToolParserOutput> {
+            Ok(std::mem::take(&mut self.finish_output))
         }
+
+        fn reset(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    impl ToolParser for PartialThenFailParser {
+        fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self {
+                buffered: String::new(),
+            }))
+        }
+
+        fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+            output.calls.extend([
+                crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: String::new(),
+                },
+                crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: None,
+                    arguments: r#"{"location":"SF"}"#.to_string(),
+                },
+            ]);
+            self.buffered.push_str(" trailing text");
+            Err(ToolParserError::ParsingFailed {
+                message: "boom".to_string(),
+            })
+        }
+
+        fn finish(&mut self) -> Result<ToolParserOutput> {
+            Ok(ToolParserOutput::default())
+        }
+
+        fn reset(&mut self) -> String {
+            std::mem::take(&mut self.buffered)
+        }
+    }
+
+    fn deepseek_v4_test_tools() -> Vec<ChatTool> {
+        vec![
+            ChatTool {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "location": { "type": "string" }
+                    }
+                }),
+                strict: None,
+            },
+            ChatTool {
+                name: "add".to_string(),
+                description: None,
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "x": { "type": "integer" },
+                        "y": { "type": "integer" }
+                    }
+                }),
+                strict: None,
+            },
+        ]
+    }
+
+    async fn collect_deepseek_v4_message(chunks: Vec<String>) -> CollectedAssistantMessage {
+        let events = chunks
+            .into_iter()
+            .map(|delta| {
+                Ok(ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta,
+                })
+            })
+            .chain(std::iter::once(Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            })));
+        let parser = DeepSeekV4ToolParser::create(&deepseek_v4_test_tools()).unwrap();
+        let assistant_events = tool_event_stream(stream::iter(events), Some(parser));
+        let chat_events = structured_chat_event_stream(assistant_events);
+
+        ChatEventStream::new("req_deepseek_v4".to_string(), Box::pin(chat_events))
+            .collect_message()
+            .await
+            .unwrap()
+    }
+
+    fn message_tool_projection(
+        message: &CollectedAssistantMessage,
+    ) -> (String, Vec<(String, serde_json::Value)>) {
+        (
+            message.message.text(),
+            message
+                .message
+                .tool_calls()
+                .map(|call| {
+                    (
+                        call.name.clone(),
+                        serde_json::from_str(&call.arguments).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn tool_parser_error_preserves_partial_output_and_flushes_buffer() {
+        let events = stream::iter(vec![
+            Ok(ContentEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: "ignored".to_string(),
+            }),
+            Ok(ContentEvent::Done {
+                prompt_token_count: 1,
+                output_token_count: 1,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = tool_event_stream(
+            events,
+            Some(Box::new(PartialThenFailParser {
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolCallStart { name, .. } if name == "get_weather"
+        ));
+        assert!(matches!(
+            &events[1],
+            AssistantEvent::ToolCallArgumentsDelta { delta } if delta == r#"{"location":"SF"}"#
+        ));
+        assert_eq!(
+            events[2],
+            AssistantEvent::TextDelta {
+                kind: AssistantBlockKind::Text,
+                delta: " trailing text".to_string(),
+            }
+        );
+        assert!(matches!(events[3], AssistantEvent::Done { .. }));
+    }
+
+    #[tokio::test]
+    async fn real_buffered_parser_error_matches_streaming_and_non_streaming() {
+        let prefix = "I will check both.\n";
+        let first_tool_call = concat!(
+            "<｜DSML｜tool_calls>\n",
+            "<｜DSML｜invoke name=\"get_weather\">\n",
+            "<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo</｜DSML｜parameter>\n",
+            "</｜DSML｜invoke>",
+        );
+        let malformed_second_tool_call = concat!(
+            "\n<｜DSML｜invoke name=\"add\">\n",
+            "not a parameter\n",
+            "</｜DSML｜invoke>\n",
+            "</｜DSML｜tool_calls>",
+        );
+        let streaming_chunks = vec![
+            prefix.to_string(),
+            first_tool_call.to_string(),
+            malformed_second_tool_call.to_string(),
+        ];
+        let full_output = streaming_chunks.concat();
+
+        let streaming = collect_deepseek_v4_message(streaming_chunks).await;
+        let non_streaming = collect_deepseek_v4_message(vec![full_output]).await;
+
+        let expected = (
+            format!("{prefix}{malformed_second_tool_call}"),
+            vec![(
+                "get_weather".to_string(),
+                serde_json::json!({ "location": "Tokyo" }),
+            )],
+        );
+        assert_eq!(message_tool_projection(&streaming), expected);
+        assert_eq!(message_tool_projection(&non_streaming), expected);
     }
 
     #[tokio::test]
@@ -341,10 +564,15 @@ mod tests {
             }),
         ]);
 
-        let collected =
-            tool_event_stream(events, Some(Box::new(FailingParser { fail_next: true })))
-                .collect::<Vec<_>>()
-                .await;
+        let collected = tool_event_stream(
+            events,
+            Some(Box::new(FailingParser {
+                fail_next: true,
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         let events = collected
             .into_iter()
@@ -415,12 +643,18 @@ mod tests {
                 kv_transfer_params: None,
             }),
         ]);
-        let events = tool_event_stream(events, Some(Box::new(FailingParser { fail_next: false })))
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<crate::Result<Vec<_>>>()
-            .unwrap();
+        let events = tool_event_stream(
+            events,
+            Some(Box::new(FailingParser {
+                fail_next: false,
+                buffered: String::new(),
+            })),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<crate::Result<Vec<_>>>()
+        .unwrap();
 
         assert_eq!(
             events,
@@ -468,7 +702,7 @@ mod tests {
         ]);
 
         let parser = ScriptedParser {
-            push_results: vec![ToolParseResult {
+            push_outputs: vec![ToolParserOutput {
                 normal_text: String::new(),
                 calls: vec![
                     crate::parser::tool::ToolCallDelta {
@@ -483,14 +717,14 @@ mod tests {
                     },
                 ],
             }],
-            finish_result: ToolParseResult::default(),
+            finish_output: ToolParserOutput::default(),
         };
 
         let err = tool_event_stream(events, Some(Box::new(parser)))
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .find_map(|result| result.err())
+            .find_map(|output| output.err())
             .expect("expected invariant error");
 
         assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
@@ -514,8 +748,8 @@ mod tests {
         ]);
 
         let parser = ScriptedParser {
-            push_results: vec![
-                ToolParseResult {
+            push_outputs: vec![
+                ToolParserOutput {
                     normal_text: String::new(),
                     calls: vec![crate::parser::tool::ToolCallDelta {
                         tool_index: 0,
@@ -523,11 +757,11 @@ mod tests {
                         arguments: "}".to_string(),
                     }],
                 },
-                ToolParseResult {
+                ToolParserOutput {
                     normal_text: "plain text".to_string(),
                     calls: Vec::new(),
                 },
-                ToolParseResult {
+                ToolParserOutput {
                     normal_text: String::new(),
                     calls: vec![crate::parser::tool::ToolCallDelta {
                         tool_index: 0,
@@ -536,14 +770,14 @@ mod tests {
                     }],
                 },
             ],
-            finish_result: ToolParseResult::default(),
+            finish_output: ToolParserOutput::default(),
         };
 
         let err = tool_event_stream(events, Some(Box::new(parser)))
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .find_map(|result| result.err())
+            .find_map(|output| output.err())
             .expect("expected invariant error");
 
         assert!(matches!(
@@ -573,7 +807,7 @@ mod tests {
         ]);
 
         let parser = ScriptedParser {
-            push_results: vec![ToolParseResult {
+            push_outputs: vec![ToolParserOutput {
                 normal_text: String::new(),
                 calls: vec![
                     crate::parser::tool::ToolCallDelta {
@@ -588,7 +822,7 @@ mod tests {
                     },
                 ],
             }],
-            finish_result: ToolParseResult::default(),
+            finish_output: ToolParserOutput::default(),
         };
 
         let events = tool_event_stream(events, Some(Box::new(parser)))

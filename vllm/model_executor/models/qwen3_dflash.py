@@ -509,7 +509,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
-        self.config.target_layer_count = target_layer_num
         self.model = DFlashQwen3Model(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
