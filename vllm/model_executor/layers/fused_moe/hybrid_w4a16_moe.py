@@ -416,6 +416,7 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 config=config_gemm1,
                 compute_type=compute_type,
                 group_size=self._group_size,
+                align_block_size_m=block_size_m,
             )
 
             # Activation
@@ -443,6 +444,7 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 config=config_gemm2,
                 compute_type=compute_type,
                 group_size=self._group_size,
+                align_block_size_m=block_size_m,
             )
         else:
             from vllm._custom_ops import fused_moe_wvSplitK_int4_gemm

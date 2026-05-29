@@ -256,8 +256,7 @@ def test_hybrid_w4a16_moe_force_triton(
     hybrid_out, torch_output = _run_hybrid_moe(
         m, n, k, e, topk, group_size, force_triton=True
     )
-    # gs<=64 _triton_config branch reorders fp16 reductions; needs 3e-2.
-    torch.testing.assert_close(hybrid_out, torch_output, atol=3e-2, rtol=0)
+    torch.testing.assert_close(hybrid_out, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.skipif(

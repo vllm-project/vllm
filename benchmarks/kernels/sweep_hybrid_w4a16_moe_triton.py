@@ -111,6 +111,7 @@ def make_gemm1_fn(inputs, cfg, group_size, E):
             config=cfg,
             compute_type=compute_type,
             group_size=group_size,
+            align_block_size_m=block_m,
         )
 
     return run
@@ -165,6 +166,7 @@ def make_gemm2_fn(inputs, cfg, group_size, E):
             config=cfg,
             compute_type=compute_type,
             group_size=group_size,
+            align_block_size_m=block_m,
         )
 
     return run

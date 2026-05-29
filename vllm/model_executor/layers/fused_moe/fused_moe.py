@@ -788,6 +788,7 @@ def invoke_fused_moe_kernel_hybrid_triton(
     config: dict[str, Any],
     compute_type: tl.dtype,
     group_size: int,
+    align_block_size_m: int,
 ):
     """Invoke fused MoE kernel for shuffle-packed INT4 weights [E, N, K//8].
 
@@ -797,6 +798,11 @@ def invoke_fused_moe_kernel_hybrid_triton(
 
     B: [E, N, K//8] int32 — shuffle-packed weights
     B_scale: [E, N, K//G] fp16/bf16 — per-group scales
+    align_block_size_m: padding alignment used by moe_align_block_size.
+        Must be a multiple of config["BLOCK_SIZE_M"].  When the caller
+        runs with BLOCK_SIZE_M < align_block_size_m, the EM tiny-batch
+        cap depends on the true alignment; passing BLOCK_SIZE_M here
+        would silently drop kernel blocks.
     """
     assert B.dtype == torch.int32
     assert B_scale is not None and B_scale.ndim == 3
@@ -807,9 +813,18 @@ def invoke_fused_moe_kernel_hybrid_triton(
     N = B.size(1)
     num_tokens = M * top_k
 
+    # Tiny-batch cap: an expert that receives any token contributes
+    # align_block_size_m padded rows.  At most min(M*top_k, E) distinct
+    # experts are populated, so the kernel needs at most
+    # min(M*top_k, E) * align_block_size_m rows of work even if the
+    # buffer is larger.
+    assert align_block_size_m % config["BLOCK_SIZE_M"] == 0, (
+        f"align_block_size_m={align_block_size_m} must be a multiple of "
+        f"BLOCK_SIZE_M={config['BLOCK_SIZE_M']}"
+    )
     EM = sorted_token_ids.size(0)
-    if config["BLOCK_SIZE_M"] > M:
-        EM = min(EM, M * top_k * config["BLOCK_SIZE_M"])
+    if align_block_size_m > M:
+        EM = min(EM, M * top_k * align_block_size_m)
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
