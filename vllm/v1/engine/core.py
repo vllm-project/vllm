@@ -315,6 +315,9 @@ class EngineCore:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
 
+    def get_device_info(self) -> list[dict]:
+        return self.model_executor.collective_rpc("get_device_info")
+
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)
