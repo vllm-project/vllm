@@ -419,8 +419,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return self.base_layer._quant_method
 
     @property
-    def runner(self):
-        return self.base_layer.runner
+    def runner(self) -> MoERunner:
+        return self.base_layer
 
     @property
     def is_internal_router(self) -> bool:
