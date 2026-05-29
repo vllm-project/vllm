@@ -17,6 +17,8 @@ from vllm import _custom_ops as ops
 
 METRIC_NAME = "vllm:kv_cache_nans"
 SAMPLE_NAME = "vllm:kv_cache_nans_total"
+ORIGIN_METRIC = "vllm:kv_cache_nan_origin"
+TIMESTAMP_METRIC = "vllm:kv_cache_nan_first_seen_timestamp"
 
 CUDA_AVAILABLE = torch.accelerator.device_count() >= 1
 
@@ -58,7 +60,17 @@ class TestKVCacheNanE2E:
         monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     def test_prometheus_counters_populated(self):
-        """NaN injection -> kernel -> model runner -> Prometheus counters."""
+        """NaN injection -> kernel -> model runner -> Prometheus counters.
+
+        Verifies:
+        - NaN counts are published per (layer, phase)
+        - Phase labels are from {"prefill", "decode"}
+        - Origin gauge identifies the first (layer, phase) with NaNs
+        - First-seen timestamp gauge is set to a recent wall-clock time
+        - Per-layer counters are zeroed after the model runner reads them
+        """
+        import time
+
         from prometheus_client import REGISTRY
 
         with patch.object(
@@ -80,14 +92,18 @@ class TestKVCacheNanE2E:
                 attention_config={"backend": "TRITON_MLA"},
                 kernel_config={"moe_backend": "triton"},
             )
+            t_before = time.time()
             llm.generate(
                 ["Hello world"],
                 SamplingParams(temperature=0, max_tokens=2),
             )
+            t_after = time.time()
 
-        # Collect Prometheus samples
+        # --- NaN counter ---
         prom_total = 0
         prom_layers = 0
+        phases_seen: set[str] = set()
+        layers_seen: set[str] = set()
         for metric in REGISTRY.collect():
             if metric.name != METRIC_NAME:
                 continue
@@ -95,6 +111,8 @@ class TestKVCacheNanE2E:
                 if sample.name == SAMPLE_NAME and sample.value > 0:
                     prom_layers += 1
                     prom_total += sample.value
+                    phases_seen.add(sample.labels["phase"])
+                    layers_seen.add(sample.labels["layer"])
 
         assert prom_total > 0, (
             f"Expected NaN counts in Prometheus, got total={prom_total}"
@@ -102,8 +120,44 @@ class TestKVCacheNanE2E:
         assert prom_layers >= 2, (
             f"Expected NaNs in at least 2 layers, got {prom_layers}"
         )
+        assert phases_seen <= {"prefill", "decode"}, (
+            f"Unexpected phase labels: {phases_seen}"
+        )
+        assert "prefill" in phases_seen, f"Expected 'prefill' phase, got {phases_seen}"
 
-        # nan counter should be zeroed (model runner resets after read)
+        # --- Origin gauge: exactly one (rank, layer, phase) set to 1 ---
+        origin_entries: list[dict[str, str]] = []
+        for metric in REGISTRY.collect():
+            if metric.name != ORIGIN_METRIC:
+                continue
+            for sample in metric.samples:
+                if sample.value == 1:
+                    origin_entries.append(sample.labels)
+
+        assert len(origin_entries) == 1, (
+            f"Expected exactly 1 origin entry, got {len(origin_entries)}: "
+            f"{origin_entries}"
+        )
+        origin = origin_entries[0]
+        assert origin["phase"] in {"prefill", "decode"}
+        assert origin["layer"] in layers_seen
+
+        # --- First-seen timestamp gauge ---
+        timestamps: list[float] = []
+        for metric in REGISTRY.collect():
+            if metric.name != TIMESTAMP_METRIC:
+                continue
+            for sample in metric.samples:
+                if sample.value > 0:
+                    timestamps.append(sample.value)
+
+        assert len(timestamps) > 0, "Expected first-seen timestamp(s)"
+        for ts in timestamps:
+            assert t_before <= ts <= t_after, (
+                f"Timestamp {ts} outside [{t_before}, {t_after}]"
+            )
+
+        # --- Counter reset ---
         ec = llm.llm_engine.engine_core.engine_core
         mr = ec.model_executor.driver_worker.model_runner
         sfc = mr.compilation_config.static_forward_context

@@ -251,5 +251,196 @@ class TestEnvVarGating:
         assert vllm.envs.VLLM_DEBUG_MLA_CACHE is True
 
 
+class TestFirstLayerDetection:
+    """Unit tests for _get_kv_nan_first_layer layer-index extraction."""
+
+    @staticmethod
+    def _get_first_layer(nans: dict[str, int]) -> str | None:
+        if not nans:
+            return None
+        import regex as re
+
+        best_name = None
+        best_idx = float("inf")
+        for name in nans:
+            m = re.search(r"\.([0-9]+)\.", name)
+            if m:
+                idx = int(m.group(1))
+                if idx < best_idx:
+                    best_idx = idx
+                    best_name = name
+        return best_name
+
+    def test_finds_lowest_index(self):
+        nans = {
+            "model.layers.5.self_attn": 10,
+            "model.layers.0.self_attn": 3,
+            "model.layers.12.self_attn": 7,
+        }
+        assert self._get_first_layer(nans) == "model.layers.0.self_attn"
+
+    def test_empty_returns_none(self):
+        assert self._get_first_layer({}) is None
+
+    def test_single_layer(self):
+        nans = {"model.layers.3.self_attn": 5}
+        assert self._get_first_layer(nans) == "model.layers.3.self_attn"
+
+    def test_adjacent_layers(self):
+        nans = {
+            "model.layers.1.self_attn": 2,
+            "model.layers.0.self_attn": 1,
+        }
+        assert self._get_first_layer(nans) == "model.layers.0.self_attn"
+
+
+class TestPhaseTracking:
+    """Unit tests for IterationStats NaN phase labeling."""
+
+    @staticmethod
+    def _make_output(layers: dict[str, int], ts: float = 1000.0):
+        from vllm.v1.engine import EngineCoreOutput
+
+        first = None
+        best_idx = float("inf")
+        import regex as re
+
+        for name in layers:
+            m = re.search(r"\.([0-9]+)\.", name)
+            if m and int(m.group(1)) < best_idx:
+                best_idx = int(m.group(1))
+                first = name
+        return EngineCoreOutput(
+            request_id="req-test",
+            new_token_ids=[1],
+            kv_cache_nans_per_layer=layers,
+            kv_cache_nan_timestamp=ts,
+            kv_cache_nan_first_layer=first,
+        )
+
+    @staticmethod
+    def _make_stats():
+        from vllm.v1.metrics.stats import IterationStats
+
+        return IterationStats()
+
+    @staticmethod
+    def _make_req_stats():
+        from vllm.v1.metrics.stats import RequestStateStats
+
+        return RequestStateStats(arrival_time=0.0)
+
+    def test_prefill_labeled(self, monkeypatch):
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        stats = self._make_stats()
+        output = self._make_output({"model.layers.0.self_attn": 5})
+        stats.update_from_output(
+            output,
+            engine_core_timestamp=0.0,
+            is_prefilling=True,
+            req_stats=self._make_req_stats(),
+            lora_states=None,
+            lora_name=None,
+        )
+        assert ("model.layers.0.self_attn", "prefill") in stats.kv_cache_nans
+        assert stats.kv_cache_nans[("model.layers.0.self_attn", "prefill")] == 5
+
+    def test_decode_labeled(self, monkeypatch):
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        stats = self._make_stats()
+        output = self._make_output({"model.layers.0.self_attn": 3})
+        stats.update_from_output(
+            output,
+            engine_core_timestamp=0.0,
+            is_prefilling=False,
+            req_stats=self._make_req_stats(),
+            lora_states=None,
+            lora_name=None,
+        )
+        assert ("model.layers.0.self_attn", "decode") in stats.kv_cache_nans
+        assert stats.kv_cache_nans[("model.layers.0.self_attn", "decode")] == 3
+
+    def test_origin_set_to_first_seen(self, monkeypatch):
+        """Origin is locked to the first (layer, phase) that reports NaNs."""
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        stats = self._make_stats()
+
+        out_prefill = self._make_output(
+            {"model.layers.0.self_attn": 2, "model.layers.1.self_attn": 3},
+        )
+        stats.update_from_output(
+            out_prefill,
+            engine_core_timestamp=0.0,
+            is_prefilling=True,
+            req_stats=self._make_req_stats(),
+            lora_states=None,
+            lora_name=None,
+        )
+        assert stats.kv_cache_nan_origin == (
+            "model.layers.0.self_attn",
+            "prefill",
+        )
+
+        out_decode = self._make_output(
+            {"model.layers.1.self_attn": 1},
+        )
+        stats.update_from_output(
+            out_decode,
+            engine_core_timestamp=0.0,
+            is_prefilling=False,
+            req_stats=self._make_req_stats(),
+            lora_states=None,
+            lora_name=None,
+        )
+        # Origin should NOT change -- first seen wins.
+        assert stats.kv_cache_nan_origin == (
+            "model.layers.0.self_attn",
+            "prefill",
+        )
+
+    def test_timestamp_recorded(self, monkeypatch):
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        stats = self._make_stats()
+        output = self._make_output(
+            {"model.layers.0.self_attn": 1},
+            ts=12345.678,
+        )
+        stats.update_from_output(
+            output,
+            engine_core_timestamp=0.0,
+            is_prefilling=True,
+            req_stats=self._make_req_stats(),
+            lora_states=None,
+            lora_name=None,
+        )
+        key = ("model.layers.0.self_attn", "prefill")
+        assert key in stats.kv_cache_nan_first_seen
+        assert stats.kv_cache_nan_first_seen[key] == 12345.678
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
