@@ -871,6 +871,7 @@ async def benchmark(
             extra_headers=extra_headers,
             extra_body=extra_body,
             request_id=request_id,
+            system_prompt=args.system_prompt,
         )
         tasks.append(
             asyncio.create_task(
@@ -1285,6 +1286,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="System prompt/instruction to be passed with each request.",
+    )
     parser.add_argument(
         "--endpoint",
         type=str,
