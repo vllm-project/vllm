@@ -146,6 +146,28 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GEMMA4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-small"),
+        Some(names::GRANITE4)
+    );
+
+    // Granite negative: older Granite versions use unrelated tool-call formats
+    // and must NOT auto-route to the `granite4` JSON `<tool_call>` parser
+    // (see `mod.rs` routing comment). They are handled by separate Python
+    // parsers (`granite`, `granite-20b-fc`) not yet ported to Rust.
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-3.3-8b-instruct"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-3.0-8b-instruct"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm/granite-20b-functioncalling"),
+        None
+    );
+
+    assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
     );
