@@ -527,7 +527,6 @@ def _process_weights_marlin(
     if w2_bias is not None:
         w2_bias_out = marlin_permute_bias(w2_bias)
 
-    # TODO: not sure about shapes here
     if w13_qzeros is not None:
         w13_qzeros_out = marlin_zero_points(
             w13_qzeros,
