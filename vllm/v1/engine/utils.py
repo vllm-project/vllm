@@ -575,7 +575,9 @@ class CoreEngineActorManager:
             node_ip_keys = [
                 key
                 for key in node_resources
-                if key != "node:__internal_head__" and key.startswith("node:")
+                if key != "node:__internal_head__"
+                and key.startswith("node:")
+                and "_group_" not in key
             ]
             assert len(node_ip_keys) == 1, (
                 f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
@@ -653,6 +655,9 @@ class CoreEngineActorManager:
                 local_dp_ranks.append(i)
                 if len(placement_groups) == dp_size:
                     break
+
+            if len(placement_groups) == dp_size:
+                break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
