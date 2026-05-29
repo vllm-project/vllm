@@ -79,6 +79,14 @@ class ECConnectorBase(ABC):
     def is_consumer(self) -> bool:
         return self._is_consumer
 
+    def shutdown(self) -> None:
+        """
+        Shutdown the connector. This is called when the process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None
+
     # ==============================
     # Worker-side methods
     # ==============================
