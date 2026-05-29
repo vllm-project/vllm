@@ -28,8 +28,10 @@
 ###############################################################################
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+# Export Python path for commands that run directly on the host. Containerized
+# tests set this to /vllm-workspace below so spawned Python processes do not
+# depend on their current working directory.
+export PYTHONPATH="${PYTHONPATH:-..}"
 
 ###############################################################################
 # Helper Functions
@@ -306,7 +308,13 @@ fi
 
 echo "Final commands: $commands"
 
-MYPYTHONPATH=".."
+MYPYTHONPATH="/vllm-workspace"
+
+container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
+container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
+CONTAINER_TMPDIR="/tmp/vllm-buildkite-${container_job_id}"
+CONTAINER_CACHE_ROOT="${CONTAINER_TMPDIR}/cache"
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -390,10 +398,15 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
+    -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
+    -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
+    -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${commands}"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"
