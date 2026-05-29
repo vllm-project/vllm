@@ -734,16 +734,23 @@ async fn test_chat_with_engine_outputs(
 }
 
 async fn test_app() -> axum::Router {
+    test_app_with_dev_mode(false).await
+}
+
+async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
         default_stream_output_specs(),
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )))
+    build_router_with_dev_mode(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        dev_mode_enabled,
+    )
 }
 
 async fn test_health_app_with_engine_script<F>(
@@ -1017,8 +1024,25 @@ async fn version_returns_engine_vllm_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn server_info_endpoint_returns_text_config_by_default() {
+async fn server_info_endpoint_is_dev_mode_only() {
     let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/server_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn server_info_endpoint_returns_text_config_by_default() {
+    let mut app = test_app_with_dev_mode(true).await;
     let response = app
         .call(
             Request::builder()
@@ -1044,7 +1068,7 @@ async fn server_info_endpoint_returns_text_config_by_default() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn server_info_endpoint_returns_json_config_when_requested() {
-    let mut app = test_app().await;
+    let mut app = test_app_with_dev_mode(true).await;
     let response = app
         .call(
             Request::builder()

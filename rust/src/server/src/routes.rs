@@ -38,7 +38,6 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
-        .route("/server_info", get(server_info::server_info))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -56,6 +55,7 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
+            .route("/server_info", get(server_info::server_info))
     }
 
     router
