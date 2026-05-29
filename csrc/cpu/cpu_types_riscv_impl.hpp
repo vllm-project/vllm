@@ -298,8 +298,8 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     reg_fp32 = RVVI(__riscv_vle32_v_f32, LMUL_512)(tmp, 16);
   }
   explicit BF16Vec16(const c10::BFloat16 v)
-      : reg_fp32(RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(
-            static_cast<float>(v), VEC_ELEM_NUM)) {}
+      : reg_fp32(RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(static_cast<float>(v),
+                                                      VEC_ELEM_NUM)) {}
   explicit BF16Vec16(const FP32Vec16&);
   void save(void* ptr) const {
     float tmp[16];
@@ -650,8 +650,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     auto idx64 =
         RVVI(__riscv_vand_vx_u64, LMUL_1024)(shifted, 0xF, VEC_ELEM_NUM);
     auto idx32 = RVVI(__riscv_vnsrl_wx_u32, LMUL_512)(idx64, 0, VEC_ELEM_NUM);
-    reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx32,
-                                                  VEC_ELEM_NUM);
+    reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx32, VEC_ELEM_NUM);
   }
   explicit FP32Vec16(const FP16Vec16& v);
 
@@ -920,8 +919,7 @@ inline void fma(FP32Vec16& acc, const FP32Vec16& a, const FP32Vec16& b) {
 }
 
 template <typename VecT>
-static void interleave_save_16b(const VecT& vec0, const VecT& vec1,
-                                void* ptr) {
+static void interleave_save_16b(const VecT& vec0, const VecT& vec1, void* ptr) {
   alignas(64) uint16_t values0[VecT::VEC_ELEM_NUM];
   alignas(64) uint16_t values1[VecT::VEC_ELEM_NUM];
   vec0.save(values0);
