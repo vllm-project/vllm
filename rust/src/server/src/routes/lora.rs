@@ -55,11 +55,11 @@ fn validate_lora_path_access(
     lora_path: &str,
     allowed_prefixes: Option<&[PathBuf]>,
 ) -> Result<(), ApiError> {
-    if !looks_like_local_lora_path(lora_path) {
+    let path = Path::new(lora_path);
+    if !looks_like_local_lora_path(lora_path) && !path.exists() {
         return Ok(());
     }
 
-    let path = Path::new(lora_path);
     let Some(allowed_prefixes) = allowed_prefixes else {
         return Err(ApiError::invalid_request(
             format!(
@@ -231,6 +231,20 @@ mod tests {
         assert!(validate_lora_path_access("./adapter-a", None).is_err());
         assert!(validate_lora_path_access("~/adapter-a", None).is_err());
         assert!(validate_lora_path_access("subdir/../../../etc/sensitive", None).is_err());
+    }
+
+    #[test]
+    fn lora_path_rejects_existing_bare_relative_paths_without_prefixes() {
+        let root =
+            PathBuf::from("target").join(format!("vllm-lora-relative-{}", std::process::id()));
+        let adapter = root.join("adapter-a");
+        fs::create_dir_all(&adapter).expect("create relative adapter dir");
+
+        assert!(
+            validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), None).is_err()
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]
