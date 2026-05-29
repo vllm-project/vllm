@@ -10,10 +10,6 @@ from torch._ops import OpOverload
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.model_executor.layers.quantization.utils.aiter_debug import (
-    emit_trace,
-    maybe_dump_blockscale_call,
-)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -660,27 +656,7 @@ def _rocm_aiter_gemm_a8w8_blockscale_impl(
 ) -> torch.Tensor:
     from aiter import gemm_a8w8_blockscale
 
-    emit_trace(
-        "blockscale.vllm._aiter_ops.pre",
-        tensors={"A": A, "B": B, "As": As, "Bs": Bs},
-        extra={"output_dtype": str(output_dtype)},
-    )
-    output = gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
-    emit_trace(
-        "blockscale.vllm._aiter_ops.post",
-        tensors={"Y": output},
-        extra={"output_dtype": str(output_dtype)},
-    )
-    maybe_dump_blockscale_call(
-        "vllm._aiter_ops.gemm_a8w8_blockscale",
-        A=A,
-        B=B,
-        As=As,
-        Bs=Bs,
-        output=output,
-        extra={"output_dtype": str(output_dtype)},
-    )
-    return output
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
 
 def _rocm_aiter_gemm_a8w8_blockscale_fake(
