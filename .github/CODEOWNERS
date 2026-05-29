@@ -72,8 +72,10 @@
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
 # CI & building
-/.buildkite @Harry-Chen
-/docker/Dockerfile @Harry-Chen
+/.buildkite @Harry-Chen @khluu
+/docker/Dockerfile @Harry-Chen @khluu
+/pyproject.toml @khluu
+/setup.py @khluu
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
