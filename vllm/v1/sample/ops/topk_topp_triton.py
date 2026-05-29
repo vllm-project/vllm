@@ -1038,6 +1038,12 @@ def apply_top_k_top_p_triton(
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
+    # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
+    if logits.device.type == "cpu":
+        block_size, block_size_trunc = 256, 128
+    else:
+        block_size, block_size_trunc = 8192, 4096
+
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
         logits.stride(0),
@@ -1049,8 +1055,8 @@ def apply_top_k_top_p_triton(
         BATCH_SIZE=batch_size,
         MASK_VALUE=mask_value,
         VOCAB_SIZE=vocab_size,
-        BLOCK_SIZE=8192,
-        BLOCK_SIZE_TRUNC=4096,
+        BLOCK_SIZE=block_size,
+        BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
     )

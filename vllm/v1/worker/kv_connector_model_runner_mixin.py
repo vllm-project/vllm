@@ -4,7 +4,6 @@
 Define KV connector functionality mixin for model runners.
 """
 
-import copy
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
@@ -20,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
     ModelRunnerOutput,
 )
@@ -47,12 +45,7 @@ class KVConnectorModelRunnerMixin:
         ):
             pass
 
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     @staticmethod
     def maybe_get_kv_connector_output(
