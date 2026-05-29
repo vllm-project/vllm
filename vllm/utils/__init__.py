@@ -42,8 +42,6 @@ def is_moe_layer(module: torch.nn.Module) -> bool:
         if cls.__name__ == "FusedMoE":
             return True
 
-        for b in cls.__bases__:
-            if _check_bases(b):
-                return True
+        return any(_check_bases(b) for b in cls.__bases__)
 
     return _check_bases(module.__class__)
