@@ -94,6 +94,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
+    cosmos3_omni="Cosmos3Config",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
@@ -112,7 +113,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    jais="JAISConfig",
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
@@ -430,9 +430,9 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         if "rope_type" not in rope_parameters and "type" in rope_parameters:
             rope_parameters["rope_type"] = rope_parameters["type"]
             logger.info("Replacing legacy 'type' key with 'rope_type'")
-        # Case 3: No rope_type field at all - cannot determine RoPE type, raise error
+        # Case 3: No rope_type field present - nothing to patch
         if "rope_type" not in rope_parameters:
-            raise ValueError("rope_parameters should have a 'rope_type' key")
+            return
         # Patch legacy rope_type values with warning
         if rope_parameters["rope_type"] == "su":
             rope_parameters["rope_type"] = "longrope"
