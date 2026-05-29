@@ -407,12 +407,11 @@ void reshape_and_cache_flash(
     torch::stable::Tensor& slot_mapping, const std::string& kv_cache_dtype,
     torch::stable::Tensor& k_scale, torch::stable::Tensor& v_scale);
 
-void concat_and_cache_mla(torch::stable::Tensor& kv_c,
-                          torch::stable::Tensor& k_pe,
-                          torch::stable::Tensor& kv_cache,
-                          torch::stable::Tensor& slot_mapping,
-                          const std::string& kv_cache_dtype,
-                          torch::stable::Tensor& scale);
+void concat_and_cache_mla(
+    torch::stable::Tensor& kv_c, torch::stable::Tensor& k_pe,
+    torch::stable::Tensor& kv_cache, torch::stable::Tensor& slot_mapping,
+    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> num_kv_cache_nan_insertions);
 
 // NOTE: k_pe and kv_c order is flipped compared to concat_and_cache_mla
 void concat_and_cache_mla_rope_fused(

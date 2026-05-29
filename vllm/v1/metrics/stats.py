@@ -336,6 +336,9 @@ class IterationStats:
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
+        self.kv_cache_nans: dict[tuple[str, str], int] = {}
+        self.kv_cache_nan_first_seen: dict[tuple[str, str], float] = {}
+        self.kv_cache_nan_origin: tuple[str, str] | None = None
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -380,6 +383,18 @@ class IterationStats:
             and output.num_nans_in_logits > 0
         ):
             req_stats.is_corrupted = True
+
+        if envs.VLLM_DEBUG_MLA_CACHE and output.kv_cache_nans_per_layer:
+            phase = "prefill" if is_prefilling else "decode"
+            ts = output.kv_cache_nan_timestamp
+            for layer, count in output.kv_cache_nans_per_layer.items():
+                key = (layer, phase)
+                self.kv_cache_nans[key] = self.kv_cache_nans.get(key, 0) + count
+                if key not in self.kv_cache_nan_first_seen:
+                    self.kv_cache_nan_first_seen[key] = ts
+            first_layer = output.kv_cache_nan_first_layer
+            if first_layer and self.kv_cache_nan_origin is None:
+                self.kv_cache_nan_origin = (first_layer, phase)
 
         # Process request-level engine core events
         if output.events is not None:

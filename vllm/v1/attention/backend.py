@@ -922,6 +922,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        num_kv_cache_nan_insertions: torch.Tensor | None = None,
     ) -> None:
         if kv_cache.numel() == 0:
             return
@@ -934,6 +935,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            num_kv_cache_nan_insertions=num_kv_cache_nan_insertions,
         )
 
 
@@ -1002,6 +1004,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        num_kv_cache_nan_insertions: torch.Tensor | None = None,
     ) -> None:
         if kv_cache.numel() == 0:
             return
@@ -1014,6 +1017,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             slot_mapping.flatten(),
             kv_cache_dtype=kv_cache_dtype,
             scale=k_scale,
+            num_kv_cache_nan_insertions=num_kv_cache_nan_insertions,
         )
 
 

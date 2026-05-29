@@ -481,6 +481,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         self.kv_cache = torch.tensor([])
+        self.debug_nans_in_kv_cache = envs.VLLM_DEBUG_MLA_CACHE
+        self.num_kv_cache_nan_insertions: torch.Tensor | None = None
 
         self.use_sparse = use_sparse
 
@@ -569,6 +571,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 slot_mapping.get(self.layer_name),
                 self.kv_cache_dtype,
                 self._k_scale,
+                self.num_kv_cache_nan_insertions,
             )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
@@ -1015,6 +1018,7 @@ def unified_mla_kv_cache_update(
             layer_slot_mapping,
             kv_cache_dtype,
             k_scale,
+            getattr(attn_layer, "num_kv_cache_nan_insertions", None),
         )
 
     return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)

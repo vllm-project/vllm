@@ -4523,6 +4523,12 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
+                kv_cache_nans_per_layer=(kv_nans := self._collect_kv_cache_nans())
+                or None,
+                kv_cache_nan_timestamp=__import__("time").time() if kv_nans else 0.0,
+                kv_cache_nan_first_layer=self._get_kv_nan_first_layer(kv_nans)
+                if kv_nans
+                else None,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5442,6 +5448,38 @@ class GPUModelRunner(
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def _collect_kv_cache_nans(self) -> dict[str, int]:
+        """Read and reset per-layer NaN counts from MLA attention layers."""
+        if not envs.VLLM_DEBUG_MLA_CACHE:
+            return {}
+        result: dict[str, int] = {}
+        for name, layer in self.compilation_config.static_forward_context.items():
+            nan_count = getattr(layer, "num_kv_cache_nan_insertions", None)
+            if nan_count is None:
+                continue
+            count = int(nan_count[0].item())
+            nan_count.zero_()
+            if count > 0:
+                result[name] = count
+        return result
+
+    def _get_kv_nan_first_layer(self, nans: dict[str, int]) -> str | None:
+        """Return the layer name with the lowest index from nans dict."""
+        if not nans:
+            return None
+        import regex as re
+
+        best_name = None
+        best_idx = float("inf")
+        for name in nans:
+            m = re.search(r"\.([0-9]+)\.", name)
+            if m:
+                idx = int(m.group(1))
+                if idx < best_idx:
+                    best_idx = idx
+                    best_name = name
+        return best_name
 
     def _get_nans_in_logits(
         self,

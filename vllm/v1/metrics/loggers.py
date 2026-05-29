@@ -145,6 +145,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
+
         self.num_preemptions += iteration_stats.num_preempted_reqs
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
@@ -537,6 +538,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.counter_corrupted_requests = create_metric_per_engine(
                 counter_corrupted_requests, per_engine_labelvalues
+            )
+
+        if envs.VLLM_DEBUG_MLA_CACHE:
+            self._kv_nan_rank = str(vllm_config.parallel_config.data_parallel_rank)
+            self.counter_kv_cache_nans = self._counter_cls(
+                name="vllm:kv_cache_nans_total",
+                documentation="NaN values detected in MLA KV cache FP8 conversion.",
+                labelnames=["rank", "layer", "phase"],
+            )
+            self._kv_nan_origin_published = False
+            self._kv_nan_first_seen_keys: set[tuple[str, str, str]] = set()
+            self.gauge_kv_nan_origin = self._gauge_cls(
+                name="vllm:kv_cache_nan_origin",
+                documentation=(
+                    "Set to 1 for the (rank, layer, phase) that first introduced NaNs."
+                ),
+                labelnames=["rank", "layer", "phase"],
+            )
+            self.gauge_kv_nan_first_seen = self._gauge_cls(
+                name="vllm:kv_cache_nan_first_seen_timestamp",
+                documentation=(
+                    "Wall-clock time when NaN was first detected (seconds since epoch)."
+                ),
+                labelnames=["rank", "layer", "phase"],
             )
 
         counter_prefix_cache_queries = self._counter_cls(
@@ -1146,6 +1171,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )
+        if envs.VLLM_DEBUG_MLA_CACHE:
+            for (layer, phase), count in iteration_stats.kv_cache_nans.items():
+                self.counter_kv_cache_nans.labels(
+                    rank=self._kv_nan_rank,
+                    layer=layer,
+                    phase=phase,
+                ).inc(count)
+            for (layer, phase), ts in iteration_stats.kv_cache_nan_first_seen.items():
+                key = (self._kv_nan_rank, layer, phase)
+                if key not in self._kv_nan_first_seen_keys:
+                    self._kv_nan_first_seen_keys.add(key)
+                    self.gauge_kv_nan_first_seen.labels(
+                        rank=key[0],
+                        layer=key[1],
+                        phase=key[2],
+                    ).set(ts)
+            if (
+                not self._kv_nan_origin_published
+                and iteration_stats.kv_cache_nan_origin is not None
+            ):
+                layer, phase = iteration_stats.kv_cache_nan_origin
+                self.gauge_kv_nan_origin.labels(
+                    rank=self._kv_nan_rank,
+                    layer=layer,
+                    phase=phase,
+                ).set(1)
+                self._kv_nan_origin_published = True
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )

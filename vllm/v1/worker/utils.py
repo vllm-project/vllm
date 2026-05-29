@@ -513,7 +513,12 @@ def bind_kv_cache(
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
-        forward_context[layer_name].kv_cache = kv_cache
+        layer = forward_context[layer_name]
+        layer.kv_cache = kv_cache
+        if getattr(layer, "debug_nans_in_kv_cache", False):
+            layer.num_kv_cache_nan_insertions = torch.zeros(
+                1, dtype=torch.int32, device=kv_cache.device
+            )
 
 
 def is_residual_scattered_for_sp(

@@ -1297,6 +1297,9 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        kv_cache_nans_per_layer = model_runner_output.kv_cache_nans_per_layer
+        kv_cache_nan_timestamp = model_runner_output.kv_cache_nan_timestamp
+        kv_cache_nan_first_layer = model_runner_output.kv_cache_nan_first_layer
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -1500,6 +1503,8 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+            if kv_cache_nans_per_layer:
+                request.kv_cache_nans_per_layer = kv_cache_nans_per_layer
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
@@ -1525,6 +1530,9 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        kv_cache_nans_per_layer=request.kv_cache_nans_per_layer,
+                        kv_cache_nan_timestamp=kv_cache_nan_timestamp,
+                        kv_cache_nan_first_layer=kv_cache_nan_first_layer,
                     )
                 )
             else:

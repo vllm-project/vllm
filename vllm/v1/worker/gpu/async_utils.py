@@ -62,6 +62,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.model_runner_output.num_nans_in_logits = dict(
                 zip(self.model_runner_output.req_ids, self.num_nans.tolist())
             )
+        # kv_cache_nans_per_layer is already a dict on ModelRunnerOutput,
+        # no async copy needed.
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()

@@ -194,6 +194,15 @@ class EngineCoreOutput(
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
 
+    # Per-layer NaN counts from KV cache. {layer_name: count}
+    kv_cache_nans_per_layer: dict[str, int] | None = None
+
+    # Wall-clock time (time.time()) when NaNs were detected.
+    kv_cache_nan_timestamp: float = 0.0
+
+    # Lowest-index layer that had NaNs this iteration.
+    kv_cache_nan_first_layer: str | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

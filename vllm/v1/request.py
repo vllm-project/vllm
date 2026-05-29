@@ -162,6 +162,7 @@ class Request:
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
+        self.kv_cache_nans_per_layer: dict[str, int] | None = None
 
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0

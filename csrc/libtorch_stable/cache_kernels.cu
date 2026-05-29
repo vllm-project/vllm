@@ -394,21 +394,33 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+template <typename T>
+__device__ __forceinline__ bool check_nan(T v) {
+  return __hisnan(v);
+}
+template <>
+__device__ __forceinline__ bool check_nan(float v) {
+  return __isnanf(v);
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          bool kDebug = false>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
     cache_t* __restrict__ kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                      // + pe_dim)]
-    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-    const int block_stride,                    //
-    const int entry_stride,                    //
-    const int kv_c_stride,                     //
-    const int k_pe_stride,                     //
-    const int kv_lora_rank,                    //
-    const int pe_dim,                          //
-    const int block_size,                      //
-    const float* scale                         //
+    const int64_t* __restrict__ slot_mapping,          // [num_tokens]
+    const int block_stride,                            //
+    const int entry_stride,                            //
+    const int kv_c_stride,                             //
+    const int k_pe_stride,                             //
+    const int kv_lora_rank,                            //
+    const int pe_dim,                                  //
+    const int block_size,                              //
+    const float* scale,                                //
+    int32_t* __restrict__ num_kv_cache_nan_insertions  // [1] only used when
+                                                       // kDebug=true
 ) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
@@ -419,8 +431,10 @@ __global__ void concat_and_cache_mla_kernel(
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
+  int nan_count = 0;
+
   auto copy = [&](const scalar_t* __restrict__ src, cache_t* __restrict__ dst,
-                  int src_stride, int dst_stride, int size, int offset) {
+                  int src_stride, int size, int offset) {
     for (int i = threadIdx.x; i < size; i += blockDim.x) {
       const int64_t src_idx = token_idx * src_stride + i;
       const int64_t dst_idx =
@@ -431,11 +445,20 @@ __global__ void concat_and_cache_mla_kernel(
         dst[dst_idx] =
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
       }
+      if constexpr (kDebug) {
+        nan_count += check_nan(src[src_idx]);
+      }
     }
   };
 
-  copy(kv_c, kv_cache, kv_c_stride, block_stride, kv_lora_rank, 0);
-  copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
+  copy(kv_c, kv_cache, kv_c_stride, kv_lora_rank, 0);
+  copy(k_pe, kv_cache, k_pe_stride, pe_dim, kv_lora_rank);
+
+  if constexpr (kDebug) {
+    if (nan_count > 0) {
+      atomicAdd(num_kv_cache_nan_insertions, nan_count);
+    }
+  }
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
@@ -813,15 +836,28 @@ void reshape_and_cache_flash(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                    \
-  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE>                  \
+#define CALL_CONCAT_AND_CACHE_MLA_IMPL(KV_T, CACHE_T, KV_DTYPE, DBG)          \
+  vllm::concat_and_cache_mla_kernel<KV_T, CACHE_T, KV_DTYPE, DBG>             \
       <<<grid, block, 0, stream>>>(                                           \
           reinterpret_cast<KV_T*>(kv_c.data_ptr()),                           \
           reinterpret_cast<KV_T*>(k_pe.data_ptr()),                           \
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), block_stride, entry_stride, \
           kv_c_stride, k_pe_stride, kv_lora_rank, pe_dim, block_size,         \
-          reinterpret_cast<const float*>(scale.data_ptr()));
+          reinterpret_cast<const float*>(scale.data_ptr()),                   \
+          nan_insertion_count_ptr);
+
+#define CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T) \
+  std::conditional_t<std::is_same_v<KV_T, uint16_t>, __half, KV_T>
+
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                 \
+  if (nan_insertion_count_ptr) {                                           \
+    CALL_CONCAT_AND_CACHE_MLA_IMPL(CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T), \
+                                   CACHE_T, KV_DTYPE, true)                \
+  } else {                                                                 \
+    CALL_CONCAT_AND_CACHE_MLA_IMPL(CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T), \
+                                   CACHE_T, KV_DTYPE, false)               \
+  }
 
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
@@ -841,7 +877,16 @@ void concat_and_cache_mla(
     torch::stable::Tensor& kv_cache,  // [num_blocks, block_size, (kv_lora_rank
                                       // + pe_dim)]
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
-    const std::string& kv_cache_dtype, torch::stable::Tensor& scale) {
+    const std::string& kv_cache_dtype, torch::stable::Tensor& scale,
+    std::optional<torch::stable::Tensor> num_kv_cache_nan_insertions) {
+  // NOTE(elvircrn): We optionally want to keep track of NaN being written
+  // into KV$ to help out with debugging numerical issues and bugs. It is
+  // also known that attention kernels break with NaNs in KV$.
+  int32_t* nan_insertion_count_ptr =
+      num_kv_cache_nan_insertions.has_value()
+          ? num_kv_cache_nan_insertions.value().mutable_data_ptr<int32_t>()
+          : nullptr;
+
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -982,7 +1027,6 @@ void convert_fp8(torch::stable::Tensor& dst_cache,
 
 namespace vllm {
 
-// grid is launched with dimensions (batch, num_splits)
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           int ENTRY_SIZE, int CTA_SIZE>
 __global__ void gather_and_maybe_dequant_cache(

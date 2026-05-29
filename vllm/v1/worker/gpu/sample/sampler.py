@@ -118,6 +118,7 @@ class Sampler:
             num_nans=num_nans,
             num_sampled=input_batch.seq_lens.new_ones(input_batch.num_reqs),
         )
+
         return sampler_output
 
     def apply_sampling_params(

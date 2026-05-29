@@ -669,7 +669,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! kv_cache,"
       "                     Tensor slot_mapping,"
       "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
+      "                     Tensor scale,"
+      "                     Tensor? num_kv_cache_nan_insertions) -> ()");
 
   // Rotate Q and K, then write to kv cache for MLA
   ops.def(
