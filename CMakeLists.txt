@@ -1325,6 +1325,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building with VLLM_SKINNY_GEMM_SWEEP_BF16 (bf16 wvSplitK_sweep) enabled")
   endif()
 
+  set(VLLM_ROCM_HAS_GFX1100 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    set(VLLM_ROCM_HAS_GFX1100 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna3.cu"
+      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1342,6 +1350,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(_ROCM_SWEEP_BF16_ENABLED)
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKINNY_GEMM_SWEEP_BF16=1)
+  endif()
+  if(VLLM_ROCM_HAS_GFX1100)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()
 endif()
 
