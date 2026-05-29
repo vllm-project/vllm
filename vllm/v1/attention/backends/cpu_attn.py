@@ -67,6 +67,10 @@ class CPUAttentionBackend(AttentionBackend):
         return "CPU_ATTN"
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
         encoder-only and encoder-decoder attention."""
@@ -349,16 +353,13 @@ class CPUAttentionBackendImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
-            ops.cpu_attn_reshape_and_cache(
+            self.do_kv_cache_update(
+                layer,
                 key,
                 value,
-                key_cache,
-                value_cache,
+                kv_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.isa,
-                k_scale=layer._k_scale_float,
-                v_scale=layer._v_scale_float,
-                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -396,6 +397,42 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        isa: str | None = None,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # Encoder attention consumes direct Q/K/V tensors without KV caching.
+            return
+
+        if self.kv_sharing_target_layer_name is not None:
+            return
+
+        key_cache, value_cache = kv_cache.unbind(0)
+        if isa is None:
+            isa = _get_attn_isa(
+                key.dtype,
+                key_cache.shape[-2],
+                self.head_size,
+                self.kv_cache_dtype,
+            )
+        ops.cpu_attn_reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            isa,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
     def _run_sdpa_forward(
         self,
