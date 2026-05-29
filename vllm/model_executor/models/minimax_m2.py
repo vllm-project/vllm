@@ -118,6 +118,7 @@ class MiniMaxM2MoE(nn.Module):
             config.num_local_experts,
             bias=False,
             params_dtype=torch.float32,
+            out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
 
