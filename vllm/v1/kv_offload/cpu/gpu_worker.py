@@ -21,10 +21,8 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.triton_swap import (
-    MIN_N,
-    NUM_SMS,
     THRESHOLD_BYTES,
-    _swap_blocks_kernel,
+    _swap_blocks_batch,
 )
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
@@ -33,38 +31,6 @@ from vllm.v1.kv_offload.worker.worker import (
 )
 
 logger = init_logger(__name__)
-
-
-def _triton_swap_blocks_batch(
-    src_addrs: torch.Tensor,
-    dst_addrs: torch.Tensor,
-    sizes: torch.Tensor,
-    is_src_access_order_any: bool = False,
-    *,
-    bytes_per_chunk: int,
-) -> None:
-    """Triton implementation of ``swap_blocks_batch`` for small CPU->GPU batches.
-
-    ``bytes_per_chunk`` is bound by :func:`_select_swap_blocks_fn` via
-    ``functools.partial`` so the call site matches ``ops.swap_blocks_batch``.
-    """
-    n = src_addrs.numel()
-    # Too few descriptors to amortize Triton's launch cost.
-    if n < MIN_N:
-        ops.swap_blocks_batch(
-            src_addrs,
-            dst_addrs,
-            sizes,
-            is_src_access_order_any=is_src_access_order_any,
-        )
-        return
-    _swap_blocks_kernel[(min(NUM_SMS, n),)](
-        src_addrs.to("cuda", non_blocking=True),
-        dst_addrs.to("cuda", non_blocking=True),
-        sizes.to("cuda", non_blocking=True),
-        n,
-        BYTES_PER_CHUNK=bytes_per_chunk,
-    )
 
 
 def _select_swap_blocks_fn(
@@ -88,7 +54,7 @@ def _select_swap_blocks_fn(
     ):
         return ops.swap_blocks_batch
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(_triton_swap_blocks_batch, bytes_per_chunk=chunk)
+    return functools.partial(_swap_blocks_batch, bytes_per_chunk=chunk)
 
 
 @dataclass
