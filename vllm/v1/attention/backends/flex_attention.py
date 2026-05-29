@@ -77,6 +77,31 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
     return F.pad(x, pad_list, mode="constant", value=0)
 
 
+def create_tanh_softcap_score_mod(
+    soft_cap: float,
+) -> _score_mod_signature:
+    """Creates a score_mod function that applies tanh softcapping.
+
+    Args:
+        soft_cap: The softcapping value. Attention scores will be transformed
+            as: soft_cap * tanh(score / soft_cap)
+
+    Returns:
+        A score_mod function compatible with FlexAttention.
+    """
+    def tanh_softcap(
+        score: torch.Tensor,
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
+        return soft_cap * torch.tanh(score / soft_cap)
+
+    return tanh_softcap
+
+
 class FlexAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -1020,10 +1045,6 @@ class FlexAttentionImpl(AttentionImpl):
 
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
-        if self.logits_soft_cap is not None:
-            raise NotImplementedError(
-                "FlexAttention does not support logits soft cap yet."
-            )
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -1135,6 +1156,17 @@ class FlexAttentionImpl(AttentionImpl):
             attn_metadata.logical_mask_mod = layer_mask_mod
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
             needs_rebuild_block_mask = True
+
+        # Handle logits soft capping via score_mod
+        if self.logits_soft_cap is not None:
+            if attn_metadata.score_mod is None:
+                attn_metadata.score_mod = create_tanh_softcap_score_mod(
+                    self.logits_soft_cap
+                )
+                # Transform the score_mod to handle physical-to-logical conversion
+                attn_metadata.transformed_score_mod = (
+                    attn_metadata.get_transformed_score_mod()
+                )
 
         layer_hint = getattr(layer, "block_sparsity_hint", None)
         if (
