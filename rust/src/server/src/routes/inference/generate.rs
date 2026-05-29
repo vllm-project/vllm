@@ -134,21 +134,17 @@ async fn generate_chunk_stream(
     mut y: TryYielder<GenerateStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     pin_mut!(stream);
-    let mut prompt_tokens = 0_u32;
+    let mut prompt_tokens: Option<u32> = None;
     let mut output_tokens = 0_u32;
-    let mut started = false;
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
-                if !started {
-                    prompt_tokens = output
-                        .prompt_info
-                        .as_ref()
-                        .map(|info| info.prompt_token_ids.len() as u32)
-                        .unwrap_or_default();
-                    started = true;
+                if prompt_tokens.is_none() {
+                    prompt_tokens =
+                        output.prompt_info.as_ref().map(|info| info.prompt_token_ids.len() as u32);
                 }
+                let usage_prompt_tokens = prompt_tokens.unwrap_or_default();
 
                 let token_ids = output.token_ids;
                 output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
@@ -163,7 +159,7 @@ async fn generate_chunk_stream(
                 {
                     info!(
                         stream = true,
-                        prompt_tokens,
+                        prompt_tokens = usage_prompt_tokens,
                         output_tokens,
                         finish_reason = finish_reason.as_str(),
                         "generate finished"
@@ -194,7 +190,7 @@ async fn generate_chunk_stream(
                         token_ids,
                     }],
                     usage: include_continuous_usage
-                        .then(|| Usage::from_counts(prompt_tokens, output_tokens)),
+                        .then(|| Usage::from_counts(usage_prompt_tokens, output_tokens)),
                 })
                 .await;
             }
@@ -212,7 +208,10 @@ async fn generate_chunk_stream(
         y.yield_ok(GenerateStreamResponse {
             request_id,
             choices: Vec::new(),
-            usage: Some(Usage::from_counts(prompt_tokens, output_tokens)),
+            usage: Some(Usage::from_counts(
+                prompt_tokens.unwrap_or_default(),
+                output_tokens,
+            )),
         })
         .await;
     }
@@ -374,4 +373,55 @@ fn to_error_sse_event(error: &ApiError) -> Event {
 fn done_sse_event() -> Event {
     trace!("generate emitting done");
     Event::default().data("[DONE]")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use futures::{TryStreamExt as _, stream};
+    use vllm_llm::GeneratePromptInfo;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn generate_chunk_stream_captures_late_prompt_info() {
+        let stream = stream::iter(vec![
+            Ok(GenerateOutput {
+                request_id: String::new(),
+                prompt_info: None,
+                token_ids: Vec::new(),
+                logprobs: None,
+                finish_reason: None,
+                kv_transfer_params: None,
+            }),
+            Ok(GenerateOutput {
+                request_id: String::new(),
+                prompt_info: Some(GeneratePromptInfo {
+                    prompt_token_ids: Arc::from([11_u32, 22_u32]),
+                    prompt_logprobs: None,
+                }),
+                token_ids: vec![33],
+                logprobs: None,
+                finish_reason: Some(FinishReason::stop_eos()),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let chunks: Vec<_> =
+            generate_chunk_stream(stream, "raw-stream".to_string(), false, true, true, false)
+                .try_collect()
+                .await
+                .expect("collect chunks");
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].usage.as_ref().expect("chunk usage").prompt_tokens,
+            2
+        );
+        assert_eq!(
+            chunks[1].usage.as_ref().expect("final usage").prompt_tokens,
+            2
+        );
+    }
 }
