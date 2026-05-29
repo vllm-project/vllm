@@ -426,6 +426,106 @@ def trtllm_moe_pack_topk_ids_weights(
     return output.reshape(original_shape)
 
 
+@triton.jit
+def _batched_swiglu_limit_kernel(
+    output_ptr,
+    input_ptr,
+    sorted_token_ids_ptr,
+    num_tokens_post_padded_ptr,
+    total_rows: tl.constexpr,
+    d: tl.constexpr,
+    output_stride_m: tl.constexpr,
+    output_stride_n: tl.constexpr,
+    input_stride_m: tl.constexpr,
+    input_stride_n: tl.constexpr,
+    swiglu_limit: tl.constexpr,
+    HAS_LIMIT: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    sorted_idx = tl.program_id(0)
+    dim_block_idx = tl.program_id(1)
+    dim_offsets = dim_block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    dim_mask = dim_offsets < d
+
+    valid_rows = tl.load(num_tokens_post_padded_ptr)
+    token_idx = tl.load(
+        sorted_token_ids_ptr + sorted_idx,
+        mask=sorted_idx < valid_rows,
+        other=0,
+    ).to(tl.int64)
+    token_mask = (sorted_idx < valid_rows) & (token_idx >= 0) & (token_idx < total_rows)
+
+    gate_offsets = token_idx * input_stride_m + dim_offsets * input_stride_n
+    up_offsets = gate_offsets + d * input_stride_n
+    output_offsets = token_idx * output_stride_m + dim_offsets * output_stride_n
+    mask = token_mask & dim_mask
+
+    gate = tl.load(input_ptr + gate_offsets, mask=mask, other=0.0).to(tl.float32)
+    up = tl.load(input_ptr + up_offsets, mask=mask, other=0.0).to(tl.float32)
+
+    if HAS_LIMIT:
+        gate = tl.minimum(gate, swiglu_limit)
+        up = tl.minimum(tl.maximum(up, -swiglu_limit), swiglu_limit)
+
+    sigmoid = 1.0 / (1.0 + tl.exp(-gate))
+    tl.store(output_ptr + output_offsets, gate * sigmoid * up, mask=mask)
+
+
+def _swiglu_block_size(d: int) -> int:
+    return min(triton.next_power_of_2(d), 1024)
+
+_BATCHED_SWIGLU_BUCKET_SIZES = (
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16384,
+    32768,
+    65536,
+)
+
+def _select_batched_swiglu_bucket_size(
+    *,
+    expert_num_tokens_cpu: torch.Tensor | None,
+    topk_ids: torch.Tensor | None,
+    num_experts: int | None,
+    total_rows: int,
+    block_size_m: int | None,
+    sorted_token_ids: torch.Tensor,
+) -> int | None:
+    sorted_token_capacity = sorted_token_ids.numel()
+    if expert_num_tokens_cpu is not None:
+        assert block_size_m is not None
+        valid_rows = 0
+        for num_tokens in expert_num_tokens_cpu.tolist():
+            num_tokens = int(num_tokens)
+            valid_rows += (
+                (num_tokens + block_size_m - 1) // block_size_m
+            ) * block_size_m
+    elif (
+        topk_ids is not None
+        and num_experts is not None
+        and block_size_m is not None
+    ):
+        assert num_experts > 0
+        assert total_rows % num_experts == 0
+        max_tokens_per_batch = total_rows // num_experts
+        routed_tokens_upper_bound = max(
+            topk_ids.numel(),
+            max_tokens_per_batch * topk_ids.size(1),
+        )
+        valid_rows = routed_tokens_upper_bound + num_experts * (block_size_m - 1)
+    else:
+        return None
+
+    valid_rows = min(valid_rows, sorted_token_capacity)
+    for bucket_size in _BATCHED_SWIGLU_BUCKET_SIZES:
+        if valid_rows <= bucket_size:
+            return min(bucket_size, sorted_token_capacity)
+    return sorted_token_capacity
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def swiglu_limit_func(
     output: torch.Tensor,
@@ -441,3 +541,47 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+def batched_swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    sorted_token_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    swiglu_limit: float = 0.0,
+    expert_num_tokens_cpu: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
+    num_experts: int | None = None,
+    block_size_m: int | None = None,
+) -> None:
+    total_rows = input.shape[0]
+    bucket_size = _select_batched_swiglu_bucket_size(
+        expert_num_tokens_cpu=expert_num_tokens_cpu,
+        topk_ids=topk_ids,
+        num_experts=num_experts,
+        total_rows=total_rows,
+        block_size_m=block_size_m,
+        sorted_token_ids=sorted_token_ids,
+    )
+    n_tokens = bucket_size if bucket_size is not None else total_rows
+    n_tokens = min(n_tokens, sorted_token_ids.numel())
+    if n_tokens == 0:
+        return
+
+    d = output.shape[1]
+    block_size = _swiglu_block_size(d)
+    grid = (n_tokens, triton.cdiv(d, block_size))
+    _batched_swiglu_limit_kernel[grid](
+        output,
+        input,
+        sorted_token_ids,
+        num_tokens_post_padded,
+        total_rows,
+        d,
+        output.stride(0),
+        output.stride(1),
+        input.stride(0),
+        input.stride(1),
+        swiglu_limit,
+        HAS_LIMIT=swiglu_limit > 0,
+        BLOCK_SIZE=block_size,
+    )
