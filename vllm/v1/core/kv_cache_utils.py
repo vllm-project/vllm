@@ -1280,13 +1280,20 @@ def get_kv_cache_config_from_groups(
         )
 
     # Step 1: Bucket every layer across all groups by a shape-aware key.
-    # Attention layers further key on (num_heads, state_content_size) so that
-    # cross-group sharing only happens between layers whose [H, N, C] layout
-    # is byte-compatible — required for HMA aliasing under non-block-contiguous
-    # layouts (e.g. LBNHC). Non-AttentionSpec layers (Mamba) key on page_size
-    # alone.
+    # Under non-block-contiguous layouts (LBNHC/BHLNC), attention layers with
+    # mismatched (num_heads, state_content_size) can't safely share a
+    # KVCacheTensor (the [H, N, C] byte interpretation diverges across the
+    # aliased layers), so the key includes those dims. Under block-contiguous
+    # layouts (LBHNC/BLHNC) the [H, N, C] content is identically packed
+    # regardless of H/C split, so a plain page_size key is safe — and this
+    # matches _validate_layout_compatibility's early-out. Non-AttentionSpec
+    # layers (Mamba) always key on page_size alone.
+    layout_is_block_contiguous = resolve_kv_cache_layout().is_block_contiguous
+
     def _bucket_key(group: KVCacheGroupSpec, layer_name: str) -> tuple:
         ps = _get_per_layer_page_size(group, layer_name)
+        if layout_is_block_contiguous:
+            return (ps,)
         spec = _get_per_layer_spec(group, layer_name)
         if isinstance(spec, AttentionSpec):
             return (ps, spec.num_heads, spec.state_content_size)
