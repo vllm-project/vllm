@@ -168,11 +168,6 @@ class TPTransferSlice:
         """Element offset into local tensor to start writing."""
         return self.transfer_range.offset_within(self.local_shard)
 
-    @property
-    def num_elements(self) -> int:
-        """Number of elements to transfer."""
-        return len(self.transfer_range)
-
     def __repr__(self) -> str:
         return (
             f"TPTransferSlice(rank={self.remote_rank}, "
