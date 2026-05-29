@@ -42,7 +42,8 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "mori",
+    "mori_high_throughput",
+    "mori_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -177,7 +178,8 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori": Use mori kernels
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
@@ -265,7 +267,12 @@ class ParallelConfig:
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
     numa_bind: bool = False
-    """Enable NUMA binding for GPU worker subprocesses."""
+    """Enable NUMA binding for GPU worker subprocesses.
+
+    By default, workers are pinned to their GPU's NUMA-local CPUs and
+    memory; on PCT-capable Xeons they also auto-bind to the SKU's
+    PCT priority cores.
+    """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
 
@@ -621,7 +628,8 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "mori",
+                "mori_high_throughput",
+                "mori_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel

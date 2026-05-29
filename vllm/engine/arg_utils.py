@@ -747,15 +747,20 @@ class EngineArgs:
         load_general_plugins()
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
-            model_id = self.model
-            self.model = get_model_path(self.model, self.revision)
-            if model_id is not self.model:
-                logger.info(
-                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                    model_id,
-                    self.model,
-                )
-            if self.tokenizer is not None:
+            # Skip cloud storage URIs (s3://, gs://, az://) — they are not
+            # HF repo IDs and will be resolved later by
+            # ModelConfig.maybe_pull_model_tokenizer_for_runai().
+            if not is_cloud_storage(self.model):
+                model_id = self.model
+                self.model = get_model_path(self.model, self.revision)
+                if model_id is not self.model:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace model_id "
+                        "[%s] to model_path [%s]",
+                        model_id,
+                        self.model,
+                    )
+            if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:

@@ -869,19 +869,23 @@ def nvfp4_w4a16_moe_quant_config(
 def int4_w4a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int4 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
+        _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
+        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
+        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -922,19 +926,21 @@ def fp8_w8a16_moe_quant_config(
 def int8_w8a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
+    w1_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and int8 weights.
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
+        _a1=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a1_gscale),
+        _a2=FusedMoEQuantDesc(shape=group_shape, alpha_or_gscale=a2_gscale),
         _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp, w1_bias),
         _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp, w2_bias),
     )
@@ -962,47 +968,6 @@ def int4_w4afp8_moe_quant_config(
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
         weight_dtype="int4",  # weight dtype for weights
-    )
-
-
-def awq_marlin_moe_quant_config(
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None,
-    w2_zp: torch.Tensor | None,
-    weight_bits: int,
-    group_size: int,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-    a1_gscale: torch.Tensor | None = None,
-    a2_gscale: torch.Tensor | None = None,
-) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for awq marlin quantization.
-
-    a1_gscale / a2_gscale are optional global scales applied to activation
-    quantization scales when Marlin runs with 8-bit activations.
-    """
-    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-
-    w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
-
-    # Activations are NOT quantized for AWQ (fp16/bf16)
-    a_shape = w_shape  # Same as weight shape for alignment
-
-    # Determine weight dtype
-    if weight_bits == 4:
-        weight_dtype = "int4"
-    elif weight_bits == 8:
-        weight_dtype = torch.int8
-    else:
-        raise ValueError(f"Unsupported weight_bits: {weight_bits}")
-
-    return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a1_gscale),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape, alpha_or_gscale=a2_gscale),
-        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 
@@ -1091,7 +1056,10 @@ class FusedMoEParallelConfig:
 
     @property
     def use_mori_kernels(self):
-        return self.use_all2all_kernels and self.all2all_backend == "mori"
+        return self.use_all2all_kernels and self.all2all_backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+        )
 
     @property
     def use_nixl_ep_kernels(self):
@@ -1292,12 +1260,6 @@ class FusedMoEConfig:
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
-
-    # This flag is used to disable the inplace optimization
-    # in MoE kernels. If this flag is True then the kernel
-    # should not be using inplace. If the flag is false, the
-    # kernel is free to use inplace or not.
-    disable_inplace: bool = True
 
     def __post_init__(self):
         if self.dp_size > 1:
