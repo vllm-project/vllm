@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -1243,7 +1244,11 @@ def get_default_config(
         bit = 4 if dtype == "int4_w4a16" else 8
         use_moe_wna16_cuda = should_moe_wna16_use_cuda(M * topk, block_shape[1], E, bit)
         if use_moe_wna16_cuda:
-            config = {"BLOCK_SIZE_M": min(16, M), "SPLIT_K": 1}
+            config = {
+                "BLOCK_SIZE_M": min(16, next_power_of_2(M)),
+                "GROUP_SIZE_M": 1,
+                "SPLIT_K": 1,
+            }
         elif M <= 20:
             config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         elif M <= 40:
@@ -1518,7 +1523,6 @@ def fused_experts(
 def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
-    ocp_mx_scheme: str | None,
 ) -> None | torch.dtype | str:
     """
     Get the quantization type based on the quantization strategy flags.
@@ -1529,18 +1533,8 @@ def _get_config_quant_dtype(
     """
     if use_fp8_w8a8:
         return current_platform.fp8_dtype()
-    elif use_int8_w8a8:
+    if use_int8_w8a8:
         return torch.int8
-    elif ocp_mx_scheme == "w_mxfp4_a_mxfp4":
-        return "mxfp4"
-    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e3m2", "w_mxfp6_e3m2_a_mxfp6_e3m2"}:
-        return "mxfp6_e3m2"
-    elif ocp_mx_scheme in {"w_mxfp4_a_mxfp6_e2m3", "w_mxfp6_e2m3_a_mxfp6_e2m3"}:
-        return "mxfp6_e2m3"
-    elif ocp_mx_scheme in {"w_mxfp4", "w_mxfp6_e3m2", "w_mxfp6_e2m3"}:
-        return torch.bfloat16
-    elif ocp_mx_scheme in {"w_mxfp4_a_fp8", "w_mxfp6_e3m2_a_fp8", "w_mxfp6_e2m3_a_fp8"}:
-        return torch.float8_e4m3fn
 
     return None
 
@@ -1615,7 +1609,6 @@ def fused_experts_impl(
     quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
-        ocp_mx_scheme=None,
     )
 
     get_config_func = functools.partial(
