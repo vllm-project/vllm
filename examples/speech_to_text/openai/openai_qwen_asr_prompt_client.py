@@ -20,31 +20,22 @@ import sys
 
 import requests
 
-AUDIO_URL = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"
-LOCAL_AUDIO = "/tmp/mary_had_lamb.ogg"
+from vllm.assets.audio import AudioAsset
 
 
-def download_audio():
-    import os
-
-    if os.path.exists(LOCAL_AUDIO):
-        return
-    print(f"Downloading {AUDIO_URL} ...")
-    r = requests.get(AUDIO_URL, timeout=30)
-    r.raise_for_status()
-    with open(LOCAL_AUDIO, "wb") as f:
-        f.write(r.content)
-    print(f"Saved to {LOCAL_AUDIO}")
-
-
-def transcribe(base_url: str, model: str, prompt: str | None = None) -> str:
+def transcribe(
+    base_url: str,
+    model: str,
+    audio_path: str,
+    prompt: str | None = None,
+) -> str:
     url = f"{base_url}/v1/audio/transcriptions"
     data = {"model": model}
     if prompt:
         data["prompt"] = prompt
 
-    with open(LOCAL_AUDIO, "rb") as f:
-        files = {"file": ("mary_had_lamb.ogg", f, "audio/ogg")}
+    with open(audio_path, "rb") as f:
+        files = {"file": (audio_path, f, "audio/ogg")}
         resp = requests.post(url, data=data, files=files, timeout=120)
 
     resp.raise_for_status()
@@ -52,23 +43,23 @@ def transcribe(base_url: str, model: str, prompt: str | None = None) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test Qwen3-ASR prompt support")
+    parser = argparse.ArgumentParser(description="Qwen3-ASR `prompt` parameter demo")
     parser.add_argument(
         "--base-url", default="http://localhost:8000", help="vLLM server base URL"
     )
     parser.add_argument("--model", default="Qwen/Qwen3-ASR-0.6B", help="Model name")
     args = parser.parse_args()
 
-    download_audio()
+    audio_path = str(AudioAsset("mary_had_lamb").get_local_path())
 
-    print("\n--- Test 1: Transcription WITHOUT prompt ---")
-    no_prompt = transcribe(args.base_url, args.model)
+    print("\n--- Transcription WITHOUT prompt ---")
+    no_prompt = transcribe(args.base_url, args.model, audio_path)
     print(f"Result: {no_prompt}")
 
     prompt_text = "Listen for the words phonograph and fleece"
-    print("\n--- Test 2: Transcription WITH prompt ---")
+    print("\n--- Transcription WITH prompt ---")
     print(f"Prompt used: '{prompt_text}'")
-    with_prompt = transcribe(args.base_url, args.model, prompt=prompt_text)
+    with_prompt = transcribe(args.base_url, args.model, audio_path, prompt=prompt_text)
     print(f"Result: {with_prompt}")
 
     print("\n" + "=" * 60)
@@ -103,7 +94,6 @@ def main():
         print("\nWARNING: Both outputs are identical — prompt had no effect!")
         return 1
 
-    print("\n--- Tests completed successfully ---")
     return 0
 
 
