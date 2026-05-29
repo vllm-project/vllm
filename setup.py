@@ -483,8 +483,8 @@ class precompiled_wheel_utils:
         supported = {12: "cu129", 13: "cu130"}
 
         # Respect explicitly set VLLM_MAIN_CUDA_VERSION
-        if envs.is_set("VLLM_MAIN_CUDA_VERSION"):
-            v = envs.VLLM_MAIN_CUDA_VERSION
+        if "VLLM_MAIN_CUDA_VERSION" in os.environ:
+            v = os.environ.get("VLLM_MAIN_CUDA_VERSION")
             print(f"Using VLLM_MAIN_CUDA_VERSION={v}")
             return "cu" + v.replace(".", "")[:3]
 
