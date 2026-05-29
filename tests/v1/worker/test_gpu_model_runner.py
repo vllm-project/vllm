@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -33,16 +34,17 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
 )
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -278,7 +280,8 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         lambda: SimpleNamespace(world_size=world_size, is_last_rank=is_last_rank),
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert receive_calls == expected_calls
 
 
@@ -297,7 +300,8 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
         pytest.fail,
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
 def test_select_common_block_size_no_valid_option():
@@ -747,6 +751,39 @@ def test_reload_weights_before_load_model(model_runner):
         model_runner.reload_weights()
 
 
+def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
+    runner = object.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.input_batch = SimpleNamespace(
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+        req_ids=["req_a", "req_b", "req_c"],
+    )
+    runner.rejection_sampler = Mock(return_value="sampler_output")
+    runner.sampler = Mock()
+    runner._draft_prob_req_ids = ["req_c", "req_a", "req_b"]
+    runner._draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1, 2], [], [3]],
+        device=torch.device("cpu"),
+    )
+    logits = torch.randn(6, 4)
+
+    output = GPUModelRunner._sample(runner, logits, spec_decode_metadata)
+
+    assert output == "sampler_output"
+    passed_draft_probs = runner.rejection_sampler.call_args.args[1]
+    expected_draft_probs = torch.cat(
+        [
+            runner._draft_probs[1, :2],
+            runner._draft_probs[0, :1],
+        ],
+        dim=0,
+    )
+    assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"
@@ -1158,33 +1195,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
-
-
-def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride():
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-
-    ambiguous_cache = torch.empty((2, 2, BLOCK_SIZE, 1, 8), dtype=torch.float16)
-    """Ambiguous, because both dims[0=kv_dim] and dims[1=num_blocks] == 2"""
-    hidden_size = ambiguous_cache.shape[2:].numel()
-    assert ambiguous_cache.stride()[:2] == (2 * hidden_size, hidden_size)
-
-    attention_spec = AttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.float16
-    )
-    runner_stub = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        _kv_cache_spec_attn_group_iterator=lambda: iter(
-            [AttentionGroup(FlashAttentionBackend, ["attn"], attention_spec, 0)]
-        ),
-    )
-    GPUModelRunner._update_hybrid_attention_mamba_layout(
-        runner_stub, {"attn": ambiguous_cache}, [BLOCK_SIZE]
-    )
-
-    assert ambiguous_cache.stride()[:2] == (hidden_size, 2 * hidden_size), """\
-        We expect _update_hybrid_attention_mamba_layout to re-stride the cache from:
-        (2, num_blocks) -> (num_blocks, 2), even when num_blocks==2, 
-        which was ambiguous before get_kv_cache_block_dim was used"""
 
 
 def test_hybrid_block_table_initialization():

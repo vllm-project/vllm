@@ -69,6 +69,7 @@ def _create_proposer(
         scheduler_config=SchedulerConfig(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
+            enable_chunked_prefill=False,
         ),
         attention_config=AttentionConfig(),
     )
@@ -119,6 +120,7 @@ def test_proposer_initialization_missing_layer_ids():
         scheduler_config=SchedulerConfig(
             max_model_len=model_config.max_model_len,
             is_encoder_decoder=model_config.is_encoder_decoder,
+            enable_chunked_prefill=False,
         ),
         attention_config=AttentionConfig(),
     )
