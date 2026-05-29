@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
+    RequestOffloadingContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -47,7 +48,7 @@ class FileSystemTierManager(SecondaryTierManager):
     queue, so neither starves.
 
     submit_store / submit_load are non-blocking: they enqueue tasks and return.
-    get_finished() polls job completion and returns completed JobResults.
+    get_finished_jobs() polls job completion and returns completed JobResults.
 
     """
 
@@ -100,6 +101,9 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
     def lookup(
         self, key: OffloadKey, req_context: ReqContext | None = None
     ) -> bool | None:
@@ -131,7 +135,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
 
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
