@@ -6,17 +6,22 @@ from typing import Any
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-    int4_w4a16_moe_quant_config,
-    int8_w8a16_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
+from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
+    SharedExperts,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    convert_to_wna16_moe_kernel_format,
+    make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -30,7 +35,15 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    INT4_DTYPE,
+    INT8_DTYPE,
+    QuantKey,
+    kInt4Static32GroupScale,
+    kInt4StaticGroupScale,
+    kInt8StaticGroupScale,
+)
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 
@@ -59,10 +72,9 @@ class MoeWNA16Config(QuantizationConfig):
         # Avoid circular import
         from vllm.model_executor.layers.quantization.awq import AWQConfig
         from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-        from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
         if self.linear_quant_method == "gptq":
-            self.use_marlin = GPTQMarlinConfig.is_gptq_marlin_compatible(full_config)
+            pass
         elif self.linear_quant_method in ("awq", "awq_marlin"):
             capability_tuple = current_platform.get_device_capability()
             device_capability = (
@@ -166,29 +178,23 @@ class MoeWNA16Config(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
-            if isinstance(layer, FusedMoE):
+            if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
             # Avoid circular import
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQConfig,
+            )
             from vllm.model_executor.layers.quantization.awq import AWQConfig
             from vllm.model_executor.layers.quantization.awq_marlin import (
                 AWQMarlinConfig,
             )
-            from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-            from vllm.model_executor.layers.quantization.gptq_marlin import (
-                GPTQMarlinConfig,
-            )
 
             if self.linear_quant_method == "gptq":
-                if self.use_marlin:
-                    return GPTQMarlinConfig.from_config(
-                        self.full_config
-                    ).get_quant_method(layer, prefix)
-                else:
-                    return GPTQConfig.from_config(self.full_config).get_quant_method(
-                        layer, prefix
-                    )
+                return AutoGPTQConfig.from_config(self.full_config).get_quant_method(
+                    layer, prefix
+                )
             elif self.linear_quant_method in ("awq", "awq_marlin"):
                 if self.use_marlin and check_marlin_supports_layer(
                     layer, self.group_size
@@ -202,7 +208,7 @@ class MoeWNA16Config(QuantizationConfig):
                     )
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return MoeWNA16Method(self, layer.moe_config)
         return None
 
@@ -222,9 +228,36 @@ class MoeWNA16Method(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
 
+        num_bits = self.quant_config.weight_bits
+        group_size = self.quant_config.group_size
+
+        if num_bits == 4:
+            quant_type = INT4_DTYPE
+            if group_size == 32:
+                scale = kInt4Static32GroupScale
+            else:
+                scale = kInt4StaticGroupScale
+        elif num_bits == 8:
+            assert group_size == -1
+            quant_type = INT8_DTYPE
+            scale = kInt8StaticGroupScale
+        else:
+            raise ValueError("MoeWNA16Method only supports int4 and int8 now.")
+
+        weight_key = QuantKey(quant_type, scale)
+
+        # Select WNA16 MoE backend via oracle.
+        # handle ZP?
+        self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
+            config=self.moe,
+            weight_key=weight_key,
+            may_have_zp=self.quant_config.has_zp,
+            may_have_bias=False,
+        )
+
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -342,51 +375,138 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
-        weight_bits = self.quant_config.weight_bits
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         has_zp = self.quant_config.has_zp
-        assert weight_bits == 4 or weight_bits == 8
-        config_builder = (
-            int4_w4a16_moe_quant_config
-            if weight_bits == 4
-            else int8_w8a16_moe_quant_config
+        (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_g_idx_processed,
+            w2_g_idx_processed,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_qzeros,
+            w2_qzeros,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            _,  # w13_bias
+            _,  # w2_bias
+        ) = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=None,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_g_idx=getattr(layer, "w13_g_idx", None),
+            w2_g_idx=getattr(layer, "w2_g_idx", None),
+            w13_qzeros=layer.w13_qzeros if has_zp else None,
+            w2_qzeros=layer.w2_qzeros if has_zp else None,
         )
 
-        return config_builder(
+        # Replace common parameters
+        replace_parameter(layer, "w13_qweight", w13_qweight)
+        replace_parameter(layer, "w2_qweight", w2_qweight)
+        replace_parameter(layer, "w13_scales", w13_scales)
+        replace_parameter(layer, "w2_scales", w2_scales)
+
+        if has_zp:
+            assert w13_qzeros is not None and w2_qzeros is not None
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
+
+        # Marlin-specific parameters (not needed for Flashinfer)
+        if self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM:
+            replace_parameter(layer, "w13_g_idx", w13_g_idx_processed)
+            replace_parameter(layer, "w2_g_idx", w2_g_idx_processed)
+            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+
+            # Register input global scales if present
+            if w13_input_global_scale is not None:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+                )
+            if w2_input_global_scale is not None:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+                )
+
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        has_zp = self.quant_config.has_zp
+        return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             w1_zp=layer.w13_qzeros if has_zp else None,
             w2_zp=layer.w2_qzeros if has_zp else None,
-            block_shape=[0, layer.group_size],
+            group_size=layer.group_size,
+            num_bits=self.quant_config.weight_bits,
         )
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        assert layer.activation == MoEActivation.SILU, (
-            f"Only SiLU activation is supported, not {layer.activation}."
-        )
-
-        return fused_experts(
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            quant_config=self.moe_quant_config,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )
 
     @staticmethod

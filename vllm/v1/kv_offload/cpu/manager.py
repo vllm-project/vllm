@@ -11,6 +11,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -93,6 +94,9 @@ class CPUOffloadingManager(OffloadingManager):
         return CPULoadStoreSpec([block.block_id for block in blocks])
 
     # --- OffloadingManager interface ---
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         if self.counts is not None:
@@ -222,6 +226,17 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                 )
             )
+
+    def reset_cache(self) -> None:
+        # Clear ALL blocks unconditionally. The scheduler's _stale_job_threshold
+        # guarantees that complete_load / complete_store are never called for
+        # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
+        # flushes in-flight load job IDs to the workers before any new stores
+        # can begin, preventing a cross-direction data race on reused offload block IDs.
+        self._policy.clear()
+
+        self._free_list.clear()
+        self._num_allocated_blocks = 0
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:

@@ -118,7 +118,9 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
     # the default filtered-vs-good ratio. The filter is intentional, so
     # suppress the health check rather than drop the filter — dropping it
     # exposes pre-existing server bugs out of scope here.
-    suppress_health_check=[HealthCheck.filter_too_much],
+    # The same nested schema can also trip Hypothesis' entropy budget while
+    # generating large-but-valid request bodies before vLLM is called.
+    suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
 )
 def test_openapi_stateless(case: Case):
     key = (
@@ -145,6 +147,7 @@ def test_openapi_stateless(case: Case):
         ("POST", "/v1/chat/completions/batch"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/messages"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/inference/v1/generate"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost

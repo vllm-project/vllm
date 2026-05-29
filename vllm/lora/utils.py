@@ -4,7 +4,6 @@
 import os
 from typing import TYPE_CHECKING
 
-import huggingface_hub
 import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
@@ -37,6 +36,7 @@ from vllm.lora.layers import (
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
+from vllm.transformers_utils.repo_utils import hf_api
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -340,7 +340,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         error_log = "Error downloading the ModelScope model"
     else:
         # Otherwise, we assume the path is a Hugging Face Hub repo.
-        download_fn = lambda: huggingface_hub.snapshot_download(repo_id=lora_path)
+        download_fn = lambda: hf_api().snapshot_download(
+            repo_id=lora_path,
+        )
         download_exceptions = (HfHubHTTPError, HFValidationError)
         error_log = "Error downloading the HuggingFace model"
 
@@ -355,7 +357,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     return local_snapshot_path
 
 
-def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+def process_packed_modules_mapping(
+    model: nn.Module, force_2d_moe: bool = False
+) -> dict[str, list[str]]:
     if is_moe_model(model):
         if moe_packed_mapping := get_moe_expert_mapping(model):
             # This method generates and returns a dictionary mapping packed module
@@ -364,8 +368,11 @@ def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
             # the expert indices are expanded based on the configured number
             # of routed experts.
             packed_modules_mapping = get_packed_modules_mapping(model)
-            if not model.is_3d_moe_weight:
-                # 3D MoE LoRA does not need `packed_modules_mapping`
+            # The 2D mapping is needed when the model itself is 2D, or when
+            # the engine forces the universal 2D wrapper via
+            # enable_mixed_moe_lora_format (so 3D models can also load 2D
+            # adapters through FusedMoEWithLoRA).
+            if (not model.is_3d_moe_weight) or force_2d_moe:
                 # Filter out malformed entries: non-gated MoE has empty
                 # ckpt_up_proj_name which results in weight_name containing ".."
                 # (e.g., "experts.0.." instead of "experts.0.layer_name.")

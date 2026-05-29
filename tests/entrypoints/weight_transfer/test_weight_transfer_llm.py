@@ -63,8 +63,8 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     last_init_info: MockInitInfo | None = None
     last_update_info: MockUpdateInfo | None = None
 
-    def __init__(self, config, parallel_config):
-        super().__init__(config, parallel_config)
+    def __init__(self, config, parallel_config, model):
+        super().__init__(config, parallel_config, model)
         # Reset tracking on init
         MockWeightTransferEngine.init_transfer_engine_called = False
         MockWeightTransferEngine.receive_weights_called = False
@@ -95,9 +95,9 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
         pass
 
 
-def mock_create_engine(config, parallel_config):
+def mock_create_engine(config, parallel_config, model):
     """Mock factory function that returns our mock engine."""
-    return MockWeightTransferEngine(config, parallel_config)
+    return MockWeightTransferEngine(config, parallel_config, model)
 
 
 # --- Tests ---
