@@ -4362,6 +4362,17 @@ class GPUModelRunner(
 
         return None
 
+    def _input_fits_in_drafter(self, max_seq_len: int) -> bool:
+        assert self.speculative_config is not None
+        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
+        num_drafter_query_tokens = self.num_spec_tokens + (
+            1 if self.speculative_config.use_dflash() else 0
+        )
+        return (
+            max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -4441,9 +4452,11 @@ class GPUModelRunner(
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
             # Decide whether to run the drafter or zero out draft tokens.
-            input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                <= self.effective_drafter_max_model_len
+            input_fits_in_drafter = (
+                spec_decode_common_attn_metadata is not None
+                and self._input_fits_in_drafter(
+                    spec_decode_common_attn_metadata.max_seq_len
+                )
             )
             use_gpu_toks = (
                 spec_config.use_eagle()
