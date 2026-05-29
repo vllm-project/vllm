@@ -12,6 +12,9 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
 from vllm.model_executor.utils import replace_parameter
 
 from ..base import (
@@ -112,22 +115,27 @@ class Fp8BlockScaledMMLinearKernel(
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
-        # View input as 2D matrix for fp8 methods
-        input_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], weight.shape[0]]
-
-        if self.apply_input_quant:
-            q_input, input_scale = self.quant_fp8(
-                input_2d, input_scale, scale_up, use_triton=self.use_triton
-            )
+        if isinstance(x, QuantizedActivation):
+            q_input = x.data
+            input_scale = x.scale
+            output_shape = [*x.orig_shape[:-1], weight.shape[0]]
         else:
-            q_input = input_2d
-            # Provide a concrete placeholder so apply_block_scaled_mm args are
-            # always Tensors. Subclasses with apply_input_quant=False must not
-            # use As in apply_block_scaled_mm.
-            input_scale = (
-                input_scale if input_scale is not None else input_2d.new_ones(1)
-            )
+            # View input as 2D matrix for fp8 methods
+            input_2d = x.view(-1, x.shape[-1])
+            output_shape = [*x.shape[:-1], weight.shape[0]]
+
+            if self.apply_input_quant:
+                q_input, input_scale = self.quant_fp8(
+                    input_2d, input_scale, scale_up, use_triton=self.use_triton
+                )
+            else:
+                q_input = input_2d
+                # Provide a concrete placeholder so apply_block_scaled_mm args
+                # are always Tensors. Subclasses with apply_input_quant=False
+                # must not use As in apply_block_scaled_mm.
+                input_scale = (
+                    input_scale if input_scale is not None else input_2d.new_ones(1)
+                )
 
         output = self.apply_block_scaled_mm(
             A=q_input,

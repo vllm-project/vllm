@@ -30,10 +30,14 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
     EncoderOnlyAttention,
@@ -42,8 +46,13 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
@@ -148,6 +157,15 @@ class Qwen3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        return self.forward_from_qkv(positions, qkv)
+
+    def forward_from_qkv(
+        self,
+        positions: torch.Tensor,
+        qkv: torch.Tensor,
+    ) -> torch.Tensor:
+        # Entry point that skips qkv_proj. Used when an upstream fused op
+        # (rmsnorm + fp8-group-quant + qkv GEMM) already produced qkv.
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
@@ -162,7 +180,60 @@ class Qwen3Attention(nn.Module):
         return output
 
 
+def _can_fuse_rms_into_fp8_block_linear(linear: nn.Module) -> bool:
+    if not rocm_aiter_ops.is_linear_enabled():
+        return False
+    qm = getattr(linear, "quant_method", None)
+    if qm is None:
+        return False
+    fp8_linear = getattr(qm, "fp8_linear", None)
+    if not isinstance(fp8_linear, AiterFp8BlockScaledMMKernel):
+        return False
+    act_quant_key = fp8_linear.config.activation_quant_key
+    return act_quant_key.scale.group_shape.is_per_group()
+
+
+def _fp8_block_linear_act_quant_key(linear: nn.Module) -> QuantKey:
+    return linear.quant_method.fp8_linear.config.activation_quant_key
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor | None,
+    *,
+    rms_weight: torch.Tensor,
+    eps: float,
+    act_quant_key: QuantKey,
+) -> tuple[QuantizedActivation, torch.Tensor]:
+    group_size = act_quant_key.scale.group_shape.col
+    if residual is not None:
+        xq, new_residual, scale = (
+            torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default(
+                hidden_states, residual, rms_weight, eps, group_size
+            )
+        )
+    else:
+        xq, scale = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default(
+            hidden_states, rms_weight, eps, group_size
+        )
+        # First-layer convention: residual takes the original input.
+        new_residual = hidden_states
+    qa = QuantizedActivation(
+        data=xq,
+        scale=scale,
+        orig_dtype=hidden_states.dtype,
+        orig_shape=hidden_states.shape,
+        quant_key=act_quant_key,
+    )
+    return qa, new_residual
+
+
 class Qwen3DecoderLayer(nn.Module):
+    def __new__(cls, *args, **kwargs):
+        if cls is Qwen3DecoderLayer and current_platform.is_rocm():
+            return super().__new__(Qwen3AmdDecoderLayer)
+        return super().__new__(cls)
+
     def __init__(
         self,
         config: Qwen3Config,
@@ -213,13 +284,12 @@ class Qwen3DecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
-    def forward(
+    def _attn_block(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -229,10 +299,89 @@ class Qwen3DecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
+        return hidden_states, residual
 
-        # Fully Connected
+    def _mlp_block(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, residual = self._attn_block(positions, hidden_states, residual)
+        hidden_states, residual = self._mlp_block(hidden_states, residual)
+        return hidden_states, residual
+
+
+class Qwen3AmdDecoderLayer(Qwen3DecoderLayer):
+    """ROCm/aiter manual-fusion variant of Qwen3DecoderLayer."""
+
+    def __init__(
+        self,
+        config: Qwen3Config,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, cache_config, quant_config, prefix)
+
+        qkv_proj = self.self_attn.qkv_proj
+        gate_up_proj = self.mlp.gate_up_proj
+        self._attn_fuse_key: QuantKey | None = (
+            _fp8_block_linear_act_quant_key(qkv_proj)
+            if _can_fuse_rms_into_fp8_block_linear(qkv_proj)
+            else None
+        )
+        self._mlp_fuse_key: QuantKey | None = (
+            _fp8_block_linear_act_quant_key(gate_up_proj)
+            if _can_fuse_rms_into_fp8_block_linear(gate_up_proj)
+            else None
+        )
+
+    def _attn_block(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._attn_fuse_key is None:
+            return super()._attn_block(positions, hidden_states, residual)
+        qa, residual = _rocm_aiter_rmsnorm_fp8_group_quant(
+            hidden_states,
+            residual,
+            rms_weight=self.input_layernorm.weight,
+            eps=self.input_layernorm.variance_epsilon,
+            act_quant_key=self._attn_fuse_key,
+        )
+        qkv, _ = self.self_attn.qkv_proj(qa)
+        hidden_states = self.self_attn.forward_from_qkv(positions, qkv)
+        return hidden_states, residual
+
+    def _mlp_block(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._mlp_fuse_key is None:
+            return super()._mlp_block(hidden_states, residual)
+        qa, residual = _rocm_aiter_rmsnorm_fp8_group_quant(
+            hidden_states,
+            residual,
+            rms_weight=self.post_attention_layernorm.weight,
+            eps=self.post_attention_layernorm.variance_epsilon,
+            act_quant_key=self._mlp_fuse_key,
+        )
+        gate_up, _ = self.mlp.gate_up_proj(qa)
+        x = self.mlp.act_fn(gate_up)
+        hidden_states, _ = self.mlp.down_proj(x)
         return hidden_states, residual
 
 
