@@ -6,7 +6,6 @@ import torch
 # import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 
 HAS_TILELANG = has_tilelang()
@@ -261,45 +260,6 @@ class MHCPostOp(CustomOp):
         )
 
 
-# ``@torch.compile`` on the CUDA HC head reduction is necessary for accuracy
-# as well as performance — upstream a8887c208 ("[Bugfix] [ROCm] [DSV4] [Perf]
-# Add aiter mhc support", #41946) refactored ``hc_head`` from a free
-# function into ``HCHeadOp(CustomOp)`` and dropped the decorator from the
-# CUDA path while keeping it on ``forward_hip``. The drop caused a measured
-# ~7 pp regression in DSv4-Flash MTP=2 spec acceptance on SM12x (mt-bench
-# c=1, 67.6 % → 59.8 %).
-#
-# Decorating the ``forward_cuda`` method directly trips
-# ``torch._dynamo.exc.Unsupported: failed to bind arguments when attempting
-# to inline forward_cuda`` whenever the outer model is wrapped by
-# ``@support_torch_compile`` (which is the no-MTP path on SM12x): dynamo
-# tries to inline the bound method through ``CustomOp._forward_method`` and
-# can't reconcile the ``self`` parameter. Keeping the body as a free
-# function — the layout that existed pre-#41946 — sidesteps the bind
-# failure while preserving the spec-acceptance recovery.
-@torch.compile(backend=current_platform.simple_compile_backend)
-def _hc_head_cuda_impl(
-    hidden_states: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    rms_norm_eps: float,
-    hc_eps: float,
-) -> torch.Tensor:
-    hc_mult, hidden_size = hidden_states.shape[-2:]
-    outer_shape = hidden_states.shape[:-2]
-    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-    out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
-        hs_flat,
-        hc_fn,
-        hc_scale,
-        hc_base,
-        rms_norm_eps,
-        hc_eps,
-    )
-    return out.view(*outer_shape, hidden_size)
-
-
 # --8<-- [start:hc_head]
 @CustomOp.register("hc_head")
 class HCHeadOp(CustomOp):
@@ -324,14 +284,18 @@ class HCHeadOp(CustomOp):
         rms_norm_eps: float,
         hc_eps: float,
     ) -> torch.Tensor:
-        return _hc_head_cuda_impl(
-            hidden_states,
+        hc_mult, hidden_size = hidden_states.shape[-2:]
+        outer_shape = hidden_states.shape[:-2]
+        hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+        out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+            hs_flat,
             hc_fn,
             hc_scale,
             hc_base,
             rms_norm_eps,
             hc_eps,
         )
+        return out.view(*outer_shape, hidden_size)
 
     def forward_hip(
         self,
