@@ -31,11 +31,13 @@ pub(crate) struct ServerInfoSnapshot {
 
 impl ServerInfoSnapshot {
     fn from_served_model_names(served_model_names: &[String]) -> Self {
+        let vllm_config_json = json!({
+            "served_model_name": served_model_names,
+        });
+
         Self {
-            vllm_config_text: format!("served_model_name={served_model_names:?}"),
-            vllm_config_json: json!({
-                "served_model_name": served_model_names,
-            }),
+            vllm_config_text: render_config_text(&vllm_config_json),
+            vllm_config_json,
             vllm_env: collect_vllm_env(),
             system_env: collect_system_env(),
         }
@@ -63,7 +65,7 @@ impl ServerInfoSnapshot {
         });
 
         Self {
-            vllm_config_text: format!("{config:#?}"),
+            vllm_config_text: render_config_text(&vllm_config_json),
             vllm_config_json,
             vllm_env: collect_vllm_env(),
             system_env: collect_system_env(),
@@ -81,6 +83,25 @@ impl ServerInfoSnapshot {
             "vllm_env": self.vllm_env.clone(),
             "system_env": self.system_env.clone(),
         })
+    }
+}
+
+fn render_config_text(config: &Value) -> String {
+    match config {
+        Value::Object(fields) => fields
+            .iter()
+            .map(|(key, value)| format!("{key}={}", render_config_text_value(value)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => render_config_text_value(config),
+    }
+}
+
+fn render_config_text_value(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
     }
 }
 

@@ -1058,7 +1058,8 @@ async fn server_info_endpoint_returns_text_config_by_default() {
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     let config = json["vllm_config"].as_str().expect("text config");
 
-    assert!(config.contains("served_model_name"));
+    assert!(config.contains("served_model_name="));
+    assert!(!config.contains("Config {"));
     assert!(json["vllm_env"].is_object());
     assert_eq!(json["system_env"]["arch"], std::env::consts::ARCH);
     assert_eq!(json["system_env"]["family"], std::env::consts::FAMILY);
