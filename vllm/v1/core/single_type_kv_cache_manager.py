@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    MomeSpec,
     SinkDSAAttentionSpec,
     SinkFullAttentionSpec,
     SinkMLAAttentionSpec,
@@ -1126,40 +1125,6 @@ class MambaManager(SingleTypeKVCacheManager):
         self.cached_blocks_this_step.clear()
 
 
-class MomeManager(SingleTypeKVCacheManager):
-    """Manager for MoME (Mixture of MoME Experts) state."""
-
-    def __init__(self, kv_cache_spec, block_pool, **kwargs):
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.kernel_size = kv_cache_spec.kernel_size
-
-    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        """
-        MoME needs to keep the state of the last kernel_size - 1 tokens.
-        """
-        return max(0, num_computed_tokens - self.kernel_size + 1)
-
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        # MoME states are not shared between requests
-        return 0
-
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
-        # MoME does not support prefix caching
-        return tuple([] for _ in range(len(kv_cache_group_ids)))
-
-
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
@@ -1259,7 +1224,6 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     SlidingWindowMomeSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
-    MomeSpec: MomeManager,
     CrossAttentionSpec: CrossAttentionManager,
     SinkFullAttentionSpec: SinkFullAttentionManager,
     SinkMLAAttentionSpec: SinkFullAttentionManager,

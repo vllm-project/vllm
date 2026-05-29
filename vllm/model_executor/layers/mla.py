@@ -282,7 +282,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
-            q_c = q_c.contiguous()
             if self.mome_attn is not None:
                 mome_output = self.mome_attn(q_c, state_indice=0)
                 q_c = mome_output + q_c
@@ -300,7 +299,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if self.mome_attn is not None:
-            kv_c = kv_c.contiguous()
             kv_c = self.mome_attn(kv_c, state_indice=1) + kv_c
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
@@ -332,7 +330,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         )
 
         if self.mome_attn is not None:
-            attn_out = attn_out.contiguous()
             attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
         output = self.o_proj(attn_out)[0]
         return output

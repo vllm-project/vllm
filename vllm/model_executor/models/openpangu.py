@@ -270,7 +270,7 @@ class MomeAttention(MambaBase, CustomOp):
         return MomeAttentionBackend
 
     def forward(self, hidden_states: torch.Tensor, state_indice: int) -> torch.Tensor:
-        output = torch.empty_like(hidden_states)
+        output = torch.empty_like(hidden_states, memory_format=torch.contiguous_format)
         torch.ops.vllm.mome_attention_fused_op(
             hidden_states,
             self.qa_conv.weight,
@@ -334,12 +334,6 @@ def mome_attention_fused_op(
 ) -> None:
     forward_context = get_forward_context()
     layer = forward_context.no_compile_layers[layer_name]
-    if forward_context.attn_metadata is None:
-        output.fill_(0)
-        return
-
-    mome_metadata = forward_context.attn_metadata[layer_name]
-    self_kv_cache = layer.kv_cache
 
     def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
         if state_indices.ndim > 1:
@@ -357,13 +351,18 @@ def mome_attention_fused_op(
         kernel_size,
     )
     conv_weight = conv_weight.to(hidden_states.dtype)
-    conv_state = self_kv_cache[state_indice]
-    conv_state = conv_state.transpose(-1, -2)
+    if forward_context.attn_metadata is None:
+        output.fill_(0)
+        return
 
-    output_chunks = []
-
+    conv_state = layer.kv_cache[state_indice].transpose(-1, -2)
+    hidden_states = hidden_states.contiguous()
+    mome_metadata = forward_context.attn_metadata[layer_name]
     num_decode_tokens = mome_metadata.num_decode_tokens
+    num_prefill_tokens = mome_metadata.num_prefill_tokens
+    num_actual_tokens = num_decode_tokens + num_prefill_tokens
     num_decodes = mome_metadata.num_decodes
+    num_prefills = mome_metadata.num_prefills
     if num_decodes > 0:
         decode_hidden_states = hidden_states[:num_decodes].clone()
         decode_state_indices = _get_request_state_indices(
@@ -377,15 +376,13 @@ def mome_attention_fused_op(
             activation=None,
             conv_state_indices=decode_state_indices,
         )
-        output_chunks.append(decode_output)
+        output[:num_decode_tokens] = decode_output
 
     num_prefills = mome_metadata.num_prefills
     if num_prefills > 0:
         query_start_loc = mome_metadata.query_start_loc_p
         assert query_start_loc is not None
-        prefill_hidden_states = hidden_states[
-            num_decode_tokens : num_decode_tokens + mome_metadata.num_prefill_tokens
-        ]
+        prefill_hidden_states = hidden_states[num_decode_tokens:num_actual_tokens]
         prefill_state_indices = _get_request_state_indices(
             mome_metadata.state_indices_tensor_p[:num_prefills]
         )
@@ -401,17 +398,7 @@ def mome_attention_fused_op(
             metadata=mome_metadata,
             zero_initial_state_output=True,
         ).transpose(0, 1)
-        output_chunks.append(prefill_output)
-
-    if len(output_chunks) == 0:
-        output.fill_(0)
-        return
-    if len(output_chunks) == 1:
-        result = output_chunks[0]
-    else:
-        result = torch.cat(output_chunks, dim=0)
-
-    output[: result.shape[0]] = result
+        output[num_decode_tokens:num_actual_tokens] = prefill_output
 
 
 def mome_attention_fake(

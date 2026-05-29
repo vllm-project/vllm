@@ -760,6 +760,7 @@ class CompilationConfig:
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
         "vllm::pangu_sparse_attn_indexer",
+        "vllm::mome_attention_fused_op",
     ]
 
     def compute_hash(self) -> str:

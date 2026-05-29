@@ -3,9 +3,7 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv, round_up
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -491,109 +489,6 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         }
 
 
-class PanguUltraMoEForCausalLMConfig(VerifyAndUpdateConfig):
-    @classmethod
-    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Hybrid KV manager alignment for Pangu models.
-        1. Aligns all SWA window sizes to the largest one.
-        2. Aligns page size across MLA, DSA, and MoME layers.
-        """
-        model_config = vllm_config.model_config
-        hf_config = model_config.hf_config
-        cache_config = vllm_config.cache_config
-
-        # 1. Store max SWA window size for KV management alignment
-        max_swa = getattr(hf_config, "sliding_window", None) or 0
-        if hasattr(hf_config, "sliding_window_list") and hf_config.sliding_window_list:
-            # Filter out None values
-            window_list = [w for w in hf_config.sliding_window_list if w is not None]
-            if window_list:
-                max_swa = max(max_swa, max(window_list))
-
-        hf_config.max_sliding_window = max_swa
-
-        # 2. Hybrid KV Manager Alignment
-        from vllm.model_executor.models.openpangu import PanguUltraMoEForCausalLM
-
-        model_cls = PanguUltraMoEForCausalLM
-
-        from vllm.utils.torch_utils import get_dtype_size
-
-        dtype_size = get_dtype_size(model_config.dtype)
-
-        # Calculate MLA page size (for 1 token)
-        # Note: Pangu MLA uses num_kv_heads=1
-        mla_page_size_1_token = (
-            hf_config.kv_lora_rank + hf_config.qk_rope_head_dim
-        ) * dtype_size
-
-        # Calculate MoME page size (per block)
-        mome_page_size = 0
-        if getattr(hf_config, "use_mome", False):
-            from vllm.v1.kv_cache_interface import MomeSpec
-
-            kernel_size = getattr(hf_config, "router_sliding_window", 0)
-            if kernel_size > 0:
-                shapes = model_cls.get_mamba_state_shape_from_config(vllm_config)
-                dtypes = model_cls.get_mamba_state_dtype_from_config(vllm_config)
-                mome_page_size = MomeSpec(
-                    shapes=shapes,
-                    dtypes=dtypes,
-                    block_size=cache_config.block_size or 16,
-                    kernel_size=kernel_size,
-                    num_spec_tokens=0,
-                ).page_size_bytes
-
-        # Calculate DSA page size (per 1 token)
-        dsa_page_size_1_token = 0
-        use_sparse_mla = hasattr(hf_config, "index_topk")
-        if use_sparse_mla:
-            index_head_dim = getattr(hf_config, "index_head_dim", 0)
-            dsa_page_size_1_token = (
-                hf_config.kv_lora_rank + hf_config.qk_rope_head_dim + index_head_dim
-            ) * dtype_size
-
-        # Find max per-token size between MLA and DSA
-        max_page_size_1_token = max(mla_page_size_1_token, dsa_page_size_1_token)
-
-        # Ensure block_size * max_page_size_1_token >= mome_page_size.
-        # Account for the MLA block size that CUDA platform config may force
-        # after model-specific config verification.
-        attention_backend = vllm_config.attention_config.backend
-        use_cutlass_mla = attention_backend == AttentionBackendEnum.CUTLASS_MLA
-        if attention_backend is None:
-            use_cutlass_mla = (
-                current_platform.is_device_capability_family(100) and not use_sparse_mla
-            )
-        mla_block_alignment_size = 128 if use_cutlass_mla else 64
-        needed_block_size = mla_block_alignment_size * cdiv(
-            mome_page_size, mla_block_alignment_size * max_page_size_1_token
-        )
-
-        if (
-            cache_config.block_size is None
-            or cache_config.block_size < needed_block_size
-            or cache_config.block_size % mla_block_alignment_size != 0
-        ):
-            needed_block_size = max(cache_config.block_size or 16, needed_block_size)
-            needed_block_size = round_up(needed_block_size, mla_block_alignment_size)
-            cache_config.block_size = needed_block_size
-            logger.info(
-                "Setting attention block size to %d to align hybrid KV.",
-                cache_config.block_size,
-            )
-
-        # Final page size for alignment
-        target_page_size = cache_config.block_size * max_page_size_1_token
-        if (
-            cache_config.mamba_page_size_padded is None
-            or cache_config.mamba_page_size_padded < target_page_size
-        ):
-            cache_config.mamba_page_size_padded = target_page_size
-            logger.info("Setting mamba_page_size_padded to %d", target_page_size)
-
-
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -719,8 +614,6 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "NomicBertModel": NomicBertModelConfig,
-    "PanguProMoEV2ForCausalLM": PanguUltraMoEForCausalLMConfig,
-    "PanguUltraMoEForCausalLM": PanguUltraMoEForCausalLMConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
