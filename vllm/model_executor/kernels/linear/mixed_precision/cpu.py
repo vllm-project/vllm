@@ -181,7 +181,6 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         else:
             self._process_gptq_weights_w4a16(layer)
 
-
     def apply_weights(
         self,
         layer: torch.nn.Module,

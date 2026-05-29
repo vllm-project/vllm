@@ -11,8 +11,8 @@ kernel in ``_POSSIBLE_INT8_KERNELS[PlatformEnum.CPU]``.
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (

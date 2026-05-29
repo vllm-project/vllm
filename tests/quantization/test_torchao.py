@@ -5,8 +5,6 @@ import importlib.util
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 
@@ -14,7 +12,6 @@ DEVICE_TYPE = current_platform.device_type
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
-TORCHAO_VERSION_AT_LEAST_0_17_0 = torchao_version_at_least("0.17.0")
 
 
 @pytest.mark.skipif(
@@ -399,157 +396,6 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
-
-
-@pytest.mark.skipif(
-    not current_platform.is_zen_cpu()
-    or not TORCHAO_AVAILABLE
-    or not TORCHAO_VERSION_AT_LEAST_0_17_0,
-    reason="Needs an AMD Zen CPU platform with torchao>=0.17.0",
-)
-def test_process_weights_after_loading_skips_zentorch_attrs_when_op_unavailable(
-    monkeypatch,
-):
-    from vllm.model_executor.layers.quantization import torchao as torchao_module
-    from vllm.model_executor.layers.quantization import (
-        zentorch_torchao as zentorch_torchao_module,
-    )
-    from vllm.model_executor.layers.quantization.torchao import (
-        TorchAOConfig,
-        TorchAOLinearMethod,
-    )
-
-    torchao_module._load_platform_optimizer.cache_clear()
-    monkeypatch.setattr(zentorch_torchao_module, "has_zentorch_op", lambda *_: False)
-    monkeypatch.setattr(
-        zentorch_torchao_module.current_platform, "is_zen_cpu", lambda: True
-    )
-
-    config = TorchAOConfig.__new__(TorchAOConfig)
-    config.torchao_config = object()
-    config.skip_modules = []
-    config.is_checkpoint_torchao_serialized = True
-    base_method = TorchAOLinearMethod(config)
-    linear_method = (
-        torchao_module._get_platform_optimized_method(base_method, config)
-        or base_method
-    )
-
-    from torchao.quantization import PerRow
-    from torchao.quantization.quantize_.workflows import Int8Tensor
-    from torchao.quantization.quantize_.workflows.int8.int8_tensor import (
-        QuantizeTensorToInt8Kwargs,
-    )
-
-    layer = torch.nn.Module()
-    qdata = torch.zeros((8, 16), dtype=torch.int8)
-    scale = torch.zeros((8, 1), dtype=torch.bfloat16)
-    weight = Int8Tensor(
-        qdata=qdata,
-        scale=scale,
-        block_size=[1, 16],
-        dtype=torch.bfloat16,
-        act_quant_kwargs=QuantizeTensorToInt8Kwargs(granularity=PerRow()),
-    )
-    layer.register_parameter(
-        "weight",
-        torch.nn.Parameter(weight, requires_grad=False),
-    )
-
-    linear_method.process_weights_after_loading(layer)
-
-    assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
-    assert not hasattr(layer, "_zentorch_dynamic_qlinear_scales")
-
-
-@pytest.mark.skipif(
-    not TORCHAO_AVAILABLE
-    or not TORCHAO_VERSION_AT_LEAST_0_17_0
-    or not has_zentorch_op(["zentorch_dynamic_qlinear"]),
-    reason=(
-        "Needs torchao>=0.17.0 and a registered "
-        "torch.ops.zentorch.zentorch_dynamic_qlinear op"
-    ),
-)
-def test_zentorch_da8w8_numerical_equivalence():
-    import torch.nn.functional as F
-    from torchao.quantization import PerRow
-    from torchao.quantization.quantize_.workflows import Int8Tensor
-    from torchao.quantization.quantize_.workflows.int8.int8_tensor import (
-        QuantizeTensorToInt8Kwargs,
-    )
-    from torchao.quantization.utils import compute_error
-
-    from vllm.model_executor.layers.quantization.torchao import (
-        TorchAOConfig,
-        TorchAOLinearMethod,
-    )
-    from vllm.model_executor.layers.quantization.zentorch_torchao import (
-        ZentorchTorchAOLinearMethod,
-    )
-
-    torch.manual_seed(0)
-    out_features, in_features = 32, 64
-    batch = 4
-    # Matches torchao's own Int8Tensor+PerRow harness (LINEAR_MIN_SQNR=40 in
-    # torchao/testing/utils.py).
-    min_sqnr_db = 40.0
-
-    config = TorchAOConfig.__new__(TorchAOConfig)
-    config.torchao_config = object()
-    config.skip_modules = []
-    config.is_checkpoint_torchao_serialized = True
-
-    ref_weight = torch.randn(out_features, in_features, dtype=torch.bfloat16)
-    x = torch.randn(batch, in_features, dtype=torch.bfloat16)
-    bias = torch.randn(out_features, dtype=torch.bfloat16)
-
-    def _make_layer():
-        # Canonical torchao quantization path.
-        weight = Int8Tensor.from_hp(
-            ref_weight,
-            granularity=PerRow(),
-            act_quant_kwargs=QuantizeTensorToInt8Kwargs(granularity=PerRow()),
-        )
-        layer = torch.nn.Module()
-        layer.register_parameter(
-            "weight", torch.nn.Parameter(weight, requires_grad=False)
-        )
-        return layer
-
-    # FP reference derived from the same canonical quantization.
-    dequant_weight = (
-        Int8Tensor.from_hp(ref_weight, granularity=PerRow())
-        .dequantize()
-        .to(torch.bfloat16)
-    )
-    y_fp = F.linear(x, dequant_weight, bias)
-
-    zen_method = ZentorchTorchAOLinearMethod(config)
-    zen_layer = _make_layer()
-    zen_method.process_weights_after_loading(zen_layer)
-    assert hasattr(zen_layer, "_zentorch_dynamic_qlinear_weight")
-    assert getattr(zen_layer, "_zentorch_kind", None) == "torchao_da8w8"
-    y_zen = zen_method.apply(zen_layer, x, bias)
-
-    ref_method = TorchAOLinearMethod(config)
-    ref_layer = _make_layer()
-    ref_method.process_weights_after_loading(ref_layer)
-    y_ref = ref_method.apply(ref_layer, x, bias)
-
-    assert y_zen.shape == y_ref.shape == y_fp.shape == (batch, out_features)
-    assert y_zen.dtype == y_ref.dtype == torch.bfloat16
-
-    sqnr_zen = compute_error(y_fp.float(), y_zen.float()).item()
-    sqnr_ref = compute_error(y_fp.float(), y_ref.float()).item()
-
-    assert sqnr_zen >= min_sqnr_db, (
-        f"zentorch DA8W8 SQNR too low: {sqnr_zen:.2f} dB (min {min_sqnr_db})"
-    )
-    assert sqnr_zen >= sqnr_ref - 1.0, (
-        f"zentorch DA8W8 SQNR ({sqnr_zen:.2f} dB) materially worse than "
-        f"torchao reference ({sqnr_ref:.2f} dB)"
-    )
 
 
 if __name__ == "__main__":

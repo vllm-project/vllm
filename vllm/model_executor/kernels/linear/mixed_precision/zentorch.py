@@ -10,7 +10,7 @@ falls through to the next kernel in ``_POSSIBLE_KERNELS[PlatformEnum.CPU]``.
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
+from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
