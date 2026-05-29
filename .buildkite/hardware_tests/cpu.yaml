@@ -54,17 +54,35 @@ steps:
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
+- label: CPU-ModelRunnerV2 Tests
+  depends_on: []
+  device: intel_cpu
+  no_plugin: true
+  soft_fail: true
+  source_file_dependencies:
+  - vllm/v1/worker/cpu/
+  - vllm/v1/worker/gpu/
+  - vllm/v1/sample/ops/topk_topp_triton.py
+  - vllm/v1/sample/ops/topk_topp_sampler.py
+  - tests/v1/sample/test_topk_topp_sampler.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
+      uv pip install git+https://github.com/triton-lang/triton-cpu.git@270e696d
+      VLLM_USE_V2_MODEL_RUNNER=1 pytest -x -v -s tests/models/language/generation/test_granite.py -m cpu_model
+      # TODO: move to CPU-Kernel Tests once triton-cpu has a pre-built wheel
+      pytest -x -v -s tests/v1/sample/test_topk_topp_sampler.py::TestTritonTopkTopp"
+
 - label: CPU-Quantization Model Tests
   depends_on: []
   device: intel_cpu
   no_plugin: true
   source_file_dependencies:
   - csrc/cpu/
-  - vllm/model_executor/layers/quantization/cpu_wna16.py
   - vllm/model_executor/layers/quantization/auto_gptq.py
   - vllm/model_executor/layers/quantization/compressed_tensors/schemes/compressed_tensors_w8a8_int8.py
-  - vllm/model_executor/layers/quantization/kernels/scaled_mm/cpu.py
-  - vllm/model_executor/layers/quantization/kernels/mixed_precision/cpu.py
+  - vllm/model_executor/kernels/linear/mixed_precision/cpu.py
+  - vllm/model_executor/kernels/linear/scaled_mm/cpu.py
   - vllm/model_executor/layers/fused_moe/experts/cpu_moe.py
   - tests/quantization/test_compressed_tensors.py
   - tests/quantization/test_cpu_wna16.py
