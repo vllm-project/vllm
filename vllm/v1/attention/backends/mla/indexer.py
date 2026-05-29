@@ -288,20 +288,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        if not self.use_flattening and next_n > 1:
-            # Native MTP: 2D buffer for per-token seq_lens.
-            self.decode_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_seqs, next_n),
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-            # Flattening or no MTP: 1D buffer for expanded per-token seq_lens.
-            self.decode_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_batched_tokens,),
-                dtype=torch.int32,
-                device=self.device,
-            )
+        # Shared workspace for decode seq_lens. Native MTP views this as
+        # (B, max_decode_len) at runtime, keeping context_lens contiguous even
+        # when max_decode_len is smaller than next_n.
+        self.decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.arange_buffer = torch.arange(
             max(
                 scheduler_config.max_num_seqs * next_n,
@@ -373,7 +367,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
           Plain decode or spec-decode with 2D per-token context lengths.
 
         Returns (seq_lens, block_table, decode_lens, batch_size, requires_padding).
-        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, next_n) for native MTP.
+        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, max_decode_len)
+        for native MTP.
         """
         min_decode_len = int(decode_lens_cpu.min().item())
         if not use_native and max_decode_len > 1:
@@ -454,16 +449,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # (requires_padding) instead.
             requires_padding = min_decode_len != max_decode_len
             if use_native and next_n > 1:
-                assert self.decode_seq_lens_buffer.dim() == 2
+                assert self.decode_seq_lens_buffer.dim() == 1
                 # (B, max_decode_len): token j attends to
                 # L - max_decode_len + j + 1 KV tokens.
-                self.decode_seq_lens_buffer[:num_decodes, :max_decode_len] = (
+                seq_lens_buffer = self.decode_seq_lens_buffer[
+                    : num_decodes * max_decode_len
+                ].view(num_decodes, max_decode_len)
+                seq_lens_buffer[:] = (
                     seq_lens.unsqueeze(1)
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
                 )
-                seq_lens = self.decode_seq_lens_buffer[:num_decodes, :max_decode_len]
+                seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
     def build(

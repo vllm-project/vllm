@@ -118,7 +118,9 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
     # the default filtered-vs-good ratio. The filter is intentional, so
     # suppress the health check rather than drop the filter — dropping it
     # exposes pre-existing server bugs out of scope here.
-    suppress_health_check=[HealthCheck.filter_too_much],
+    # The same nested schema can also trip Hypothesis' entropy budget while
+    # generating large-but-valid request bodies before vLLM is called.
+    suppress_health_check=[HealthCheck.filter_too_much, HealthCheck.data_too_large],
 )
 def test_openapi_stateless(case: Case):
     key = (

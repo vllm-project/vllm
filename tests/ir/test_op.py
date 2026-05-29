@@ -272,6 +272,31 @@ class TestIrOpImplDispatch:
         # Restored to empty
         assert _custom_add.get_priority() == []
 
+    @pytest.mark.parametrize(
+        "default,override",
+        [
+            (["impl_even", "impl_b"], ["impl_a"]),
+            (["impl_a"], ["impl_even", "impl_b"]),
+        ],
+    )
+    def test_set_default_priority(
+        self, custom_add_op, default: list[str], override: list[str]
+    ):
+        _custom_add = custom_add_op
+        assert _custom_add.get_priority() == []
+
+        _custom_add.set_default(default)
+        assert _custom_add.get_priority() == default
+
+        # Priority doesn't change after exiting the set_priority context.
+        with _custom_add.set_priority(override):
+            assert _custom_add.get_priority() == override
+        assert _custom_add.get_priority() == default
+
+        # Should override the previous default.
+        _custom_add.set_default(override)
+        assert _custom_add.get_priority() == override
+
     @pytest.mark.parametrize("overload", ["default", "maybe_inplace"])
     def test_dispatch_priority_order(self, custom_add_op, overload: str):
         _custom_add = custom_add_op
@@ -379,6 +404,26 @@ class TestIrOpImplDispatch:
         message = caplog_vllm.records[0].message.lower()
         assert "_custom_add" in message
         assert "priority not set" in message
+
+
+@pytest.mark.parametrize("default", [True, False])
+def test_set_default_torch_wrap(default: bool):
+    """set_default_torch_wrap permanently flips the global flag."""
+    original = vllm.ir.op._ENABLE_TORCH_WRAP
+    try:
+        vllm.ir.set_default_torch_wrap(default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is default
+
+        # Flag doesn't change after exiting the enable_torch_wrap context.
+        with vllm.ir.enable_torch_wrap(not default):
+            assert vllm.ir.op._ENABLE_TORCH_WRAP is (not default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is default
+
+        # Should override the previous default.
+        vllm.ir.set_default_torch_wrap(not default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is (not default)
+    finally:
+        vllm.ir.op._ENABLE_TORCH_WRAP = original
 
 
 @pytest.fixture

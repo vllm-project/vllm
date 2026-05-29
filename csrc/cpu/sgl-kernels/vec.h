@@ -11,7 +11,7 @@
 
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
-
+#include <immintrin.h>
 namespace {
 
 using namespace at::vec;
@@ -19,6 +19,15 @@ using namespace at::vec;
 template <typename scalar_t, typename std::enable_if_t<is_reduced_floating_point_v<scalar_t>, int> = 0>
 inline Vectorized<scalar_t> convert_from_float_ext(const Vectorized<float>& a, const Vectorized<float>& b) {
   return at::vec::convert_from_float<scalar_t>(a, b);
+}
+
+template <typename scalar_t>
+inline void convert_from_float_and_store(scalar_t* out, const Vectorized<float>& a) {
+  float out_buffer[at::vec::Vectorized<float>::size()];
+  a.store(out_buffer);
+  for (int i = 0; i < 16; i++) {
+    out[i] = (scalar_t)out_buffer[i];
+  }
 }
 
 // allow f16, bf16
@@ -48,6 +57,11 @@ template <>
 inline Vectorized<at::BFloat16>
 convert_from_float_ext<at::BFloat16>(const Vectorized<float>& a, const Vectorized<float>& b) {
   return (__m512i)(_mm512_cvtne2ps_pbh(__m512(b), __m512(a)));
+}
+
+template <>
+inline void convert_from_float_and_store<at::BFloat16>(at::BFloat16* out, const Vectorized<float>& a) {
+  _mm256_storeu_si256((__m256i*)out, (__m256i)(_mm512_cvtneps_pbh(__m512(a))));
 }
 
 #define CVT_BF16_TO_FP32(a) _mm512_castsi512_ps(_mm512_slli_epi32(_mm512_cvtepu16_epi32(a), 16))
@@ -125,7 +139,6 @@ inline __m512bh CVT_FP8_TO_BF16(__m256i a) {
   return cvt_e4m3_bf16_intrinsic_with_denorm(a);
 #endif
 }
-
 // faster version of float8_e4m3fn conversion to bfloat16
 //
 // we mapped cuda implementation from below link and vectorized with avx512:
