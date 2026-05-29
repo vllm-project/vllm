@@ -1195,11 +1195,6 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
-        "triton-cpu": [
-            "triton @ "
-            "git+https://github.com/triton-lang/triton-cpu.git@270e696d ; "
-            "platform_machine == 'x86_64'",
-        ],  # Remove after stable release
     },
     cmdclass=cmdclass,
     package_data=package_data,
