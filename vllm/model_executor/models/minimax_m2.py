@@ -43,6 +43,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.topk_quant_kernels import (
+    minimax_moe_topk_sigmoid_quant_dispatch,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -61,6 +64,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import EagleModelMixin, SupportsEagle3, SupportsLoRA, SupportsPP
@@ -122,10 +126,105 @@ class MiniMaxM2MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Pre-compute only platform/model static checks here. The quant method
+        # and its MoE kernel are initialized after weight loading, so the final
+        # prepared-input decision must be resolved lazily.
+        self._prepared_moe_block_k: int | None = None
+        self._prepared_moe_config_checked = False
+        self._prepared_moe_fp8_dtype = (
+            current_platform.fp8_dtype() if current_platform.is_cuda() else None
+        )
+        is_hopper_or_blackwell = current_platform.is_device_capability(
+            (9, 0)
+        ) or current_platform.is_device_capability_family(100)
+        self._prepared_moe_static_ok = (
+            config.hidden_size == 3072
+            and current_platform.is_cuda()
+            and is_hopper_or_blackwell
+            and not self.experts.apply_router_weight_on_input
+            and self.experts.moe_config.pcp_size == 1
+        )
+        self._minimax_fused_topk_quant_static_ok = (
+            self._prepared_moe_static_ok
+            and self.use_routing_bias
+            and config.num_local_experts == 256
+            and config.num_experts_per_tok == 8
+            and config.scoring_func == "sigmoid"
+        )
+        # Runtime dispatch threshold for the fused topk+quant custom op. Keep
+        # the token-count check inside the opaque op so Dynamo cannot
+        # specialize this forward pass to the trace-time batch size.
+        self._minimax_fused_topk_quant_max_tokens = 128
+
     @staticmethod
     def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
+
+    def _maybe_init_prepared_moe_config(self) -> int | None:
+        if self._prepared_moe_config_checked:
+            return self._prepared_moe_block_k
+
+        self._prepared_moe_config_checked = True
+        if (
+            not self._prepared_moe_static_ok
+            or not self.experts.quant_method.supports_prepared_inputs
+        ):
+            return None
+
+        quant_config = self.experts.moe_quant_config
+        if quant_config is None:
+            return None
+
+        if (
+            quant_config.block_shape == [128, 128]
+            and not quant_config.per_act_token_quant
+            and quant_config.a1_scale is None
+            and quant_config.a1_gscale is None
+            and quant_config.quant_dtype == self._prepared_moe_fp8_dtype
+        ):
+            self._prepared_moe_block_k = quant_config.block_shape[1]
+        return self._prepared_moe_block_k
+
+    def _maybe_prepare_moe_inputs(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        block_k = self._maybe_init_prepared_moe_config()
+        if (
+            block_k is None
+            or hidden_states.dtype != torch.bfloat16
+            or router_logits.dtype != torch.float32
+            or hidden_states.stride(-1) != 1
+            or router_logits.stride(-1) != 1
+            or not hidden_states.is_cuda
+            or self.experts.runner.enable_dbo
+        ):
+            return None, None, None, None
+
+        if (
+            self._minimax_fused_topk_quant_static_ok
+            and self.e_score_correction_bias is not None
+        ):
+            topk_weights, topk_ids, a1q, a1q_scale = (
+                minimax_moe_topk_sigmoid_quant_dispatch(
+                    hidden_states,
+                    router_logits,
+                    self.e_score_correction_bias,
+                    self.experts.top_k,
+                    block_k,
+                    self._minimax_fused_topk_quant_max_tokens,
+                )
+            )
+            return topk_weights, topk_ids, a1q, a1q_scale
+
+        return None, None, None, None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -133,8 +232,22 @@ class MiniMaxM2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(torch.float32))
+        (
+            prepared_topk_weights,
+            prepared_topk_ids,
+            prepared_a1q,
+            prepared_a1q_scale,
+        ) = self._maybe_prepare_moe_inputs(
+            hidden_states,
+            router_logits,
+        )
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            prepared_topk_weights=prepared_topk_weights,
+            prepared_topk_ids=prepared_topk_ids,
+            prepared_a1q=prepared_a1q,
+            prepared_a1q_scale=prepared_a1q_scale,
         )
 
         return final_hidden_states.view(num_tokens, hidden_dim)

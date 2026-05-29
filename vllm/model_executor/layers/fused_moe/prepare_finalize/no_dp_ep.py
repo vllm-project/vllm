@@ -54,6 +54,9 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     def output_is_reduced(self) -> bool:
         return False
 
+    def supports_prepared_inputs(self) -> bool:
+        return True
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -76,6 +79,70 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
 
         return a1q, a1q_scale, None, None, None
+
+    def prepare_prepared_input(
+        self,
+        a1: torch.Tensor,
+        prepared_a1q: torch.Tensor,
+        prepared_a1q_scale: torch.Tensor | None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> mk.PrepareResultType:
+        if (
+            defer_input_quant
+            or apply_router_weight_on_input
+            or not quant_config.is_quantized
+        ):
+            return self.prepare(
+                a1,
+                topk_weights,
+                topk_ids,
+                num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                quant_config,
+                defer_input_quant,
+            )
+
+        if prepared_a1q.shape != a1.shape:
+            raise ValueError(
+                "prepared_a1q must have the same shape as the MoE input, "
+                f"got {prepared_a1q.shape} and {a1.shape}."
+            )
+        if prepared_a1q.device != a1.device:
+            raise ValueError(
+                "prepared_a1q must be on the same device as the MoE input, "
+                f"got {prepared_a1q.device} and {a1.device}."
+            )
+        if prepared_a1q_scale is not None and prepared_a1q_scale.device != a1.device:
+            raise ValueError(
+                "prepared_a1q_scale must be on the same device as the MoE input, "
+                f"got {prepared_a1q_scale.device} and {a1.device}."
+            )
+
+        block_shape = quant_config.block_shape
+        if block_shape is not None:
+            block_k = block_shape[1]
+            expected_scale_shape = (
+                *a1.shape[:-1],
+                (a1.shape[-1] + block_k - 1) // block_k,
+            )
+            if prepared_a1q_scale is None:
+                raise ValueError(
+                    "prepared_a1q_scale is required for block quantized MoE."
+                )
+            if prepared_a1q_scale.shape != expected_scale_shape:
+                raise ValueError(
+                    "prepared_a1q_scale has an unexpected shape, got "
+                    f"{prepared_a1q_scale.shape}, expected {expected_scale_shape}."
+                )
+
+        return prepared_a1q, prepared_a1q_scale, None, None, None
 
     def finalize(
         self,

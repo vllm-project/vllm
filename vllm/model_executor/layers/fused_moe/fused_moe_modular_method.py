@@ -65,6 +65,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return self.old_quant_method.supports_eplb
 
     @property
+    def supports_prepared_inputs(self) -> bool:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.supports_prepared_inputs()
+
+    @property
     def method_name(self) -> str:
         return self.old_quant_method.method_name
 
@@ -92,6 +97,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -106,4 +113,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=None if self.disable_expert_map else layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prepared_a1q=prepared_a1q,
+            prepared_a1q_scale=prepared_a1q_scale,
         )

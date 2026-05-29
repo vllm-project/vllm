@@ -298,6 +298,34 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         """
         raise NotImplementedError
 
+    def supports_prepared_inputs(self) -> bool:
+        """
+        Whether this prepare/finalize implementation can accept caller-provided
+        quantized activations and scales instead of quantizing a1 internally.
+        """
+        return False
+
+    def prepare_prepared_input(
+        self,
+        a1: torch.Tensor,
+        prepared_a1q: torch.Tensor,
+        prepared_a1q_scale: torch.Tensor | None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
+    ) -> PrepareResultType:
+        """
+        Prepare an MoE input that has already been quantized by the caller.
+
+        Implementations may still need to dispatch or reorder the prepared
+        tensors. The default is unsupported so callers fall back to prepare().
+        """
+        raise NotImplementedError
+
     def prepare_async(
         self,
         a1: torch.Tensor,
@@ -1118,6 +1146,8 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1129,7 +1159,33 @@ class FusedMoEKernelModularImpl:
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-        if not self.prepare_finalize.supports_async():
+        can_use_prepared_input = (
+            prepared_a1q is not None
+            and not dbo_enabled()
+            and not self.fused_experts.expects_unquantized_inputs
+            and self.prepare_finalize.supports_prepared_inputs()
+        )
+
+        if can_use_prepared_input:
+            (
+                a1q,
+                a1q_scale,
+                expert_tokens_meta,
+                _expert_topk_ids,
+                _expert_topk_weights,
+            ) = self.prepare_finalize.prepare_prepared_input(
+                hidden_states,
+                prepared_a1q,
+                prepared_a1q_scale,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
+            )
+        elif not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
@@ -1360,6 +1416,8 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1402,6 +1460,8 @@ class FusedMoEKernelModularImpl:
             global_num_experts,
             expert_map,
             apply_router_weight_on_input,
+            prepared_a1q,
+            prepared_a1q_scale,
         )
 
         fused_out = self._fused_experts(
@@ -1573,6 +1633,14 @@ class FusedMoEKernel:
         """
         return self.fused_experts.supports_expert_map()
 
+    def supports_prepared_inputs(self) -> bool:
+        if not isinstance(self.impl, FusedMoEKernelModularImpl):
+            return False
+        return (
+            self.impl.prepare_finalize.supports_prepared_inputs()
+            and not self.impl.fused_experts.expects_unquantized_inputs
+        )
+
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
@@ -1625,6 +1693,8 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        prepared_a1q: torch.Tensor | None = None,
+        prepared_a1q_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -1639,4 +1709,6 @@ class FusedMoEKernel:
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            prepared_a1q=prepared_a1q,
+            prepared_a1q_scale=prepared_a1q_scale,
         )

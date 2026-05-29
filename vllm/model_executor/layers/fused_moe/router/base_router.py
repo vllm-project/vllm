@@ -296,3 +296,26 @@ class BaseRouter(FusedMoERouter):
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
 
         return topk_weights, topk_ids
+
+    def prepare_precomputed_experts(
+        self,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply the common router post-processing to externally computed top-k.
+
+        Prepared top-k producers are responsible for matching this router's
+        scoring semantics. This method preserves the shared BaseRouter
+        behavior that normally happens after _compute_routing().
+        """
+        self._validate_eplb_state()
+
+        indices_type = self._get_indices_type()
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+
+        topk_ids = self._apply_eplb_mapping(topk_ids)
+        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
+
+        return topk_weights, topk_ids
