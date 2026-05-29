@@ -2244,8 +2244,14 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            # Skip-if-missing: the worker-side KV connector can report a
+            # completion for a request that has already been removed from
+            # ``self.requests`` (e.g. WRITE-mode connectors like MoRI-IO
+            # report finished_sending out-of-band, racing with the
+            # scheduler's normal lifecycle removal). Asserting here causes
+            # spurious crashes; tolerate the race by skipping the free.
+            if req_id in self.requests:
+                self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
         self,
