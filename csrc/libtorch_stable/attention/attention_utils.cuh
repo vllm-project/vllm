@@ -18,8 +18,8 @@
  */
 #pragma once
 
-#include "../cuda_compat.h"
-#include "attention_dtypes.h"
+#include "../../cuda_compat.h"
+#include "../../attention/attention_dtypes.h"
 
 #include <float.h>
 #include <type_traits>
