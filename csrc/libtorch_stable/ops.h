@@ -276,7 +276,8 @@ void selective_scan_fwd(
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,
-                        torch::stable::Tensor& input, double limit);
+                        torch::stable::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_tanh_and_mul(torch::stable::Tensor& out,

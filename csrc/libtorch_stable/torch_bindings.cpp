@@ -364,9 +364,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
+  // alpha scales the sigmoid (gate * sigmoid(alpha * gate)); beta is added to
+  // the up half (up + beta). Defaults alpha=1.0, beta=0.0 give silu(gate)*up.
   ops.def(
-      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
-      "-> ()");
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
 
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
