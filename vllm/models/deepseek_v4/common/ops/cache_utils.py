@@ -366,7 +366,7 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
-        from vllm.models.deepseek_v4.nvidia.ops import (
+        from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             dequantize_and_gather_k_cache_cutedsl,
         )
 
