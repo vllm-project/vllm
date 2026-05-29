@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, get_current_vllm_config
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -23,11 +23,15 @@ def get_act_fn(
     # get classification act_fn
     # Implement alignment with transformers ForSequenceClassificationLoss
     # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    num_labels: int | None = None
+    if static_num_labels:
+        num_labels = getattr(config, "num_labels", 0)
+
     problem_type = getattr(config, "problem_type", "")
     if problem_type == "regression":
         return PoolerIdentity()
     if problem_type == "single_label_classification":
-        return PoolerClassify(static_num_labels=static_num_labels)
+        return PoolerClassify(num_labels=num_labels)
     if problem_type == "multi_label_classification":
         return PoolerMultiLabelClassify()
 
@@ -45,25 +49,27 @@ def get_act_fn(
         function_name = config.sbert_ce_default_activation_function
 
     if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons"
-        )
+        if not function_name.startswith("torch.nn.modules."):
+            raise ValueError(
+                "Loading of activation functions is restricted to "
+                "torch.nn.modules for security reasons"
+            )
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
-    return PoolerClassify(static_num_labels=static_num_labels)
+    return PoolerClassify(num_labels=num_labels)
 
 
 def resolve_classifier_act_fn(
     model_config: ModelConfig,
     static_num_labels: bool = True,
     act_fn: "PoolerActivation | None" = None,
-):
+) -> "PoolerActivation":
     if act_fn is None:
         return get_act_fn(model_config.hf_config, static_num_labels)
 
-    assert callable(act_fn)
+    if not callable(act_fn):
+        raise TypeError(f"Expected a callable activation function, got {type(act_fn)}")
     return act_fn
 
 
@@ -72,7 +78,7 @@ _T = TypeVar("_T", torch.Tensor, list[torch.Tensor])
 
 class PoolerActivation(nn.Module, ABC):
     @staticmethod
-    def wraps(module: nn.Module):
+    def wraps(module: nn.Module) -> "PoolerActivation":
         if isinstance(module, nn.Identity):
             return PoolerIdentity()
         if isinstance(module, (nn.Sigmoid, nn.Softmax)):
@@ -110,20 +116,13 @@ class PoolerMultiLabelClassify(PoolerActivation):
 
 
 class PoolerClassify(PoolerActivation):
-    def __init__(self, *, static_num_labels: bool = True) -> None:
+    def __init__(self, *, num_labels: int | None = None) -> None:
         super().__init__()
-
-        if static_num_labels:
-            vllm_config = get_current_vllm_config()
-            model_config = vllm_config.model_config
-            num_labels = getattr(model_config.hf_config, "num_labels", 0)
-        else:
-            num_labels = None
 
         if num_labels == 0:
             logger.warning(
                 "num_labels should be > 0 for classification "
-                "models, falling back to softmax. "
+                "models, falling back to sigmoid. "
                 "Please check if the configuration is correct."
             )
 
@@ -141,7 +140,7 @@ class PoolerClassify(PoolerActivation):
 
 
 class LambdaPoolerActivation(PoolerActivation):
-    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]):
+    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> None:
         super().__init__()
 
         self.fn = fn

@@ -50,9 +50,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import (
-    disable_inplace,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -335,8 +332,8 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -472,7 +469,6 @@ class FusedMoE(PluggableLayer):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    inplace=not self.moe_config.disable_inplace,
                 )
             )
 
@@ -977,6 +973,19 @@ class FusedMoE(PluggableLayer):
         if "input_scale" in weight_name:
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
+
+            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
+            # The generic assignment below would broadcast w1/w3 into the
+            # whole expert row, so the second shard would overwrite the first.
+            if (
+                "ModelOpt" in quant_method_name
+                and param.data.ndim == 2
+                and shard_id in ("w1", "w3")
+            ):
+                scale_expert_id = global_expert_id if use_global_sf else expert_id
+                scale_shard_id = 0 if shard_id == "w1" else 1
+                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
+                return True if return_success else None
 
             if (
                 "compressed" in quant_method_name.lower()

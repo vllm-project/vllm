@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Must be imported firstly
+import vllm.v1.worker.cpu.shm  # noqa # isort: skip
+
 import math
 import os
 import sys
@@ -101,6 +105,8 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
+        self.device = torch.device("cpu")
+
         # Check whether critical libraries are loaded
         def check_preloaded_libs(name: str):
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
@@ -141,9 +147,16 @@ class CPUWorker(Worker):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: CPUModelRunner = CPUModelRunner(
-            self.vllm_config, torch.device("cpu")
-        )
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.cpu.model_runner import (
+                CPUModelRunner as CPUModelRunnerV2,
+            )
+
+            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
@@ -213,10 +226,13 @@ class CPUWorker(Worker):
         return kv_cache_size
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        # Note: the model has been compiled in determine_available_memory(),
+        # Only compile here for models without kv cache
+        if len(self.model_runner.kv_caches) == 0:
+            self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        # Note: the model has been compiled in determine_available_memory()
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,

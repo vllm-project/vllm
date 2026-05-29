@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
+    get_visible_memory_node,
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -135,16 +136,35 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
-        # OMP requires the MP executor to function correctly, UniProc is not
-        # supported as it is not possible to set the OMP environment correctly
-        if parallel_config.distributed_executor_backend == "uni":
+        if (
+            os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
+            and parallel_config.distributed_executor_backend == "uni"
+        ):
+            # OMP requires the MP executor to function correctly, UniProc
+            # is not supported as it is not possible to set the OMP
+            # environment correctly
             parallel_config.distributed_executor_backend = "mp"
+
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
             logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
+
+        if torch.cpu._is_amx_tile_supported() and (
+            model_config is not None
+            and model_config.get_num_layers_by_block_type(
+                parallel_config, "linear_attention"
+            )
+            > 0
+        ):
+            cache_config.enable_prefix_caching = False
+            scheduler_config.enable_chunked_prefill = False
+            logger.warning(
+                "Disabled unsupported prefix caching and chunked prefill "
+                "for linear attention on AMX CPU platforms."
+            )
 
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode
@@ -210,6 +230,10 @@ class CpuPlatform(Platform):
 
         # Avoid inductor generates num_thread() and breaks the thread binding
         os.environ["TORCHINDUCTOR_CPP_DYNAMIC_THREADS"] = "1"
+
+        # For efficient conv state memory access
+        if torch.cpu._is_amx_tile_supported():
+            os.environ["VLLM_SSM_CONV_STATE_LAYOUT"] = "SD"
 
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         cpu_architecture = Platform.get_cpu_architecture()
@@ -385,6 +409,10 @@ class CpuPlatform(Platform):
         return True
 
     @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.get_num_threads()
+
+    @classmethod
     def import_kernels(cls) -> None:
         if Platform.get_cpu_architecture() in (CpuArchEnum.X86,):
             # Note: The lib name is _C_AVX2/AVX512, but the module name is _C.
@@ -462,3 +490,15 @@ class CpuPlatform(Platform):
             slot_mapping,
             isa,
         )
+
+    @classmethod
+    def get_current_memory_usage(
+        cls, device: torch.types.Device | None = None
+    ) -> float:
+        allowed_mem_node_list = get_visible_memory_node()
+        mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
+        memory_usage = 0
+        for s in mem_status_list:
+            memory_usage += s.total_memory - s.available_memory
+
+        return memory_usage

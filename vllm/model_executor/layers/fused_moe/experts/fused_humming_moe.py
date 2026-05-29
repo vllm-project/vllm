@@ -26,14 +26,19 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
+    moe_permute_unpermute_supported,
     moe_unpermute,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    swiglu_limit_func,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -82,6 +87,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+        self._permute_scratch: MoEPermuteScratch | None = None
 
     def init_humming_moe(self):
         self.compute_config = {
@@ -106,6 +112,19 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
+
+    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
+        if self._permute_scratch is None and moe_permute_unpermute_supported():
+            self._permute_scratch = MoEPermuteScratch(
+                max_num_tokens=self.moe_config.max_num_tokens,
+                topk=self.moe_config.experts_per_token,
+                num_experts=self.moe_config.num_experts,
+                num_local_experts=self.moe_config.num_local_experts,
+                device=torch.device(self.moe_config.device),
+                hidden_size=self.moe_config.hidden_dim,
+                hidden_dtype=self.moe_config.in_dtype,
+            )
+        return self._permute_scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
         num_tokens = topk_ids.size(0)
@@ -422,6 +441,18 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
         return supported, None if supported else reason
 
+    def apply_activation(
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+    ) -> None:
+        swiglu_limit = self.quant_config.gemm1_clamp_limit
+        if activation == MoEActivation.SILU and swiglu_limit is not None:
+            swiglu_limit_func(output=output, input=input, swiglu_limit=swiglu_limit)
+        else:
+            self.activation(activation=activation, input=input, output=output)
+
 
 class HummingIndexedExperts(HummingExpertsBase):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -514,7 +545,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
@@ -583,6 +614,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=self.global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=self.layer.expert_map,
+            scratch=self._get_permute_scratch(),
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(
@@ -604,7 +636,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             sublayer_name="w13",
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],
@@ -691,7 +723,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             sublayer_name="w13",
         )
 
-        self.activation(
+        self.apply_activation(
             activation=self.layer.activation,
             input=buffers["gate_up_output"],
             output=buffers["activation_output"],

@@ -502,6 +502,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.prefix = prefix
 
         self.num_spec = vllm_config.num_speculative_tokens
+        if self.num_spec > 0:
+            self.register_buffer(
+                "_decode_state_offsets",
+                torch.arange(1 + self.num_spec, dtype=torch.int32).unsqueeze(0),
+                persistent=False,
+            )
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -755,6 +761,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dim=0,
                 )
             )
+            if attn_metadata.block_idx_last_scheduled_token_prev_step is not None:
+                block_idx_last_scheduled_token_prev_step_d, _ = torch.split(
+                    attn_metadata.block_idx_last_scheduled_token_prev_step,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            else:
+                block_idx_last_scheduled_token_prev_step_d = None
             # Prefill-only variables:
             block_idx_first_scheduled_token_p = (
                 attn_metadata.block_idx_first_scheduled_token_p
@@ -766,6 +780,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             block_idx_first_scheduled_token_p = None
             block_idx_last_scheduled_token_d = None
             block_idx_last_computed_token_d = None
+            block_idx_last_scheduled_token_prev_step_d = None
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
@@ -944,18 +959,29 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if has_decode:
             assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
-                state_indices_tensor_d_input = state_indices_tensor_d.gather(
-                    1, block_idx_last_computed_token_d.unsqueeze(1)
-                ).squeeze(1)
-                state_indices_tensor_d_output = state_indices_tensor_d.gather(
-                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
-                ).squeeze(1)
-                # for decode:
-                #   block_idx_first_scheduled_token_d ==
-                #       block_idx_last_scheduled_token_d
-                # at block boundaries:
-                #   block_idx_first_scheduled_token_d >
-                #       block_idx_last_computed_token_d
+                if self.num_spec > 0:
+                    assert block_idx_last_scheduled_token_prev_step_d is not None
+                    input_indices = (
+                        block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    output_indices = (
+                        block_idx_last_scheduled_token_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    state_indices_tensor_d_input = state_indices_tensor_d.gather(
+                        1, input_indices
+                    )
+                    state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                        1, output_indices
+                    )
+                else:
+                    state_indices_tensor_d_input = state_indices_tensor_d.gather(
+                        1, block_idx_last_computed_token_d.unsqueeze(1)
+                    ).squeeze(1)
+                    state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                        1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                    ).squeeze(1)
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
