@@ -25,6 +25,8 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
@@ -144,6 +146,7 @@ pub(crate) fn prepare_chat_request(
         request_id,
         response_model,
         include_usage,
+        include_continuous_usage: false,
         requested_logprobs,
         include_prompt_logprobs,
         chat_request,

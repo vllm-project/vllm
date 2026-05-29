@@ -27,6 +27,10 @@ pub struct AppState {
     pub enable_request_id_headers: bool,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
+    /// Server default for formatting logprob tokens as `token_id:{id}`.
+    pub return_tokens_as_token_ids: bool,
+    /// Include final usage chunks for streaming OpenAI responses by default.
+    pub enable_force_include_usage: bool,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -53,6 +57,8 @@ impl AppState {
             enable_log_requests: false,
             enable_request_id_headers: false,
             server_info: None,
+            return_tokens_as_token_ids: false,
+            enable_force_include_usage: false,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -82,6 +88,17 @@ impl AppState {
         config_format: ServerInfoConfigFormat,
     ) -> Option<Value> {
         self.server_info.as_ref().map(|server_info| server_info.response(config_format))
+    }
+
+    /// Configure OpenAI-compatible server defaults.
+    pub fn with_openai_defaults(
+        mut self,
+        return_tokens_as_token_ids: bool,
+        enable_force_include_usage: bool,
+    ) -> Self {
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids;
+        self.enable_force_include_usage = enable_force_include_usage;
+        self
     }
 
     /// The primary model name echoed back in API responses (the first served

@@ -153,6 +153,14 @@ fn sse_data_payloads(text: &str) -> Vec<&str> {
     text.lines().filter_map(|line| line.strip_prefix("data: ")).collect()
 }
 
+fn sse_json_payloads(text: &str) -> Vec<serde_json::Value> {
+    sse_data_payloads(text)
+        .into_iter()
+        .filter(|payload| *payload != "[DONE]")
+        .map(|payload| serde_json::from_str(payload).expect("sse json payload"))
+        .collect()
+}
+
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 fn boxed_test_future<'a>(future: impl Future<Output = ()> + Send + 'a) -> TestFuture<'a> {
@@ -856,6 +864,14 @@ async fn test_app_with_engine_handle() -> (axum::Router, MockEngineTask) {
 async fn test_app_with_stream_output_specs(
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> (axum::Router, MockEngineTask) {
+    test_app_with_stream_output_specs_and_openai_defaults(output_specs, false, false).await
+}
+
+async fn test_app_with_stream_output_specs_and_openai_defaults(
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    return_tokens_as_token_ids: bool,
+    enable_force_include_usage: bool,
+) -> (axum::Router, MockEngineTask) {
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
         output_specs,
@@ -863,10 +879,83 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router(Arc::new(AppState::new(
-            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-            chat,
-        ))),
+        build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_openai_defaults(return_tokens_as_token_ids, enable_force_include_usage),
+        )),
+        engine_task,
+    )
+}
+
+async fn test_app_with_token_logprobs_and_openai_defaults(
+    engine_id: impl Into<EngineId>,
+    return_tokens_as_token_ids: bool,
+    enable_force_include_usage: bool,
+) -> (axum::Router, MockEngineTask) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = engine_id.into();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                let prompt_token_ids = request.prompt_token_ids.clone().expect("prompt token ids");
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: vec![
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![b'h' as u32],
+                                None,
+                                None,
+                                Some(sample_logprobs_for_token(b'h' as u32, b'H' as u32)),
+                                Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
+                            ),
+                            request_output_with_logprobs(
+                                &request.request_id,
+                                vec![b'i' as u32],
+                                Some(EngineCoreFinishReason::Stop),
+                                None,
+                                Some(sample_logprobs_for_token(b'i' as u32, b'I' as u32)),
+                                None,
+                            ),
+                        ],
+                        scheduler_stats: None,
+                        timestamp: 0.0,
+                        utility_output: None,
+                        finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
+                        wave_complete: None,
+                        start_wave: None,
+                    },
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_openai_defaults(return_tokens_as_token_ids, enable_force_include_usage),
+        )),
         engine_task,
     )
 }
@@ -1708,61 +1797,13 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = b"engine-openai-chat-logprobs".to_vec();
-
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_id.clone(),
-        |dealer, push| {
-            boxed_test_future(async move {
-                let add = recv_engine_message(dealer).await;
-                let request: EngineCoreRequest =
-                    rmp_serde::from_slice(&add[1]).expect("decode request");
-                let prompt_token_ids = request.prompt_token_ids.clone().expect("prompt token ids");
-
-                send_outputs(
-                    push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
-                        outputs: vec![request_output_with_logprobs(
-                            &request.request_id,
-                            bytes_to_token_ids(b"hi"),
-                            Some(EngineCoreFinishReason::Stop),
-                            None,
-                            Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
-                            Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
-                        )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
-                )
-                .await;
-            })
-        },
-    ));
-
-    let client = EngineCoreClient::connect(
-        EngineCoreClientConfig::new_single(handshake_address)
-            .with_model_name("test-model")
-            .with_local_input_output_addresses(
-                Some(ipc.input_endpoint()),
-                Some(ipc.output_endpoint()),
-            ),
+async fn non_stream_chat_uses_server_return_tokens_as_token_ids_default() {
+    let (mut app, engine_task) = test_app_with_token_logprobs_and_openai_defaults(
+        b"engine-openai-chat-logprobs",
+        true,
+        false,
     )
-    .await
-    .expect("connect client");
-    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new(
-        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
-        chat,
-    )));
+    .await;
 
     let response = app
         .call(
@@ -1792,11 +1833,11 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
 
     assert_eq!(
         json["choices"][0]["logprobs"]["content"][0]["token"],
-        json!("h")
+        json!("token_id:104")
     );
     assert_eq!(
         json["choices"][0]["logprobs"]["content"][1]["token"],
-        json!("i")
+        json!("token_id:105")
     );
     assert_eq!(json["prompt_logprobs"][0], serde_json::Value::Null);
     assert!(json["prompt_logprobs"][1].is_object());
@@ -2247,6 +2288,69 @@ async fn stream_without_include_usage_keeps_existing_shape() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn force_include_usage_default_adds_continuous_and_final_usage_chunks() {
+    let (app, engine_task) = test_app_with_stream_output_specs_and_openai_defaults(
+        default_stream_output_specs(),
+        false,
+        true,
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    let json_payloads = sse_json_payloads(&text);
+    let usage_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"usage\":"))
+        .expect("usage chunk");
+    let done_index =
+        payloads.iter().position(|payload| *payload == "[DONE]").expect("done sentinel");
+
+    assert!(usage_index < done_index, "{text}");
+    assert!(
+        json_payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        json_payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = json_payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(usage_chunk["choices"], json!([]));
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn completions_invalid_request_returns_openai_error() {
     let mut app = test_app().await;
     let response = app
@@ -2454,6 +2558,50 @@ async fn non_stream_completions_include_logprobs() {
     assert_eq!(
         json["choices"][0]["logprobs"]["top_logprobs"][0],
         json!({"h": -0.1, "H": -0.2})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_uses_server_return_tokens_as_token_ids_default() {
+    let (mut app, engine_task) = test_app_with_token_logprobs_and_openai_defaults(
+        b"engine-openai-completion-token-ids",
+        true,
+        false,
+    )
+    .await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": false,
+                        "logprobs": 1
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(
+        json["choices"][0]["logprobs"]["tokens"],
+        json!(["token_id:104", "token_id:105"])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["top_logprobs"][0],
+        json!({"token_id:104": -0.1, "token_id:72": -0.2})
     );
 }
 
@@ -3297,6 +3445,69 @@ async fn completions_happy_path_returns_sse_stream() {
 
     let usage_chunk: serde_json::Value =
         serde_json::from_str(payloads[usage_index]).expect("usage chunk json");
+    assert_eq!(usage_chunk["choices"], json!([]));
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_force_include_usage_default_adds_continuous_and_final_usage_chunks() {
+    let (app, engine_task) = test_app_with_stream_output_specs_and_openai_defaults(
+        default_stream_output_specs(),
+        false,
+        true,
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    let json_payloads = sse_json_payloads(&text);
+    let usage_index = payloads
+        .iter()
+        .position(|payload| payload.contains("\"usage\":"))
+        .expect("usage chunk");
+    let done_index =
+        payloads.iter().position(|payload| *payload == "[DONE]").expect("done sentinel");
+
+    assert!(usage_index < done_index, "{text}");
+    assert!(
+        json_payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        json_payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = json_payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
     assert_eq!(usage_chunk["choices"], json!([]));
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }

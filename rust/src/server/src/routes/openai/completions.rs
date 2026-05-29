@@ -44,12 +44,21 @@ pub async fn completions(
     let stream = body.stream;
     let logprobs = body.logprobs;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_return_tokens_as_token_ids = body.return_tokens_as_token_ids;
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
+    let mut prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if request_return_tokens_as_token_ids.is_none() {
+        prepared.return_tokens_as_token_ids = state.return_tokens_as_token_ids;
+    }
+    if state.enable_force_include_usage {
+        prepared.include_usage = true;
+        prepared.include_continuous_usage = true;
+    }
+
     let request_span = tracing::info_span!(
         "completions",
         request_id = %prepared.request_id,
@@ -85,6 +94,7 @@ pub async fn completions(
             created,
             log_request,
             prepared.include_usage,
+            prepared.include_continuous_usage,
             prepared.echo,
             logprobs,
             prepared.return_token_ids,
@@ -209,6 +219,7 @@ async fn completion_chunk_stream(
     created: u64,
     log_request: bool,
     include_usage: bool,
+    include_continuous_usage: bool,
     echo: Option<String>,
     requested_logprobs: Option<u32>,
     return_token_ids: bool,
@@ -218,6 +229,8 @@ async fn completion_chunk_stream(
     pin_mut!(stream);
     let mut visible_text_len = 0_u32;
     let mut first_chunk = true;
+    let mut prompt_token_count = 0_usize;
+    let mut output_token_count = 0_usize;
 
     while let Some(next) = stream.next().await {
         match next {
@@ -225,6 +238,7 @@ async fn completion_chunk_stream(
                 prompt_token_ids, ..
             }) => {
                 debug!("completion stream started");
+                prompt_token_count = prompt_token_ids.len();
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let mut chunk =
@@ -235,6 +249,12 @@ async fn completion_chunk_stream(
                         }
                         first_chunk = false;
                     }
+                    maybe_attach_usage(
+                        &mut chunk,
+                        include_continuous_usage,
+                        prompt_token_count,
+                        output_token_count,
+                    );
                     y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 } else if return_token_ids {
                     // Emit a chunk with prompt_token_ids in the first streaming response
@@ -244,6 +264,12 @@ async fn completion_chunk_stream(
                         choice.prompt_token_ids = Some(prompt_token_ids.to_vec());
                     }
                     first_chunk = false;
+                    maybe_attach_usage(
+                        &mut chunk,
+                        include_continuous_usage,
+                        prompt_token_count,
+                        output_token_count,
+                    );
                     y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 }
             }
@@ -269,9 +295,17 @@ async fn completion_chunk_stream(
                     None
                 };
                 let mut chunk = delta_chunk(&request_id, &response_model, created, delta, logprobs);
+                let delta_token_count = token_ids.len();
+                output_token_count = output_token_count.saturating_add(delta_token_count);
                 if return_token_ids && let Some(choice) = chunk.choices.first_mut() {
                     choice.token_ids = Some(token_ids);
                 }
+                maybe_attach_usage(
+                    &mut chunk,
+                    include_continuous_usage,
+                    prompt_token_count,
+                    output_token_count,
+                );
                 y.yield_ok(CompletionSseChunk::Chunk(chunk)).await;
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
@@ -286,13 +320,21 @@ async fn completion_chunk_stream(
                             "completion finished"
                         );
                     }
-                    y.yield_ok(CompletionSseChunk::Chunk(final_chunk(
+                    prompt_token_count = finished.prompt_token_count;
+                    output_token_count = finished.output_token_count;
+                    let mut final_chunk = final_chunk(
                         &request_id,
                         &response_model,
                         created,
                         finished.finish_reason,
-                    )?))
-                    .await;
+                    )?;
+                    maybe_attach_usage(
+                        &mut final_chunk,
+                        include_continuous_usage,
+                        prompt_token_count,
+                        output_token_count,
+                    );
+                    y.yield_ok(CompletionSseChunk::Chunk(final_chunk)).await;
 
                     if include_usage {
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
@@ -374,6 +416,20 @@ fn usage_chunk(
     let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.usage = Some(usage);
     chunk
+}
+
+fn maybe_attach_usage(
+    chunk: &mut CompletionStreamResponse,
+    include_continuous_usage: bool,
+    prompt_token_count: usize,
+    output_token_count: usize,
+) {
+    if include_continuous_usage {
+        chunk.usage = Some(Usage::from_counts(
+            prompt_token_count as u32,
+            output_token_count as u32,
+        ));
+    }
 }
 
 /// Convert one chunk stream into OpenAI-style SSE events.
@@ -526,6 +582,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             false,
             false,
             None,

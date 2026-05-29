@@ -17,6 +17,8 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
     /// Original text prompt that should be echoed back northbound when
@@ -117,6 +119,7 @@ pub(crate) fn prepare_completion_request(
         request_id,
         response_model,
         include_usage,
+        include_continuous_usage: false,
         text_request,
         echo,
         return_token_ids: request.return_token_ids.unwrap_or(false),

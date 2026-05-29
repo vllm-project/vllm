@@ -67,6 +67,10 @@ pub struct Config {
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
+    /// Server default for formatting logprob tokens as `token_id:{id}`.
+    pub return_tokens_as_token_ids: bool,
+    /// Include final usage chunks for streaming OpenAI responses by default.
+    pub enable_force_include_usage: bool,
     /// TCP port for the gRPC Generate service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,
