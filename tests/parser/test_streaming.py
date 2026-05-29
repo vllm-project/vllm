@@ -237,9 +237,9 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert len(tool_calls) == 0
 
 
-def test_parse_delta_finished_flushes_remaining(tokenizer, request_obj):
-    """When finished=True and the tool parser has unstreamed args,
-    parse_delta must flush the remaining arguments."""
+def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, request_obj):
+    """When finished=True but the final parse_delta produces no
+    tool-call delta, unstreamed args are not flushed."""
     parser = make_parser(tokenizer, reasoning=False, tool=True)
 
     results = stream_text(
@@ -250,18 +250,14 @@ def test_parse_delta_finished_flushes_remaining(tokenizer, request_obj):
 
     streamed = parser._tool_parser.streamed_args_for_tool[0]
     assert len(streamed) > 5
-    truncated_suffix = streamed[-5:]
     parser._tool_parser.streamed_args_for_tool[0] = streamed[:-5]
 
-    # Prevent normal extraction from catching the gap — only the
-    # finished flush path should fill it.
+    # Prevent normal extraction from catching the gap — without a
+    # tool-call delta to merge into, the flush is skipped.
     parser._tool_parser.extract_tool_calls_streaming = lambda *a, **kw: None
 
     flush_result = parser.parse_delta("", [], request_obj, finished=True)
-    assert flush_result is not None
-    assert flush_result.tool_calls is not None
-    flushed_args = flush_result.tool_calls[-1].function.arguments
-    assert flushed_args == truncated_suffix
+    assert flush_result is None or flush_result.tool_calls is None
 
 
 def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, request_obj):
@@ -282,3 +278,40 @@ def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, reque
 
     flush_result = parser.parse_delta("", [], request_obj, finished=True)
     assert flush_result is None or flush_result.tool_calls is None
+
+
+def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
+    """When finished=True and the tool parser has unstreamed args,
+    parse_delta appends the remaining arguments to the tool-call delta."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    token_ids = tokenizer.encode(MODEL_OUTPUT, add_special_tokens=False)
+
+    remainder = ',"unit":"celsius"}'
+    prompt_ids: list[int] | None = []
+    results: list[DeltaMessage | None] = []
+    for i, tid in enumerate(token_ids):
+        is_last = i == len(token_ids) - 1
+
+        # Before the final token, extend parsed args beyond what was
+        # streamed so get_remaining_unstreamed_args() returns the gap.
+        if is_last and parser._tool_parser.prev_tool_call_arr:
+            streamed = parser._tool_parser.streamed_args_for_tool[0]
+            parser._tool_parser.prev_tool_call_arr[-1]["arguments"] = (
+                streamed + remainder
+            )
+
+        result = parser.parse_delta(
+            tokenizer.decode([tid]),
+            [tid],
+            request_obj,
+            prompt_token_ids=prompt_ids,
+            finished=is_last,
+        )
+        prompt_ids = None
+        results.append(result)
+
+    _, _, tool_calls = collect_fields(results)
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert tool_args.endswith(remainder)

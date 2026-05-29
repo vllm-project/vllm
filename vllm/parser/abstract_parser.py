@@ -28,9 +28,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
-    DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
     FunctionDefinition,
@@ -662,29 +660,17 @@ class DelegatingParser(Parser):
     def _append_unstreamed_tool_args(
         self,
         delta_message: DeltaMessage | None,
-    ) -> DeltaMessage | None:
+    ) -> None:
         """Append parsed-but-unstreamed tool-call arguments to *delta_message*."""
-        if self._tool_parser is None:
-            return delta_message
-        remaining = self._tool_parser.get_remaining_unstreamed_args()
-        if not remaining:
-            return delta_message
-        index = len(self._tool_parser.prev_tool_call_arr) - 1
-        if delta_message and delta_message.tool_calls:
-            last_tc = delta_message.tool_calls[-1]
-            if last_tc.function:
-                last_tc.function.arguments = (
-                    last_tc.function.arguments or ""
-                ) + remaining
-                return delta_message
-        tc = DeltaToolCall(
-            index=index,
-            function=DeltaFunctionCall(arguments=remaining),
-        )
-        if delta_message is None:
-            return DeltaMessage(tool_calls=[tc])
-        delta_message.tool_calls = [tc]
-        return delta_message
+        if (
+            self._tool_parser is not None
+            and delta_message
+            and delta_message.tool_calls
+            and (last_tc := delta_message.tool_calls[-1]).function
+        ):
+            last_tc.function.arguments = (
+                last_tc.function.arguments or ""
+            ) + self._tool_parser.get_remaining_unstreamed_args()
 
     def parse_delta(
         self,
@@ -778,7 +764,7 @@ class DelegatingParser(Parser):
         state.previous_token_ids = current_token_ids
 
         if finished:
-            delta_message = self._append_unstreamed_tool_args(delta_message)
+            self._append_unstreamed_tool_args(delta_message)
 
         return delta_message
 
