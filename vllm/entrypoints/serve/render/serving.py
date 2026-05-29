@@ -105,7 +105,7 @@ class OpenAIServingRender:
             default_chat_template_kwargs or {}
         )
         self.log_error_stack = log_error_stack
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = model_config.use_harmony
         self.supports_browsing = False
         self.supports_code_interpreter = False
 

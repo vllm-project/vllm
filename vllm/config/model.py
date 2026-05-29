@@ -340,6 +340,10 @@ class ModelConfig:
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
 
+    use_harmony: bool | None = None
+    """Specifying whether to use the OpenAI Harmony message rendering. By default
+    set to True when using a gpt_oss model"""
+
     # Pooler config
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling

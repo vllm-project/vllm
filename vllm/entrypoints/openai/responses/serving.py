@@ -216,7 +216,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = self.model_config.use_harmony
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
