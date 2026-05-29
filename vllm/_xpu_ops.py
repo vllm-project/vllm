@@ -521,9 +521,7 @@ def _selective_scan_fwd_kernel(
         delta_base = (
             delta_ptr + dim_idx * delta_d_stride + seq_start * delta_batch_stride
         )
-        out_base = (
-            out_ptr + dim_idx * out_d_stride + seq_start * out_batch_stride
-        )
+        out_base = out_ptr + dim_idx * out_d_stride + seq_start * out_batch_stride
         B_base = B_ptr + group_idx * B_group_stride + seq_start * B_batch_stride
         C_base = C_ptr + group_idx * C_group_stride + seq_start * C_batch_stride
     else:
@@ -531,9 +529,7 @@ def _selective_scan_fwd_kernel(
         delta_base = (
             delta_ptr + batch_idx * delta_batch_stride + dim_idx * delta_d_stride
         )
-        out_base = (
-            out_ptr + batch_idx * out_batch_stride + dim_idx * out_d_stride
-        )
+        out_base = out_ptr + batch_idx * out_batch_stride + dim_idx * out_d_stride
         B_base = B_ptr + batch_idx * B_batch_stride + group_idx * B_group_stride
         C_base = C_ptr + batch_idx * C_batch_stride + group_idx * C_group_stride
 
@@ -541,16 +537,12 @@ def _selective_scan_fwd_kernel(
         if IS_VARLEN:
             z_base = z_ptr + dim_idx * z_d_stride + seq_start * z_batch_stride
             out_z_base = (
-                out_z_ptr
-                + dim_idx * out_z_d_stride
-                + seq_start * out_z_batch_stride
+                out_z_ptr + dim_idx * out_z_d_stride + seq_start * out_z_batch_stride
             )
         else:
             z_base = z_ptr + batch_idx * z_batch_stride + dim_idx * z_d_stride
             out_z_base = (
-                out_z_ptr
-                + batch_idx * out_z_batch_stride
-                + dim_idx * out_z_d_stride
+                out_z_ptr + batch_idx * out_z_batch_stride + dim_idx * out_z_d_stride
             )
 
     # Determine chunk boundaries for APC mode
@@ -563,10 +555,9 @@ def _selective_scan_fwd_kernel(
                 tl.load(last_chunk_indices_ptr + batch_idx - 1).to(tl.int32) + 1
             )
         n_chunks = last_chunk_idx - first_chunk_idx + 1
-        first_chunk_tokens = (
-            tl.load(cu_chunk_seqlen_ptr + first_chunk_idx + 1).to(tl.int32)
-            - tl.load(cu_chunk_seqlen_ptr + first_chunk_idx).to(tl.int32)
-        )
+        first_chunk_tokens = tl.load(cu_chunk_seqlen_ptr + first_chunk_idx + 1).to(
+            tl.int32
+        ) - tl.load(cu_chunk_seqlen_ptr + first_chunk_idx).to(tl.int32)
         block_idx_first = tl.load(block_idx_first_ptr + batch_idx).to(tl.int32)
         chunk_start_offset = 0
         if n_chunks > 1 and first_chunk_tokens < block_size:
@@ -580,13 +571,10 @@ def _selective_scan_fwd_kernel(
     tokens_processed = 0
     for chunk in range(0, n_chunks if CACHE_ENABLED else 1):
         if CACHE_ENABLED:
-            chunk_tokens = (
-                tl.load(
-                    cu_chunk_seqlen_ptr + first_chunk_idx + chunk + 1
-                ).to(tl.int32)
-                - tl.load(
-                    cu_chunk_seqlen_ptr + first_chunk_idx + chunk
-                ).to(tl.int32)
+            chunk_tokens = tl.load(
+                cu_chunk_seqlen_ptr + first_chunk_idx + chunk + 1
+            ).to(tl.int32) - tl.load(cu_chunk_seqlen_ptr + first_chunk_idx + chunk).to(
+                tl.int32
             )
         else:
             chunk_tokens = actual_seqlen
@@ -656,9 +644,7 @@ def _selective_scan_fwd_kernel(
                     + tl.load(block_idx_last_ptr + batch_idx).to(tl.int32)
                 ).to(tl.int64)
             else:
-                block_idx_done = (
-                    current_position + chunk_tokens - 1
-                ) // block_size
+                block_idx_done = (current_position + chunk_tokens - 1) // block_size
                 store_slot = tl.load(
                     cache_indices_ptr
                     + batch_idx * cache_indices_stride
