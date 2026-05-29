@@ -96,7 +96,13 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
+            may_have_zp=False,
+            may_have_bias=False,
         )
+        self.is_marlin = self.wna16_backend in [
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+        ]
 
     def get_weight_shape(
         self,
@@ -122,7 +128,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales/zero_points"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
         shape_map = {
             "w13_weight": {
                 "Flashinfer": (
@@ -181,7 +186,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 ),
             },
         }
-        backend_key = "Flashinfer" if is_flashinfer else "Marlin"
+        backend_key = "Marlin" if self.is_marlin else "Flashinfer"
         return shape_map[weight_name][backend_key]
 
     def create_weights(
@@ -198,9 +203,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
-        is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
         extra_weight_attrs.update(
-            {"is_transposed": is_transposed, "quant_method": self.strategy}
+            {"is_transposed": self.is_marlin, "quant_method": self.strategy}
         )
 
         w13_weight = torch.nn.Parameter(
@@ -381,7 +385,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process weights using the shared oracle infrastructure
-        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER_TRTLLM
         (
             w13_qweight,
             w2_qweight,
@@ -423,7 +426,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)
-        if not is_flashinfer:
+        if self.is_marlin:
             replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
             replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
             replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
@@ -455,7 +458,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
 
         # Add Marlin-specific arguments
         marlin_args: dict[str, Any] = {}
-        if not is_flashinfer:
+        if self.is_marlin:
             marlin_args = {
                 "w13_g_idx": layer.w13_weight_g_idx,
                 "w2_g_idx": layer.w2_weight_g_idx,
