@@ -74,6 +74,20 @@ class AttentionConfig:
     If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
     128 otherwise)."""
 
+    mixed_kv_n_tokens: int = 0
+    """Mixed-precision KV cache: number of tokens kept in a higher-precision sibling
+    cache, while the bulk history stays in the primary (e.g. NVFP4) KV cache. Set to 0
+    (default) to disable. Currently supported only with nvfp4 kv cache on the FlashInfer
+    TRTLLM-gen backend."""
+
+    mixed_kv_dtype: Literal["fp8", "bf16"] = "fp8"
+    """Dtype of the mixed-precision sibling cache."""
+
+    mixed_kv_location: Literal["first", "last"] = "last"
+    """Position of the high-precision tier within each sequence:
+    - `last`: the most-recent N tokens.
+    - `first`: pin the first N tokens."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

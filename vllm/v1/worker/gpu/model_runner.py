@@ -447,6 +447,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
+    def _init_kv_zero_meta(self) -> None:
+        """Initialize the KV block zeroer for specs with ``requires_zeroing``.
+        Called from gpu_worker.py after KV caches are allocated. Without
+        this, freshly allocated blocks (e.g. for the mixed-precision KV
+        sibling) retain stale data from prior warmup/dummy runs, which
+        corrupts attention output.
+        """
+        from vllm.utils.platform_utils import is_pin_memory_available
+        from vllm.v1.worker.utils import KVBlockZeroer
+
+        self._kv_block_zeroer = KVBlockZeroer(self.device, is_pin_memory_available())
+        # V2 builds metadata with ``kernel_block_size=None`` so the kernel
+        # block size equals each spec's own ``block_size``.
+        kernel_block_sizes = [
+            g.kv_cache_spec.block_size for g in self.kv_cache_config.kv_cache_groups
+        ]
+        self._kv_block_zeroer.init_meta(
+            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=self.cache_config.cache_dtype,
+            runner_only_attn_layers=set(),
+            static_forward_context=self.compilation_config.static_forward_context,
+        )
+
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
     def _dummy_run(
@@ -1020,6 +1044,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            # Zero GPU memory for freshly allocated cache blocks (specs with
+            # ``requires_zeroing=True``, e.g. mixed-precision KV sibling) to
+            # prevent stale data — including from earlier warmup/dummy runs —
+            # from corrupting attention computation when the block is reused.
+            if scheduler_output.new_block_ids_to_zero and hasattr(
+                self, "_kv_block_zeroer"
+            ):
+                self._kv_block_zeroer.zero_block_ids(
+                    scheduler_output.new_block_ids_to_zero
+                )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)

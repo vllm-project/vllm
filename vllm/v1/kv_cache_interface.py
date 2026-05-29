@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -147,6 +147,18 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    # The kernel block sizes the layer's attention backend supports. Carried
+    # on the spec so page-size unification doesn't need to look up the layer
+    # in ``static_forward_context`` — which doesn't exist in the engine-core
+    # process under multi-process executors. Tuples for hashability; empty
+    # tuple means "not populated" (legacy callers that pre-date this field).
+    supported_kernel_block_sizes: tuple = ()
+
+    # If True, newly-allocated blocks for this spec are zero-initialized
+    # before first use. Needed when the attention kernel may load partial
+    # blocks where unfilled slots could land on FP NaN bit patterns and
+    # propagate via ``0 * NaN = NaN`` in the softmax-weighted sum.
+    requires_zeroing: ClassVar[bool] = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -260,6 +272,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -393,6 +406,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            supported_kernel_block_sizes=specs[0].supported_kernel_block_sizes,
         )
 
 
@@ -492,6 +506,25 @@ class SlidingWindowSpec(AttentionSpec):
             max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
         )
         return max_blocks * self.page_size_bytes
+
+
+@dataclass(frozen=True, kw_only=True)
+class FirstNSpec(SlidingWindowSpec):
+    """Like SlidingWindowSpec but pins the FIRST N tokens (no eviction).
+
+    Allocation is capped at ``ceil(N/block_size)`` blocks per request and old blocks are
+    never evicted. Used by the mixed-precision KV cache's ``location='first'`` mode,
+    where the sibling cache holds positions ``[0, N)`` indefinitely.
+
+    Reuses ``sliding_window``."""
+
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        # Per-request peak holdings = ceil(N / block_size), regardless of
+        # batched-token / max-model-len: we stop allocating once the first
+        # N tokens are stored, and we never evict.
+        return cdiv(self.sliding_window, self.block_size)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -859,4 +892,8 @@ class KVCacheConfig:
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        return self.has_mamba_layers or any(
+            isinstance(g.kv_cache_spec, AttentionSpec)
+            and g.kv_cache_spec.requires_zeroing
+            for g in self.kv_cache_groups
+        )

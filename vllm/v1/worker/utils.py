@@ -120,7 +120,9 @@ class KVBlockZeroer:
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
-            if not isinstance(spec, FullAttentionSpec):
+            if not isinstance(spec, FullAttentionSpec) and not (
+                isinstance(spec, AttentionSpec) and spec.requires_zeroing
+            ):
                 continue
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue

@@ -45,11 +45,15 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
-    base: int
+    """Marker for a kernel block size that must be any positive multiple of
+    ``base``. Frozen so two instances with the same ``base`` compare equal and
+    hash to the same value — needed for spec equality across layers in the
+    same KV cache group.
+    """
 
-    def __init__(self, base: int):
-        self.base = base
+    base: int
 
 
 class AttentionBackend(ABC):
