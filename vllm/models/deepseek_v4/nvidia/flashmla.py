@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
-from vllm.distributed import get_pcp_group
+from vllm.distributed import maybe_get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -34,11 +34,8 @@ if TYPE_CHECKING:
 
 
 def _get_pcp_group_for_merge():
-    try:
-        pcp_group = get_pcp_group()
-    except AssertionError:
-        return None
-    return pcp_group if pcp_group.world_size > 1 else None
+    pcp_group = maybe_get_pcp_group()
+    return pcp_group if pcp_group is not None and pcp_group.world_size > 1 else None
 
 
 def _decode_lse_to_2d(lse: torch.Tensor) -> torch.Tensor:
