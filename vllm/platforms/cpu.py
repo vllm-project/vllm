@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
     get_memory_node_info,
-    get_visible_memory_node,
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -136,13 +135,9 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
-        if (
-            os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
-            and parallel_config.distributed_executor_backend == "uni"
-        ):
-            # OMP requires the MP executor to function correctly, UniProc
-            # is not supported as it is not possible to set the OMP
-            # environment correctly
+        # OMP requires the MP executor to function correctly, UniProc is not
+        # supported as it is not possible to set the OMP environment correctly
+        if parallel_config.distributed_executor_backend == "uni":
             parallel_config.distributed_executor_backend = "mp"
 
         if parallel_config.worker_cls == "auto":
@@ -486,15 +481,3 @@ class CpuPlatform(Platform):
             slot_mapping,
             isa,
         )
-
-    @classmethod
-    def get_current_memory_usage(
-        cls, device: torch.types.Device | None = None
-    ) -> float:
-        allowed_mem_node_list = get_visible_memory_node()
-        mem_status_list = [get_memory_node_info(i) for i in allowed_mem_node_list]
-        memory_usage = 0
-        for s in mem_status_list:
-            memory_usage += s.total_memory - s.available_memory
-
-        return memory_usage

@@ -54,20 +54,6 @@ steps:
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
-- label: CPU-ModelRunnerV2 Tests
-  depends_on: []
-  device: intel_cpu
-  no_plugin: true
-  soft_fail: true
-  source_file_dependencies:
-  - vllm/v1/worker/cpu/
-  - vllm/v1/worker/gpu/
-  commands:
-    - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
-      uv pip install git+https://github.com/triton-lang/triton-cpu.git@270e696d
-      VLLM_USE_V2_MODEL_RUNNER=1 pytest -x -v -s tests/models/language/generation/test_granite.py -m cpu_model"
-
 - label: CPU-Quantization Model Tests
   depends_on: []
   device: intel_cpu
