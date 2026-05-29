@@ -23,10 +23,10 @@ from packaging import version
 
 from vllm.platforms import current_platform
 
-try:
+if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
-except Exception:
-    # vllm.platforms.rocm import fails on non-ROCm torch builds (XPU/CPU).
+else:
+
     def on_gfx950() -> bool:
         return False
 
