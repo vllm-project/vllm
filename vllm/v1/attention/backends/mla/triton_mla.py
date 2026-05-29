@@ -88,12 +88,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             kFp8Dynamic64Sym,
             kFp8Dynamic128Sym,
             kFp8StaticTensorSym,
+            kNvfp4Dynamic,
         )
 
         supported_keys = {
             kFp8StaticTensorSym,
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
+            kNvfp4Dynamic,
         }
 
         return quant_key in supported_keys
@@ -213,74 +215,62 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)
 
-        # Use truly fused kernel when quant params are provided
+        # Stage1: attention computation (always use standard kernel)
+        from vllm.v1.attention.ops.triton_decode_attention import (
+            _decode_grouped_att_m_fwd,
+        )
+        _decode_grouped_att_m_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            kv_c_cache,
+            attn_logits,
+            attn_metadata.decode.block_table,
+            attn_metadata.decode.seq_lens,
+            num_kv_splits,
+            self.scale,
+            PAGE_SIZE,
+            logit_cap=0.0,
+            k_scale=layer._k_scale,
+            v_scale=layer._k_scale,
+            is_mla=True,
+        )
+
+        # Stage2: reduction + quantization (fused when quant params provided)
         if output_scale is not None or output_block_scale is not None:
             from vllm.v1.attention.ops.mla_attn_quant_fused import (
-                mla_attn_fused_fp8_group,
-                mla_attn_fused_fp8_static,
+                decode_softmax_reducev_fwd_fused_fp8_static,
+                decode_softmax_reducev_fwd_fused_fp8_group,
             )
 
             if output_block_scale is not None:
                 # Per-group FP8 quantization
                 assert quant_group_size is not None
-                mla_attn_fused_fp8_group(
+                decode_softmax_reducev_fwd_fused_fp8_group(
+                    attn_logits,
                     q,
-                    kv_c_and_k_pe_cache,
                     o,
                     lse,
-                    attn_metadata.decode.block_table,
                     attn_metadata.decode.seq_lens,
                     num_kv_splits,
-                    self.scale,
-                    PAGE_SIZE,
-                    logit_cap=0.0,
-                    k_scale=layer._k_scale,
-                    v_scale=layer._k_scale,
-                    output_block_scale=output_block_scale,
-                    quant_group_size=quant_group_size,
+                    output_block_scale,
+                    quant_group_size,
                 )
             else:
                 # Static FP8 quantization
-                mla_attn_fused_fp8_static(
+                decode_softmax_reducev_fwd_fused_fp8_static(
+                    attn_logits,
                     q,
-                    kv_c_and_k_pe_cache,
                     o,
                     lse,
-                    attn_metadata.decode.block_table,
                     attn_metadata.decode.seq_lens,
                     num_kv_splits,
-                    self.scale,
-                    PAGE_SIZE,
-                    logit_cap=0.0,
-                    k_scale=layer._k_scale,
-                    v_scale=layer._k_scale,
-                    output_scale=output_scale,
+                    output_scale,
                 )
-
-            return o, lse
         else:
-            # Use standard two-stage kernel without quantization
+            # Standard stage2 without quantization
             from vllm.v1.attention.ops.triton_decode_attention import (
-                _decode_grouped_att_m_fwd,
                 _decode_softmax_reducev_fwd,
             )
-
-            _decode_grouped_att_m_fwd(
-                q,
-                kv_c_and_k_pe_cache,
-                kv_c_cache,
-                attn_logits,
-                attn_metadata.decode.block_table,
-                attn_metadata.decode.seq_lens,
-                num_kv_splits,
-                self.scale,
-                PAGE_SIZE,
-                logit_cap=0.0,
-                k_scale=layer._k_scale,
-                v_scale=layer._k_scale,
-                is_mla=True,
-            )
-
             _decode_softmax_reducev_fwd(
                 attn_logits,
                 q,

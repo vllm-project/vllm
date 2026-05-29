@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kNvfp4Dynamic,
 )
 
 
@@ -55,5 +56,13 @@ def get_mla_attn_quant_params(
         output_block_scale = getattr(output_proj, "input_block_scale", None)
         quant_group_size = getattr(output_proj, "quant_group_size", None)
         return output_scale, output_block_scale, quant_group_size
+
+    elif output_quant_key == kNvfp4Dynamic:
+        if not fused_supported(kNvfp4Dynamic):
+            return None, None, None
+        # NVFP4 uses input_scale for dequantization and output_block_scale for quantization
+        input_scale = getattr(output_proj, "input_scale", None)
+        output_block_scale = getattr(output_proj, "input_block_scale", None)
+        return input_scale, output_block_scale, None
 
     return None, None, None
