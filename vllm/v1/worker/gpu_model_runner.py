@@ -4511,6 +4511,15 @@ class GPUModelRunner(
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
+        if envs.VLLM_DEBUG_MLA_CACHE:
+            kv_nans = self._collect_kv_cache_nans()
+            kv_nan_ts = time.time()
+            kv_nan_first = self._get_kv_nan_first_layer(kv_nans)
+        else:
+            kv_nans = {}
+            kv_nan_ts = 0.0
+            kv_nan_first = None
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4523,12 +4532,9 @@ class GPUModelRunner(
                 if self.supports_mm_inputs
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
-                kv_cache_nans_per_layer=(kv_nans := self._collect_kv_cache_nans())
-                or None,
-                kv_cache_nan_timestamp=time.time() if kv_nans else 0.0,
-                kv_cache_nan_first_layer=self._get_kv_nan_first_layer(kv_nans)
-                if kv_nans
-                else None,
+                kv_cache_nans_per_layer=kv_nans or None,
+                kv_cache_nan_timestamp=kv_nan_ts,
+                kv_cache_nan_first_layer=kv_nan_first,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
             )
@@ -5451,8 +5457,6 @@ class GPUModelRunner(
 
     def _collect_kv_cache_nans(self) -> dict[str, int]:
         """Read and reset per-layer NaN counts from MLA attention layers."""
-        if not envs.VLLM_DEBUG_MLA_CACHE:
-            return {}
         result: dict[str, int] = {}
         for name, layer in self.compilation_config.static_forward_context.items():
             nan_count = getattr(layer, "num_kv_cache_nan_insertions", None)
