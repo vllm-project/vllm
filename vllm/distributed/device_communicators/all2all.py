@@ -1,135 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.flashinfer import (
+    has_flashinfer_nvlink_one_sided,
+    has_flashinfer_nvlink_two_sided,
+)
 from vllm.utils.import_utils import has_deep_ep, has_mori
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_all2all():
+if has_flashinfer_nvlink_two_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
     from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
     from flashinfer.comm.trtllm_alltoall import (
         MnnvlMoe,  # type: ignore[import-not-found]
     )
 
+if has_flashinfer_nvlink_one_sided():
+    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
+    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
+    from flashinfer.comm.trtllm_moe_alltoall import (
+        MoeAlltoAll,  # type: ignore[import-not-found]
+        moe_a2a_get_workspace_size_per_rank,
+    )
+
+
 logger = init_logger(__name__)
-
-
-class NaiveAll2AllManager(All2AllManagerBase):
-    """
-    A naive implementation of all2all communication.
-    It uses all-reduce under the hood, which is not
-    efficient at all. The main purpose is for testing and
-    debugging.
-    """
-
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
-
-    def naive_multicast(
-        self,
-        x: torch.Tensor,
-        cu_tokens_across_sp_cpu: torch.Tensor,
-        is_sequence_parallel: bool,
-    ) -> torch.Tensor:
-        assert len(x.shape) == 2
-        buffer = torch.empty(
-            (cu_tokens_across_sp_cpu[-1], x.size(1)), device=x.device, dtype=x.dtype
-        )
-
-        rank = self.rank if is_sequence_parallel else self.dp_rank
-        world_size = self.world_size if is_sequence_parallel else self.dp_world_size
-
-        start = 0 if rank == 0 else cu_tokens_across_sp_cpu[rank - 1]
-        end = cu_tokens_across_sp_cpu[rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(world_size):
-            start = 0 if idx == 0 else cu_tokens_across_sp_cpu[idx - 1]
-            end = cu_tokens_across_sp_cpu[idx]
-            get_ep_group().broadcast(buffer[start:end, :], idx)
-
-        return buffer
-
-    def dispatch_router_logits(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if extra_tensors is not None:
-            raise NotImplementedError(
-                "extra_tensors is not supported for NaiveAll2AllManager"
-            )
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        hidden_states = self.naive_multicast(
-            hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        router_logits = self.naive_multicast(
-            router_logits, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-
-        return hidden_states, router_logits
-
-    def dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_sequence_parallel: bool = False,
-        extra_tensors: list[torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if extra_tensors is not None:
-            raise NotImplementedError(
-                "extra_tensors is not supported for NaiveAll2AllManager"
-            )
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        hidden_states = self.naive_multicast(
-            hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        topk_weights = self.naive_multicast(
-            topk_weights, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        topk_ids = self.naive_multicast(
-            topk_ids, cu_tokens_across_sp_cpu, is_sequence_parallel
-        )
-        return hidden_states, topk_weights, topk_ids
-
-    def combine(
-        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
-    ) -> torch.Tensor:
-        ep_rank = self.rank if is_sequence_parallel else self.dp_rank
-
-        dp_metadata = get_forward_context().dp_metadata
-        assert dp_metadata is not None
-        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
-        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
-
-        start = 0 if ep_rank == 0 else cu_tokens_across_sp_cpu[ep_rank - 1]
-        end = cu_tokens_across_sp_cpu[ep_rank]
-
-        all_hidden_states = get_ep_group().all_reduce(hidden_states)
-        hidden_states = all_hidden_states[start:end, :]
-        return hidden_states
-
-    def destroy(self):
-        pass
 
 
 class AgRsAll2AllManager(All2AllManagerBase):
@@ -138,8 +44,8 @@ class AgRsAll2AllManager(All2AllManagerBase):
     all-gather (dispatch) and reduce-scatter (combine).
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def dispatch_router_logits(
         self,
@@ -239,12 +145,12 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, tcp_store_group=None):
         assert has_deep_ep(), (
             "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install DeepEP kernels."
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         self.handle_cache = Cache()
 
         # This is the DeepEP default. Stick to it till we can establish
@@ -282,7 +188,10 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         raise NotImplementedError
 
     def destroy(self):
-        pass
+        with self.handle_cache._lock:
+            for _, handle in self.handle_cache._cache.items():
+                handle.destroy()
+            self.handle_cache._cache.clear()
 
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
@@ -290,8 +199,8 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -308,13 +217,17 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
         assert num_rdma_bytes is not None
         assert num_qps_per_rank is not None
-        return dict(
+        # TODO: remove platform-specific logic
+        # once ROCm DeepEP is updated with the latest APIs.
+        kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=False,
             num_qps_per_rank=num_qps_per_rank,
+            explicitly_destroy=True,
         )
+        return kwargs
 
     def get_handle(self, kwargs):
         assert len(kwargs) == 0, (
@@ -347,8 +260,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     All2All communication based on DeepEP Low-Latency kernels.
     """
 
-    def __init__(self, cpu_group):
-        super().__init__(cpu_group)
+    def __init__(self, cpu_group, tcp_store_group=None):
+        super().__init__(cpu_group, tcp_store_group)
 
     def _make_all2all_kwargs(
         self,
@@ -379,7 +292,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         )
 
         assert num_rdma_bytes is not None
-        return dict(
+        # TODO: remove platform-specific logic
+        # once ROCm DeepEP is updated with the latest APIs.
+        kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
@@ -387,7 +302,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_qps_per_rank=num_qps_per_rank,
             allow_nvlink_for_low_latency_mode=True,
             allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+            explicitly_destroy=True,
         )
+        return kwargs
 
     def get_handle(self, kwargs):
         """
@@ -408,9 +325,187 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
-class FlashInferAllToAllManager(All2AllManagerBase):
+@dataclass
+class _NixlEPBufferState:
+    buffer: Any
+    connected_ep_size: int
+    active_ep_size: int
+
+
+class NixlEPAll2AllManager(All2AllManagerBase):
     """
-    All2All communication based on flashinfer kernels.
+    All2All communication based on NIXL EP kernels.
+    This backend supports elastic EP with dynamic rank connection/disconnection.
+    """
+
+    _buffer: _NixlEPBufferState | None = None
+    _lock = threading.RLock()
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert tcp_store_group is not None
+        super().__init__(cpu_group, tcp_store_group)
+
+        self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
+
+    def _init_buffer(
+        self,
+        max_num_tokens_per_dp_rank: int,
+        token_hidden_size: int,
+        num_experts_per_rank: int,
+    ) -> None:
+        from nixl_ep import Buffer  # type: ignore[import-not-found]
+
+        max_num_global_experts = self.max_num_ep_ranks * num_experts_per_rank
+        num_rdma_bytes = Buffer.get_rdma_size_hint(
+            num_max_dispatch_tokens_per_rank=max_num_tokens_per_dp_rank,
+            hidden=token_hidden_size,
+            num_ranks=self.max_num_ep_ranks,
+            num_experts=max_num_global_experts,
+        )
+        assert NixlEPAll2AllManager._buffer is None, (
+            "NIXL EP buffer already initialized"
+        )
+        buffer = Buffer(
+            rank=self.rank,
+            tcp_store_group=self.tcp_store_group.store,
+        )
+        buffer.update_memory_buffers(
+            num_ranks=self.max_num_ep_ranks,
+            num_experts_per_rank=num_experts_per_rank,
+            num_rdma_bytes=num_rdma_bytes,
+        )
+        ranks_to_connect = list(range(self.world_size))
+        buffer.connect_ranks(ranks_to_connect)
+        NixlEPAll2AllManager._buffer = _NixlEPBufferState(
+            buffer=buffer,
+            connected_ep_size=self.world_size,
+            active_ep_size=self.world_size,
+        )
+
+    def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        if ep_size <= state.connected_ep_size:
+            return
+
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        ranks_to_connect = list(range(state.connected_ep_size, ep_size))
+        state.buffer.connect_ranks(ranks_to_connect, activate=make_active)
+        state.connected_ep_size = ep_size
+        if make_active:
+            state.active_ep_size = ep_size
+
+    def _disconnect_to_ep_size(self, ep_size: int) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        if ep_size >= state.connected_ep_size:
+            return
+
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        ranks_to_disconnect = list(range(ep_size, state.connected_ep_size))
+        state.buffer.disconnect_ranks(ranks_to_disconnect)
+        state.connected_ep_size = ep_size
+        state.active_ep_size = min(state.active_ep_size, ep_size)
+
+    def _unmask_connected_ranks(self, target_ep_size: int) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        if target_ep_size <= state.active_ep_size:
+            return
+        assert state.connected_ep_size >= target_ep_size
+
+        for rank in range(state.active_ep_size, target_ep_size):
+            state.buffer.update_mask_buffer(rank, mask=False)
+        state.active_ep_size = target_ep_size
+
+    def _stage_ep_size(self) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        target_ep_size = self.world_size
+
+        # Scale-up can safely connect standby ranks while leaving them masked.
+        # Scale-down must not disconnect active ranks until commit.
+        if target_ep_size > state.connected_ep_size:
+            self._connect_to_ep_size(target_ep_size, make_active=False)
+
+    def commit_staged_state(self) -> None:
+        """Commit staged NIXL EP state to the active communication set."""
+        with NixlEPAll2AllManager._lock:
+            assert NixlEPAll2AllManager._buffer is not None
+            state = NixlEPAll2AllManager._buffer
+            target_ep_size = self.world_size
+
+            if target_ep_size < state.connected_ep_size:
+                self._disconnect_to_ep_size(target_ep_size)
+            elif target_ep_size > state.connected_ep_size:
+                self._connect_to_ep_size(target_ep_size, make_active=True)
+
+            self._unmask_connected_ranks(target_ep_size)
+
+    def _ensure_ep_size(self, *, stage: bool) -> None:
+        if stage:
+            self._stage_ep_size()
+        else:
+            self.commit_staged_state()
+
+    def get_handle(self, kwargs):
+        with NixlEPAll2AllManager._lock:
+            stage = bool(kwargs.get("stage", False))
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                assert not stage, (
+                    "NIXL EP staged initialization requires an existing buffer"
+                )
+                max_num_tokens_per_dp_rank = kwargs["max_num_tokens_per_dp_rank"]
+                num_experts_per_rank = (
+                    kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+                )
+                self._init_buffer(
+                    max_num_tokens_per_dp_rank=max_num_tokens_per_dp_rank,
+                    token_hidden_size=kwargs["token_hidden_size"],
+                    num_experts_per_rank=num_experts_per_rank,
+                )
+            else:
+                self._ensure_ep_size(stage=stage)
+
+            assert NixlEPAll2AllManager._buffer is not None
+            handle = NixlEPAll2AllManager._buffer.buffer
+            return handle
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        raise NotImplementedError
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def destroy(self):
+        # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
+        # scale-up/down, so we cannot destroy the persistent buffer here.
+        assert NixlEPAll2AllManager._buffer is not None
+        buffer = NixlEPAll2AllManager._buffer.buffer
+        buffer.set_tcp_store_group(None)
+
+    # NIXL EP uses RDMA so no SMs are used for communication
+    def max_sms_used(self) -> int | None:
+        return 0
+
+
+class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
+    """
+    All2All communication based on flashinfer all2allv/two-sided NVLink kernels.
     """
 
     # This type lint could be removed after all of the work in
@@ -418,11 +513,11 @@ class FlashInferAllToAllManager(All2AllManagerBase):
     rank: int
     world_size: int
 
-    def __init__(self, cpu_group):
-        assert has_flashinfer_all2all(), (
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert has_flashinfer_nvlink_two_sided(), (
             "flashinfer all2all module not found. Please install/check flashinfer"
         )  # noqa
-        super().__init__(cpu_group)
+        super().__init__(cpu_group, tcp_store_group)
         logger.debug(
             "Initialize for flashinfer All2All rank=%d, world size=%d",
             self.rank,
@@ -454,15 +549,18 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             CustomCommunicator,
         )
 
-        dp_config = MnnvlConfig(
-            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
             allocation_granularity=0,  # Auto-detect
         )
 
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, dp_config)
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
         self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, dp_config
+            self.mapping, ep_config
         )
 
         self.world_size = world_size
@@ -476,7 +574,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
     def ensure_alltoall_workspace_initialized(self):
         """Ensure workspace is initialized"""
-        if not has_flashinfer_all2all():
+        if not has_flashinfer_nvlink_two_sided():
             return False
 
         if self.world_size <= 1:
@@ -486,7 +584,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             self.initialize(
                 world_size=self.world_size,
                 rank=self.rank,
-                gpus_per_node=torch.cuda.device_count,
+                gpus_per_node=torch.accelerator.device_count,
             )
         return self.initialized
 
@@ -512,15 +610,173 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.initialized = False
 
 
-class MoriAll2AllManager(All2AllManagerBase):
+class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
+    """
+    All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
+    This is a newer kernel from trtllm that should perform better than the kernel
+    used by flashinfer_nvlink_two_sided.
+    """
+
+    rank: int
+    world_size: int
+
     def __init__(self, cpu_group):
+        assert has_flashinfer_nvlink_one_sided(), (
+            "flashinfer trtllm_moe_alltoall module not found. "
+            "Please install/check flashinfer"
+        )
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize FlashInfer One-sided NVLink rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.initialized = False
+        self.moe_alltoall: MoeAlltoAll | None = None
+        self.mapping = None
+        self.workspace_size = 0
+        self.max_num_tokens = 0
+        self.top_k = 0
+        self.num_experts = 0
+
+    def initialize(
+        self,
+        max_num_tokens: int,
+        top_k: int,
+        num_experts: int,
+        hidden_size: int,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_scale_bytes_per_token: int = 0,
+    ):
+        """Initialize (or grow) the MoeAlltoAll workspace."""
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
+        total_dispatch_payload_size_per_token = (
+            hidden_bytes
+            + dispatch_scale_bytes_per_token
+            + top_k * 4  # int32 topks ids
+            + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+        # workspace_size and max_num_tokens are kernel-side max-bounds, so
+        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
+        # need the shared workspace grown to the union. top_k and num_experts
+        # must match across layers: top_k is a strict-equality assert at
+        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
+        # feeds the expert-to-rank routing math, so any mismatch would crash
+        # or silently corrupt routing. All ranks see the same MoE layers in
+        # the same order with identical shapes, so the skip / rebuild
+        # branches are taken consistently across ranks.
+        if self.initialized:
+            assert top_k == self.top_k, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous top_k across MoE layers (got {top_k}, "
+                f"was built with {self.top_k})"
+            )
+            assert num_experts == self.num_experts, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous num_experts across MoE layers (got "
+                f"{num_experts}, was built with {self.num_experts})"
+            )
+            if (
+                needed_workspace_size <= self.workspace_size
+                and max_num_tokens <= self.max_num_tokens
+            ):
+                return
+
+        self.workspace_size = max(self.workspace_size, needed_workspace_size)
+        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
+        self.top_k = top_k
+        self.num_experts = num_experts
+
+        self.cleanup()
+        gpus_per_node = torch.accelerator.device_count()
+        logger.debug(
+            "Making One-sided NVLink mapping: rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.mapping = Mapping(
+            self.world_size,
+            self.rank,
+            gpus_per_node,
+            tp_size=self.world_size,
+            moe_ep_size=self.world_size,
+        )
+
+        from vllm.distributed.device_communicators.mnnvl_compat import (
+            CustomCommunicator,
+        )
+
+        # MNNVL workspace is allocated per rank in the comm_backend's group; the
+        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
+        # must span the EP group (= DP*PCP*TP), not the DP group.
+        ep_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(self.cpu_group),
+        )
+
+        self.moe_alltoall = MoeAlltoAll(
+            mapping=self.mapping,
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
+            workspace_size_per_rank=self.workspace_size,
+            mnnvl_config=ep_config,
+        )
+
+        self.gpus_per_node = gpus_per_node
+        self.initialized = True
+
+        logger.info(
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s",
+            self.rank,
+            self.world_size,
+        )
+        # Scope barrier to the EP group: with PP, different EP groups can
+        # rebuild a different number of times if their MoE layers have
+        # different shape sequences, so a world-level barrier would deadlock.
+        dist.barrier(group=self.cpu_group)
+
+    def get_handle(self, kwargs):
+        return self
+
+    def cleanup(self):
+        """Clean up resources."""
+        if self.initialized and self.moe_alltoall is not None:
+            try:
+                del self.moe_alltoall
+            except Exception as e:
+                logger.warning(
+                    "Failed to cleanup FlashInfer One-sided NVLink workspace: %s", e
+                )
+            finally:
+                self.moe_alltoall = None
+                self.mapping = None
+                self.initialized = False
+
+
+class MoriAll2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group, all2all_backend: str):
         assert has_mori(), (
             "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
             " to install MoRI kernels."
         )  # noqa
+        assert all2all_backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+        ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
         import mori
 
         super().__init__(cpu_group)
+        self._all2all_backend = all2all_backend
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
@@ -554,8 +810,12 @@ class MoriAll2AllManager(All2AllManagerBase):
             warp_num_per_block = 16
             block_num = 80
         else:
-            # multi node
-            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+            # Multi-node: kernel follows --all2all-backend (mirrors deepep_* split).
+            # mori_low_latency → InterNodeV1LL; mori_high_throughput → V1.
+            if self._all2all_backend == "mori_low_latency":
+                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
+            else:
+                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
             if on_gfx942():
                 warp_num_per_block = 16
                 block_num = 32

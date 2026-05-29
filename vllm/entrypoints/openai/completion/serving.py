@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-import jinja2
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -34,7 +36,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -42,6 +44,9 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -52,20 +57,20 @@ class OpenAIServingCompletion(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        openai_serving_render: "OpenAIServingRender",
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
-        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
+        self.openai_serving_render = openai_serving_render
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -80,13 +85,15 @@ class OpenAIServingCompletion(OpenAIServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
+    ) -> list[EngineInput] | ErrorResponse:
         """
-        render completion request by validating and preprocessing inputs.
+        Validate the model and preprocess a completion request.
+
+        Delegates preprocessing logic to OpenAIServingRender, adding the
+        engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A list of engine_prompts on success,
-            or an ErrorResponse on failure.
+            A list of engine_inputs on success, or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -98,29 +105,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
-
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response("Echo is unsupported with prompt embeds.")
-
-        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "prompt_logprobs is not compatible with prompt embeds."
-            )
-
-        try:
-            engine_prompts = await self._preprocess_completion(
-                request,
-                prompt_input=request.prompt,
-                prompt_embeds=request.prompt_embeds,
-            )
-        except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
-
-        return engine_prompts
+        return await self.openai_serving_render.render_completion(request)
 
     async def create_completion(
         self,
@@ -136,11 +121,25 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_completion(request, raw_request), request, raw_request
+        )
+
+    async def _create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
+        if request.stream and request.use_beam_search:
+            return self.create_error_response(
+                "Streaming is not currently supported with beam search"
+            )
+
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
             return result
 
-        engine_prompts = result
+        engine_inputs = result
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -149,11 +148,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        try:
-            lora_request = self._maybe_get_adapters(request)
-        except (ValueError, TypeError, RuntimeError) as e:
-            logger.exception("Error preparing request components")
-            return self.create_error_response(e)
+        lora_request = self._maybe_get_adapters(request)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
@@ -161,80 +156,75 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        try:
-            for i, engine_prompt in enumerate(engine_prompts):
-                max_tokens = get_max_tokens(
-                    max_model_len,
-                    request.max_tokens,
-                    self._extract_prompt_len(engine_prompt),
+        for i, engine_input in enumerate(engine_inputs):
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_tokens,
+                self._extract_prompt_len(engine_input),
+                self.default_sampling_params,
+                self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
+            )
+
+            sampling_params: SamplingParams | BeamSearchParams
+            if request.use_beam_search:
+                sampling_params = request.to_beam_search_params(
+                    max_tokens, self.default_sampling_params
+                )
+            else:
+                sampling_params = request.to_sampling_params(
+                    max_tokens,
                     self.default_sampling_params,
-                    self.override_max_tokens,
                 )
 
-                sampling_params: SamplingParams | BeamSearchParams
-                if request.use_beam_search:
-                    sampling_params = request.to_beam_search_params(
-                        max_tokens, self.default_sampling_params
-                    )
-                else:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.default_sampling_params,
-                    )
+            request_id_item = f"{request_id}-{i}"
 
-                request_id_item = f"{request_id}-{i}"
+            self._log_inputs(
+                request_id_item,
+                engine_input,
+                params=sampling_params,
+                lora_request=lora_request,
+            )
 
-                self._log_inputs(
-                    request_id_item,
-                    engine_prompt,
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
+
+            if isinstance(sampling_params, BeamSearchParams):
+                generator = self.beam_search(
+                    prompt=engine_input,
+                    request_id=request_id,
                     params=sampling_params,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
+                )
+            else:
+                generator = self.engine_client.generate(
+                    engine_input,
+                    sampling_params,
+                    request_id_item,
+                    lora_request=lora_request,
+                    trace_headers=trace_headers,
+                    priority=request.priority,
+                    data_parallel_rank=data_parallel_rank,
                 )
 
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
-                )
-
-                if isinstance(sampling_params, BeamSearchParams):
-                    generator = self.beam_search(
-                        prompt=engine_prompt,
-                        request_id=request_id,
-                        params=sampling_params,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                    )
-                else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        data_parallel_rank=data_parallel_rank,
-                    )
-
-                generators.append(generator)
-        except ValueError as e:
-            return self.create_error_response(e)
+            generators.append(generator)
 
         result_generator = merge_async_iterators(*generators)
 
         model_name = self.models.model_name(lora_request)
-        num_prompts = len(engine_prompts)
-
-        # We do not stream the results when using beam search.
-        stream = request.stream and not request.use_beam_search
+        num_prompts = len(engine_inputs)
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
 
-        if stream:
+        if request.stream:
             return self.completion_stream_generator(
                 request,
-                engine_prompts,
+                engine_inputs,
                 result_generator,
                 request_id,
                 created_time,
@@ -257,8 +247,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    engine_prompt = engine_prompts[i]
-                    final_res.prompt = self._extract_prompt_text(engine_prompt)
+                    final_res.prompt = self._extract_prompt_text(engine_inputs[i])
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -273,10 +262,6 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except GenerationError as e:
-            return self._convert_generation_error_to_response(e)
-        except ValueError as e:
-            return self.create_error_response(e)
 
         # When user requests streaming but we don't stream, we still need to
         # return a streaming response with a single event.
@@ -294,7 +279,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[ProcessorInputs],
+        engine_inputs: list[EngineInput],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -327,8 +312,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 prompt_text = res.prompt
                 if prompt_text is None:
-                    engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_prompt)
+                    engine_input = engine_inputs[prompt_idx]
+                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -411,6 +396,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
+                        object="text_completion",
                         created=created_time,
                         model=model_name,
                         choices=[
@@ -429,6 +415,14 @@ class OpenAIServingCompletion(OpenAIServing):
                             )
                         ],
                     )
+                    # Stamp on terminal chunk only when no trailing usage chunk
+                    # will follow (that one is the true final message).
+                    if (
+                        not include_usage
+                        and self.system_fingerprint is not None
+                        and finish_reason is not None
+                    ):
+                        chunk.system_fingerprint = self.system_fingerprint
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
                         completion_tokens = previous_num_tokens[i]
@@ -438,7 +432,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             total_tokens=prompt_tokens + completion_tokens,
                         )
 
-                    response_json = chunk.model_dump_json(exclude_unset=False)
+                    response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
 
             total_prompt_tokens = sum(num_prompt_tokens)
@@ -461,6 +455,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     model=model_name,
                     choices=[],
                     usage=final_usage_info,
+                    system_fingerprint=self.system_fingerprint,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -546,6 +541,18 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                # Encode routed_experts for transport. JSON can't carry raw
+                # bytes, so we write the ndarray as a ``.npy`` byte stream
+                # and base64-encode it. ``pybase64`` is ~3x faster than the
+                # stdlib ``base64`` on large payloads thanks to SIMD.
+                routed_experts_b64 = None
+                if output.routed_experts is not None:
+                    buf = io.BytesIO()
+                    np.save(buf, output.routed_experts)
+                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                        "ascii"
+                    )
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -559,6 +566,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=routed_experts_b64,
                 )
                 choices.append(choice_data)
 
@@ -590,6 +598,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
         )
 

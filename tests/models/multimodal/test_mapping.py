@@ -5,14 +5,73 @@ from collections.abc import Iterable
 import pytest
 import torch
 import transformers
-from transformers import AutoConfig, PreTrainedModel
+from transformers import AutoConfig, AutoModel, PreTrainedModel
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.base import Base as TransformersBase
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.transformers_utils.config import try_get_safetensors_metadata
 
 from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+
+
+def test_cosmos3_new_checkpoint_weights_mapper():
+    from vllm.model_executor.models.cosmos3 import Cosmos3ForConditionalGeneration
+
+    mapper = Cosmos3ForConditionalGeneration.hf_to_vllm_mapper
+
+    assert mapper.apply_list(
+        [
+            "layers.0.self_attn.to_q.weight",
+            "layers.0.self_attn.to_k.weight",
+            "layers.0.self_attn.to_v.weight",
+            "layers.0.self_attn.to_out.weight",
+            "layers.0.self_attn.norm_q.weight",
+            "layers.0.self_attn.norm_k.weight",
+            "embed_tokens.weight",
+            "norm.weight",
+            "lm_head.weight",
+            "blocks.0.attn.qkv.weight",
+        ]
+    ) == [
+        "language_model.model.layers.0.self_attn.q_proj.weight",
+        "language_model.model.layers.0.self_attn.k_proj.weight",
+        "language_model.model.layers.0.self_attn.v_proj.weight",
+        "language_model.model.layers.0.self_attn.o_proj.weight",
+        "language_model.model.layers.0.self_attn.q_norm.weight",
+        "language_model.model.layers.0.self_attn.k_norm.weight",
+        "language_model.model.embed_tokens.weight",
+        "language_model.model.norm.weight",
+        "language_model.lm_head.weight",
+        "visual.blocks.0.attn.qkv.weight",
+    ]
+
+    assert (
+        mapper.apply_list(
+            [
+                "layers.0.self_attn.add_q_proj.weight",
+                "layers.0.self_attn.add_k_proj.weight",
+                "layers.0.self_attn.add_v_proj.weight",
+                "layers.0.self_attn.to_add_out.weight",
+                "layers.0.self_attn.norm_added_q.weight",
+                "layers.0.self_attn.norm_added_k.weight",
+                "layers.0.self_attn.q_proj_moe_gen.weight",
+                "layers.0.mlp_moe_gen.gate_up_proj.weight",
+                "norm_moe_gen.weight",
+                "proj_in.weight",
+                "proj_out.weight",
+                "time_embedder.linear_1.weight",
+                "audio_proj_in.weight",
+                "audio_proj_out.weight",
+                "action_proj_in.weight",
+                "action_proj_out.weight",
+                "audio_modality_embed",
+                "action_modality_embed",
+            ]
+        )
+        == []
+    )
 
 
 def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
@@ -23,6 +82,16 @@ def create_repo_dummy_weights(repo: str) -> Iterable[tuple[str, torch.Tensor]]:
         return ((name, torch.empty(0)) for name in weight_names)
 
 
+def create_dummy_base_model(repo: str, model_arch: str) -> PreTrainedModel:
+    """
+    Create weights from a dummy meta deserialized hf base model with name conversion
+    """
+    config = AutoConfig.from_pretrained(repo)
+    with torch.device("meta"):
+        model = AutoModel.from_config(config)
+    return model
+
+
 def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     """
     Create weights from a dummy meta deserialized hf model with name conversion
@@ -31,12 +100,6 @@ def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
         model = model_cls._from_config(config)
-    # TODO(hmellor): Remove this once Transformers has fixed tied weights on meta device
-    # https://github.com/huggingface/transformers/issues/43522
-    if getattr(config.get_text_config(), "tie_word_embeddings", False) or getattr(
-        config, "tie_word_embeddings", False
-    ):
-        model.tie_weights()
     return model
 
 
@@ -85,6 +148,19 @@ def test_hf_model_weights_mapper(model_arch: str):
         dtype=model_info.dtype,
     )
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
+    if issubclass(model_cls, TransformersBase):
+        # Transformers backend models create their mapper during __init__
+        # by inspecting the HF model instance. We simulate this by calling
+        # _create_hf_to_vllm_mapper with a minimal proxy object.
+        model_cls = type(
+            "ProxyModelCls",
+            (),
+            {
+                "model": create_dummy_base_model(model_id, model_arch),
+                "_maybe_apply_model_mapping": lambda self: None,
+            },
+        )()
+        TransformersBase._create_hf_to_vllm_mapper(model_cls)
 
     original_weights = create_repo_dummy_weights(model_id)
     hf_dummy_model = create_dummy_model(model_id, model_arch)
@@ -102,6 +178,18 @@ def test_hf_model_weights_mapper(model_arch: str):
 
     # Some checkpoints may have buffers, we ignore them for this test
     ref_weight_names -= buffer_names
+
+    # Some checkpoints include tied weights (e.g. lm_head tied to embed_tokens) in the
+    # safetensors file. In Transformers v5, named_parameters() will not include them
+    # after they are tied in the model, so the mapper will not be able to map them.
+    # We exclude them from the reference weight names for this test.
+    if isinstance(tied := getattr(hf_dummy_model, "_tied_weights_keys", None), dict):
+        config = hf_dummy_model.config
+        key = "tie_word_embeddings"
+        if getattr(config.get_text_config(), key, False) or getattr(config, key, False):
+            mapped_tied_weights = mapper.apply((k, None) for k in tied)
+            tied_weight_names = set(map(lambda x: x[0], mapped_tied_weights))
+            ref_weight_names -= tied_weight_names
 
     weights_missing = ref_weight_names - weight_names
     weights_unmapped = weight_names - ref_weight_names

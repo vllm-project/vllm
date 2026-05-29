@@ -5,6 +5,7 @@ from typing import Any, Literal, get_args
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.tasks import PoolingTask
 from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
@@ -19,6 +20,11 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 @config
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
+
+    task: PoolingTask | None = None
+    """
+    The task used for pooling.
+    """
 
     pooling_type: SequencePoolingType | TokenPoolingType | None = None
     """
@@ -71,10 +77,19 @@ class PoolerConfig:
     Defaults to None (i.e. set to max_model_len).
     """
 
-    ## for classification models
-    logit_bias: float | None = None
+    ## for classification models — affine score calibration
+    logit_mean: float | None = None
     """
-    If provided, apply classification logit biases. Defaults to None.
+    If provided, subtract this value from classification logits before
+    activation. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
+    """
+
+    logit_sigma: float | None = None
+    """
+    If provided, divide the classification logits by this value after
+    mean subtraction. Used for affine score calibration (Platt scaling):
+    activation((logit - logit_mean) / logit_sigma). Defaults to None.
     """
 
     ## for reward models
@@ -92,6 +107,9 @@ class PoolerConfig:
     """
 
     def __post_init__(self) -> None:
+        if self.logit_sigma is not None and self.logit_sigma == 0:
+            raise ValueError("logit_sigma cannot be 0 (division by zero)")
+
         if pooling_type := self.pooling_type:
             if self.seq_pooling_type is not None:
                 raise ValueError(
@@ -108,14 +126,14 @@ class PoolerConfig:
                     pooling_type,
                     pooling_type,
                 )
-                self.seq_pooling_type = pooling_type
+                self.seq_pooling_type = pooling_type  # type: ignore[assignment]
             elif pooling_type in TOK_POOLING_TYPES:
                 logger.debug(
                     "Resolved `pooling_type=%r` to `tok_pooling_type=%r`.",
                     pooling_type,
                     pooling_type,
                 )
-                self.tok_pooling_type = pooling_type
+                self.tok_pooling_type = pooling_type  # type: ignore[assignment]
             else:
                 raise NotImplementedError(pooling_type)
 

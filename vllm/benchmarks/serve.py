@@ -45,6 +45,7 @@ from vllm.benchmarks.datasets import SampleRequest, add_dataset_parser, get_samp
 from vllm.benchmarks.lib.endpoint_request_func import (
     ASYNC_REQUEST_FUNCS,
     OPENAI_COMPATIBLE_BACKENDS,
+    POOLING_BACKENDS,
     RequestFuncInput,
     RequestFuncOutput,
 )
@@ -127,26 +128,30 @@ async def fetch_spec_decode_metrics(
                     continue
 
                 if line.startswith("vllm:spec_decode"):
+                    # Extract metric name (before labels) to avoid matching
+                    # substrings inside label values.
+                    parts = line.split(None, 1)
+                    metric_name = parts[0].split("{")[0]
+                    if not metric_name.endswith("_total"):
+                        continue
                     found_spec_decode = True
-                    parts = line.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            if "num_drafts" in line:
-                                num_drafts += int(float(parts[-1]))
-                            elif "num_draft_tokens" in line:
-                                num_draft_tokens += int(float(parts[-1]))
-                            elif "num_accepted_tokens_per_pos" in line:
-                                pos_label = 'position="'
-                                if pos_label in line:
-                                    start = line.index(pos_label) + len(pos_label)
-                                    end = line.index('"', start)
-                                    pos = int(line[start:end])
-                                    val = int(float(parts[-1]))
-                                    accepted_per_pos[pos] = (
-                                        accepted_per_pos.get(pos, 0) + val
-                                    )
-                            elif "num_accepted_tokens" in line:
-                                num_accepted_tokens += int(float(parts[-1]))
+                    with contextlib.suppress(ValueError):
+                        if "num_drafts" in metric_name:
+                            num_drafts += int(float(parts[-1]))
+                        elif "num_draft_tokens" in metric_name:
+                            num_draft_tokens += int(float(parts[-1]))
+                        elif "num_accepted_tokens_per_pos" in metric_name:
+                            pos_label = 'position="'
+                            if pos_label in line:
+                                start = line.index(pos_label) + len(pos_label)
+                                end = line.index('"', start)
+                                pos = int(line[start:end])
+                                val = int(float(parts[-1]))
+                                accepted_per_pos[pos] = (
+                                    accepted_per_pos.get(pos, 0) + val
+                                )
+                        elif "num_accepted_tokens" in metric_name:
+                            num_accepted_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -246,6 +251,7 @@ async def get_request(
     ramp_up_strategy: Literal["linear", "exponential"] | None = None,
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
+    self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -285,49 +291,59 @@ async def get_request(
     # Precompute delays among requests to minimize request send laggings
     request_rates = []
     delay_ts = []
-    for request_index, request in enumerate(input_requests):
-        current_request_rate = _get_current_request_rate(
-            ramp_up_strategy,
-            ramp_up_start_rps,
-            ramp_up_end_rps,
-            request_index,
-            total_requests,
-            request_rate,
-        )
-        assert current_request_rate > 0.0, (
-            f"Obtained non-positive request rate {current_request_rate}."
-        )
-        request_rates.append(current_request_rate)
-        if current_request_rate == float("inf"):
-            delay_ts.append(0)
-        elif burstiness == float("inf"):
-            # when burstiness tends to infinity, the delay time becomes constant
-            # and tends to the inverse of the request rate
-            delay_ts.append(1.0 / current_request_rate)
-        else:
-            theta = 1.0 / (current_request_rate * burstiness)
 
-            # Sample the request interval from the gamma distribution.
-            # If burstiness is 1, it follows exponential distribution.
-            delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+    # if the traces have timing info then:
+    if not self_timed:
+        for request_index, request in enumerate(input_requests):
+            current_request_rate = _get_current_request_rate(
+                ramp_up_strategy,
+                ramp_up_start_rps,
+                ramp_up_end_rps,
+                request_index,
+                total_requests,
+                request_rate,
+            )
+            assert current_request_rate > 0.0, (
+                f"Obtained non-positive request rate {current_request_rate}."
+            )
+            request_rates.append(current_request_rate)
+            if current_request_rate == float("inf"):
+                delay_ts.append(0)
+            elif burstiness == float("inf"):
+                # when burstiness tends to infinity, the delay time becomes constant
+                # and tends to the inverse of the request rate
+                delay_ts.append(1.0 / current_request_rate)
+            else:
+                theta = 1.0 / (current_request_rate * burstiness)
 
-    # Calculate the cumulative delay time from the first sent out requests.
-    for i in range(1, len(delay_ts)):
-        delay_ts[i] += delay_ts[i - 1]
-    if ramp_up_strategy is None and delay_ts[-1] != 0:
-        # When ramp_up_strategy is not set, we assume the request rate is fixed
-        # and all requests should be sent in target_total_delay_s, the following
-        # logic would re-scale delay time to ensure the final delay_ts
-        # align with target_total_delay_s.
-        #
-        # NOTE: If we simply accumulate the random delta values
-        # from the gamma distribution, their sum would have 1-2% gap
-        # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stabilizing the throughput data
-        # from different random seeds.
-        target_total_delay_s = total_requests / request_rate
-        normalize_factor = target_total_delay_s / delay_ts[-1]
-        delay_ts = [delay * normalize_factor for delay in delay_ts]
+                # Sample the request interval from the gamma distribution.
+                # If burstiness is 1, it follows exponential distribution.
+                delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+
+        # Calculate the cumulative delay time from the first sent out requests.
+        for i in range(1, len(delay_ts)):
+            delay_ts[i] += delay_ts[i - 1]
+        if ramp_up_strategy is None and delay_ts[-1] != 0:
+            # When ramp_up_strategy is not set, we assume the request rate is fixed
+            # and all requests should be sent in target_total_delay_s, the following
+            # logic would re-scale delay time to ensure the final delay_ts
+            # align with target_total_delay_s.
+            #
+            # NOTE: If we simply accumulate the random delta values
+            # from the gamma distribution, their sum would have 1-2% gap
+            # from target_total_delay_s. The purpose of the following logic is to
+            # close the gap for stabilizing the throughput data
+            # from different random seeds.
+            target_total_delay_s = total_requests / request_rate
+            normalize_factor = target_total_delay_s / delay_ts[-1]
+            delay_ts = [delay * normalize_factor for delay in delay_ts]
+    else:
+        for request_index, request in enumerate(input_requests):
+            # this is cumulative running ts, from which sleep is calculated later
+            delay_ts.append(request.timestamp)
+            # TODO: there is no notion of RPS here, may be we can calculate
+            # from the trace.
+            request_rates.append(0.0)
 
     start_ts = time.time()
     for request_index, request in enumerate(input_requests):
@@ -438,7 +454,7 @@ def calculate_metrics(
                         ).input_ids
                     )
             actual_output_lens.append(output_len)
-            total_input += input_requests[i].prompt_len
+            total_input += outputs[i].prompt_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
@@ -623,11 +639,13 @@ async def benchmark(
     lora_modules: Iterable[str] | None,
     extra_headers: dict | None,
     extra_body: dict | None,
+    lora_assignment: Literal["random", "round-robin"] = "random",
     ramp_up_strategy: Literal["linear", "exponential"] | None = None,
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    self_timed: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -730,10 +748,20 @@ async def benchmark(
     print("Starting main benchmark run...")
 
     if lora_modules:
-        # For each input request, choose a LoRA module at random.
-        lora_modules = iter(
-            [random.choice(lora_modules) for _ in range(len(input_requests))]
-        )
+        lora_modules_list = list(lora_modules)
+        if lora_assignment == "round-robin":
+            # Deterministic round-robin assignment across requests.
+            lora_modules = iter(
+                [
+                    lora_modules_list[i % len(lora_modules_list)]
+                    for i in range(len(input_requests))
+                ]
+            )
+        else:
+            # For each input request, choose a LoRA module at random.
+            lora_modules = iter(
+                [random.choice(lora_modules_list) for _ in range(len(input_requests))]
+            )
 
     if profile:
         print("Starting profiler...")
@@ -757,18 +785,20 @@ async def benchmark(
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
+    if not self_timed:
+        if ramp_up_strategy is not None:
+            print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+            print(
+                f"Will increase RPS from {ramp_up_start_rps} to "
+                f"{ramp_up_end_rps} RPS over the duration of the benchmark."
+            )
+        else:
+            print(f"Traffic request rate: {request_rate}")
 
-    if ramp_up_strategy is not None:
-        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
-        print(
-            f"Will increase RPS from {ramp_up_start_rps} to "
-            f"{ramp_up_end_rps} RPS over the duration of the benchmark."
-        )
+        print(f"Burstiness factor: {burstiness} ({distribution})")
+        print(f"Maximum request concurrency: {max_concurrency}")
     else:
-        print(f"Traffic request rate: {request_rate}")
-
-    print(f"Burstiness factor: {burstiness} ({distribution})")
-    print(f"Maximum request concurrency: {max_concurrency}")
+        print("Self timing is set, using the timestamps from the trace file.")
 
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
 
@@ -807,6 +837,7 @@ async def benchmark(
         ramp_up_strategy,
         ramp_up_start_rps,
         ramp_up_end_rps,
+        self_timed,
     ):
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
@@ -1321,6 +1352,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
+        - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
         - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
@@ -1418,6 +1450,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
         "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
+    )
+    parser.add_argument(
+        "--self-timed",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use timing information from the traces instead of the configuration. "
+        "This is useful when replaying traces faithfully based on their timestamps. "
+        "When unset, defaults to False, except for --dataset-name=timed_trace where "
+        "it defaults to True. Use --no-self-timed to force off. When off, user "
+        "defined generation rates are used and in trace timing info is ignored.",
     )
     parser.add_argument(
         "--percentile-metrics",
@@ -1521,7 +1563,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="A subset of LoRA module names passed in when "
         "launching the server. For each request, the "
-        "script chooses a LoRA module at random.",
+        "script chooses a LoRA module at random by default. "
+        "Use --lora-assignment to control selection strategy.",
+    )
+
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA modules to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRA modules deterministically.",
     )
 
     parser.add_argument(
@@ -1587,14 +1640,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--timeline-itl-thresholds",
-        type=float,
-        nargs=2,
-        default=[25.0, 50.0],
-        metavar=("THRESHOLD1", "THRESHOLD2"),
+        type=str,
+        default="25,50",
         help="ITL thresholds in milliseconds for timeline plot coloring. "
-        "Specify two values to categorize inter-token latencies into three groups: "
-        "below first threshold (green), between thresholds (orange), "
-        "and above second threshold (red). Default: 25 50 (milliseconds).",
+        "Specify two comma-separated values to categorize inter-token "
+        "latencies into three groups: below first threshold (green), "
+        "between thresholds (orange), and above second threshold (red).",
     )
     parser.add_argument(
         "--plot-dataset-stats",
@@ -1612,6 +1663,19 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Validate timeline ITL thresholds
+    if args.plot_timeline:
+        try:
+            itl_thresholds = [
+                float(t.strip()) for t in args.timeline_itl_thresholds.split(",")
+            ]
+            if len(itl_thresholds) != 2:
+                raise ValueError(
+                    f"Expected 2 ITL threshold values, got {len(itl_thresholds)}"
+                )
+        except ValueError as e:
+            raise ValueError(f"Invalid --timeline-itl-thresholds format: {e}") from e
 
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
@@ -1687,10 +1751,23 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             trust_remote_code=args.trust_remote_code,
         )
 
+    # Validate dataset name/path
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
+        )
+
+    if (
+        args.dataset_name
+        in ["random", "random-mm", "random-rerank", "prefix_repetition"]
+        and args.dataset_path is not None
+    ):
+        raise ValueError(
+            f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
+            "Please specify the appropriate --dataset-name (e.g., "
+            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            f"{args.dataset_path}"
         )
 
     # Map general --input-len and --output-len to all dataset-specific arguments
@@ -1715,16 +1792,30 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     ):
         args.ignore_eos = True
 
+    if args.dataset_name == "timed_trace":
+        # timed_trace carries per-request timestamps;
+        # ignore EOS so generation runs to the trace's specified output length,
+        # and default to using those timestamps for scheduling unless the user
+        # opted out.
+        args.ignore_eos = True
+        if args.self_timed is None:
+            args.self_timed = True
+    else:
+        # if this is set for anything else, it is an error
+        if args.self_timed is not None:
+            raise ValueError(
+                "--self-timed/--no-self-timed is only supported with "
+                "--dataset-name=timed_trace"
+            )
+        # for any non self-timed trace, this is False
+        args.self_timed = False
+
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
-    task_type = (
-        TaskType.POOLING
-        if "embeddings" in backend or "rerank" in backend
-        else TaskType.GENERATION
-    )
+    task_type = TaskType.POOLING if backend in POOLING_BACKENDS else TaskType.GENERATION
 
     # Collect the sampling parameters.
     if task_type == TaskType.GENERATION:
@@ -1790,6 +1881,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         goodput_config_dict=goodput_config_dict,
         max_concurrency=args.max_concurrency,
         lora_modules=args.lora_modules,
+        lora_assignment=args.lora_assignment,
         extra_headers=headers,
         extra_body=extra_body,
         ramp_up_strategy=args.ramp_up_strategy,
@@ -1797,6 +1889,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        self_timed=args.self_timed,
     )
 
     # Save config and results to json
@@ -1872,7 +1965,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
                 timeline_path = Path(file_name).with_suffix(".timeline.html")
                 # Convert thresholds from milliseconds to seconds
-                itl_thresholds_sec = [t / 1000.0 for t in args.timeline_itl_thresholds]
+                itl_thresholds_sec = [
+                    float(t) / 1000.0 for t in args.timeline_itl_thresholds.split(",")
+                ]
                 generate_timeline_plot(
                     per_request_data, timeline_path, itl_thresholds=itl_thresholds_sec
                 )

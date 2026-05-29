@@ -5,10 +5,12 @@ from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -104,7 +106,7 @@ class AWQConfig(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             # Lazy import to avoid circular import.
             from .awq_marlin import AWQMarlinConfig
             from .moe_wna16 import MoeWNA16Config
@@ -146,7 +148,12 @@ class AWQConfig(QuantizationConfig):
                 self.modules_to_not_convert
             )
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
         if self.modules_to_not_convert:
             return
 
@@ -267,8 +274,9 @@ class AWQLinearMethod(LinearMethodBase):
 
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
-
-        if FP16_MATMUL_HEURISTIC_CONDITION:
+        # Batch invariant mode requires torch.matmul path
+        # for Triton override
+        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
             out = torch.matmul(reshaped_x, out)
         else:

@@ -10,21 +10,33 @@ steps:
       docker build
       --build-arg max_jobs=16
       --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx942;gfx950'
+      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
       --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
       --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
       -f docker/Dockerfile.rocm
       --target test
       --no-cache
       --progress plain .
+    - |
+      docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
+        if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
+        if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
+        if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
+        if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
+        command -v python3
+        command -v uv
+        command -v pytest
+        if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
+          echo No ROCm CLI found in image >&2
+          exit 1
+        fi
+        python3 - <<PY
+      import torch, vllm
+      print(torch.__version__)
+      print(vllm.__version__)
+      PY
+        echo AMD image smoke OK
+      '
     - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
     env:
       DOCKER_BUILDKIT: "1"
-    retry:
-      automatic:
-        - exit_status: -1  # Agent was lost
-          limit: 1
-        - exit_status: -10  # Agent was lost
-          limit: 1
-        - exit_status: 1  # Machine occasionally fail
-          limit: 1

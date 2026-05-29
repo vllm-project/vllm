@@ -14,13 +14,19 @@ import torch
 import torch.nn as nn
 import transformers
 
+from vllm.model_executor.custom_op import PluggableLayer
 
-class CustomQwen2Decoder(nn.Module):
+
+# --8<-- [start:qwen2_decoder]
+@PluggableLayer.register("qwen2_decoder")
+class CustomQwen2Decoder(PluggableLayer):
     """
     Qwen2 visual encoder
     non-causal attention + causal attention
     token_type_ids ：0=non-causal, 1=causal
     """
+
+    # --8<-- [end:qwen2_decoder]
 
     def __init__(
         self,

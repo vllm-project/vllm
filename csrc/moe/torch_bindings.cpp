@@ -16,6 +16,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "bias) -> ()");
   m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
+  m.def(
+      "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
+      "token_expert_indices, Tensor gating_output, bool renormalize, float "
+      "routed_scaling_factor, Tensor? "
+      "bias, Tensor? input_ids, Tensor? tid2eid) -> ()");
+  m.impl("topk_softplus_sqrt", torch::kCUDA, &topk_softplus_sqrt);
+
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
@@ -86,16 +93,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 
   m.def(
-      "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
-      "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
-      "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
-      "int b_q_type, SymInt size_m, "
-      "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
-      "topk, "
-      "int moe_block_size, bool replicate_input, bool apply_weights)"
-      " -> Tensor");
-
-  m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
@@ -104,12 +101,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "permuted_idx)->()");
 
   m.def(
+      "moe_permute_with_scratch(Tensor input, Tensor topk_ids,"
+      "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
+      "int n_local_expert,"
+      "int topk, Tensor! permuted_input, Tensor! "
+      "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
+      "permuted_idx, Tensor! sort_workspace, Tensor! permuted_experts_id, "
+      "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort)->()");
+
+  m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
       "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
       "int topk, Tensor! hidden_states)->()");
 
   m.def("moe_permute_unpermute_supported() -> bool");
+  m.def(
+      "moe_permute_sort_workspace_size(int num_expanded_rows, int n_expert) -> "
+      "int");
   m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
+  m.impl("moe_permute_sort_workspace_size", &moe_permute_sort_workspace_size);
 
   // Row shuffle for MoE
   m.def(
@@ -124,10 +134,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
-
-  // cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
-  m.def("router_gemm_bf16_fp32(Tensor input, Tensor weight) -> Tensor");
-  m.impl("router_gemm_bf16_fp32", torch::kCUDA, &router_gemm_bf16_fp32);
 
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");

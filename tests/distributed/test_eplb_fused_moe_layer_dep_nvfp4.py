@@ -10,6 +10,7 @@ import torch
 
 from tests.kernels.moe.utils import make_test_quant_config
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
@@ -201,7 +202,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 dtype=torch.int32,
                 device=device,
             )
-            fml.enable_eplb = True
+            fml.eplb_state = EplbLayerState()
             fml.set_eplb_state(
                 lidx,
                 torch.zeros(
@@ -253,7 +254,7 @@ def test_eplb_fml(
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     num_local_experts = num_experts // world_size

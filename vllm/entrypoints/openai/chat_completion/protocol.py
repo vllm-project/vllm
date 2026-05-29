@@ -7,12 +7,11 @@ import json
 import time
 from typing import Annotated, Any, ClassVar, Literal
 
-import torch
 from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -38,16 +37,19 @@ from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     BeamSearchParams,
+    RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class ChatMessage(OpenAIBaseModel):
@@ -91,6 +93,16 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -106,6 +118,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request).
+    prompt_text: str | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
@@ -128,13 +143,33 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request); only sent on the first chunk.
+    prompt_text: str | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
+    defer_loading: bool | None = None
+
+    @model_validator(mode="after")
+    def _propagate_defer_loading(self) -> "ChatCompletionToolsParam":
+        if self.defer_loading is not None and self.function.defer_loading is None:
+            self.function.defer_loading = self.defer_loading
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
 
 
 class ChatCompletionNamedFunction(OpenAIBaseModel):
@@ -164,7 +199,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     n: int | None = 1
     presence_penalty: float | None = 0.0
     response_format: AnyResponseFormat | None = None
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
@@ -178,7 +213,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["low", "medium", "high"] | None = None
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Constrains effort on reasoning for reasoning models. "
+            "Currently supported values are none, minimal, low, medium, "
+            "high, xhigh, and max. Reducing reasoning effort can result in "
+            "faster responses and fewer tokens used on reasoning in a response. "
+            "Note that 'max' is specific to the DeepSeek V4 series and is not "
+            "part of the standard OpenAI API specification."
+        ),
+    )
+    thinking_token_budget: ThinkingTokenBudget = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -197,8 +245,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_LONG_INFO.max)] | None = (
-        None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
     )
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
@@ -267,6 +321,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
@@ -277,6 +338,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -310,6 +373,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_prompt_text: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response will include ``prompt_text`` containing the "
+            "prompt string produced by chat templating. In streaming mode it "
+            "is sent only on the first chunk. This is useful for inspecting "
+            "exactly what was fed into the model."
+        ),
+    )
 
     cache_salt: str | None = Field(
         default=None,
@@ -336,25 +408,94 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    repetition_detection: RepetitionDetectionParams | None = Field(
+        default=None,
+        description="Parameters for detecting repetitive N-gram patterns "
+        "in output tokens. If such repetition is detected, generation will "
+        "be ended early. LLMs can sometimes generate repetitive, unhelpful "
+        "token patterns, stopping only when they hit the maximum output length "
+        "(e.g. 'abcdabcdabcd...' or '\\emoji \\emoji \\emoji ...'). This feature "
+        "can detect such behavior and terminate early, saving time and tokens.",
+    )
+
     # --8<-- [end:chat-completion-extra-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_messages_before(cls, data: Any) -> Any:
+        """Pre-process message dicts before Pydantic field validation.
+
+        Performs two normalizations in a single pass:
+        - Converts tool_calls generators/iterators to lists so one-shot
+          generators are not consumed during union type matching.
+        - Renames the deprecated ``reasoning_content`` field to
+          ``reasoning`` so downstream code only needs to check one field.
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+            reasoning_content = msg.pop("reasoning_content", None)
+            if reasoning_content is not None and msg.get("reasoning") is None:
+                msg["reasoning"] = reasoning_content
+        return data
+
+    @model_validator(mode="after")
+    def _materialize_tool_calls_after(self) -> "ChatCompletionRequest":
+        """Convert Pydantic ValidatorIterator wrappers back to lists.
+
+        Even after the "before" validator converts iterables to lists,
+        Pydantic re-wraps them in a ValidatorIterator when validating
+        against ChatCompletionAssistantMessageParam's Iterable[...] type.
+        This "after" pass materialises those wrappers so downstream code
+        (tokenizers, model_dump_json) always sees plain lists.
+        """
+        for msg in self.messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+        return self
+
+    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
 
     def build_chat_params(
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            documents=self.documents,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                    documents=self.documents,
-                    reasoning_effort=self.reasoning_effort,
-                ),
+                extra_kwargs,
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -369,6 +510,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_output_tokens or 0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
@@ -490,17 +632,46 @@ class ChatCompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
+            thinking_token_budget=self.thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
+            repetition_detection=self.repetition_detection,
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -588,6 +759,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+        if not isinstance(data, dict):
+            return data
+
+        # Reject empty tools array, matching OpenAI API behavior
+        if data.get("tools") == []:
+            raise ValueError(
+                "`tools` must not be an empty array. "
+                "Either provide at least one tool or omit the field entirely."
+            )
+
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
@@ -613,18 +796,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'Only named tools, "none", "auto" or "required" '
                     "are supported."
                 )
-
-            # if tool_choice is "required" but the "tools" list is empty,
-            # override the data to behave like "none" to align with
-            # OpenAI’s behavior.
-            if (
-                data["tool_choice"] == "required"
-                and isinstance(data["tools"], list)
-                and len(data["tools"]) == 0
-            ):
-                data["tool_choice"] = "none"
-                del data["tools"]
-                return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
@@ -731,3 +902,85 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                 )
 
         return data
+
+
+class BatchChatCompletionRequest(OpenAIBaseModel):
+    """Request model for the /v1/chat/completions/batch endpoint.
+
+    Accepts the same fields as ChatCompletionRequest except that ``messages``
+    is a list of conversations (each conversation is a
+    ``list[ChatCompletionMessageParam]``).  Each conversation is processed
+    independently and the response contains one choice per conversation,
+    indexed 0, 1, ..., N-1.
+
+    Current limitations compared to the single-conversation endpoint:
+    - Streaming is not supported (``stream`` must be False or omitted).
+    - Tool use is not supported (``tools`` must be omitted).
+    - Beam search is not supported (``use_beam_search`` must be False or omitted).
+    - The ``n`` parameter must be 1 (or omitted).
+    """
+
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
+    model: str | None = None
+
+    # Shared sampling / generation fields — mirror ChatCompletionRequest.
+    frequency_penalty: float | None = 0.0
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = False
+    top_logprobs: int | None = 0
+    max_tokens: int | None = None
+    max_completion_tokens: int | None = None
+    n: int | None = 1
+    presence_penalty: float | None = 0.0
+    response_format: Any | None = None
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
+    stop: str | list[str] | None = Field(default_factory=list)
+    temperature: float | None = 0.7
+    top_p: float | None = 1.0
+    user: str | None = None
+
+    # vLLM extensions
+    best_of: int | None = None
+    use_beam_search: bool = False
+    top_k: int | None = None
+    min_p: float | None = 0.0
+    repetition_penalty: float | None = 1.0
+    length_penalty: float | None = 1.0
+    early_stopping: bool = False
+    structured_outputs: StructuredOutputsParams | None = None
+    request_id: str | None = None
+    add_generation_prompt: bool = True
+    continue_final_message: bool = False
+    chat_template: str | None = None
+    chat_template_kwargs: dict[str, Any] | None = None
+    include_stop_str_in_output: bool = False
+    guided_decoding_backend: str | None = None
+    echo: bool = False
+    return_token_ids: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_batch_mode(cls, data: Any) -> Any:
+        if isinstance(data, BatchChatCompletionRequest):
+            data = data.model_dump(exclude_unset=True)
+        if data.get("use_beam_search"):
+            raise ValueError(
+                "Batch chat completions do not support beam search. "
+                "Please set `use_beam_search` to False."
+            )
+        n = data.get("n", 1)
+        if n is not None and n != 1:
+            raise ValueError(
+                "Batch chat completions do not support `n > 1`. Please set `n` to 1."
+            )
+        return data
+
+    def to_chat_completion_request(
+        self, messages: list[ChatCompletionMessageParam]
+    ) -> ChatCompletionRequest:
+        """Build a single-conversation ChatCompletionRequest from one conversation."""
+        data = self.model_dump(exclude={"messages"}, exclude_none=True)
+        data["messages"] = messages
+        return ChatCompletionRequest.model_validate(data)

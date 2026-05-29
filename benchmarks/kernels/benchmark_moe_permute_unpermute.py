@@ -10,6 +10,7 @@ from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_unpermute,
 )
@@ -54,6 +55,15 @@ def benchmark_permute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare(i: int):
         input_gating.copy_(gating_output[i])
@@ -65,23 +75,24 @@ def benchmark_permute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
 
     # JIT compilation & warmup
     run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Capture 10 invocations with CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(10):
             run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Warmup
     for _ in range(5):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
@@ -89,7 +100,7 @@ def benchmark_permute(
     latencies: list[float] = []
     for i in range(num_iters):
         prepare(i)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         start_event.record()
         graph.replay()
@@ -123,6 +134,15 @@ def benchmark_unpermute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare():
         (
@@ -137,6 +157,7 @@ def benchmark_unpermute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
         # convert to fp16/bf16 as gemm output
         return (
@@ -159,26 +180,26 @@ def benchmark_unpermute(
     # JIT compilation & warmup
     input = prepare()
     run(input)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Capture 10 invocations with CUDA graph
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         for _ in range(10):
             run(input)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Warmup
     for _ in range(5):
         graph.replay()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_event.record()
         graph.replay()
         end_event.record()

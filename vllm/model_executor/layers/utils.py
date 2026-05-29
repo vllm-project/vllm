@@ -31,27 +31,6 @@ def is_layer_moe_router_gate(prefix: str) -> bool:
     return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
 
 
-def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
-    # Shuffle weight along the last dimension so that
-    # we folded the weights to adjance location
-    # Example:
-    # input:
-    #       [[1, 2, 3, 4, 5, 6],
-    #        [7, 8, 9, 10, 11, 12]]
-    # output:
-    #       [[1, 4, 2, 5, 3, 6],
-    #        [7, 10, 8, 11, 9, 12]]
-    # This will be used together with triton swiglu kernel
-    shape = w.shape
-    N = shape[-1]
-    first = w[..., : N // 2]
-    second = w[..., N // 2 :]
-
-    stacked = torch.stack((first, second), dim=-1)
-    w_shuffled = stacked.reshape(shape)
-    return w_shuffled
-
-
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -143,17 +122,13 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]
 
     cu_count = num_compute_units()
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-        return gemm_a16w16(x, weight, bias)
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
@@ -166,45 +141,56 @@ def rocm_unquantized_gemm_impl(
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
-    fits_wvsplitkrc = CuNeeded <= cu_count
+    fits_wvsplitkrc = (
+        N_p2 * m * ((k + 512 - 1) // 512)
+    ) <= 128 * 1024 * 12  # deterministic
+    fits_wvsplitkrc &= CuNeeded <= cu_count
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0
             and k > 512
             and m % 16 == 0
             and fits_wvsplitkrc
-            and x.is_contiguous()
+            and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
-        x_view = x.reshape(-1, x.size(-1))
-        out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+        return ops.wvSplitKrc(x, weight, cu_count, bias)
+
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx9()
+        and (on_gfx9() or on_gfx1x())
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
-        and x.is_contiguous()
     )
 
-    if use_skinny is not True:
-        return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 5:
+            cu_count = num_compute_units()
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -232,7 +218,7 @@ direct_register_custom_op(
 
 def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return (
-        torch._C._cpu._is_amx_tile_supported()
+        torch.cpu._is_amx_tile_supported()
         and (dtype in (torch.bfloat16, torch.int8))
         and k % 32 == 0
         and n % 16 == 0
@@ -248,8 +234,45 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op
+        if torch.cpu._is_amx_tile_supported():
+            # prepack conv weight
+            layer.weight.data = ops.causal_conv1d_weight_pack(
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+            )
+        return
+
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
+
+    # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
+    if current_platform.is_zen_cpu() and hasattr(
+        torch.ops.zentorch, "zentorch_linear_unary"
+    ):
+        zen_weight = layer.weight.detach()
+        is_prepacked = False
+
+        if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
+            torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+        ):
+            zen_weight = torch.ops.zentorch.zentorch_weight_prepack_for_linear(
+                zen_weight
+            )
+            is_prepacked = True
+
+        layer.cpu_linear = lambda x, weight, bias, _p=is_prepacked: (
+            torch.ops.zentorch.zentorch_linear_unary(
+                x, zen_weight, bias, is_weight_prepacked=_p
+            )
+        )
+        if remove_weight:
+            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        return
 
     if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)

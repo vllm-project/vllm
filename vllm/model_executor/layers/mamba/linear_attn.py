@@ -10,13 +10,11 @@ from einops import rearrange
 from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
-from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.lightning_attn import (
     lightning_attention,
     linear_decode_forward_triton,
@@ -27,78 +25,12 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
-
-
-class MiniMaxText01RMSNormTP(CustomOp):
-    name = "MiniMaxText01RMSNormTP"
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size / self.tp_world)))
-
-        self.weight.weight_loader = self.weight_loader
-        self.variance_epsilon = eps
-
-    @staticmethod
-    def weight_loader(
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-    ) -> None:
-        tp_world = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
-
-    def _forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
-        return x
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert residual is None, "RMSNorm does not support residual connection."
-        return self._forward(x)
-
-    @staticmethod
-    def forward_qk(
-        q_norm: "MiniMaxText01RMSNormTP",
-        k_norm: "MiniMaxText01RMSNormTP",
-        q: torch.Tensor,
-        k: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_dtype = q.dtype
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        q_var = q.pow(2).mean(dim=-1, keepdim=True)
-        k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        if q_norm.tp_world > 1:
-            qk_var = torch.cat([q_var, k_var], dim=-1)
-            qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
-            q_var, k_var = qk_var.chunk(2, dim=-1)
-        q = q * torch.rsqrt(q_var + q_norm.variance_epsilon) * q_norm.weight
-        k = k * torch.rsqrt(k_var + k_norm.variance_epsilon) * k_norm.weight
-        q = q.to(orig_dtype)
-        k = k.to(orig_dtype)
-        return q, k
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 def clear_linear_attention_cache_for_new_sequences(
@@ -227,8 +159,8 @@ class MiniMaxText01LinearKernel:
 
 class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     @property
-    def mamba_type(self) -> str:
-        return "linear_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.LINEAR
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
         assert self.model_config is not None
@@ -396,10 +328,11 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         self, hidden_states: torch.Tensor, output: torch.Tensor, positions: torch.Tensor
     ) -> None:
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, LinearAttentionMetadata)
             num_actual_tokens = (
                 attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
@@ -413,7 +346,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         qkvact = qkvact.view((qkv.shape[0], self.tp_heads, -1))
         q, k, v = torch.split(qkvact, [self.head_dim] * 3, dim=-1)
         if attn_metadata is not None:
-            kv_cache = self.kv_cache[forward_context.virtual_engine][0]
+            kv_cache = self.kv_cache[0]
             state_indices_tensor = attn_metadata.state_indices_tensor
             clear_linear_attention_cache_for_new_sequences(
                 kv_cache, state_indices_tensor, attn_metadata

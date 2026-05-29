@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import multiprocessing
+import multiprocessing.connection
 import time
 import weakref
 
@@ -55,6 +56,26 @@ class DPCoordinator:
     request wave / running state changes.
     """
 
+    def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
+        try:
+            timeout = 120
+            ready = multiprocessing.connection.wait(
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
+            )
+            if not ready:
+                raise RuntimeError(
+                    "DP Coordinator process failed to report ZMQ addresses "
+                    f"within timeout={timeout} seconds during startup."
+                )
+            try:
+                return zmq_addr_pipe.recv()
+            except EOFError:
+                raise RuntimeError(
+                    "DP Coordinator process failed during startup."
+                ) from None
+        finally:
+            zmq_addr_pipe.close()
+
     def __init__(
         self, parallel_config: ParallelConfig, enable_wave_coordination: bool = True
     ):
@@ -66,15 +87,17 @@ class DPCoordinator:
         # Assume coordinator is colocated with front-end procs when not in
         # either external or hybrid DP LB mode.
         local_only = not parallel_config.local_engines_only
-        front_publish_address = get_engine_client_zmq_addr(
-            local_only=local_only, host=host
-        )
-
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+        # NOTE(yongji): handling scaling from intra-node to inter-node
+        if parallel_config.enable_elastic_ep:
+            local_only_eng = False
+
+        front_publish_address = get_engine_client_zmq_addr(local_only, host=host)
+        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host=host)
+        back_output_address = get_engine_client_zmq_addr(local_only_eng, host=host)
 
         context = get_mp_context()
+        parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=False)
         self.proc: multiprocessing.Process = context.Process(
             target=DPCoordinatorProc.run_coordinator,
             name="VLLM_DP_Coordinator",
@@ -83,11 +106,18 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
+                "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
             },
             daemon=True,
         )
         self.proc.start()
+        child_zmq_addr_pipe.close()
+        (
+            front_publish_address,
+            back_output_address,
+            back_publish_address,
+        ) = self._wait_for_zmq_addrs(parent_zmq_addr_pipe)
 
         self.stats_publish_address = front_publish_address
         self.coord_in_address = back_publish_address
@@ -101,8 +131,10 @@ class DPCoordinator:
         """Returns tuple of ZMQ input address, output address."""
         return self.coord_in_address, self.coord_out_address
 
-    def close(self):
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown([self.proc], timeout=timeout)
 
 
 class EngineState:
@@ -131,6 +163,7 @@ class DPCoordinatorProc:
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
     ):
@@ -144,15 +177,20 @@ class DPCoordinatorProc:
                 front_publish_address,
                 back_output_address,
                 back_publish_address,
+                zmq_addr_pipe,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
+        finally:
+            if zmq_addr_pipe is not None:
+                zmq_addr_pipe.close()
 
     def process_input_socket(
         self,
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
+        zmq_addr_pipe=None,
     ):
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
@@ -186,6 +224,17 @@ class DPCoordinatorProc:
                 bind=True,
             ) as publish_back,
         ):
+            if zmq_addr_pipe is not None:
+                try:
+                    zmq_addr_pipe.send(
+                        (
+                            publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                        )
+                    )
+                finally:
+                    zmq_addr_pipe.close()
             # Wait until all engines subscribe.
             for _ in self.engines:
                 if publish_back.recv() != b"\x01":
@@ -201,6 +250,7 @@ class DPCoordinatorProc:
 
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
+            poller.register(publish_back, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
@@ -231,6 +281,22 @@ class DPCoordinatorProc:
                 events = dict(events)
                 wave_state_changed = False
 
+                if publish_back in events:
+                    buffer = publish_back.recv()
+                    if buffer == b"\x01":
+                        # NOTE(yongji): newly started engine subscribed
+                        # We need to send READY message here instead of receiving
+                        # SCALE_ELASTIC_EP notification from engine core client
+                        # as SCALE_ELASTIC_EP is only sent when
+                        # new engines finished initialization.
+                        # Subscription message, on the other hand, is sent
+                        # by each engine during initialization
+                        publish_back.send(b"READY")
+                    elif buffer != b"\x00":
+                        logger.error(
+                            "DP Coordinator received unexpected message from engines"
+                        )
+
                 if publish_front in events:
                     buffer = publish_front.recv()
                     if buffer in (b"\x01", b"\x00"):
@@ -259,7 +325,6 @@ class DPCoordinatorProc:
                             # current_wave
                             # we note that 0 is the wave number for the new
                             # engine
-                            engines_running = False
                             logger.info(
                                 "DPCoordinator scaled up from %s to %s engines",
                                 current_count,

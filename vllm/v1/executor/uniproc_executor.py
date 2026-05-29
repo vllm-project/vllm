@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
@@ -12,15 +12,35 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+
+class AsyncOutputFuture(Future):
+    def __init__(self, async_output: AsyncModelRunnerOutput, single_value: bool):
+        self.async_output = async_output
+        self.single_value = single_value
+        super().__init__()
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise RuntimeError("timeout not implemented")
+
+        if not super().done():
+            try:
+                output = self.async_output.get_output()
+                self.set_result(output if self.single_value else [output])
+            except Exception as e:
+                self.set_exception(e)
+        return super().result()
 
 
 class UniProcExecutor(Executor):
@@ -37,15 +57,17 @@ class UniProcExecutor(Executor):
             shared_worker_lock=Lock(),
         )
 
-        self.async_output_thread: ThreadPoolExecutor | None = None
-        if self.max_concurrent_batches > 1:
-            self.async_output_thread = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="WorkerAsyncOutput"
-            )
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(local_rank, self.vllm_config)
 
         self.driver_worker.init_worker(all_kwargs=[kwargs])
         self.driver_worker.init_device()
-        self.driver_worker.load_model()
+
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.driver_worker.elastic_ep_execute("load_model")
+        else:
+            self.driver_worker.load_model()
+        current_platform.update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -78,15 +100,7 @@ class UniProcExecutor(Executor):
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
-                if (async_thread := self.async_output_thread) is not None:
-                    if single_value:
-                        return async_thread.submit(result.get_output)
-
-                    def get_output_list() -> list[Any]:
-                        return [result.get_output()]
-
-                    return async_thread.submit(get_output_list)
-                result = result.get_output()
+                return AsyncOutputFuture(result, single_value)
             future = Future[Any]()
             future.set_result(result if single_value else [result])
         except Exception as e:
@@ -97,12 +111,17 @@ class UniProcExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
+        output = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
             non_block=non_block,
             single_value=True,
         )
+        # In non-blocking mode, surface any exception as early as possible.
+        if non_block and output.done():
+            # Raise the exception in-line if the task failed.
+            output.result()
+        return output
 
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
@@ -122,19 +141,13 @@ class UniProcExecutor(Executor):
         # it's running.
         return
 
-    def reinitialize_distributed(
-        self, reconfig_request: ReconfigureDistributedRequest
-    ) -> None:
-        self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
-
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
 
 
 class ExecutorWithExternalLauncher(UniProcExecutor):
@@ -143,7 +156,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     offline inference with tensor parallelism.
 
     see https://github.com/vllm-project/vllm/issues/11400 for
-    the motivation, and examples/offline_inference/torchrun_example.py
+    the motivation, and examples/features/torchrun/torchrun_example_offline.py
     for the usage example.
 
     The key idea: although it is tensor-parallel inference, we only

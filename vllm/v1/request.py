@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
-from typing_extensions import deprecated
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -21,6 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.metrics.stats import PrefillStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -66,6 +66,7 @@ class Request:
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
+        prompt_is_token_ids: list[bool] | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
@@ -74,6 +75,8 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
+        abort_immediately: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -86,6 +89,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -103,7 +109,7 @@ class Request:
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if self.structured_output_request is not None:
-                self.status = RequestStatus.WAITING_FOR_FSM
+                self.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
@@ -114,6 +120,10 @@ class Request:
 
         self.prompt_token_ids = prompt_token_ids
         self.prompt_embeds = prompt_embeds
+        # Per-position mask used in mixed-mode (chat completion with
+        # prompt_embeds). `None` except when both `prompt_token_ids` and
+        # `prompt_embeds` are set and their positions are interleaved.
+        self.prompt_is_token_ids = prompt_is_token_ids
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
@@ -129,8 +139,7 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_tokens = False
+        self.async_tokens_to_discard = 0
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
@@ -146,9 +155,6 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
-        # State
-        # The number of tokens with prefix cache hits.
-        self.num_cached_tokens = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -160,8 +166,7 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # The number of tokens that have been computed remotely.
-        self.num_external_computed_tokens = 0
+        self.prefill_stats: PrefillStats | None = PrefillStats()
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
@@ -177,16 +182,9 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
-    @property
-    @deprecated(
-        "Request.eos_token_id will be removed in v0.18. "
-        "Please use Request.sampling_params.eos_token_id instead."
-    )
-    def eos_token_id(self) -> int | None:
-        if self.sampling_params is None:
-            return None
-
-        return self.sampling_params.eos_token_id
+        # If True, request should be aborted immediately after being added to
+        # the scheduler so the connector's request_finished hook runs.
+        self.abort_immediately = abort_immediately
 
     @classmethod
     def from_engine_core_request(
@@ -199,6 +197,7 @@ class Request:
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
             prompt_embeds=request.prompt_embeds,
+            prompt_is_token_ids=request.prompt_is_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -210,6 +209,8 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            abort_immediately=request.abort_immediately,
         )
 
     def append_output_token_ids(
@@ -290,6 +291,13 @@ class Request:
         events, self.events = self.events, []
         return events
 
+    def take_prefill_stats(self) -> PrefillStats | None:
+        if self.prefill_stats is None:
+            return None
+        prefill_stats = self.prefill_stats
+        self.prefill_stats = None
+        return prefill_stats
+
     def __lt__(self, other: "Request") -> bool:
         """
         Compare two requests based on priority, arrival time, and request ID.
@@ -308,7 +316,7 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
 
     WAITING = enum.auto()
-    WAITING_FOR_FSM = enum.auto()
+    WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     WAITING_FOR_STREAMING_REQ = enum.auto()
     RUNNING = enum.auto()
@@ -320,6 +328,7 @@ class RequestStatus(enum.IntEnum):
     FINISHED_ABORTED = enum.auto()
     FINISHED_IGNORED = enum.auto()
     FINISHED_ERROR = enum.auto()
+    FINISHED_REPETITION = enum.auto()
 
     def __str__(self) -> str:
         return self.name
@@ -344,4 +353,5 @@ _FINISHED_REASON_MAP = {
     RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
     RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
     RequestStatus.WAITING_FOR_STREAMING_REQ: FinishReason.STOP,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
 }

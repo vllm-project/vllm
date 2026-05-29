@@ -13,12 +13,14 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 class Matches(NamedTuple):
     # simple pointwise
+    aiter_rms_quant_fusion: int = 0
     rms_quant_fusion: int = 0
     act_quant_fusion: int = 0
     norm_rope_fusion: int = 0
     attn_quant_fusion: int = 0
     # distributed
     ar_rms_fusion: int = 0
+    aiter_ar_rms_fusion: int = 0
     sequence_parallel: int = 0
     async_tp: int = 0
 
@@ -82,6 +84,9 @@ INDUCTOR_GRAPH_PARTITION = [
 ]
 
 FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
+    "aiter_rms_quant_fusion": re.compile(
+        r"RocmAiterRMSNormQuantFusionPass Replaced (\d+) patterns"
+    ),
     "rms_quant_fusion": re.compile(r"rms_quant_fusion.py:\d+] Replaced (\d+) patterns"),
     "act_quant_fusion": re.compile(r"act_quant_fusion.py:\d+] Replaced (\d+) patterns"),
     "norm_rope_fusion": re.compile(
@@ -92,6 +97,9 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     ),
     "ar_rms_fusion": re.compile(
         r"allreduce_rms_fusion.py:\d+] Replaced (\d+) patterns"
+    ),
+    "aiter_ar_rms_fusion": re.compile(
+        r"RocmAiterAllReduceFusionPass Replaced (\d+) patterns"
     ),
     "sequence_parallel": re.compile(
         r"sequence_parallelism.py:\d+] Replaced (\d+) patterns"

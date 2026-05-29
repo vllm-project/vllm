@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-import os
 import subprocess
+import uuid
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -36,8 +36,14 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from .utils import create_request, create_scheduler
+
+
+def _make_test_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
@@ -84,10 +90,13 @@ def mock_parallel_groups():
         yield mock_group
 
 
-def _setup_kv_transfer_request(request, remote_host="127.0.0.1", fake_port=4789):
+def _setup_kv_transfer_request(
+    request, remote_host="127.0.0.1", fake_port=4789, fake_transfer_id="0"
+):
     """Setup KV transfer parameters for a request."""
     request.kv_transfer_params.update(
         {
+            "transfer_id": fake_transfer_id,
             "remote_notify_port": fake_port,
             "remote_block_ids": None,
             "remote_host": remote_host,
@@ -96,10 +105,15 @@ def _setup_kv_transfer_request(request, remote_host="127.0.0.1", fake_port=4789)
             "remote_engine_id": "test_engine",
         }
     )
+    zmq_addr = f"host:{remote_host},handshake:{fake_port},notify:{fake_port}"
+    fake_uuid = uuid.uuid4().hex
+    request.request_id = (
+        f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{fake_uuid}"
+    )
     return request
 
 
-class FakeMorIIOWrapper:
+class FakeMoRIIOWrapper:
     # A fake MoRIIOWrapper for testing purposes
     def __init__(self, *args, **kwargs):
         pass
@@ -168,7 +182,7 @@ class FakeMorIIOWrapper:
         pass
 
 
-class FakeMorIIOConnectorWorker(MoRIIOConnectorWorker):
+class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     # Define a fake remote engine id for testing
     REMOTE_ENGINE_ID = "remote_engine"
 
@@ -187,6 +201,7 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     enable_permute_local_kv: bool = False,
     role="kv_consumer",
+    read_mode: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig for testing."""
     scheduler_config = SchedulerConfig(
@@ -206,7 +221,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
@@ -214,6 +228,7 @@ def create_vllm_config(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
+        kv_connector_extra_config={"read_mode": read_mode},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -222,15 +237,6 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
     )
-
-
-@pytest.fixture
-def moriio_read_mode():
-    """Force the connector into read mode via env for tests."""
-    os.environ["VLLM_MORIIO_CONNECTOR_READ_MODE"] = "True"
-    yield
-    # Cleanup after test
-    os.environ.pop("VLLM_MORIIO_CONNECTOR_READ_MODE", None)
 
 
 def test_write_mode_saves_local_block_ids():
@@ -252,12 +258,13 @@ def test_write_mode_saves_local_block_ids():
         do_remote_decode=True,
         do_remote_prefill=False,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
-
-    # Fake Config
-    request = _setup_kv_transfer_request(request)
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
     scheduler_output = scheduler.schedule()
@@ -310,12 +317,13 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         do_remote_decode=True,
         do_remote_prefill=False,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
-
-    # Fake Config
-    request = _setup_kv_transfer_request(request)
 
     # Remote Prefill with chunked prefill, triggers multiple schedules.
     expected_counts = [(0, 0, 0), (0, 0, 0), (1, 0, 0)]
@@ -342,11 +350,11 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
-def test_read_mode_loads_remote_block_ids(moriio_read_mode):
+def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
 
     # Setup Scheduler and Request
-    vllm_config = create_vllm_config(role="kv_consumer")
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
 
     # 2 Full Blocks and 1 Half Block.
@@ -361,6 +369,10 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
         do_remote_decode=False,
         do_remote_prefill=True,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
@@ -368,12 +380,10 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
         0
     ].req_to_blocks[request_id]
 
-    request = _setup_kv_transfer_request(request)
-
     # Set remote block ids to be fetched.
     request.kv_transfer_params["remote_block_ids"] = block_list
 
-    # Remote Prefill, triggers MorIIOConnectorMetadata.
+    # Remote Prefill, triggers MoRIIOConnectorMetadata.
 
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
@@ -450,8 +460,12 @@ def test_register_kv_caches(mock_parallel_groups):
         )
 
         with set_current_vllm_config(vllm_config):
-            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
-            connector.connector_worker = FakeMorIIOConnectorWorker(
+            connector = MoRIIOConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                _make_test_kv_cache_config(),
+            )
+            connector.connector_worker = FakeMoRIIOConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )
 
@@ -528,7 +542,7 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     with (
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
-            FakeMorIIOWrapper,
+            FakeMoRIIOWrapper,
         ),
     ):
         handshake_port = _find_free_port()
@@ -542,7 +556,11 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
             }
         )
         with set_current_vllm_config(vllm_config):
-            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+            connector = MoRIIOConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                _make_test_kv_cache_config(),
+            )
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)

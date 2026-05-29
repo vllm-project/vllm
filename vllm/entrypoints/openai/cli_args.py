@@ -105,9 +105,6 @@ class BaseFrontendArgs:
     """When `--max-logprobs` is specified, represents single tokens as
     strings of the form 'token_id:{token_id}' so that tokens that are not
     JSON-encodable can be identified."""
-    disable_frontend_multiprocessing: bool = False
-    """If specified, will run the OpenAI frontend server in the same process as
-    the model serving engine."""
     enable_auto_tool_choice: bool = False
     """Enable auto tool choice for supported models. Use `--tool-call-parser`
     to specify which parser to use."""
@@ -125,8 +122,11 @@ class BaseFrontendArgs:
     `--tool-call-parser`."""
     tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
-    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
-    purpose."""
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for
+    built-in demo tools (browser and Python code interpreter). WARNING:
+    The `demo` Python tool executes model-generated code in Docker without
+    network isolation by default. See the security guide for more
+    information."""
     log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: int | None = None
@@ -143,7 +143,8 @@ class BaseFrontendArgs:
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations).
-    Requires --enable-log-requests."""
+    Requires `--enable-log-requests`. As with `--enable-log-requests`,
+    information is only logged at INFO level at maximum."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
@@ -152,9 +153,21 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
+    """Controls the ``system_fingerprint`` field on responses.
+
+    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+      server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
+      8-char config hash.
+    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
+    - ``custom``: emits the literal string from ``--fingerprint-value``.
+    - ``none``: the field is omitted (serialized as ``null``).
+    """
+    fingerprint_value: str | None = None
+    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -216,6 +229,17 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    data_parallel_supervisor_port: int = 9256
+    """HTTP port for aggregated health endpoints in multi-port external LB
+    mode."""
+    dp_supervisor_probe_interval_s: float = 5.0
+    """Seconds between aggregated health probes in multi-port external LB mode."""
+    dp_supervisor_probe_timeout_s: float = 5.0
+    """Seconds to wait between retries when a child health probe fails with a
+    connection error in multi-port external LB mode."""
+    dp_supervisor_probe_failure_threshold: int = 3
+    """Number of consecutive connection-error retries before a child health
+    probe is declared failed in multi-port external LB mode."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
@@ -277,6 +301,9 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_flash_late_interaction: bool = True
+    """If set, run pooling score MaxSim on GPU in the API server process.
+    Can significantly improve late-interaction scoring performance."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -344,6 +371,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
     )
+    parser.add_argument(
+        "--grpc",
+        action="store_true",
+        default=False,
+        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+        "server. Requires: pip install vllm[grpc].",
+    )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -363,6 +397,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    if args.data_parallel_multi_port_external_lb:
+        from vllm.entrypoints.openai.dp_supervisor import (
+            validate_multi_port_external_lb_args,
+        )
+
+        validate_multi_port_external_lb_args(args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

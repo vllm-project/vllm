@@ -5,6 +5,8 @@ import os
 
 from transformers import AutoConfig, DeepseekV2Config, PretrainedConfig
 
+from vllm.transformers_utils.utils import without_trust_remote_code
+
 
 class EAGLEConfig(PretrainedConfig):
     model_type = "eagle"
@@ -60,9 +62,20 @@ class EAGLEConfig(PretrainedConfig):
                 else f"Eagle3{arch}"
                 for arch in self.model.architectures
             ]
+        elif method == "dflash":
+            assert self.model is not None, (
+                "model should not be None when method is dflash"
+            )
+            kwargs["architectures"] = [
+                arch
+                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                else f"DFlash{arch}"
+                for arch in self.model.architectures
+            ]
         else:
             raise ValueError(
-                f"Invalid method {method}. Supported methods are eagle and eagle3."
+                f"Invalid method {method}. Supported methods are "
+                "eagle, eagle3, and dflash."
             )
 
         super().__init__(**kwargs)
@@ -79,7 +92,7 @@ class EAGLEConfig(PretrainedConfig):
         **kwargs,
     ) -> "EAGLEConfig":
         config_dict, kwargs = cls.get_config_dict(
-            pretrained_model_name_or_path, **kwargs
+            pretrained_model_name_or_path, **without_trust_remote_code(kwargs)
         )
         return cls.from_dict(config_dict, **kwargs)
 

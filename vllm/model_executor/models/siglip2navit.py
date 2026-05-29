@@ -29,6 +29,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
+from .utils import maybe_prefix
 from .vision import is_vit_use_data_parallel
 
 
@@ -598,7 +599,7 @@ class Siglip2NavitModel(torch.nn.Module):
         self.vision_model = Siglip2VisionTransformer(
             config,
             quant_config=quant_config,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
 
     def forward(
