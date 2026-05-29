@@ -177,10 +177,10 @@ impl JsonParamType {
         match kind.as_str() {
             "string" | "str" | "text" | "varchar" | "char" | "enum" => Some(Self::String),
             "integer" | "int" => Some(Self::Integer),
-            "number" | "float" => Some(Self::Number),
+            "number" | "float" | "double" => Some(Self::Number),
             "boolean" | "bool" | "binary" => Some(Self::Boolean),
-            "object" => Some(Self::Object),
-            "array" | "arr" | "sequence" => Some(Self::Array),
+            "object" | "dict" | "map" => Some(Self::Object),
+            "array" | "arr" | "list" | "sequence" => Some(Self::Array),
             "null" => Some(Self::Null),
             _ if kind.starts_with("int")
                 || kind.starts_with("uint")
@@ -288,9 +288,12 @@ mod tests {
                 "text": { "type": "string" },
                 "count": { "type": "integer" },
                 "size": { "type": "number" },
+                "ratio": { "type": "double" },
                 "enabled": { "type": "boolean" },
                 "payload": { "type": "object" },
+                "mapping": { "type": "map" },
                 "items": { "type": "array" },
+                "names": { "type": "list" },
                 "nothing": { "type": "null" }
             }
         }));
@@ -298,9 +301,12 @@ mod tests {
         assert_eq!(params.convert("text", "42"), json!("42"));
         assert_eq!(params.convert("count", "42"), json!(42));
         assert_eq!(params.convert("size", "5.0"), json!(5.0));
+        assert_eq!(params.convert("ratio", "2.5"), json!(2.5));
         assert_eq!(params.convert("enabled", "1"), json!(true));
         assert_eq!(params.convert("payload", r#"{"k":1}"#), json!({ "k": 1 }));
+        assert_eq!(params.convert("mapping", r#"{"k":1}"#), json!({ "k": 1 }));
         assert_eq!(params.convert("items", "[1,2]"), json!([1, 2]));
+        assert_eq!(params.convert("names", r#"["a","b"]"#), json!(["a", "b"]));
         assert_eq!(params.convert("nothing", "null"), json!(null));
     }
 
