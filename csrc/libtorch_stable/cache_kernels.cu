@@ -1027,6 +1027,7 @@ void convert_fp8(torch::stable::Tensor& dst_cache,
 
 namespace vllm {
 
+// grid is launched with dimensions (batch, num_splits)
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           int ENTRY_SIZE, int CTA_SIZE>
 __global__ void gather_and_maybe_dequant_cache(
