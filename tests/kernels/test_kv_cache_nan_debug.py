@@ -391,5 +391,65 @@ class TestPhaseTracking:
         assert stats.kv_cache_nan_first_seen[key] == 12345.678
 
 
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
+class TestKernelToStatsOrigin:
+    """Kernel -> IterationStats: verify first-layer origin detection."""
+
+    def test_two_layers_prefill_origin_is_first(self, monkeypatch):
+        """Call kernel for two layers with NaNs, verify origin is layer 0."""
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        import importlib
+        import time
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        from vllm.v1.engine import EngineCoreOutput
+        from vllm.v1.metrics.stats import IterationStats, RequestStateStats
+
+        kv_c0, k_pe0, kv_cache0, slots0, scale0, cnt0 = _make_inputs(16)
+        kv_c0[0, 0] = float("nan")
+        ops.concat_and_cache_mla(kv_c0, k_pe0, kv_cache0, slots0, "fp8", scale0, cnt0)
+
+        kv_c1, k_pe1, kv_cache1, slots1, scale1, cnt1 = _make_inputs(16)
+        kv_c1[0, 0] = float("nan")
+        ops.concat_and_cache_mla(kv_c1, k_pe1, kv_cache1, slots1, "fp8", scale1, cnt1)
+        torch.accelerator.synchronize()
+
+        layer_nans = {
+            "model.layers.0.self_attn": int(cnt0[0].item()),
+            "model.layers.1.self_attn": int(cnt1[0].item()),
+        }
+        assert layer_nans["model.layers.0.self_attn"] >= 1
+        assert layer_nans["model.layers.1.self_attn"] >= 1
+
+        ts = time.time()
+        output = EngineCoreOutput(
+            request_id="req-test",
+            new_token_ids=[1],
+            kv_cache_nans_per_layer=layer_nans,
+            kv_cache_nan_timestamp=ts,
+            kv_cache_nan_first_layer=next(iter(layer_nans)),
+        )
+
+        stats = IterationStats()
+        stats.update_from_output(
+            output,
+            engine_core_timestamp=0.0,
+            is_prefilling=True,
+            req_stats=RequestStateStats(arrival_time=0.0),
+            lora_states=None,
+            lora_name=None,
+        )
+
+        assert stats.kv_cache_nan_origin == (
+            "model.layers.0.self_attn",
+            "prefill",
+        )
+        assert ("model.layers.0.self_attn", "prefill") in stats.kv_cache_nans
+        assert ("model.layers.1.self_attn", "prefill") in stats.kv_cache_nans
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

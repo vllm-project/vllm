@@ -54,6 +54,8 @@ def _nan_injecting_concat_and_cache_mla(
     )
 
 
+@pytest.mark.slow_test
+@pytest.mark.slow_test
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
 class TestKVCacheNanE2E:
     """End-to-end: NaN injection -> kernel detection -> Prometheus counter."""
@@ -209,6 +211,8 @@ class TestKVCacheNanE2E:
         )
 
 
+@pytest.mark.slow_test
+@pytest.mark.slow_test
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
 class TestKVCacheNanCUDAGraph:
     """Verify NaN detection works when CUDA graphs are enabled."""
@@ -279,6 +283,8 @@ class TestKVCacheNanCUDAGraph:
         )
 
 
+@pytest.mark.slow_test
+@pytest.mark.slow_test
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
 class TestKVCacheNanMultiprocessing:
     """Verify NaN detection works with VLLM_ENABLE_V1_MULTIPROCESSING=1.
