@@ -689,6 +689,76 @@ def test_eager_intra_request_dedup_swa_reuse() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2b3: SWA reuse intra-request dedup (LOAD path) — #42085
+# ---------------------------------------------------------------------------
+def test_load_path_dedup_swa_reuse() -> None:
+    """Load path: when a request's GPU block table repeats the same physical
+    ``gpu_block_id`` at multiple logical positions within the CPU-hit range
+    (the SWA window-slide pattern), ``update_state_after_alloc`` must emit each
+    GPU block at most once in the load transfer.
+
+    Without the per-group ``load_map`` dedup the duplicate id is passed N times
+    to ``gpu_pool.touch`` (over-incrementing ``ref_cnt``); the later
+    ``free_blocks`` then re-appends the same ``KVCacheBlock`` into the free
+    list, corrupting it and crashing the engine via the ``popleft_n``
+    assertion. See #42085 (the crash) and #42571 (same defect class).
+    """
+    fix = make_scheduler(num_cpu_blocks=16, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    # 1. Store 2 distinct blocks for req1, then complete the store so they
+    #    become a CPU prefix-cache hit.
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    simulate_store_completion(sched, meta.store_event)
+
+    # 2. New request, same prompt → 2-block CPU hit.
+    req2 = Request(
+        request_id="req-load-swa",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == num_blocks * BLOCK_SIZE
+    assert is_async is True
+
+    # 3. SWA reuse: allocate ONE physical GPU block and present it at BOTH
+    #    logical positions of the hit range. The back-trace would otherwise
+    #    emit it twice.
+    g = gpu_pool.get_new_blocks(1)[0]
+    kv_blocks2 = KVCacheBlocks(blocks=([g, g],))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    sched_out2 = make_scheduler_output({req2.request_id: 1})
+    meta2 = sched.build_connector_meta(sched_out2)
+
+    assert meta2.load_event >= 0, "Expected a load event for the CPU hit"
+    assert len(meta2.load_gpu_blocks) == len(set(meta2.load_gpu_blocks)), (
+        f"Duplicate gpu_block_ids leaked into load event: {meta2.load_gpu_blocks}"
+    )
+    assert meta2.load_gpu_blocks == [g.block_id]
+    # CPU side stays paired 1:1 with the deduped GPU blocks.
+    assert len(meta2.load_cpu_blocks) == len(meta2.load_gpu_blocks)
+    # ref_cnt must not be over-incremented by the duplicate touch.
+    assert g.ref_cnt == 2, (
+        f"gpu block ref_cnt={g.ref_cnt}, expected 2 (1 alloc + 1 load touch); "
+        "a higher value means the duplicate was touched more than once"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 2c: Lazy duplicate store is skipped
 # ---------------------------------------------------------------------------
 def test_lazy_duplicate_store_skipped() -> None:
