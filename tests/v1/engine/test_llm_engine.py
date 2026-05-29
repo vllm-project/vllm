@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import random
 from typing import TYPE_CHECKING
 
 import pytest
 
 from vllm import LLM
-from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.sampling_params import (
+    RequestOutputKind,
+    SamplingParams,
+    StructuredOutputsParams,
+)
+from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -236,3 +243,129 @@ def test_skip_tokenizer_initialization(model: str):
     assert len(completions) > 0
     assert completions[0].text == ""
     assert completions[0].token_ids
+
+
+def _validate_parallel_sampling_outputs(
+    outputs, n: int, outputs_label: str = "outputs"
+) -> None:
+    """Validate parallel sampling results: count, indices, uniqueness."""
+    assert len(outputs) == n, (
+        f"{len(outputs)} {outputs_label}; {n} expected."
+    )
+    completion_counts: dict[str, int] = {}
+    for idx in range(n):
+        comp = outputs[idx]
+        assert comp.index == idx, f"Index {comp.index}; expected {idx}."
+        text = comp.text
+        completion_counts[text] = completion_counts.get(text, 0) + 1
+    if len(completion_counts) != n:
+        repeats = {
+            txt: num for (txt, num) in completion_counts.items() if num > 1
+        }
+        raise AssertionError(
+            f"{len(completion_counts)} unique completions; expected"
+            f" {n}. Repeats: {repeats}"
+        )
+
+
+@pytest.mark.parametrize(
+    "output_kind",
+    [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
+)
+@pytest.mark.asyncio
+async def test_parallel_sampling_async_llm(
+    output_kind: RequestOutputKind,
+    example_prompts: list[str],
+) -> None:
+    """Test parallel sampling `n>1` yields `n` unique completions via AsyncLLM.
+
+    Args:
+      output_kind: RequestOutputKind variant under test.
+      example_prompts: test fixture providing prompts for testing.
+    """
+    engine_args = AsyncEngineArgs(
+        model=MODEL,
+        dtype=DTYPE,
+        max_model_len=128,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+    )
+    sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
+    for sp in sampling_params_list:
+        sp.output_kind = output_kind
+
+    engine = AsyncLLM.from_engine_args(engine_args)
+    try:
+        for prompt, sp, n in zip(example_prompts, sampling_params_list, n_list):
+            last_output = None
+            async for out in engine.generate(
+                request_id=f"test-async-{random.randint(0, 10**9)}",
+                prompt=prompt,
+                sampling_params=sp,
+            ):
+                last_output = out
+
+            assert last_output is not None, "No output generated"
+            _validate_parallel_sampling_outputs(last_output.outputs, n)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    "output_kind",
+    [
+        RequestOutputKind.CUMULATIVE,
+        RequestOutputKind.DELTA,
+        RequestOutputKind.FINAL_ONLY,
+    ],
+)
+def test_parallel_sampling_llm_engine(
+    vllm_model,
+    example_prompts: list[str],
+    output_kind: RequestOutputKind,
+) -> None:
+    """Test parallel sampling `n>1` yields `n` unique completions via LLMEngine.
+
+    Uses LLMEngine.add_request() + step() for fine-grained control.
+
+    Args:
+      vllm_model: VllmRunner instance under test.
+      example_prompts: test fixture providing prompts for testing.
+      output_kind: RequestOutputKind variant under test.
+    """
+    sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
+    for sp in sampling_params_list:
+        sp.output_kind = output_kind
+
+    engine = vllm_model.llm.llm_engine
+
+    # Add all requests
+    n_map: dict[str, int] = {}
+    for i, (prompt, sp, n) in enumerate(
+        zip(example_prompts, sampling_params_list, n_list)
+    ):
+        req_id = f"test-engine-{i}"
+        n_map[req_id] = n
+        engine.add_request(
+            request_id=req_id,
+            prompt=prompt,
+            params=sp,
+        )
+
+    # Collect outputs by request
+    outputs_by_req: dict[str, list] = {rid: [] for rid in n_map}
+    while engine.has_unfinished_requests():
+        for out in engine.step():
+            if out.request_id in outputs_by_req:
+                outputs_by_req[out.request_id].append(out)
+
+    # Validate each request
+    for req_id, n in n_map.items():
+        all_outputs = outputs_by_req[req_id]
+        assert len(all_outputs) > 0, f"No outputs for request {req_id}"
+        final_out = all_outputs[-1]
+        _validate_parallel_sampling_outputs(final_out.outputs, n)
