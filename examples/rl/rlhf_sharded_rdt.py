@@ -38,7 +38,7 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 TRAINER_ACTOR_NAME = "sharded_rdt_trainer"
 # Explicit namespace so vLLM workers -- which run in an EngineCore
 # subprocess that does its own ray.init() -- can resolve the named
@@ -56,31 +56,58 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
+# Mirror of the supported op set the worker-side LazyRDTTensor allows. The
+# trainer refuses any op name outside this set so a misbehaving / spoofed
+# spec can't reach into arbitrary tensor methods via getattr.
+_ALLOWED_OPS = frozenset(
+    {
+        "narrow",
+        "view",
+        "reshape",
+        "__getitem__",
+        "unsqueeze",
+        "squeeze",
+        "transpose",
+        "t",
+        "permute",
+        "flatten",
+        "contiguous",
+        "chunk",
+    }
+)
+
+
 @ray.remote(num_gpus=1, enable_tensor_transport=True)
 class TrainModel:
     """Ray actor wrapping the training model and serving slice tensors
     over RDT/NIXL.
 
-    Unlike the unsharded example, the producer method takes a *list of
-    specs* in one call -- one entry per ``LazyRDTTensor.copy_`` the
-    layer's loaders are about to issue -- and returns one slice per
-    spec. Batching matters: each worker would otherwise pay one RPC
-    per fused-QKV/MergedColumn shard call, of which there are several
-    per layer.
+    The producer method takes a *list of specs* in one call -- one entry
+    per ``LazyRDTTensor.copy_`` the layer's loaders are about to issue --
+    and returns one slice per spec. Batching matters: each worker would
+    otherwise pay one RPC per fused-QKV/MergedColumn shard call, of
+    which there are several per layer.
+
+    Each spec is ``(name, [(op_name, args, kwargs_items), ...])`` and
+    the chain is replayed in order on the trainer's live parameter via
+    ``getattr(tensor, op_name)(*args, **dict(kwargs_items))``.
     """
 
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda:0")
         # Cache name -> Parameter for O(1) lookups. PyTorch parameters
         # mutate in place during training, so cached references stay valid.
-        self._param_lookup = dict(self.model.named_parameters())
+        self._param_lookup: dict[str, torch.Tensor] = dict(
+            self.model.named_parameters()
+        )
 
     @ray.method(tensor_transport="nixl")
     def rdt_produce_weights_batched(
-        self, specs: list[tuple[str, list[tuple[int, int, int]]]]
+        self,
+        specs,
     ) -> list[torch.Tensor]:
-        """Apply each (dim, start, size) chain to the named parameter
-        and return one slice per spec.
+        """Replay each op chain on the named parameter and return one
+        slice per spec.
 
         Each slice is materialized via ``.clone(memory_format=
         torch.contiguous_format)`` for two reasons: (1) NIXL's
@@ -93,12 +120,19 @@ class TrainModel:
         contiguous, so ``.contiguous()`` returns the view as-is with
         aliased storage. ``.clone(...)`` forces a fresh allocation
         with contiguous layout. Bandwidth savings are preserved --
-        the clone is only the slice size, not the full HF tensor."""
+        the clone is only the slice size, not the full HF tensor.
+        """
         out: list[torch.Tensor] = []
         for name, chain in specs:
             tensor = self._param_lookup[name]
-            for dim, start, size in chain:
-                tensor = tensor.narrow(dim, start, size)
+            for op_name, args, kwargs_items in chain:
+                if op_name not in _ALLOWED_OPS:
+                    raise ValueError(
+                        f"Spec for {name!r} requested disallowed op "
+                        f"{op_name!r}; allowed: {sorted(_ALLOWED_OPS)}"
+                    )
+                kwargs = dict(kwargs_items)
+                tensor = getattr(tensor, op_name)(*args, **kwargs)
             out.append(tensor.clone(memory_format=torch.contiguous_format))
         return out
 
@@ -198,10 +232,13 @@ names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
 
 # update_weights drives model.load_weights with lazy placeholders.
-# vLLM's existing loaders call .narrow()/.copy_() on them; we record
-# the chains during pass 1, batch them into a single
-# rdt_produce_weights_batched RPC per layer in the pre-replay hook,
-# then copy the prefetched slices during pass 2.
+# vLLM's existing loaders call narrow/view/reshape/transpose/...
+# /.copy_() on them; we record the full op chain during pass 1, batch
+# every layer's chains into a single rdt_produce_weights_batched RPC
+# in the pre-replay hook, then copy the prefetched slices during pass
+# 2. Loaders that need ops outside the supported set (e.g. .to(),
+# .float(), .item(), .data, bool-mask indexing) raise from
+# __torch_dispatch__ so the failure is loud rather than silent.
 ray.get(
     llm.update_weights.remote(
         dict(

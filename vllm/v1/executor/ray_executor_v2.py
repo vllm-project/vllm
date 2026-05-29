@@ -323,12 +323,12 @@ class RayExecutorV2(MultiprocExecutor):
         runtime_env = self._build_runtime_env()
         resource_kwargs = self._get_actor_resource_kwargs()
 
-        # The RDT weight transfer backend pulls weights via Ray's tensor
+        # The RDT weight transfer backends pull weights via Ray's tensor
         # transport (@ray.method(tensor_transport=...)). Ray requires the
         # *calling* actor (the vLLM worker) to opt in via enable_tensor_transport.
         wt_cfg = self.vllm_config.weight_transfer_config
         extra_actor_options: dict[str, object] = {}
-        if wt_cfg is not None and wt_cfg.backend == "rdt":
+        if wt_cfg is not None and wt_cfg.backend in ("rdt", "sharded_rdt"):
             extra_actor_options["enable_tensor_transport"] = True
 
         for bundle_idx in range(self.world_size):
