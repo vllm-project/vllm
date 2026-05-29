@@ -20,9 +20,9 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.triton_swap import (
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
-    _swap_blocks_batch,
+    swap_blocks_batch,
 )
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
@@ -54,7 +54,7 @@ def _select_swap_blocks_fn(
     ):
         return ops.swap_blocks_batch
     chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
-    return functools.partial(_swap_blocks_batch, bytes_per_chunk=chunk)
+    return functools.partial(swap_blocks_batch, bytes_per_chunk=chunk)
 
 
 @dataclass

@@ -46,7 +46,7 @@ def _swap_blocks_kernel(
         job += num_progs
 
 
-def _swap_blocks_batch(
+def swap_blocks_batch(
     src_addrs: torch.Tensor,
     dst_addrs: torch.Tensor,
     sizes: torch.Tensor,

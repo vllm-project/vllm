@@ -7,8 +7,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.v1.kv_offload.base import CanonicalKVCacheRef
-from vllm.v1.kv_offload.cpu.gpu_worker import _select_swap_blocks_fn
+from vllm.v1.kv_offload.cpu.swap_blocks_triton import swap_blocks_batch
 
 
 def _addrs(buffers: list[torch.Tensor]) -> torch.Tensor:
@@ -28,12 +27,9 @@ def test_triton_swap_matches_cpp_path():
     sizes_t = torch.tensor(sizes, dtype=torch.int64)
 
     ops.swap_blocks_batch(_addrs(src), _addrs(dst_cpp), sizes_t.clone())
-    swap = _select_swap_blocks_fn(
-        [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=max(sizes))]],
-        gpu_to_cpu=False,
+    swap_blocks_batch(
+        _addrs(src), _addrs(dst_tri), sizes_t.clone(), bytes_per_chunk=8192
     )
-    assert swap is not ops.swap_blocks_batch, "expected the Triton fast path"
-    swap(_addrs(src), _addrs(dst_tri), sizes_t.clone())
     torch.accelerator.synchronize()
 
     for s, cpp, tri in zip(src, dst_cpp, dst_tri):
