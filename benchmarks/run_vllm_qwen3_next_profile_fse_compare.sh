@@ -1,36 +1,36 @@
 #!/usr/bin/env bash
-# Short profiling sweep to verify the BlockScale SplitK zero-init fusion
-# actually elides the per-GEMM-output fill/zero kernels in vLLM.
+# A/B benchmark for the Fused Shared Expert (FSE) ablation, on top of the
+# blockscale-splitk-zero-init fusion pass.
 #
-# For each of two configs (splitk, splitk_fused) this:
-#   1. Launches `vllm serve` with torch profiler enabled
-#      (--profiler-config.profiler=torch, schedule = 2 warmup + 5 active).
-#   2. Runs a tiny `vllm bench serve` (short ISL/OSL, few prompts) with
-#      --profile so it pings /start_profile and /stop_profile around the
-#      benchmark.
-#   3. Kills the server cleanly.
-#   4. Records the per-kernel `self_cuda_time_total` table that vLLM dumps
-#      next to the trace and produces a side-by-side fill/memset/zero
-#      summary so we can confirm the fusion really removed the producer
-#      zero-init kernels.
+# This is the focused follow-up to
+# run_vllm_qwen3_next_profile_master_csv.sh after we determined that the
+# residual FillFunctor<BFloat16> kernels visible in prior traces came from
+# the standalone shared-expert MLP linears -- a site that lives inside the
+# opaque moe_forward_shared custom op and is therefore invisible to
+# Inductor's post-grad fusion pass. Folding the shared expert into the
+# routed-expert FusedMoE kernel (FSE) is the only way to eliminate those
+# kernels.
+#
+# Both modes have:
+#   - fuse_blockscale_splitk_zero_init = true
+#   - same production tuned CSV (88 CK splitK>0 rows)
+# Only difference:
+#   - splitk_fused      : VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS = 0
+#   - splitk_fused_fse  : VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS = 1
 #
 # Usage:
-#   bash benchmarks/run_vllm_qwen3_next_profile_demo.sh [<results_dir>]
+#   bash benchmarks/run_vllm_qwen3_next_profile_fse_compare.sh [<results_dir>]
 set -euo pipefail
 
 VLLM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AITER_ROOT="${AITER_ROOT:-${HOME}/dev/aiter}"
-RESULTS_DIR="${1:-${VLLM_ROOT}/benchmarks/zero_init_demo_results/profile_qwen3_next_$(date +%Y%m%d_%H%M%S)}"
+RESULTS_DIR="${1:-${VLLM_ROOT}/benchmarks/zero_init_demo_results/profile_qwen3_next_fse_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "${RESULTS_DIR}"
 
-SPLITK_CSV="${AITER_ROOT}/aiter/configs/zero_init_demo/robust/qwen3_next_80b_a3b_per1x128_cktile_splitk_yz_gfx950.csv"
-
+TUNED_CSV="${TUNED_CSV:-${AITER_ROOT}/aiter/configs/model_configs/a8w8_blockscale_tuned_gemm_qwen3_next_80b_a3b_filtered_built.csv}"
 MODEL="${MODEL:-Qwen/Qwen3-Next-80B-A3B-Instruct-FP8}"
 SERVER_PORT="${SERVER_PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
-# Keep the profiled run very small: 4 prompts at concurrency 2 with a
-# short ISL/OSL keeps the trace size manageable. Combined with the
-# active=5 profiler schedule below this records ~5 engine iterations.
 NUM_PROMPTS="${NUM_PROMPTS:-4}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-2}"
 INPUT_LEN="${INPUT_LEN:-128}"
@@ -38,7 +38,11 @@ OUTPUT_LEN="${OUTPUT_LEN:-16}"
 TP_SIZE="${TP_SIZE:-1}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 
-PYTHONPATH_BASE="${AITER_ROOT}:${VLLM_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# IMPORTANT: with the editable install in place, vllm resolves to
+# ~/dev/vllm/vllm/ from the venv's .pth entry; prepending VLLM_ROOT to
+# PYTHONPATH is now redundant (we still keep AITER_ROOT on PYTHONPATH
+# because aiter is not pip-installed).
+PYTHONPATH_BASE="${AITER_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 SERVER_BOOT_TIMEOUT="${SERVER_BOOT_TIMEOUT:-3600}"
 
 export AMDGCN_USE_BUFFER_OPS="${AMDGCN_USE_BUFFER_OPS:-0}"
@@ -79,18 +83,17 @@ wait_for_server() {
 run_config() {
     local mode="$1"
     local csv="$2"
-    local fuse_flag="$3"   # "true" or "false"
+    local fse_flag="$3"   # "0" or "1"
 
     local mode_dir="${RESULTS_DIR}/${mode}"
     mkdir -p "${mode_dir}"
     local server_log="${RESULTS_DIR}/${mode}.server.log"
     local bench_log="${RESULTS_DIR}/${mode}.bench.log"
-    local result_json="${RESULTS_DIR}/${mode}.json"
 
     echo "=========================================================="
     echo "# config: mode=${mode}"
     echo "#   csv         = ${csv}"
-    echo "#   fuse pass   = ${fuse_flag}"
+    echo "#   FSE         = ${fse_flag}  (VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS)"
     echo "#   trace dir  -> ${mode_dir}"
     echo "#   server log -> ${server_log}"
     echo "#   bench log  -> ${bench_log}"
@@ -98,19 +101,10 @@ run_config() {
 
     nuke_torch_compile_cache
 
-    # Compilation config: explicitly enable the four producer fusion knobs
-    # that BlockScaleSplitKZeroInitFusionPass depends on (RMSNorm+quant,
-    # SiluMul+quant, MLA dual rms norm) plus the zero-init flag we are
-    # actually toggling per mode. Without setting fuse_norm_quant /
-    # fuse_act_quant explicitly the producer ops never collapse to the
-    # *_fp8_group_quant variants we want to rewrite, and the zero-init
-    # pass matches zero patterns.
+    # Always with fusion pass on; only FSE toggles between modes.
     local compilation_config
-    compilation_config=$(printf '{"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true,"fuse_mla_dual_rms_norm":true,"fuse_blockscale_splitk_zero_init":%s}}' "${fuse_flag}")
+    compilation_config=$(printf '{"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true,"fuse_mla_dual_rms_norm":true,"fuse_blockscale_splitk_zero_init":true}}')
 
-    # Profiler config: torch profiler with schedule 0/2/5 (wait/warmup/active).
-    # Output is uncompressed JSON so we can diff trivially. The cuda-time
-    # table is written next to the trace by vLLM's TorchProfilerWrapper.
     local profiler_config
     profiler_config=$(python3 -c "
 import json
@@ -132,6 +126,7 @@ print(json.dumps({
             PYTHONPATH=\"${PYTHONPATH_BASE}\" \
             AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=\"${csv}\" \
             VLLM_ROCM_USE_AITER=\"${VLLM_ROCM_USE_AITER}\" \
+            VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=\"${fse_flag}\" \
             VLLM_USE_TRITON_FLASH_ATTN=\"${VLLM_USE_TRITON_FLASH_ATTN}\" \
             VLLM_ROCM_USE_SKINNY_GEMM=\"${VLLM_ROCM_USE_SKINNY_GEMM}\" \
             VLLM_ROCM_USE_AITER_TRITON_GEMM=\"${VLLM_ROCM_USE_AITER_TRITON_GEMM}\" \
@@ -173,10 +168,6 @@ print(json.dumps({
         --result-filename "${mode}.json" \
         2>&1 | tee "${bench_log}"
 
-    # Give the engine a moment to actually finalize the trace dump
-    # (the /stop_profile call returns before tensorboard_trace_handler
-    # finishes serializing the JSON). 15s is comfortable for ~5
-    # iterations of an 80B model on one MI355X.
     sleep 15
 
     echo "# stopping server pgid ${server_pid}"
@@ -207,14 +198,22 @@ print(json.dumps({
     trap - EXIT
 }
 
-run_config splitk       "${SPLITK_CSV}"   "false"
-run_config splitk_fused "${SPLITK_CSV}"   "true"
+echo "# tuned CSV = ${TUNED_CSV}"
+echo "# CK rows (libtype=ck): $(awk -F, 'NR>1 && $6=="ck"' "${TUNED_CSV}" | wc -l)"
+echo "# CK rows with splitK>0: $(awk -F, 'NR>1 && $6=="ck" && $8>0' "${TUNED_CSV}" | wc -l)"
+echo "# cktile rows: $(awk -F, 'NR>1 && $6=="cktile"' "${TUNED_CSV}" | wc -l)"
+
+# Run FSE-on first (the case we expect to eliminate residual FillFunctor
+# kernels). The FSE-off baseline runs second purely as a sanity reference
+# against the previous master_csv splitk_fused trace.
+run_config splitk_fused_fse "${TUNED_CSV}"   "1"
+run_config splitk_fused     "${TUNED_CSV}"   "0"
 
 echo
 echo "=========================================================="
 echo "# Trace artifacts:"
 echo "=========================================================="
-for mode in splitk splitk_fused; do
+for mode in splitk_fused_fse splitk_fused; do
     echo "[$mode]"
     ls -lh "${RESULTS_DIR}/${mode}" 2>/dev/null | sed 's/^/    /'
 done

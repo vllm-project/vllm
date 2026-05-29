@@ -154,7 +154,161 @@ class _BaseP2Module(torch.nn.Module):
 
 
 class _BaseP3Module(torch.nn.Module):
-    """P3: gated RMSNorm + FP8 group quant -> blockscale GEMM."""
+    """P3 (ATOM HIP gated): gated RMSNorm + FP8 group quant -> blockscale GEMM.
+
+    The AITER ``gated_rmsnorm_fp8_group_quant`` kernel only supports
+    ``head_dim == 128`` and expects 3D ``[T, H, D]`` inputs with a weight of
+    shape ``[D]``. Production Qwen3-Next GDN already calls this op with the
+    correct 3D layout, so the test module emits the same call shape.
+    """
+
+    def __init__(self, K: int, N: int):
+        super().__init__()
+        self._fp8 = _fp8_dtype()
+        assert K % GROUP_SIZE == 0, "K must be a multiple of head_dim=128 for P3"
+        self._num_heads = K // GROUP_SIZE
+        self._head_dim = GROUP_SIZE
+        self.weight = torch.nn.Parameter(
+            torch.ones(self._head_dim, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty(
+                (N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        # Reshape (T, H*D) -> (T, H, D) for the gated rmsnorm kernel.
+        x3 = x.view(-1, self._num_heads, self._head_dim)
+        z3 = z.view(-1, self._num_heads, self._head_dim)
+        out, scale = torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant(
+            x3, z3, self.weight, EPS, GROUP_SIZE
+        )
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-producer test modules for the *new* registered ProducerSpec entries.
+# These exercise the Phase-2 plumbing (P1 HIP per-1x128, P2 / P2-add Triton
+# rmsnorm-quant, P3 PR#40710 fused gated, P4 silu+mul + quant). Each module
+# emits the *same* keyword-style call that the upstream producer fusion
+# pass produces in the real Qwen3-Next FX graph, so the pattern matcher
+# sees an FX node whose arg layout matches what we register.
+# ---------------------------------------------------------------------------
+
+
+class _NewP1GroupQuantModule(torch.nn.Module):
+    """Upstream P1 producer: `rocm_aiter_group_fp8_quant(x, group_size)`.
+
+    HIP per-1x128 group FP8 quant. Distinct from the ATOM per-token quant
+    used in `_BaseP1Module`; this is the producer that actually fires in
+    Qwen3-Next-class models on gfx950 post-PR #41825.
+    """
+
+    def __init__(self, K: int, N: int):
+        super().__init__()
+        self._fp8 = _fp8_dtype()
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty(
+                (N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, scale = torch.ops.vllm.rocm_aiter_group_fp8_quant(x, GROUP_SIZE)
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+
+
+class _NewP2RMSNormGroupQuantModule(torch.nn.Module):
+    """Upstream P2 producer: `rocm_aiter_rmsnorm_fp8_group_quant`.
+
+    Calls the op with the all-kwargs convention that the upstream
+    `AiterRMSFp8GroupQuantPattern` emits in the FX graph.
+    """
+
+    def __init__(self, K: int, N: int):
+        super().__init__()
+        self._fp8 = _fp8_dtype()
+        self.weight = torch.nn.Parameter(
+            torch.ones(K, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty(
+                (N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, scale = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant(
+            x=x,
+            weight=self.weight,
+            variance_epsilon=EPS,
+            group_size=GROUP_SIZE,
+        )
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+
+
+class _NewP2AddRMSNormGroupQuantModule(torch.nn.Module):
+    """Upstream P2-add producer: `rocm_aiter_rmsnorm_with_add_fp8_group_quant`.
+
+    Returns three outputs (fp8, residual, scales); the fusion pass must
+    preserve the residual SSA edge in the rewrite.
+    """
+
+    def __init__(self, K: int, N: int):
+        super().__init__()
+        self._fp8 = _fp8_dtype()
+        self.weight = torch.nn.Parameter(
+            torch.ones(K, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty(
+                (N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        out, res, scale = torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant(
+            x=x,
+            residual=residual,
+            weight=self.weight,
+            variance_epsilon=EPS,
+            group_size=GROUP_SIZE,
+        )
+        gemm = torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+        # Keep ``res`` live so the residual SSA edge survives fusion. We
+        # don't add the residual to the GEMM (shapes differ: residual is
+        # (M, K), GEMM is (M, N)); use ``sum()`` to fold ``res`` into a
+        # scalar and broadcast it into the GEMM output.
+        return gemm + res.sum()
+
+
+class _NewP3FusedRMSGatedModule(torch.nn.Module):
+    """Upstream P3 producer: `rocm_aiter_fused_rms_gated_fp8_group_quant`."""
 
     def __init__(self, K: int, N: int):
         super().__init__()
@@ -173,8 +327,46 @@ class _BaseP3Module(torch.nn.Module):
         )
 
     def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        out, scale = torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant(
-            x, z, self.weight, EPS, GROUP_SIZE
+        out, scale = torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant(
+            x=x,
+            weight=self.weight,
+            bias=None,
+            z=z,
+            eps=EPS,
+            norm_before_gate=True,
+            activation="silu",
+            group_size=GROUP_SIZE,
+        )
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+
+
+class _NewP4ActMulModule(torch.nn.Module):
+    """Upstream P4 producer: `rocm_aiter_act_mul_and_fp8_group_quant`.
+
+    Takes x with last dim 2*K (gate_up_proj output) and applies silu*mul
+    + group quant to give (M, K) FP8 feeding down_proj.
+    """
+
+    def __init__(self, K: int, N: int):
+        super().__init__()
+        self._fp8 = _fp8_dtype()
+        # x has 2*K columns (gate_up); GEMM B is (N, K).
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=self._fp8), requires_grad=False
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty(
+                (N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32
+            ),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, scale = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant(
+            x=x,
+            group_size=GROUP_SIZE,
         )
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             out, self.B, scale, self.Bs, torch.bfloat16
@@ -269,16 +461,192 @@ def test_pass_rewrites_producer_gemm_chain(
             f"got {fusion_pass.matched_count}"
         )
 
-        # Sanity: the rewritten graph must contain the mutating GEMM op.
+        # Sanity: the rewritten graph must contain the mutating GEMM op,
+        # either bare or wrapped by AOTAutograd's auto_functionalized HOP
+        # (which is the default lowering for mutates_args ops).
         post_ops = {
             n.target for n in backend.graph_post_pass.nodes if n.op == "call_function"
         }
+        splitk_op = torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_splitk.default
+        # auto_functionalized wraps the mutating op as its first positional
+        # arg; walk the FX args of every node to look for it there too.
+        wrapped_targets = {
+            arg
+            for n in backend.graph_post_pass.nodes
+            if n.op == "call_function"
+            for arg in n.args
+            if isinstance(arg, torch._ops.OpOverload)
+        }
         assert (
-            torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_splitk.default in post_ops
+            splitk_op in post_ops
+            or splitk_op in wrapped_targets
             or any(
                 "rocm_aiter_gemm_a8w8_blockscale_splitk" in str(t) for t in post_ops
             )
         ), "splitk GEMM op missing from rewritten graph"
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="ROCm + AITER required for the blockscale SplitK zero-init fusion test",
+)
+@pytest.mark.parametrize(
+    "module_cls,extra_inputs,expected_replaced_op",
+    [
+        (
+            _NewP1GroupQuantModule,
+            (),
+            "rocm_aiter_group_fp8_quant_with_zero_init",
+        ),
+        (
+            _NewP2RMSNormGroupQuantModule,
+            (),
+            "rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
+        ),
+        (
+            _NewP2AddRMSNormGroupQuantModule,
+            ("residual",),
+            "rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
+        ),
+        (
+            _NewP3FusedRMSGatedModule,
+            ("z",),
+            "rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init",
+        ),
+        (
+            _NewP4ActMulModule,
+            ("gate_up_2k",),  # special-cased input: x has 2*K cols
+            "rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
+        ),
+    ],
+)
+def test_pass_rewrites_new_producer_specs(
+    module_cls: type[torch.nn.Module],
+    extra_inputs: tuple[str, ...],
+    expected_replaced_op: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Each of the Phase-2 new ProducerSpec entries must rewrite its producer
+    -> blockscale-GEMM chain into the ``_with_zero_init`` + ``_splitk``
+    pair. The test asserts ``matched_count >= 1`` (i.e. the FX rewriter
+    actually fired) and verifies the post-pass graph contains the
+    expected mutating producer op.
+    """
+    torch._dynamo.reset()
+    vllm_config = _build_vllm_config()
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(torch.bfloat16)
+        torch.manual_seed(0)
+
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        model = module_cls(K, N)
+        x = torch.randn(M, K, dtype=torch.bfloat16)
+        inputs: list[torch.Tensor] = [x]
+        if "residual" in extra_inputs:
+            inputs.append(torch.randn(M, K, dtype=torch.bfloat16))
+        if "z" in extra_inputs:
+            inputs.append(torch.randn(M, K, dtype=torch.bfloat16))
+        if "gate_up_2k" in extra_inputs:
+            # P4: replace x with (M, 2*K) input (silu+mul halves it back to K).
+            inputs = [torch.randn(M, 2 * K, dtype=torch.bfloat16)]
+
+        backend, fusion_pass = _run_pass_on_module(model, tuple(inputs), vllm_config)
+
+        assert fusion_pass.matched_count >= 1, (
+            f"Expected at least 1 fusion match for {module_cls.__name__}, "
+            f"got {fusion_pass.matched_count}"
+        )
+
+        # The mutating producer / GEMM ops live inside ``auto_functionalized``
+        # nodes (PyTorch's HOP that functionalizes ops with mutable args).
+        # We have to inspect the first positional arg of each
+        # ``auto_functionalized`` node, not the node target itself, to verify
+        # the rewrite landed.
+        from torch._higher_order_ops.auto_functionalize import auto_functionalized
+
+        functionalized_targets: set[str] = set()
+        for n in backend.graph_post_pass.nodes:
+            if n.op != "call_function":
+                continue
+            if n.target is auto_functionalized and n.args:
+                functionalized_targets.add(str(n.args[0]))
+            else:
+                functionalized_targets.add(str(n.target))
+
+        assert any(expected_replaced_op in s for s in functionalized_targets), (
+            f"Expected post-pass graph to contain {expected_replaced_op!r}; "
+            f"got targets: {sorted(functionalized_targets)}"
+        )
+        assert any(
+            "rocm_aiter_gemm_a8w8_blockscale_splitk" in s
+            for s in functionalized_targets
+        ), "splitk GEMM op missing from rewritten graph"
+
+
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="ROCm + AITER required for the per-pair attribution test",
+)
+def test_per_pair_attribution_counts(monkeypatch: pytest.MonkeyPatch):
+    """The fusion pass exposes per-(producer, gemm) attribution via
+    ``_count_per_pair(graph)``. The counter walks the post-apply graph and
+    pairs each ``auto_functionalized(producer.with_zero_init_op)`` HOP with
+    its downstream ``auto_functionalized(gemm.splitk_op)`` consumer.
+
+    This is the regression guard against an earlier dict-keying bug that
+    keyed the lookup table on ``producer.with_zero_init_op`` alone, which
+    caused every (producer, *) match to be attributed to the
+    last-registered ``gemm`` overload in the registry (i.e. the triton
+    variant ate every legacy-CK match). The bug was diagnostic-only -- it
+    didn't change the matched_count -- but it produced misleading
+    per-pair logs that hid which backend the rewrite landed on.
+    """
+    torch._dynamo.reset()
+    vllm_config = _build_vllm_config()
+
+    with (
+        vllm.config.set_current_vllm_config(vllm_config),
+        monkeypatch.context() as m,
+    ):
+        torch.set_default_device("cuda")
+        torch.set_default_dtype(torch.bfloat16)
+        torch.manual_seed(0)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+
+        model = _NewP1GroupQuantModule(K, N)
+        x = torch.randn(M, K, dtype=torch.bfloat16)
+        backend, fusion_pass = _run_pass_on_module(model, (x,), vllm_config)
+
+        counts = fusion_pass._count_per_pair(backend.graph_post_pass)
+        ck_key = "aiter_group_fp8_quant__x__aiter_gemm_a8w8_blockscale"
+        triton_key = "aiter_group_fp8_quant__x__aiter_triton_gemm_a8w8_blockscale"
+        # Production graph uses the legacy CK GEMM (the only one the
+        # test module instantiates), so the CK-side pair gets the credit.
+        assert counts.get(ck_key, 0) == 1, (
+            f"Expected exactly 1 match attributed to {ck_key}, got {counts}"
+        )
+        # Triton variant shares the producer.with_zero_init_op overload
+        # with the CK variant. A regression of the dict-keying bug would
+        # show up as triton_key=1 / ck_key=0.
+        assert counts.get(triton_key, 0) == 0, (
+            f"Triton-gemm key {triton_key} should be 0 for a CK-only graph "
+            f"(would indicate the dict-keying regression), got {counts}"
+        )
+        # Sanity: the total per-pair count must equal the global match
+        # count tracked by the pattern matcher pass.
+        total_per_pair = sum(counts.values())
+        assert total_per_pair == fusion_pass.matched_count, (
+            f"per-pair total {total_per_pair} != matched_count "
+            f"{fusion_pass.matched_count}; counts={counts}"
+        )
 
 
 @pytest.mark.skipif(

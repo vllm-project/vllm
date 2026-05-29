@@ -716,13 +716,20 @@ def _rocm_aiter_gemm_a8w8_blockscale_splitk_impl(
     output_dtype: torch.dtype = torch.float16,
     split_k: int = 0,
     y_is_zeroed: bool = False,
-) -> torch.Tensor:
-    """Blockscale GEMM into a caller-provided output buffer with SplitK.
+) -> None:
+    """Blockscale GEMM into a caller-provided output buffer.
 
-    Requires AITER's gemm_a8w8_blockscale to support the
-    (out=, splitK=, y_is_zeroed=) kwargs. Until that ships, callers should
-    only enable this path through the BlockScaleSplitKZeroInitFusionPass,
-    which is gated by PassConfig.fuse_blockscale_splitk_zero_init.
+    Kernel + SplitK selection are handled entirely by the AITER dispatcher
+    via the tuned CSV (``AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_FILE``).  AITER
+    main's C++ cktile dispatch is now keyed by ``kernelName`` resolved on
+    the Python side: any short-circuit that bypasses the CSV would lose
+    both the tuned splitK and the tuned kernel (the latter falling back to
+    a non-tuned default heuristic kernel).
+
+    ``split_k`` is accepted for ABI compatibility but ignored - the CSV is
+    authoritative.  ``y_is_zeroed`` is propagated to the cktile invoker so
+    the kernel can skip its internal Y.zero_() when a producer-fused
+    prologue has already pre-zeroed ``output``.
     """
     from aiter import gemm_a8w8_blockscale
 
@@ -733,10 +740,12 @@ def _rocm_aiter_gemm_a8w8_blockscale_splitk_impl(
         Bs,
         dtype=output_dtype,
         out=output,
-        splitK=split_k,
         y_is_zeroed=y_is_zeroed,
     )
-    return output
+    # In-place op: `output` is mutated, never returned. Returning a mutated
+    # input would alias it under an inferred schema that declares a fresh
+    # result, which breaks Inductor's buffer-reuse planning (the zero-init
+    # output buffer gets recycled and clobbered by a later block's prologue).
 
 
 def _rocm_aiter_gemm_a8w8_blockscale_splitk_fake(
@@ -748,8 +757,8 @@ def _rocm_aiter_gemm_a8w8_blockscale_splitk_fake(
     output_dtype: torch.dtype = torch.float16,
     split_k: int = 0,
     y_is_zeroed: bool = False,
-) -> torch.Tensor:
-    return output
+) -> None:
+    return None
 
 
 def _rocm_aiter_triton_gemm_a8w8_blockscale_splitk_impl(
@@ -761,7 +770,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_splitk_impl(
     output_dtype: torch.dtype = torch.float16,
     split_k: int = 0,
     y_is_zeroed: bool = False,
-) -> torch.Tensor:
+) -> None:
     """Triton blockscale GEMM into a caller-provided output buffer with SplitK.
 
     Wraps aiter.ops.triton.gemm_a8w8_blockscale.gemm_a8w8_blockscale, which
@@ -788,7 +797,8 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_splitk_impl(
         )
     except TypeError:
         gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype, y=output)
-    return output
+    # In-place op: `output` is mutated, never returned (see the CK twin above
+    # for why returning a mutated input breaks Inductor buffer reuse).
 
 
 def _rocm_aiter_triton_gemm_a8w8_blockscale_splitk_fake(
@@ -800,8 +810,8 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_splitk_fake(
     output_dtype: torch.dtype = torch.float16,
     split_k: int = 0,
     y_is_zeroed: bool = False,
-) -> torch.Tensor:
-    return output
+) -> None:
+    return None
 
 
 
@@ -1065,6 +1075,98 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """P2 producer with zero-init prologue.
+
+    Same contract as `_rocm_aiter_rmsnorm_fp8_group_quant_impl`, plus the
+    Triton kernel pre-zeros `gemm_out_zero_init` as a grid-strided prologue
+    so a downstream SplitK blockscale GEMM can run with `y_is_zeroed=True`.
+    """
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, _ = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=FP8_DTYPE,
+        res1=None,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+    return (x_quant, x_quant_scales)
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_fake(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """P2-add producer with zero-init prologue.
+
+    Same as `_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl` but also
+    pre-zeros the downstream GEMM output buffer in the Triton kernel.
+    """
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=FP8_DTYPE,
+        res1=residual,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+    return (x_quant, res, x_quant_scales)
+
+
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_fake(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty_like(residual, device=residual.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
 def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1109,6 +1211,58 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """P3 (gated RMSNorm + FP8 group quant) with zero-init prologue.
+
+    The triton kernel pre-zeros ``gemm_out_zero_init`` as a grid-strided
+    prologue so a downstream SplitK blockscale GEMM can run with
+    ``y_is_zeroed=True``.
+    """
+    from aiter.ops.triton.quant import fused_rms_gated_fp8_group_quant
+
+    return fused_rms_gated_fp8_group_quant(
+        x,
+        weight,
+        bias,
+        z,
+        eps,
+        norm_before_gate=norm_before_gate,
+        activation=activation,
+        out_dtype=FP8_DTYPE,
+        group_size=group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_fake(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    z: torch.Tensor,
+    eps: float,
+    norm_before_gate: bool,
+    activation: str,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -1122,6 +1276,48 @@ def _rocm_aiter_group_fp8_quant_impl(
 
 def _rocm_aiter_group_fp8_quant_fake(
     x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
+def _rocm_aiter_group_fp8_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """HIP per-1x128 group FP8 quant that also pre-zeros a downstream GEMM
+    output buffer.
+
+    The aiter `per_group_quant_hip` kernel writes a grid-strided uint4 zero
+    store across the full byte range of `gemm_out_zero_init` as a kernel
+    prologue, so the downstream SplitK blockscale GEMM can be invoked with
+    `y_is_zeroed=True` and skip its internal hipMemsetAsync.
+    """
+    assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
+    from aiter.ops.quant import per_group_quant_hip
+
+    return per_group_quant_hip(
+        x.contiguous(),
+        quant_dtype=FP8_DTYPE,
+        group_size=group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_group_fp8_quant_with_zero_init_fake(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
@@ -1170,6 +1366,48 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """P4 (silu+mul + FP8 group quant) with zero-init prologue.
+
+    The triton kernel pre-zeros ``gemm_out_zero_init`` as a grid-strided
+    prologue so a downstream SplitK blockscale GEMM can run with
+    ``y_is_zeroed=True``.
+    """
+    from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    return act_mul_and_fp8_group_quant(
+        x,
+        activation="silu",
+        group_size=group_size,
+        dtype_quant=FP8_DTYPE,
+        gemm_out_zero_init=gemm_out_zero_init,
+    )
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_fake(
+    x: torch.Tensor,
+    gemm_out_zero_init: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    assert N % 2 == 0
+    N_half = N // 2
+    x_fp8 = torch.empty((M, N_half), dtype=FP8_DTYPE, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N_half + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
 # ---------------------------------------------------------------------------
 # Zero-init SplitK fusion: new mutating producer variants
 #
@@ -1196,16 +1434,39 @@ def _rocm_aiter_per_token_quant_with_zero_init_impl(
     out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
-    dynamic_per_token_scaled_quant(
-        out,
-        x,
-        scale,
-        scale_ub=None,
-        shuffle_scale=False,
-        num_rows=None,
-        num_rows_factor=1,
-        gemm_out_zero_init=gemm_out_zero_init,
-    )
+    cols = int(x.shape[-1])
+    if cols in (32, 64, 128):
+        dynamic_per_token_scaled_quant(
+            out,
+            x,
+            scale,
+            scale_ub=None,
+            shuffle_scale=False,
+            num_rows=None,
+            num_rows_factor=1,
+            gemm_out_zero_init=gemm_out_zero_init,
+        )
+    else:
+        # AITER's `dynamic_per_token_scaled_quant` only fuses gemm_out_zero_init
+        # into the per-group (per_1x128) path; the per-token path (cols > 128)
+        # does not have the zero-init prologue plumbed through the kernel
+        # template. To keep the SSA edge through `gemm_out_zero_init` correct
+        # (the downstream SplitK GEMM expects it pre-zeroed when
+        # y_is_zeroed=True) we fall back to an explicit memset here.  This
+        # path forfeits the fusion benefit -- the producer kernel can't piggy-
+        # back the zero-init on its grid -- but preserves correctness for
+        # non-blockscale-shape producers that some test modules still wire
+        # through this op.
+        gemm_out_zero_init.zero_()
+        dynamic_per_token_scaled_quant(
+            out,
+            x,
+            scale,
+            scale_ub=None,
+            shuffle_scale=False,
+            num_rows=None,
+            num_rows_factor=1,
+        )
     return out, scale
 
 
@@ -1329,9 +1590,21 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
     if x.dim() == 3:
         num_tokens, num_heads, head_dim = x.shape
         flat_n = num_heads * head_dim
+        x_k = x
+        z_k = z
     else:
+        # AITER's gated_rmsnorm_fp8_group_quant kernel only supports
+        # head_dim == 128 and requires 3D [T, H, D] inputs. Production
+        # Qwen3-Next GDN already passes 3D; this branch is a friendly
+        # fallback for 2D callers that match the same head_dim invariant.
         num_tokens = x.shape[0]
         flat_n = x.shape[-1]
+        assert flat_n % group_size == 0, (
+            "rocm_aiter_gated_rmsnorm_fp8_group_quant: 2D input requires "
+            f"hidden_dim ({flat_n}) divisible by group_size ({group_size})"
+        )
+        x_k = x.view(num_tokens, flat_n // group_size, group_size)
+        z_k = z.view(num_tokens, flat_n // group_size, group_size)
 
     out = torch.empty((num_tokens, flat_n), dtype=FP8_DTYPE, device=x.device)
     scale = torch.empty(
@@ -1342,8 +1615,8 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl(
     gated_rmsnorm_fp8_group_quant(
         out=out,
         scale=scale,
-        x=x,
-        z=z,
+        x=x_k,
+        z=z_k,
         weight=weight,
         epsilon=variance_epsilon,
         group_size=group_size,
@@ -1388,9 +1661,20 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl(
     if x.dim() == 3:
         num_tokens, num_heads, head_dim = x.shape
         flat_n = num_heads * head_dim
+        x_k = x
+        z_k = z
     else:
+        # See _rocm_aiter_gated_rmsnorm_fp8_group_quant_impl for the 2D
+        # fallback rationale and head_dim=128 constraint.
         num_tokens = x.shape[0]
         flat_n = x.shape[-1]
+        assert flat_n % group_size == 0, (
+            "rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init: 2D "
+            f"input requires hidden_dim ({flat_n}) divisible by "
+            f"group_size ({group_size})"
+        )
+        x_k = x.view(num_tokens, flat_n // group_size, group_size)
+        z_k = z.view(num_tokens, flat_n // group_size, group_size)
 
     out = torch.empty((num_tokens, flat_n), dtype=FP8_DTYPE, device=x.device)
     scale = torch.empty(
@@ -1401,8 +1685,8 @@ def _rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init_impl(
     gated_rmsnorm_fp8_group_quant(
         out=out,
         scale=scale,
-        x=x,
-        z=z,
+        x=x_k,
+        z=z_k,
         weight=weight,
         epsilon=variance_epsilon,
         group_size=group_size,
@@ -2091,10 +2375,26 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
             )
 
+            # P2: RMSNorm + FP8 group quant with zero-init prologue.
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init_fake,
+            )
+
             direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
+            )
+
+            # P3: gated RMSNorm + FP8 group quant with zero-init prologue.
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init_fake,
             )
 
             direct_register_custom_op(
@@ -2103,10 +2403,26 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
             )
 
+            # P2-add: residual-add + RMSNorm + FP8 group quant with zero-init.
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init_fake,
+            )
+
             direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+            )
+
+            # P4: silu+mul + FP8 group quant with zero-init prologue.
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init_fake,
             )
 
             direct_register_custom_op(
@@ -2147,6 +2463,16 @@ class rocm_aiter_ops:
                 mutates_args=["gemm_out_zero_init"],
                 fake_impl=_rocm_aiter_per_token_quant_with_zero_init_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            # P1 (HIP per-1x128 group FP8 quant) - mutating variant that
+            # pre-zeros a downstream GEMM output buffer. The aiter HIP kernel
+            # already supports the `gemm_out_zero_init=` kwarg.
+            direct_register_custom_op(
+                op_name="rocm_aiter_group_fp8_quant_with_zero_init",
+                op_func=_rocm_aiter_group_fp8_quant_with_zero_init_impl,
+                mutates_args=["gemm_out_zero_init"],
+                fake_impl=_rocm_aiter_group_fp8_quant_with_zero_init_fake,
             )
 
             # P2 (Gemma RMSNorm + FP8 group quant) - functional and mutating
@@ -2262,6 +2588,34 @@ class rocm_aiter_ops:
     @staticmethod
     def get_per_token_quant_with_zero_init_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_per_token_quant_with_zero_init.default
+
+    @staticmethod
+    def get_group_quant_with_zero_init_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
+
+    @staticmethod
+    def get_rmsnorm_fp8_group_quant_with_zero_init_op() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
+        )
+
+    @staticmethod
+    def get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
+        )
+
+    @staticmethod
+    def get_fused_rms_gated_fp8_group_quant_with_zero_init_op() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init.default
+        )
+
+    @staticmethod
+    def get_act_mul_fused_fp8_group_quant_with_zero_init_op() -> OpOverload:
+        return (
+            torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
+        )
 
     @staticmethod
     def get_gemma_rmsnorm_fp8_group_quant_op() -> OpOverload:
