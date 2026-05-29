@@ -205,6 +205,38 @@ class TestStreamingScheduler(unittest.TestCase):
         # 2 + len([1, 2, 3])
         assert session.mm_features[1].mm_position.offset == 5
 
+    def test_trim_consumed_streaming_mm_features(self):
+        request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1] * 12,
+            mm_features=[
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="audio",
+                    identifier="0",
+                    mm_position=PlaceholderRange(offset=1, length=2),
+                ),
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="audio",
+                    identifier="1",
+                    mm_position=PlaceholderRange(offset=5, length=2),
+                ),
+                MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy(),
+                    modality="audio",
+                    identifier="2",
+                    mm_position=PlaceholderRange(offset=10, length=2),
+                ),
+            ],
+        )
+        request.num_computed_tokens = 7
+
+        Scheduler._trim_consumed_mm_features(request)
+
+        assert [f.identifier for f in request.mm_features] == ["2"]
+        assert request.mm_features[0].mm_position.offset == 10
+
     def test_process_streaming_requests_with_finish_session(self):
         """Test that a non-resumable request signals stream completion.
 

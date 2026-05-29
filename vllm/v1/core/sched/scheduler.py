@@ -1421,6 +1421,7 @@ class Scheduler(SchedulerInterface):
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
+                self._trim_consumed_mm_features(request)
 
             stopped = False
             new_logprobs = None
@@ -1714,6 +1715,21 @@ class Scheduler(SchedulerInterface):
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
+
+    @staticmethod
+    def _trim_consumed_mm_features(request: Request) -> None:
+        if not request.resumable or not request.mm_features:
+            return
+
+        num_consumed = 0
+        for mm_feature in request.mm_features:
+            mm_pos = mm_feature.mm_position
+            if mm_pos.offset + mm_pos.length > request.num_computed_tokens:
+                break
+            num_consumed += 1
+
+        if num_consumed:
+            request.mm_features = request.mm_features[num_consumed:]
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
