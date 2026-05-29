@@ -122,10 +122,12 @@ class RejectionSampler:
             input_batch.expanded_idx_mapping,
             input_batch.expanded_local_pos,
             self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.min_p.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
-            # Temperature was already applied in apply_sampling_params.
+            # Temperature and min-p were already applied in apply_sampling_params.
             False,  # apply_temperature
+            False,  # apply_min_p
             self.synthetic_conditional_rates,
             use_fp64_gumbel=self.sampler.use_fp64_gumbel,
         )
@@ -150,13 +152,15 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        logits_indices: torch.Tensor,
         cu_num_logits: torch.Tensor,
         idx_mapping: torch.Tensor,
-        logits_indices: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        temperature: torch.Tensor,
+        min_p: torch.Tensor,
+        seeds: torch.Tensor,
         draft_logits: torch.Tensor | None = None,
-        shard_vocab_start: int | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -164,16 +168,6 @@ class RejectionSampler:
 
         draft_sampled = input_ids[logits_indices]
         draft_positions = positions[logits_indices]
-
-        # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
-        self.sampler.logit_bias_state.apply_logit_bias(
-            logits,
-            expanded_idx_mapping,
-            draft_positions,
-        )
-
-        # Apply min_p in place.
-        self.sampler.sampling_states.apply_min_p(logits, expanded_idx_mapping)
 
         # Rejection sample.
         sampled, num_sampled = rejection_sample(
@@ -185,13 +179,14 @@ class RejectionSampler:
             idx_mapping,
             expanded_idx_mapping,
             expanded_local_pos,
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
+            temperature,
+            min_p,
+            seeds,
             self.num_speculative_steps,
             True,  # apply_temperature
+            True,  # apply_min_p
             self.synthetic_conditional_rates,
             use_fp64_gumbel=self.sampler.use_fp64_gumbel,
-            shard_vocab_start=shard_vocab_start,
         )
 
         return SamplerOutput(

@@ -686,16 +686,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self,
         captured_attn_states: dict[BatchExecutionDescriptor, Any],
     ) -> None:
-        """Capture the rejection-sampler chain (compute_logits → sampling
-        params → rejection_sample → get_num_sampled_and_rejected) as one
-        FULL graph per uniform spec-decode batch descriptor.
-
-        Skipped when not on the last PP rank, when there's no speculator /
-        rejection sampler, or when the model has no FULL captures for us
-        to piggy-back on.
-        """
         if self.rejection_sampler_cudagraph_manager is None:
             return
+        
         assert self.rejection_sampler is not None
         assert self.speculator is not None
         assert self.cudagraph_manager is not None
@@ -706,26 +699,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # we have nothing to chain onto.
             return
 
-        def compute_logits_sharded(
-            hidden_states: torch.Tensor,
-        ) -> tuple[torch.Tensor, int | None]:
-            logits = self.model.logits_processor.get_local_logits(
-                self.model.lm_head, hidden_states
-            )
-            return logits, self.model.lm_head.shard_indices.org_vocab_start_index
-
-        def compute_logits_full(
-            hidden_states: torch.Tensor,
-        ) -> tuple[torch.Tensor, int | None]:
-            return self.model.compute_logits(hidden_states), None
-
         # Capture for the same descriptors the model captured.
         descs = list(captured_attn_states.keys())
         self.rejection_sampler_cudagraph_manager.capture(
             descs=descs,
-            compute_logits_fn=compute_logits_sharded
-            if self.parallel_config.tensor_parallel_size > 1
-            else compute_logits_full,
+            compute_logits_fn=self.model.compute_logits,
             hidden_states=hidden_states,
             rejection_sampler=self.rejection_sampler,
             draft_logits=self.speculator.draft_logits,
@@ -760,6 +738,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and not np.any(sampling_states.top_p.np[idx] != 1.0)
             and not np.any(self.sampler.penalties_state.use_penalty[idx])
             and self.sampler.bad_words_state.num_bad_words.np[idx].max() == 0
+            and not np.any(self.sampler.logit_bias_state.use_logit_bias[idx])
         )
 
     def _remove_request(self, req_id: str) -> bool:
