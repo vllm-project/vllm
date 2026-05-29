@@ -380,6 +380,14 @@ class OffloadingSpec(ABC):
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
 
+        # When True, only prompt (prefill) blocks are offloaded; decode-phase
+        # blocks (KV generated after the prompt) are skipped. Useful when prior
+        # turns' generated tokens are dropped before the next turn (e.g.
+        # reasoning models that strip thinking).
+        self.offload_prompt_only: bool = bool(
+            self.extra_config.get("offload_prompt_only", True)
+        )
+
         parallel_config = vllm_config.parallel_config
         context_parallel_factor = (
             parallel_config.decode_context_parallel_size
