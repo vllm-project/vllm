@@ -1373,6 +1373,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Step3p7ForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step-3.7-Flash",
+        trust_remote_code=True,
         use_original_num_layers=True,
         # Initialize at least one MoE layer
         hf_overrides={"num_hidden_layers": 4},
