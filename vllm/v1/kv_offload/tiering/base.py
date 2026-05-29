@@ -11,10 +11,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -50,12 +50,25 @@ class SecondaryTierManager(ABC):
 
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
-    async jobs; get_finished() polls for completion.
+    async jobs; get_finished_jobs() polls for completion.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", primary_kv_view: memoryview) -> None:
-        self._vllm_config = vllm_config
+    def __init__(
+        self,
+        offloading_spec: "OffloadingSpec",
+        primary_kv_view: memoryview,
+        tier_type: str,
+    ) -> None:
+        """
+        Args:
+            offloading_spec: Offloading configuration.
+            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+            tier_type: Tier type identifier, set by SecondaryTierFactory
+                from the registered tier type.
+        """
+        self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
+        self.tier_type = tier_type
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -93,7 +106,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via block_ids)
 
-        Report completion via ``get_finished()``.
+        Report completion via ``get_finished_jobs()``.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and block_ids
@@ -118,7 +131,7 @@ class SecondaryTierManager(ABC):
         The implementation must copy data from this tier into the
         primary-tier slots identified by ``block_ids``.
 
-        Report completion via ``get_finished()``.
+        Report completion via ``get_finished_jobs()``.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and block_ids
@@ -127,7 +140,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Return all jobs (loads and stores) that completed since the last call.
 
@@ -150,19 +163,28 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext expressing this tier's preference
+        for how blocks should be offloaded for this request.
+
+        Args:
+            req_context: Per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
+        """
+        return
+
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
-
-    @staticmethod
-    @abstractmethod
-    def get_tier_type() -> str:
-        """
-        Get the type identifier of this tier (e.g., "example", "storage").
-
-        Must match the "type" field in the tier config dict.
-
-        Returns:
-            Tier type string.
-        """
-        pass

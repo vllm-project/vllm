@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
 )
@@ -74,11 +75,14 @@ class Mxfp4MoeBackend(Enum):
     # Keep the legacy name as an alias while the ROCm split backend rename settles.
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
+    AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # CPU
+    CPU = "CPU"
     # Emulation
     EMULATION = "EMULATION"
     # Humming
@@ -89,6 +93,7 @@ class Mxfp4MoeBackend(Enum):
 AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_MXFP4_FP8,
+    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
 )
 
 
@@ -193,10 +198,22 @@ def backend_to_kernel_cls(
 
         return [AiterW4A8ExpertsMonolithic]
 
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterExperts,
+        )
+
+        return [AiterExperts]
+
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
 
         return [XPUExpertsMXFp4]
+
+    elif backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
+
+        return [CPUExpertsMxfp4]
 
     elif backend == Mxfp4MoeBackend.EMULATION:
         from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
@@ -234,9 +251,12 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "aiter": [
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
+        "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
+        "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
     }
     if backends := mapping.get(runner_backend):
@@ -255,6 +275,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -264,7 +285,6 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
-        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -277,6 +297,8 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     if current_platform.is_rocm():
         return [Mxfp4MoeBackend.AITER_MXFP4_BF16]
+    if current_platform.is_xpu():
+        return [Mxfp4MoeBackend.XPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -300,6 +322,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return kMxfp4Dynamic
     return None  # BF16 activation
 
 
@@ -371,6 +395,7 @@ def _filter_by_activation(
             b
             for b in backends
             if _backend_activation_key(b) == requested_activation_key
+            or b == Mxfp4MoeBackend.EMULATION
         ]
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     return bf16 if bf16 else backends
@@ -535,9 +560,25 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
+    if current_platform.is_cpu():
+        backend = Mxfp4MoeBackend.CPU
+        logger.info_once(_make_log_backend(backend))
+        return _return_or_raise(
+            Mxfp4MoeBackend.CPU,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
-            "No MXFP4 MoE backend supports the deployment configuration."
+            "No MXFP4 MoE backend supports the deployment configuration. "
+            f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+            "Native backends require specific hardware. "
+            "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
+            "To use the emulation backend for research/debugging, pass "
+            "--moe-backend emulation."
         )
 
     return Mxfp4MoeBackend.NONE, None
@@ -581,16 +622,15 @@ def select_deepseek_v4_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
-    # DeepSeek-V4 on ROCm is more accurate with the unfused Triton MXFP4 path
-    # than the default AITER path. Prefer Triton-unfused for this routing mode,
-    # while keeping AITER as a fallback if Triton-unfused rejects the config.
+    # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
+    # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
     if (
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
-            Mxfp4MoeBackend.TRITON_UNFUSED,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
     else:
         priority_backends = _get_priority_backends()
@@ -639,6 +679,10 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     elif current_platform.is_rocm():
         intermediate_size = round_up(intermediate_size, 256)
         hidden_size = round_up(hidden_size, 256)
+    elif backend == Mxfp4MoeBackend.CPU:
+        # CPU AMX kernel uses BLOCK_N=32, align to 32
+        intermediate_size = round_up(intermediate_size, 32)
+        hidden_size = round_up(hidden_size, 32)
     else:
         intermediate_size = round_up(intermediate_size, 64)
     return hidden_size, intermediate_size
@@ -907,29 +951,75 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         else:
             assert mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16
 
-            def _interleave_mxfp4_cutlass_sm90(w):
-                w_shape = w.shape
-                w_interleaved = w.reshape(w_shape[0], w_shape[1], (w_shape[2] // 4), 4)
-                w_interleaved = w_interleaved.permute(0, 2, 1, 3)
-                w_interleaved = w_interleaved.reshape(
-                    w_shape[0], w_shape[2] // 4, w_shape[1] * 4
-                )
-                return w_interleaved
+            from flashinfer.fused_moe import (
+                interleave_moe_scales_for_sm90_mixed_gemm,
+                interleave_moe_weights_for_sm90_mixed_gemm,
+            )
 
-            w31_scales = w13_scale_swapped.to(torch.uint8)
-            w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w31_scales)
-
-            w2_scale = w2_weight_scale.data.to(torch.uint8)
-            w2_scale_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scale)
+            w13_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w13_weight_swapped.contiguous(), "fp4"
+            )
+            w2_weight_interleaved = interleave_moe_weights_for_sm90_mixed_gemm(
+                w2_weight.contiguous(), "fp4"
+            )
+            w31_scales_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w13_scale_swapped.to(torch.uint8)
+            )
+            w2_scale_interleaved = interleave_moe_scales_for_sm90_mixed_gemm(
+                w2_weight_scale.data.to(torch.uint8)
+            )
 
             return (
-                w13_weight_swapped,
-                w2_weight,
+                w13_weight_interleaved,
+                w2_weight_interleaved,
                 w31_scales_interleaved,
                 w2_scale_interleaved,
                 w13_bias_swapped,
                 w2_bias,
             )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+
+        # e8m0_shuffle on weight scales (GFX950 swizzle layout)
+        from aiter.utility.fp4_utils import e8m0_shuffle
+
+        s0, s1, _ = w13_weight_scale.shape
+        w13_weight_scale.data = e8m0_shuffle(w13_weight_scale.view(s0 * s1, -1)).view(
+            s0, s1, -1
+        )
+
+        s0, s1, _ = w2_weight_scale.shape
+        w2_weight_scale.data = e8m0_shuffle(w2_weight_scale.view(s0 * s1, -1)).view(
+            s0, s1, -1
+        )
+
+        # View as native FP4 dtype
+        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
+        if fp4_dtype is not None:
+            w13_weight.data = w13_weight.data.view(fp4_dtype)
+            w2_weight.data = w2_weight.data.view(fp4_dtype)
+
+        # Shuffle weights for AITER CK kernel
+        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+            w13_weight, w2_weight
+        )
+        shuffled_w13.is_shuffled = True
+        shuffled_w2.is_shuffled = True
+
+        return (
+            shuffled_w13,
+            shuffled_w2,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1092,6 +1182,31 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_weight,
             w13_weight_scale,
             w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_mxfp4_moe_layer_for_cpu,
+        )
+
+        packed_w13, packed_w2, packed_w13_scale, packed_w2_scale = (
+            prepare_mxfp4_moe_layer_for_cpu(
+                w13_weight.data,
+                w2_weight.data,
+                w13_weight_scale.data,
+                w2_weight_scale.data,
+            )
+        )
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+        return (
+            packed_w13,
+            packed_w2,
+            packed_w13_scale,
+            packed_w2_scale,
             w13_bias,
             w2_bias,
         )
@@ -1305,7 +1420,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
@@ -1314,44 +1429,30 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         e, n, k = w13_weight.shape
 
-        w13_weight.view(torch.uint8).copy_(
-            w13_weight.data.view(torch.uint8)
-            .view(e, n // 2, 2, k)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, k)
-        )
-        w13_weight_scale.data = (
-            w13_weight_scale.data.view(e, n // 2, 2, -1)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, -1)
-        )
+        # No de-interleave: standard _load_w13 already produces
+        # [gate_all, up_all] layout.  Use aiter-native shuffle functions
+        # (matching aiter/ops/flydsl/test_flydsl_moe_a4w4.py pattern).
+        from aiter.ops.shuffle import shuffle_weight as _shuf_w
+        from aiter.utility.fp4_utils import e8m0_shuffle as _e8m0_shuf
 
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
-        shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
-            num_experts,
-            True,
+        # w13 (gate+up, stage1): shuffle_weight with layout (16,16)
+        w13_weight = torch.nn.Parameter(
+            _shuf_w(w13_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            requires_grad=False,
+        )
+        shuffled_w13_scale = _e8m0_shuf(
+            w13_weight_scale.view(-1, w13_weight_scale.shape[-1])
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
-        shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
-            num_experts,
-            False,
+        # w2 (down-proj, stage2): same shuffle as w13 for a4w4 fp4x2
+        # (tuning script uses shuffle_weight((16,16)) + e8m0_shuffle for both)
+        w2_weight = torch.nn.Parameter(
+            _shuf_w(w2_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            requires_grad=False,
         )
-
-        if w13_bias is not None:
-            w13_bias = (
-                w13_bias.data.view(-1, n // 2, 2)
-                .permute(0, 2, 1)
-                .contiguous()
-                .view(-1, n)
-            )
+        shuffled_w2_scale = _e8m0_shuf(
+            w2_weight_scale.view(-1, w2_weight_scale.shape[-1])
+        )
 
         return (
             w13_weight,
@@ -1414,10 +1515,20 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.XPU:
+        # No additional transformation needed for XPU backend
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend for Mxfp4MoEMethod: {mxfp4_backend}. "
-            f"Expected TRTLLM, Triton, or AITER backend."
+            f"Expected TRTLLM, Triton, AITER, or XPU backend."
         )
 
 
@@ -1490,6 +1601,17 @@ def make_mxfp4_moe_quant_config(
             block_shape=None,
             gemm1_clamp_limit=swiglu_limit,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+        return ocp_mx_moe_quant_config(
+            quant_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
@@ -1498,6 +1620,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        Mxfp4MoeBackend.CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
@@ -1515,7 +1638,12 @@ def make_mxfp4_moe_quant_config(
         )
 
         assert isinstance(layer, FusedMoE)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
+        )
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
@@ -1577,9 +1705,6 @@ def make_mxfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=(
-            not moe_config.disable_inplace and mxfp4_backend not in TRTLLM_BACKENDS
-        ),
     )
 
     return kernel

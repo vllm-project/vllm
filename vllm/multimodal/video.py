@@ -639,6 +639,107 @@ class DynamicVideoBackend(VideoBackend):
         )
 
 
+@VIDEO_LOADER_REGISTRY.register("glm4_6v")
+class GLM4_6VVideoBackend(VideoBackend):
+    @classmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        # Estimate duration from frame count and fps when the container
+        # does not report it (common for WebM/streaming inputs).
+        if source.duration:
+            return source
+        if source.original_fps > 0:
+            max_frame_idx = source.total_frames_num - 1
+            duration = round(max_frame_idx / source.original_fps) + 1
+        else:
+            duration = 0
+        return VideoSourceMetadata(
+            source.total_frames_num, source.original_fps, duration
+        )
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        duration = source.duration
+        original_fps = source.original_fps
+        target_fps = target.fps
+        max_frame_idx = source.total_frames_num - 1
+        max_frames = kwargs.get("max_frames", 640)
+
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        extract_t = int(duration * target_fps)
+        extract_t = min(extract_t, max_frames)
+
+        duration_per_frame = 1 / original_fps
+        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
+
+        if total_frames_num < extract_t:
+            frame_indices = [
+                math.floor(i * total_frames_num / extract_t) for i in range(extract_t)
+            ]
+        else:
+            frame_indices = []
+            current_second = 0.0
+            inv_fps = 1 / target_fps
+            for frame_index in range(total_frames_num):
+                if timestamps[frame_index] >= current_second:
+                    current_second += inv_fps
+                    frame_indices.append(frame_index)
+                    if current_second >= duration - inv_fps:
+                        break
+
+        if len(frame_indices) < extract_t:
+            if len(frame_indices) == 0:
+                start, end = 0, max(total_frames_num - 1, 0)
+            else:
+                start, end = frame_indices[0], frame_indices[-1]
+            frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+        elif len(frame_indices) > extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+
+        seen, uniq = set(), []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        return uniq
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        frames, metadata = super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+        # Ensure even frame count — matches HF's sample_frames even-padding
+        # and _preprocess temporal_patch_size divisibility check.
+        if frames.shape[0] & 1:
+            frames = np.concatenate([frames, frames[-1:]], axis=0)
+        return frames, metadata
+
+
 @VIDEO_LOADER_REGISTRY.register("molmo2")
 class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod

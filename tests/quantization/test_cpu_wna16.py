@@ -15,6 +15,7 @@ MODELS = [
     "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
     "Qwen/Qwen3-0.6B-FP8",  # FP8 W8A16 block-quantized linear
     "Qwen/Qwen3-30B-A3B-FP8",  # FP8 W8A16 block-quantized MoE
+    "openai/gpt-oss-20b",  # MXFP4 W4A16
 ]
 DTYPE = ["bfloat16"]
 

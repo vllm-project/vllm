@@ -46,14 +46,14 @@ In V1, **chunked prefill is enabled by default whenever possible**. With chunked
 
 This policy has two benefits:
 
-- It improves ITL and generation decode because decode requests are prioritized.
+- It improves inter-token latency (ITL) and generation decode because decode requests are prioritized.
 - It helps achieve better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
 
 ### Performance Tuning with Chunked Prefill
 
 You can tune the performance by adjusting `max_num_batched_tokens`:
 
-- Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
+- Smaller values (e.g., 2048) achieve better ITL because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
@@ -270,31 +270,34 @@ Known supported models (with corresponding benchmarks):
 
 ## Input Processing
 
-### fastokens Tokenizer Mode
+### fastokens Backend
 
 By default vLLM uses the standard Hugging Face `tokenizers` library to power
-the fast tokenizer (`--tokenizer-mode hf`). For BPE tokenizers (Qwen, Llama,
-DeepSeek, GPT-OSS, etc.) you can switch to the
-[fastokens](https://github.com/crusoecloud/fastokens) Rust backend, a drop-in
-replacement that's substantially faster on encode/decode and on streaming
-detokenization:
+the fast tokenizer. For BPE tokenizers (Qwen, Llama, DeepSeek, GPT-OSS, etc.)
+you can switch to the [fastokens](https://github.com/crusoecloud/fastokens)
+Rust backend, a drop-in replacement that's substantially faster on
+encode/decode and on streaming detokenization. Enable it by setting
+`VLLM_USE_FASTOKENS=1`:
 
 ```console
-vllm serve Qwen/Qwen3-8B --tokenizer-mode fastokens
+VLLM_USE_FASTOKENS=1 vllm serve Qwen/Qwen3-8B
 ```
 
 Equivalent in the offline API:
 
 ```python
+import os
+os.environ["VLLM_USE_FASTOKENS"] = "1"
+
 from vllm import LLM
-llm = LLM(model="Qwen/Qwen3-8B", tokenizer_mode="fastokens")
+llm = LLM(model="Qwen/Qwen3-8B")
 ```
 
-The `fastokens` Python package must be installed; if it isn't, vLLM raises
-a clear `ImportError` at tokenizer load. `fastokens` loads a Hugging Face
-fast tokenizer with its inner Rust tokenizer replaced by the fastokens shim,
-so it is mutually exclusive with non-HF modes such as `mistral` or
-`deepseek_v32`.
+The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
+vLLM raises a clear `ImportError` at tokenizer load. The override applies to
+any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
+`deepseek_v32`, `deepseek_v4`, `qwen_vl`, …). Modes that don't use the HF
+fast tokenizer (`mistral`, `grok2`, `kimi_audio`) ignore the flag.
 
 Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU
