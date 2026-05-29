@@ -408,10 +408,7 @@ def empty_exponential_noise_like(
     return torch.empty(probs.shape, dtype=dtype, device=probs.device)
 
 
-def sample_with_exponential_noise(
-    probs: torch.Tensor,
-    q: torch.Tensor,
-) -> torch.Tensor:
+def sample_with_exponential_noise(probs: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     if q.dtype == probs.dtype:
         scores = probs.div_(q)
     else:
