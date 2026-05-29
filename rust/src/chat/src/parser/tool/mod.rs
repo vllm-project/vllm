@@ -4,9 +4,10 @@ use std::sync::LazyLock;
 
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, KimiK2ToolParser,
-    Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
+    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, HyV3ToolParser,
+    KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
+    ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
@@ -22,6 +23,7 @@ pub mod names {
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
     pub const HERMES: &str = "hermes";
+    pub const HY_V3: &str = "hy_v3";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
@@ -59,6 +61,7 @@ impl ToolParserFactory {
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
             .register_parser::<HermesToolParser>(names::HERMES)
+            .register_parser::<HyV3ToolParser>(names::HY_V3)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
@@ -75,6 +78,8 @@ impl ToolParserFactory {
             .register_pattern("qwen3.5", names::QWEN3_CODER)
             .register_pattern("qwen", names::QWEN3_XML)
             .register_pattern("hermes", names::HERMES)
+            .register_pattern("hy3", names::HY_V3)
+            .register_pattern("hy_v3", names::HY_V3)
             .register_pattern("llama-4", names::LLAMA4_JSON)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)
