@@ -439,7 +439,7 @@ class MoERunner(MoERunnerInterface):
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
-            states = tensor_model_parallel_all_reduce(states.contiguous())
+            states = tensor_model_parallel_all_reduce(states)
 
         return states
 
@@ -657,9 +657,6 @@ class MoERunner(MoERunnerInterface):
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
-        # Remember 40794. Double check tests/lora/test_gpt_oss.py::test_gpt_oss_tp2
-        fused_output = fused_output[:, :og_hidden_dim]
-
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
@@ -672,11 +669,14 @@ class MoERunner(MoERunnerInterface):
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = shared_output + fused_output
+            result = shared_output + fused_output[:, :og_hidden_dim]
         else:
             result = fused_output
 
         result = self._maybe_reduce_final_output(result)
+
+        if shared_output is None:
+            result = result[..., :og_hidden_dim]
 
         return self._maybe_add_zero_expert_output(result)
 
