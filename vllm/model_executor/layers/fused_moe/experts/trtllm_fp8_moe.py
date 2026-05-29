@@ -257,7 +257,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return True
+        return router_logits_dtype != torch.float32
 
     @staticmethod
     def _supports_routing_method(

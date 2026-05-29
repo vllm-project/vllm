@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
     kInt8Static,
     kMxfp4Static,
     kMxfp8Static,
@@ -566,8 +567,9 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             quant_config.use_mxfp4_w4a16
             or quant_config.use_nvfp4_w4a16
             or quant_config.use_int4_w4a16
+            or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
-        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
+        ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -608,6 +610,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kNvfp4Static,
             kInt4Static,
             kInt8Static,
+            kInt4Static32,
         ]
         return weight_key in SUPPORTED_W
 
@@ -640,6 +643,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             if self.w1_zp is not None or self.w2_zp is not None:
                 return scalar_types.uint4.id
             return scalar_types.uint4b8.id
+        elif self.quant_config.use_int8_w8a16:
+            return scalar_types.uint8b128.id
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
         elif (

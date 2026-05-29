@@ -363,7 +363,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
-    "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
         "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
     ),
@@ -846,6 +845,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
         "CohereLabs/command-a-vision-07-2025"
     ),
+    "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Nano",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        is_available_online=False,
+    ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
         extras={"fork": "Isotr0py/deepseek-vl2-tiny"},
@@ -930,7 +935,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
     ),
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
+    "Glm4vForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-4.1V-9B-Thinking",
+        extras={"4.6V": "zai-org/GLM-4.6V-Flash"},
+    ),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
@@ -1362,6 +1370,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "StepVLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
+    ),
+    "Step3p7ForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step-3.7-Flash", is_available_online=False, trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
