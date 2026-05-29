@@ -43,6 +43,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     OffloadKey,
     PrepareStoreOutput,
+    RequestOffloadingContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.worker.worker import (
@@ -119,6 +120,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.lookup.return_value = 0
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = False
+        self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:
@@ -169,6 +171,7 @@ class RequestRunner:
         block_size_factor: int = 1,
         async_scheduling: bool = True,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        extra_config_overrides: dict[str, Any] | None = None,
     ):
         assert block_size_factor == 1 or kv_cache_groups is None, (
             "block_size_factor > 1 requires all groups to have the same "
@@ -192,9 +195,13 @@ class RequestRunner:
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
             "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
+            # Preserve legacy behavior for tests; new opt-in tests override.
+            "offload_prompt_only": False,
         }
         if block_size_factor > 1:
             extra_config["block_size"] = block_size * block_size_factor
+        if extra_config_overrides:
+            extra_config.update(extra_config_overrides)
 
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
@@ -591,6 +598,7 @@ def request_runner():
         async_scheduling,
         block_size_factor=1,
         kv_cache_groups=None,
+        extra_config_overrides=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -598,6 +606,7 @@ def request_runner():
             block_size_factor=block_size_factor,
             async_scheduling=async_scheduling,
             kv_cache_groups=kv_cache_groups,
+            extra_config_overrides=extra_config_overrides,
         )
         runners.append(runner)
         return runner

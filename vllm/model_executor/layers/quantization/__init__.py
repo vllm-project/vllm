@@ -46,7 +46,6 @@ QuantizationMethods = Literal[
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
-    "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
 ]
