@@ -804,6 +804,26 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
 
 
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_model_and_tokenizer(mock_pull_files):
+    """Test that when model and tokenizer are different cloud URIs,
+    pull_files receives the correct URI for each."""
+    mock_pull_files.return_value = None
+
+    model_url = "s3://bucket/model/"
+    tokenizer_url = "s3://bucket/tokenizer/"
+
+    config = MockConfig(model=model_url, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
+
+    # pull_files should be called twice: once for model, once for tokenizer
+    assert mock_pull_files.call_count == 2
+    # First call: model URI with allow_pattern
+    assert mock_pull_files.call_args_list[0][0][0] == model_url
+    # Second call: tokenizer URI with ignore_pattern
+    assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_attn_type", "expected_result", "reason"),
     [

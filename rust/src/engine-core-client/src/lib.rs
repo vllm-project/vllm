@@ -2,6 +2,7 @@ mod client;
 mod coordinator;
 mod error;
 mod metrics;
+pub mod mock_engine;
 pub mod protocol;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;

@@ -102,7 +102,7 @@ impl<'de> Deserialize<'de> for UtilityCallId {
 ///
 /// Original Python payload shape:
 /// `(client_index, call_id, method_name, args)`
-#[derive(Debug, Clone, PartialEq, Serialize_tuple)]
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
 pub struct EngineCoreUtilityRequest {
     pub client_index: u32,
     pub call_id: UtilityCallId,

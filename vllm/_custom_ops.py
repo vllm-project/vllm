@@ -650,6 +650,51 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
+def gptq_gemm_rdna3(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.gptq_gemm_rdna3(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3"):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna3")
+    def _gptq_gemm_rdna3_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3_wmma"):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna3_wmma")
+    def _gptq_gemm_rdna3_wmma_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
     @register_fake("_C::allspark_w8a16_gemm")
@@ -2367,36 +2412,6 @@ def dsv3_router_gemm(
     return output
 
 
-def dsv4_norm_router_gemm(
-    x: torch.Tensor,
-    norm_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused RMSNorm + router GEMV for DeepSeek V4.
-
-    Returns ``(normed_x, router_logits)`` where
-        normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
-        router_logits[m,n] = sum_k(normed_x[m,k] * gate_weight[n,k])
-
-    DSV4-specific constraints (caller must check before dispatching here):
-      - x, norm_weight, gate_weight all bf16 contiguous
-      - x.shape == [num_tokens, 7168] with num_tokens in [1, 16]
-      - gate_weight.shape == [num_experts, 7168] with num_experts in {256, 384}
-      - SM 9.x or 10.x device
-
-    Logits output is fp32 (hard-coded by DSV4 router).
-    """
-    num_tokens, hidden = x.shape
-    num_experts = gate_weight.shape[0]
-    normed_x = torch.empty_like(x)
-    logits = torch.empty(num_tokens, num_experts, device=x.device, dtype=torch.float32)
-    torch.ops._moe_C.dsv4_norm_router_gemm(
-        logits, normed_x, x, norm_weight, gate_weight, float(eps)
-    )
-    return normed_x, logits
-
-
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -3747,29 +3762,6 @@ def matmul_mxf4_bf16_tn(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return torch.ops._qutlass_C.matmul_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
-
-
-if hasattr(torch.ops._qutlass_C, "matmul_ada_mxf4_bf16_tn"):
-
-    @register_fake("_qutlass_C::matmul_ada_mxf4_bf16_tn")
-    def _fake_matmul_ada_mxf4_bf16_tn(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_sf: torch.Tensor,
-        b_sf: torch.Tensor,
-        alpha: torch.Tensor,
-    ):
-        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
-
-
-def matmul_ada_mxf4_bf16_tn(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_sf: torch.Tensor,
-    b_sf: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
