@@ -294,7 +294,11 @@ class MediaConnector:
                 _, _, _, _, sockaddr = result
                 address = sockaddr[0]
                 ip_obj = ipaddress.ip_address(address)
-                if ip_obj.is_private:
+                # here we rely on ip_obj.is_global as ipaddress.is_private returns False
+                # for CGNAT addresses, which are used internally by cloud providers
+                # (e.g., AWS EKS default pod CIDR). An attacker could supply a URL
+                # resolving to this range to reach internal services.
+                if not ip_obj.is_global:
                     raise ValueError(
                         f"The media URL must resolve to a public domain. "
                         f"Input media URL: {url_spec.url}"
