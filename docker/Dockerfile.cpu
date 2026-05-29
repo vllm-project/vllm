@@ -176,7 +176,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
-        uv build --wheel --out-dir=dist git+https://github.com/triton-lang/triton-cpu.git@270e696d; \
+        uv build --wheel --out-dir=dist "git+https://github.com/triton-lang/triton-cpu.git@270e696d"; \
     fi
 
 ######################### TEST DEPS #########################
