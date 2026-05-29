@@ -375,7 +375,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             (1, 1), dtype=torch.int32, device=self.device
         )
 
-        self.req_id_per_token_buffer = torch.empty(
+        self.req_id_per_token_buffer = torch.zeros(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=device,
@@ -458,6 +458,10 @@ class ROCMAiterMLASparseMetadataBuilder(
             device=device,
         )
 
+        self._prev_req_extent: int = 0
+        self._prev_indices_extent: int = 0
+        self._prev_metadata_key: tuple | None = None
+
     def build(
         self,
         common_prefix_len: int,
@@ -470,11 +474,23 @@ class ROCMAiterMLASparseMetadataBuilder(
         req_id_per_token = np.repeat(
             np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
         )
-        # Zero-fill for cudagraphs
-        self.req_id_per_token_buffer.fill_(0)
-        self.paged_kv_indices.fill_(0)
-        self.paged_kv_indptr.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
+        # Only re-zero the shrink-tail. paged_kv_indptr is fully rewritten
+        # by the cumsum below. paged_kv_indices entries past new_indices_extent
+        # are never read (the attention kernel only touches the ranges
+        # defined by paged_kv_indptr).
+        new_req_extent = int(req_id_per_token.shape[0])
+        new_indices_extent = num_tokens * self.topk_tokens
+        if self._prev_req_extent > new_req_extent:
+            self.req_id_per_token_buffer[new_req_extent : self._prev_req_extent].fill_(
+                0
+            )
+        if self._prev_indices_extent > new_indices_extent:
+            self.paged_kv_indices[new_indices_extent : self._prev_indices_extent].fill_(
+                0
+            )
+        self._prev_req_extent = new_req_extent
+        self._prev_indices_extent = new_indices_extent
+        self.req_id_per_token_buffer[:new_req_extent].copy_(
             torch.from_numpy(req_id_per_token), non_blocking=True
         )
         query_lens = (
@@ -505,27 +521,43 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        from aiter import get_mla_metadata_v1
-
-        get_mla_metadata_v1(
-            qo_indptr,
-            paged_kv_indptr,
-            paged_kv_last_page_len,
-            self._num_attention_heads,
-            1,
-            True,
-            self._mla_work_meta_data,
-            self._mla_work_info_set,
-            self._mla_work_indptr,
-            self._mla_reduce_indptr,
-            self._mla_reduce_final_map,
-            self._mla_reduce_partial_map,
-            page_size=1,
-            kv_granularity=16,
-            max_seqlen_qo=1,
-            uni_seqlen_qo=1,
-            fast_mode=True,
+        # The output is a deterministic function of (num_tokens, max_query_len,
+        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
+        # and skip the launch when nothing changed.
+        num_reqs = common_attn_metadata.num_reqs
+        clamped_seq_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+            self.topk_tokens,
         )
+        metadata_key = (
+            num_tokens,
+            int(common_attn_metadata.max_query_len),
+            self._num_attention_heads,
+            clamped_seq_lens.tobytes(),
+        )
+        if metadata_key != self._prev_metadata_key:
+            from aiter import get_mla_metadata_v1
+
+            get_mla_metadata_v1(
+                qo_indptr,
+                paged_kv_indptr,
+                paged_kv_last_page_len,
+                self._num_attention_heads,
+                1,
+                True,
+                self._mla_work_meta_data,
+                self._mla_work_info_set,
+                self._mla_work_indptr,
+                self._mla_reduce_indptr,
+                self._mla_reduce_final_map,
+                self._mla_reduce_partial_map,
+                page_size=1,
+                kv_granularity=16,
+                max_seqlen_qo=1,
+                uni_seqlen_qo=1,
+                fast_mode=True,
+            )
+            self._prev_metadata_key = metadata_key
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
