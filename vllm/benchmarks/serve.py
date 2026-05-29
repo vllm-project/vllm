@@ -646,6 +646,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    system_prompt: str | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -871,7 +872,7 @@ async def benchmark(
             extra_headers=extra_headers,
             extra_body=extra_body,
             request_id=request_id,
-            system_prompt=args.system_prompt,
+            system_prompt=system_prompt,
         )
         tasks.append(
             asyncio.create_task(
@@ -1899,6 +1900,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        system_prompt=args.system_prompt,
     )
 
     # Save config and results to json
