@@ -215,8 +215,8 @@ class TestNanDetectionPipeline:
             "prefill",
         )
 
-    def test_first_layer_is_lowest_index(self, monkeypatch):
-        """When multiple layers have NaNs, origin picks the lowest index."""
+    def test_origin_is_first_layer_with_nans(self, monkeypatch):
+        """Origin picks the first layer (in model order) that reported NaNs."""
         monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
         import importlib
 
@@ -227,14 +227,15 @@ class TestNanDetectionPipeline:
         from vllm.v1.metrics.stats import IterationStats
 
         c0 = _call_kernel_with_nans({0: [0]})
-        c5 = _call_kernel_with_nans({0: [0]})
         c2 = _call_kernel_with_nans({0: [0]})
+        c5 = _call_kernel_with_nans({0: [0]})
 
         ts = time.time()
+        # Dict order matches static_forward_context iteration order.
         layer_nans = {
-            "model.layers.5.self_attn": int(c5[0].item()),
             "model.layers.0.self_attn": int(c0[0].item()),
             "model.layers.2.self_attn": int(c2[0].item()),
+            "model.layers.5.self_attn": int(c5[0].item()),
         }
 
         stats = IterationStats()
