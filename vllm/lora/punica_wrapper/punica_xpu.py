@@ -390,6 +390,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        add_inputs: bool = True,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
@@ -439,6 +440,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+            add_inputs,
         )
 
     def add_lora_w13(
@@ -461,6 +463,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
+        add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
@@ -594,6 +597,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         fully_sharded: bool,
         tp_rank: int,
         use_tuned_config: bool,
+        add_inputs: bool = True,
     ) -> None:
         import functools
 

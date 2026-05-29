@@ -300,11 +300,11 @@
                             {{- format_tool_response_block(ns_tname.name, ns_txt.s) -}}
                             {%- for part in tool_body -%}
                                 {%- if part.get('type') == 'image' -%}
-                                    {{- '\n\n<|image|>\n\n' -}}
+                                    {{- '<|image|>' -}}
                                 {%- elif part.get('type') == 'audio' -%}
                                     {{- '<|audio|>' -}}
                                 {%- elif part.get('type') == 'video' -%}
-                                    {{- '\n\n<|video|>\n\n' -}}
+                                    {{- '<|video|>' -}}
                                 {%- endif -%}
                             {%- endfor -%}
                         {%- else -%}

@@ -21,6 +21,7 @@ from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphConfig,
+    EncoderItemSpec,
 )
 
 logger = init_logger(__name__)
@@ -44,7 +45,9 @@ class BudgetGraphMetadata:
     # The input tensor updated before replay (e.g. pixel_values)
     input_buffer: torch.Tensor
     # Buffers recorded into the CUDA graph (e.g. embeddings, sequence metadata).
-    # Before replay the manager zeros then slice-copies new data into these.
+    # Before replay the manager updates these in-place. By default buffers are
+    # zeroed before slice-copying the actual values; model-specific padding
+    # behavior is provided by EncoderCudaGraphConfig.padding_logics.
     metadata_buffers: dict[str, torch.Tensor]
     # Output written by graph, read after replay
     output_buffer: torch.Tensor
@@ -141,8 +144,8 @@ class EncoderCudaGraphManager:
         elif user_max_frames is not None:
             self.max_frames_per_batch = user_max_frames
         else:
-            # Set it to the model-specific value according to its `processing_info`.
-            max_frames_per_video = self.model.get_max_frames_per_video()
+            # Set it to the model-specific value from config.
+            max_frames_per_video = self.config.max_frames_per_video
             self.max_frames_per_batch = self.max_batch_size * max_frames_per_video
 
         mm_config = vllm_config.model_config.multimodal_config
@@ -250,12 +253,21 @@ class EncoderCudaGraphManager:
                 return budget
         return None
 
+    def _get_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
+        """Get item specs from the model."""
+        return self.model.get_encoder_cudagraph_item_specs(mm_kwargs)
+
     def _get_per_item_out_tokens(self, mm_kwargs: dict[str, Any]) -> list[int]:
         """Get per-item output token counts as plain ints."""
-        return [
-            int(t)
-            for t in self.model.get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)
-        ]
+        return [spec.output_tokens for spec in self._get_item_specs(mm_kwargs)]
+
+    @staticmethod
+    def _copy_padded_buffer(
+        dst: torch.Tensor,
+        src: torch.Tensor,
+    ) -> None:
+        dst.zero_()
+        dst[: src.shape[0]].copy_(src)
 
     def _run_budget_graph(
         self,
@@ -274,7 +286,7 @@ class EncoderCudaGraphManager:
         Returns:
             Encoder outputs, or None if graph not captured.
         """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
+        num_items = len(self._get_item_specs(mm_kwargs))
         if token_budget not in self.budget_graphs:
             self.graph_misses += num_items
             return None
@@ -300,9 +312,10 @@ class EncoderCudaGraphManager:
             if src.ndim == 0:
                 buf.copy_(src)
             else:
-                n = src.shape[0]
-                buf.zero_()
-                buf[:n].copy_(src)
+                padding_logic = self.config.padding_logics.get(
+                    key, self._copy_padded_buffer
+                )
+                padding_logic(buf, src)
 
         graph_meta.graph.replay()
 
@@ -332,10 +345,11 @@ class EncoderCudaGraphManager:
                          always satisfy total_tokens <= max_budget and therefore
                          always find a valid budget (no miss).
         """
-        num_items = self.model.get_encoder_cudagraph_num_items(mm_kwargs)
+        item_specs = self._get_item_specs(mm_kwargs)
+        num_items = len(item_specs)
         max_budget = self.token_budgets[-1]
 
-        per_item_out_tokens = self._get_per_item_out_tokens(mm_kwargs)
+        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
 
         # Sort ascending by output token count (smallest first)
         sorted_indices = sorted(range(num_items), key=lambda i: per_item_out_tokens[i])
@@ -459,9 +473,8 @@ class EncoderCudaGraphManager:
         tp_size = get_tensor_model_parallel_world_size()
         current_rank = get_tensor_model_parallel_rank()
 
-        per_item_input_sizes = self.model.get_encoder_cudagraph_per_item_input_sizes(
-            mm_kwargs
-        )
+        item_specs = self._get_item_specs(mm_kwargs)
+        per_item_input_sizes = [spec.input_size for spec in item_specs]
 
         (image_rank_assignment, images_per_rank, input_patches_per_rank) = (
             get_load_balance_assignment(per_item_input_sizes, tp_size)
