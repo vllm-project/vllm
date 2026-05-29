@@ -18,7 +18,9 @@ use thiserror_ext::AsReport as _;
 use tracing::{error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
-use vllm_llm::{CollectedGenerateOutput, GenerateOutput, GenerateOutputStreamExt as _};
+use vllm_llm::{
+    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _,
+};
 
 use self::convert::prepare_generate_request;
 use self::types::{
@@ -151,6 +153,10 @@ async fn generate_chunk_stream(
                 let token_ids = output.token_ids;
                 output_tokens = output_tokens.saturating_add(token_ids.len() as u32);
                 let finish_reason = output.finish_reason;
+
+                if matches!(finish_reason.as_ref(), Some(FinishReason::Error)) {
+                    bail_server_error!("Internal server error");
+                }
 
                 if let Some(finish_reason) = finish_reason.as_ref()
                     && log_request
