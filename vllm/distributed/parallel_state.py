@@ -1392,10 +1392,6 @@ def get_pcp_group() -> GroupCoordinator:
     return _PCP
 
 
-def maybe_get_pcp_group() -> GroupCoordinator | None:
-    return _PCP
-
-
 @contextmanager
 def graph_capture(device: torch.device):
     """
