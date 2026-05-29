@@ -592,34 +592,6 @@ class MambaSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True)
-class MomeSpec(MambaSpec):
-    """
-    A spec for MoME (Mixture of MoME Experts) conv states.
-    Stores representations of `kernel_size - 1 + num_spec_tokens` tokens per block,
-    with 3 state components: q_cache, kv_cache, o_cache.
-    """
-
-    kernel_size: int = 0
-    num_spec_tokens: int = 0
-
-    @property
-    def num_total_tokens(self) -> int:
-        return self.kernel_size - 1 + self.num_spec_tokens
-
-    def __post_init__(self):
-        if len(self.shapes) != 3:
-            raise ValueError(
-                f"MoME has 3 components but got {len(self.shapes)} shapes."
-            )
-        if len(self.dtypes) != 3:
-            raise ValueError(
-                f"MoME has 3 components but got {len(self.dtypes)} dtypes."
-            )
-        if self.kernel_size <= 0:
-            raise ValueError(f"kernel_size must be positive, got {self.kernel_size}.")
-
-
-@dataclass(frozen=True)
 class SlidingWindowMomeSpec(SlidingWindowMLASpec):
     component_dims: tuple[int, ...] = ()
 
@@ -987,7 +959,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             )
         elif isinstance(one_spec, MambaSpec):
             return all(
-                isinstance(spec, (MambaSpec, MomeSpec))
+                isinstance(spec, MambaSpec)
                 and type(spec) is type(one_spec)
                 and spec.num_speculative_blocks == one_spec.num_speculative_blocks
                 for spec in kv_cache_specs.values()
