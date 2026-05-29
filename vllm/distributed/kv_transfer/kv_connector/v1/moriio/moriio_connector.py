@@ -412,22 +412,64 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id[transfer_id] = request_id
         self.request_id_to_transfer_id[request_id] = transfer_id
 
+    # Per-transfer suffix that MoRI-IO appends to ``request.request_id``
+    # between ``update_state_after_alloc`` (alloc-time) and
+    # ``request_finished`` (finish-time) on the sidecar-fronted decode
+    # path. Used by ``unmap_request_id`` to strip the suffix when the
+    # exact-match lookup misses.
+    _MORIIO_RID_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$")
+
     def unmap_request_id(self, request_id: ReqId):
-        if request_id in self.request_id_to_transfer_id:
-            transfer_id = self.request_id_to_transfer_id[request_id]
-            del self.request_id_to_transfer_id[request_id]
+        # In multi-pod disagg routing, MoRI-IO can append a
+        # "-[0-9a-f]{8}" per-transfer suffix to ``request.request_id``
+        # between the call that populated ``request_id_to_transfer_id``
+        # (``update_state_after_alloc``) and the call that drains it
+        # (``request_finished``). The dict lookup is exact-match, so the
+        # suffix mutation produces a spurious
+        #
+        #   "Could not find <rid> in transfer_id_to_request_id lookup
+        #    table.  This could lead to a possible hang."
+        #
+        # warning, leaks the dict entry, and ships stale state to the
+        # worker via ``meta.transfer_id_to_request_id`` -- causing
+        # rank-asymmetric MoRI-IO transfer-id lookup failures in worker
+        # logs on the pod where the suffix gets appended (decode-master
+        # in Wide-EP DP=16, ranks 0..7).
+        #
+        # Resolution: try exact match first (preserves the no-suffix
+        # fast path -- zero overhead and bit-identical to the
+        # pre-patch behaviour for callers that already pass the
+        # canonical rid), then fall back to stripping a trailing
+        # "-[0-9a-f]{8}" suffix and retrying.
+        lookup_id = request_id
+        if lookup_id not in self.request_id_to_transfer_id:
+            base = self._MORIIO_RID_SUFFIX_RE.sub("", str(request_id))
+            if base != request_id and base in self.request_id_to_transfer_id:
+                logger.debug(
+                    "MoRI-IO unmap suffix-strip: %r -> %r",
+                    request_id,
+                    base,
+                )
+                lookup_id = base
+        if lookup_id in self.request_id_to_transfer_id:
+            transfer_id = self.request_id_to_transfer_id[lookup_id]
+            del self.request_id_to_transfer_id[lookup_id]
             if transfer_id in self.transfer_id_to_request_id:
                 del self.transfer_id_to_request_id[transfer_id]
             else:
                 logger.warning(
-                    "transfer id not in transfer_id_to_request_id lookup"
-                    "table. there is likely a bug!"
+                    "MoRI-IO unmap: transfer_id %s not in "
+                    "transfer_id_to_request_id for rid %s",
+                    transfer_id,
+                    lookup_id,
                 )
         else:
             logger.warning(
-                "Could not find %s  in transfer_id_to_request_id"
-                "lookup table.  This could lead to a possible hang.",
+                "MoRI-IO unmap MISS: rid=%r table_size=%d "
+                "(suffix-strip fallback also missed; map_request_id "
+                "likely never fired for this request)",
                 request_id,
+                len(self.request_id_to_transfer_id),
             )
 
     def get_num_new_matched_tokens(
