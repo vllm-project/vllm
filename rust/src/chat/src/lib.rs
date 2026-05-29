@@ -93,7 +93,7 @@ pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,
     /// Effective model dtype reported by the engine.
-    model_dtype: Option<ModelDtype>,
+    model_dtype: ModelDtype,
     /// Tool-call parser selection.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -135,7 +135,7 @@ impl ChatLlm {
     }
 
     /// Override the effective model dtype used for multimodal tensor encoding.
-    pub fn with_model_dtype(mut self, model_dtype: Option<ModelDtype>) -> Self {
+    pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
         self.model_dtype = model_dtype;
         self
     }
