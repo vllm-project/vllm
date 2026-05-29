@@ -134,7 +134,7 @@ class Fp8BlockScaledMMLinearKernel(
                 # are always Tensors. Subclasses with apply_input_quant=False
                 # must not use As in apply_block_scaled_mm.
                 input_scale = (
-                    input_scale if input_scale is not None else input_2d.new_ones(1)
+                    input_scale if input_scale is not None else input_2d.new_empty(1)
                 )
 
         output = self.apply_block_scaled_mm(

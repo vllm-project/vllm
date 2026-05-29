@@ -54,13 +54,6 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
-void merge_attn_states(
-    torch::Tensor& output, std::optional<torch::Tensor> output_lse,
-    const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
-    const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
-    const std::optional<int64_t> prefill_tokens_with_context,
-    const std::optional<torch::Tensor>& output_scale = std::nullopt);
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
@@ -70,30 +63,11 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-    torch::Tensor& q, torch::Tensor const& kv, torch::Tensor& k_cache,
+torch::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    torch::Tensor const& q_in, torch::Tensor const& kv, torch::Tensor& k_cache,
     torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
-    torch::Tensor const& cos_sin_cache, double eps, int64_t cache_block_size);
-
-void apply_repetition_penalties_(torch::Tensor& logits,
-                                 const torch::Tensor& prompt_mask,
-                                 const torch::Tensor& output_mask,
-                                 const torch::Tensor& repetition_penalties);
-
-void top_k_per_row_prefill(const torch::Tensor& logits,
-                           const torch::Tensor& rowStarts,
-                           const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1,
-                           int64_t topK);
-
-void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
-                          const torch::Tensor& seqLens, torch::Tensor& indices,
-                          int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t topK);
-
-void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
-                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
-                     int64_t max_seq_len);
+    torch::Tensor const& cos_sin_cache, int64_t q_head_padded, double eps,
+    int64_t cache_block_size);
 
 void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
@@ -148,22 +122,6 @@ void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                                torch::Tensor& scales,
                                std::optional<torch::Tensor> const& azp);
-
-void selective_scan_fwd(
-    const torch::Tensor& u, const torch::Tensor& delta, const torch::Tensor& A,
-    const torch::Tensor& B, const torch::Tensor& C,
-    const std::optional<torch::Tensor>& D_,
-    const std::optional<torch::Tensor>& z_,
-    const std::optional<torch::Tensor>& delta_bias_, bool delta_softplus,
-    const std::optional<torch::Tensor>& query_start_loc,
-    const std::optional<torch::Tensor>& cache_indices,
-    const std::optional<torch::Tensor>& has_initial_state,
-    const torch::Tensor& ssm_states, int64_t null_block_id, int64_t block_size,
-    const std::optional<torch::Tensor>& block_idx_first_scheduled_token,
-    const std::optional<torch::Tensor>& block_idx_last_scheduled_token,
-    const std::optional<torch::Tensor>& initial_state_idx,
-    const std::optional<torch::Tensor>& cu_chunk_seqlen,
-    const std::optional<torch::Tensor>& last_chunk_indices);
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
