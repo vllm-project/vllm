@@ -243,12 +243,14 @@ pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/
     --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with INFO-level logs and look for the activation banner:
+vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with INFO-level logs and look for the platform-selection line:
 
 ```bash
 VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
-    2>&1 | grep -E "ZenCpuPlatform activated|CPU unquantized GEMM dispatch"
+    2>&1 | grep "AMD Zen CPU detected with zentorch installed"
 ```
+
+For per-backend dispatch details (which kernel each linear layer was bound to), re-run with `VLLM_LOGGING_LEVEL=DEBUG` and grep for `CPU unquantized GEMM dispatch`.
 
 See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, supported dtypes, and the `VLLM_ZENTORCH_WEIGHT_PREPACK` knob.
 
