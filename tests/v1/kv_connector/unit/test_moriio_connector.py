@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-import subprocess
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -47,18 +46,6 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
-
-
-def _rdma_available() -> bool:
-    """Check if RDMA devices are available."""
-    try:
-        result = subprocess.run(["ibv_devinfo"], capture_output=True, text=True)
-        return "No IB devices found" not in result.stderr
-    except FileNotFoundError:
-        return False
-
-
-rdma_available = _rdma_available()
 
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
@@ -224,11 +211,14 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
+    # These tests exercise connector setup, not real RDMA transfer (MoRI wrapper is
+    # mocked), so we can use any backend without affecting test validity. Use xGMI to
+    # avoid requiring RNICs in CI.
     kv_transfer_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
-        kv_connector_extra_config={"read_mode": read_mode},
+        kv_connector_extra_config={"read_mode": read_mode, "backend": "xgmi"},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -417,7 +407,6 @@ def test_read_mode_loads_remote_block_ids():
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
@@ -517,7 +506,6 @@ def test_register_kv_caches(mock_parallel_groups):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
 

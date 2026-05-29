@@ -94,6 +94,7 @@ def _get_priority_backends(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
+    return _AVAILABLE_BACKENDS
 
     if not may_have_bias:
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
@@ -921,6 +922,17 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
             None,
             None,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
+        return _process_weights_flashinfer(
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
             w13_bias,
             w2_bias,
         )

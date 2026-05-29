@@ -935,7 +935,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
     ),
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
+    "Glm4vForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-4.1V-9B-Thinking",
+        extras={"4.6V": "zai-org/GLM-4.6V-Flash"},
+    ),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
@@ -1367,6 +1370,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "StepVLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
+    ),
+    "Step3p7ForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step-3.7-Flash", is_available_online=False, trust_remote_code=True
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
