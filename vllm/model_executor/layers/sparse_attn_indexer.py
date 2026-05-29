@@ -297,6 +297,13 @@ def sparse_attn_indexer(
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
         seq_lens = decode_metadata.seq_lens[:batch_size]
+        # persistent_topk expects 1D per-row context lengths in row-major order.
+        if seq_lens.ndim == 2 and seq_lens.shape[1] > 1:
+            seq_lens_for_topk = seq_lens.reshape(-1).contiguous()
+        else:
+            seq_lens_for_topk = seq_lens.contiguous()
+            if seq_lens_for_topk.ndim == 2:
+                seq_lens_for_topk = seq_lens_for_topk.squeeze(-1)
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
         # the downstream topk kernels accept both 1D and 2D.
@@ -341,7 +348,7 @@ def sparse_attn_indexer(
             )
             torch.ops._C.persistent_topk(
                 logits,
-                seq_lens,
+                seq_lens_for_topk,
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
@@ -351,7 +358,7 @@ def sparse_attn_indexer(
             ops.top_k_per_row_decode(
                 logits,
                 next_n,
-                seq_lens,
+                seq_lens_for_topk,
                 topk_indices,
                 num_rows,
                 logits.stride(0),
