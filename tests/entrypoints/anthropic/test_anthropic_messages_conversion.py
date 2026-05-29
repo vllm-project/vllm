@@ -10,6 +10,7 @@ blocks echoed back by Anthropic clients.
 """
 
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicContentBlock,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -635,3 +636,105 @@ class TestThinkingBlockConversion:
         # Redacted thinking is ignored, normal thinking still becomes reasoning.
         assert asst.get("reasoning") == "Thinking..."
         assert asst.get("content") == "Hi!"
+
+
+# ======================================================================
+# System message extraction from messages array
+# ======================================================================
+
+
+class TestSystemMessageExtraction:
+    """When Claude Code puts system messages in the messages array instead
+    of the ``system`` field, vLLM should extract them automatically.
+    """
+
+    def test_single_system_message_extracted(self):
+        """A single system message in messages array should be extracted."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="You are helpful.")
+        ]
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+    def test_multiple_system_messages_concatenated(self):
+        """Multiple system messages should be joined as content blocks."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="You are helpful."),
+            AnthropicContentBlock(type="text", text="Be concise."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_system_message_with_existing_system_field(self):
+        """System messages in array should be prepended to existing system."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "Extra instruction."},
+                {"role": "user", "content": "Hello"},
+            ],
+            system="Main system prompt.",
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="Main system prompt."),
+            AnthropicContentBlock(type="text", text="Extra instruction."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_system_message_content_blocks(self):
+        """System message with content blocks should pass through as-is."""
+        request = AnthropicMessagesRequest(
+            model="test-model",
+            max_tokens=128,
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "First instruction."},
+                        {"type": "text", "text": "Second instruction."},
+                    ],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="First instruction."),
+            AnthropicContentBlock(type="text", text="Second instruction."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_no_system_messages_unchanged(self):
+        """Normal requests without system messages are unchanged."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+        )
+        assert request.system is None
+        assert len(request.messages) == 2
+
+    def test_conversion_works_after_extraction(self):
+        """Full round-trip: extraction + conversion to chat format."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "You are a pirate."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        result = _convert(request)
+        system_msg = result.messages[0]
+        assert system_msg["role"] == "system"
+        assert system_msg["content"] == "You are a pirate."
+        assert result.messages[1]["role"] == "user"
