@@ -1284,6 +1284,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
+  set(VLLM_ROCM_HAS_GFX1100 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    set(VLLM_ROCM_HAS_GFX1100 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna3.cu"
+      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1293,6 +1301,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  if(VLLM_ROCM_HAS_GFX1100)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
