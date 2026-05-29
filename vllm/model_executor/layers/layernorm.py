@@ -151,7 +151,7 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        weight = self.weight.float() + 1.0
+        weight = self.weight.data.to(x.dtype) + 1.0
         if residual is None:
             return ir.ops.rms_norm(x, weight, self.variance_epsilon)
         return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
