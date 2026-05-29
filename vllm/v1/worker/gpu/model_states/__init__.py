@@ -26,6 +26,11 @@ def init_model_state(
 
         return WhisperModelState(vllm_config, model, encoder_cache, device)
 
+    if "ParakeetForTDT" in vllm_config.model_config.architectures:
+        from vllm.v1.worker.gpu.model_states.parakeet_tdt import ParakeetTDTModelState
+
+        return ParakeetTDTModelState(vllm_config, model, encoder_cache, device)
+
     if vllm_config.model_config.is_hybrid:
         from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
