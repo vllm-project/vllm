@@ -53,7 +53,11 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    _require_is_multimodal,
+)
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
@@ -142,6 +146,17 @@ class MossAudioConfig(PretrainedConfig):
             kwargs.setdefault(key, getattr(self.language_config, key, None))
         kwargs.setdefault("tie_word_embeddings", False)
         super().__init__(**kwargs)
+
+        for key in (
+            "hidden_size",
+            "num_attention_heads",
+            "num_key_value_heads",
+            "head_dim",
+            "max_position_embeddings",
+            "rms_norm_eps",
+        ):
+            if hasattr(self.language_config, key):
+                setattr(self, key, getattr(self.language_config, key))
 
     def get_text_config(self, decoder: bool = False) -> Qwen3Config:
         return self.language_config
@@ -904,6 +919,27 @@ class MossAudioProcessor:
         input_ids = []
         cursor = 0
         placeholder = f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+        if not audio_list:
+            while True:
+                match_idx = prompt_text.find(placeholder, cursor)
+                if match_idx < 0:
+                    break
+                prefix = prompt_text[cursor:match_idx]
+                input_ids.extend(
+                    self.tokenizer.encode(prefix, add_special_tokens=False)
+                )
+                input_ids.extend(
+                    [self.audio_start_id, self.audio_token_id, self.audio_end_id]
+                )
+                cursor = match_idx + len(placeholder)
+            suffix = prompt_text[cursor:]
+            input_ids.extend(self.tokenizer.encode(suffix, add_special_tokens=False))
+            data: dict[str, torch.Tensor] = {
+                "input_ids": torch.tensor([input_ids], dtype=torch.long),
+                "attention_mask": torch.ones((1, len(input_ids)), dtype=torch.long),
+            }
+            return BatchFeature(data=data, tensor_type=return_tensors)
+
         for item_idx, _ in enumerate(audio_list):
             match_idx = prompt_text.find(placeholder, cursor)
             if match_idx < 0:
@@ -926,7 +962,7 @@ class MossAudioProcessor:
             )
         input_ids.extend(self.tokenizer.encode(suffix, add_special_tokens=False))
 
-        data: dict[str, torch.Tensor] = {
+        data = {
             "input_ids": torch.tensor([input_ids], dtype=torch.long),
             "attention_mask": torch.ones((1, len(input_ids)), dtype=torch.long),
         }
@@ -1086,11 +1122,15 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                 for length in lens
             ]
 
-        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(
+            item_idx: int,
+            suffix_token_ids: list[int] | None = None,
+        ) -> PromptUpdateDetails[list[int]]:
             num_tokens = audio_token_lens[item_idx]
             if num_tokens == 0:
                 raise ValueError("The audio is too short to be represented.")
             audio_token_ids = processor.build_audio_placeholder_ids(num_tokens)
+            suffix_token_ids = suffix_token_ids or []
             is_embed = torch.tensor(
                 [token_id == processor.audio_token_id for token_id in audio_token_ids],
                 dtype=torch.bool,
@@ -1100,26 +1140,54 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                     processor.audio_start_id,
                     *audio_token_ids,
                     processor.audio_end_id,
+                    *suffix_token_ids,
                 ],
                 is_embed=lambda _tokenizer, _seq: torch.cat(
                     [
                         torch.tensor([False]),
                         is_embed,
                         torch.tensor([False]),
+                        torch.zeros(len(suffix_token_ids), dtype=torch.bool),
                     ]
                 ),
             )
 
-        return [
-            PromptReplacement(
-                modality="audio",
-                target=[
+        placeholder = f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+        prompt_update_specs = [
+            (
+                [
                     processor.audio_start_id,
                     processor.audio_token_id,
                     processor.audio_end_id,
                 ],
-                replacement=get_replacement,
+                [],
             )
+        ]
+        for suffix in ("", "\n"):
+            tokenizer_target = processor.tokenizer.encode(
+                placeholder + suffix,
+                add_special_tokens=False,
+            )
+            suffix_token_ids = processor.tokenizer.encode(
+                suffix,
+                add_special_tokens=False,
+            )
+            if any(target == tokenizer_target for target, _ in prompt_update_specs):
+                continue
+            prompt_update_specs.append((tokenizer_target, suffix_token_ids))
+
+        return [
+            PromptReplacement(
+                modality="audio",
+                target=target,
+                replacement=(
+                    lambda item_idx, suffix_token_ids=suffix_token_ids: get_replacement(
+                        item_idx,
+                        suffix_token_ids,
+                    )
+                ),
+            )
+            for target, suffix_token_ids in prompt_update_specs
         ]
 
 
@@ -1275,7 +1343,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         self,
         audio_data: torch.Tensor,
         audio_data_seqlens: torch.Tensor,
-    ) -> tuple[tuple[torch.Tensor, ...], ...]:
+    ) -> tuple[torch.Tensor, ...]:
         last_hidden_state, deepstack = self.audio_encoder(
             audio_data.to(self.audio_encoder.dtype),
             feature_lens=audio_data_seqlens,
@@ -1289,6 +1357,11 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
 
         deepstack_embeddings: list[tuple[torch.Tensor, ...]] = []
         if deepstack is not None:
+            if len(deepstack) < len(self.deepstack_audio_merger_list):
+                raise RuntimeError(
+                    "DeepStack output count does not match configured audio "
+                    "merger count."
+                )
             for idx, hidden_states in enumerate(
                 deepstack[: len(self.deepstack_audio_merger_list)]
             ):
@@ -1297,13 +1370,65 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
                     tuple(ds_embeds.squeeze(0).split(audio_lengths, dim=0))
                 )
 
-        return (main_embeddings, *deepstack_embeddings)
+        if not deepstack_embeddings:
+            return main_embeddings
+
+        return tuple(
+            torch.cat(
+                [
+                    main_embedding,
+                    *(
+                        layer_embeddings[item_idx]
+                        for layer_embeddings in deepstack_embeddings
+                    ),
+                ],
+                dim=-1,
+            )
+            for item_idx, main_embedding in enumerate(main_embeddings)
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return ()
         return self._process_audio_input(*audio_input)
+
+    def _split_multimodal_embeddings(
+        self,
+        multimodal_embeddings: MultiModalEmbeddings,
+        hidden_size: int,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[tuple[torch.Tensor, ...], ...]]:
+        if isinstance(multimodal_embeddings, torch.Tensor):
+            embeddings = tuple(multimodal_embeddings.unbind(0))
+        else:
+            embeddings = tuple(multimodal_embeddings)
+
+        if len(embeddings) == 0:
+            return (), ()
+
+        deepstack_count = len(self.deepstack_audio_merger_list)
+        if all(embedding.shape[-1] == hidden_size for embedding in embeddings):
+            return embeddings, ()
+
+        packed_hidden_size = hidden_size * (deepstack_count + 1)
+        if deepstack_count == 0 or any(
+            embedding.shape[-1] != packed_hidden_size for embedding in embeddings
+        ):
+            got = [int(embedding.shape[-1]) for embedding in embeddings]
+            raise ValueError(
+                "MOSS-Audio multimodal embedding width mismatch: expected "
+                f"{hidden_size} or {packed_hidden_size}, got {got}."
+            )
+
+        split_by_item = [
+            torch.split(embedding, hidden_size, dim=-1) for embedding in embeddings
+        ]
+        main_embeddings = tuple(parts[0] for parts in split_by_item)
+        deepstack_embeddings = tuple(
+            tuple(parts[layer_idx + 1] for parts in split_by_item)
+            for layer_idx in range(deepstack_count)
+        )
+        return main_embeddings, deepstack_embeddings
 
     def _cache_deepstack_input_embeds(
         self,
@@ -1350,14 +1475,15 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         self.deepstack_input_embeds = None
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
-        if is_multimodal is None:
-            raise ValueError("is_multimodal is required for MOSS-Audio inputs.")
+        is_multimodal = _require_is_multimodal(is_multimodal)
+        multimodal_embeddings, deepstack_embeddings = self._split_multimodal_embeddings(
+            multimodal_embeddings,
+            hidden_size=int(inputs_embeds.shape[-1]),
+        )
 
-        main_embeddings = multimodal_embeddings[0]
-        deepstack_embeddings = tuple(multimodal_embeddings[1:])
         inputs_embeds = _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
-            multimodal_embeddings=main_embeddings,
+            multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         )
         self._cache_deepstack_input_embeds(
