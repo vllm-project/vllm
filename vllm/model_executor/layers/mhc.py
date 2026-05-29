@@ -243,21 +243,13 @@ class HCHeadOp(CustomOp):
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        num_tokens = hs_flat.shape[0]
-
-        out = torch.empty(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
-        )
-        torch.ops.vllm.hc_head_fused_kernel_tilelang(
+        out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
             hs_flat,
             hc_fn,
             hc_scale,
             hc_base,
-            out,
-            hidden_size,
             rms_norm_eps,
             hc_eps,
-            hc_mult,
         )
         return out.view(*outer_shape, hidden_size)
 
@@ -273,25 +265,24 @@ class HCHeadOp(CustomOp):
         hc_mult, hidden_size = hidden_states.shape[-2:]
         outer_shape = hidden_states.shape[:-2]
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-        num_tokens = hs_flat.shape[0]
-
-        out = torch.empty(
-            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
-        )
 
         if HAS_TILELANG:
-            torch.ops.vllm.hc_head_fused_kernel_tilelang(
+            out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
                 hs_flat,
                 hc_fn,
                 hc_scale,
                 hc_base,
-                out,
-                hidden_size,
                 rms_norm_eps,
                 hc_eps,
-                hc_mult,
             )
         else:
+            num_tokens = hs_flat.shape[0]
+            out = torch.empty(
+                num_tokens,
+                hidden_size,
+                dtype=torch.bfloat16,
+                device=hidden_states.device,
+            )
             torch.ops.vllm.hc_head_triton(
                 hs_flat,
                 hc_fn,
