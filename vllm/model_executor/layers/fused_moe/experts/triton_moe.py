@@ -128,9 +128,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def _supports_batch_invariance():
         return True
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
