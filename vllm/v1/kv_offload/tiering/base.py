@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -160,6 +160,28 @@ class SecondaryTierManager(ABC):
         Args:
             keys: Offload keys to mark as recently used.
             req_context: Per-request context.
+        """
+        return
+
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext expressing this tier's preference
+        for how blocks should be offloaded for this request.
+
+        Args:
+            req_context: Per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
         """
         return
 
