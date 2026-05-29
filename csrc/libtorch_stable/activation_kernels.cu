@@ -79,9 +79,11 @@ __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const float limit) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  // Promote blockIdx.x to int64_t before multiplying by 2 * d (#42860).
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -317,9 +319,10 @@ template <typename scalar_t, typename packed_t,
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -526,8 +529,9 @@ __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
-  const scalar_t* in_ptr = input + blockIdx.x * d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* in_ptr = input + token_idx * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
