@@ -1277,12 +1277,6 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
         else
           WVSPLIT_TILE_CFG(64, 16, sYT, 4)
         break;
-      case 5:
-        if (use_wave32)
-          WVSPLIT_TILE_CFG(32, 16, sYT, 5)
-        else
-          WVSPLIT_TILE_CFG(64, 16, sYT, 5)
-        break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
