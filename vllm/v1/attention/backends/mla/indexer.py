@@ -107,6 +107,10 @@ def split_indexer_prefill_chunks(
             end += 1
 
         req_slice = slice(start + request_offset, end + request_offset)
+        # Zero-query rows can appear from padded requests in full-CG/ubatch metadata.
+        # They produce no logits/indexer work, so skip the no-op chunk.
+        if chunk_m == 0:
+            continue
         max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
         for q_off in range(0, chunk_m, max_q):
             sub_m = min(max_q, chunk_m - q_off)
@@ -477,12 +481,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         seq_lens = common_attn_metadata.seq_lens
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
+        has_prefilling_rows = (
+            common_attn_metadata.is_prefilling is not None
+            and torch.any(common_attn_metadata.is_prefilling).item()
+        )
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=not self.use_flattening,
+                treat_short_extends_as_decodes=not has_prefilling_rows,
             )
         )
 
