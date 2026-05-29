@@ -89,6 +89,7 @@ def create_tanh_softcap_score_mod(
     Returns:
         A score_mod function compatible with FlexAttention.
     """
+
     def tanh_softcap(
         score: torch.Tensor,
         b: torch.Tensor,
@@ -1158,15 +1159,14 @@ class FlexAttentionImpl(AttentionImpl):
             needs_rebuild_block_mask = True
 
         # Handle logits soft capping via score_mod
-        if self.logits_soft_cap is not None:
-            if attn_metadata.score_mod is None:
-                attn_metadata.score_mod = create_tanh_softcap_score_mod(
-                    self.logits_soft_cap
-                )
-                # Transform the score_mod to handle physical-to-logical conversion
-                attn_metadata.transformed_score_mod = (
-                    attn_metadata.get_transformed_score_mod()
-                )
+        if self.logits_soft_cap is not None and attn_metadata.score_mod is None:
+            attn_metadata.score_mod = create_tanh_softcap_score_mod(
+                self.logits_soft_cap
+            )
+            # Transform the score_mod to handle physical-to-logical conversion
+            attn_metadata.transformed_score_mod = (
+                attn_metadata.get_transformed_score_mod()
+            )
 
         layer_hint = getattr(layer, "block_sparsity_hint", None)
         if (
