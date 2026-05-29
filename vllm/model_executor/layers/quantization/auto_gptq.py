@@ -485,6 +485,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             weight_key,
+            may_have_zp=True,
+            may_have_bias=True,
         )
 
     def create_weights(
@@ -644,12 +646,22 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        def replace_or_register(name: str, val: torch.Tensor | None):
+            if val is None:
+                return
+
+            if hasattr(layer, name):
+                replace_parameter(layer, name, val)
+            else:
+                layer.register_parameter(
+                    name, torch.nn.Parameter(val, requires_grad=False)
+                )
+
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
-        if is_a_8bit:
-            assert self.quant_config.quant_type.size_bits == 8, (
-                "W8A8-INT8 is not supported by marlin kernel."
-            )
+        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
+            "W8A8-INT8 is not supported by marlin kernel."
+        )
 
         (
             w13,
@@ -660,8 +672,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
-            _w13_qzeros,
-            _w2_qzeros,
+            w13_qzeros,
+            w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
             w13_bias,
@@ -679,6 +691,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            w13_qzeros=getattr(layer, "w13_qzeros", None),
+            w2_qzeros=getattr(layer, "w2_qzeros", None),
         )
 
         replace_parameter(layer, "w13_qweight", w13)
@@ -689,38 +703,12 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_g_idx", w2_g_idx)
         replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        if w13_input_global_scale is not None:
-            if hasattr(layer, "w13_input_global_scale"):
-                replace_parameter(
-                    layer, "w13_input_global_scale", w13_input_global_scale
-                )
-            else:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-                )
-        if w2_input_global_scale is not None:
-            if hasattr(layer, "w2_input_global_scale"):
-                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
-            else:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-                )
-        if w13_bias is not None:
-            if hasattr(layer, "w13_bias"):
-                replace_parameter(layer, "w13_bias", w13_bias)
-            else:
-                layer.register_parameter(
-                    "w13_bias", torch.nn.Parameter(w13_bias, requires_grad=False)
-                )
-        if w2_bias is not None:
-            if hasattr(layer, "w2_bias"):
-                replace_parameter(layer, "w2_bias", w2_bias)
-            else:
-                layer.register_parameter(
-                    "w2_bias", torch.nn.Parameter(w2_bias, requires_grad=False)
-                )
+        replace_or_register("w13_input_global_scale", w13_input_global_scale)
+        replace_or_register("w2_input_global_scale", w2_input_global_scale)
+        replace_or_register("w13_bias", w13_bias)
+        replace_or_register("w2_bias", w2_bias)
+        replace_or_register("w13_qzeros", w13_qzeros)
+        replace_or_register("w2_qzeros", w2_qzeros)
 
         self._setup_kernel(layer)
 
