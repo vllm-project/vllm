@@ -11,7 +11,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -32,7 +32,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -52,7 +52,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -75,7 +75,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -96,7 +96,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -117,7 +117,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -138,7 +138,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -161,7 +161,7 @@ steps:
   optional: true
   parallelism: 24
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -181,7 +181,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -206,7 +206,7 @@ steps:
   optional: true
   parallelism: 24
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -228,7 +228,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -248,7 +248,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -270,7 +270,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -293,7 +293,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -315,7 +315,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
@@ -337,7 +337,7 @@ steps:
   optional: true
   parallelism: 12
   source_file_dependencies:
-  - .buildkite/test_areas/amd_mi300_workload.yaml
+  - .buildkite/mi300_workload/amd_mi300_workload.yaml
   commands:
   - ':'
   mirror:
