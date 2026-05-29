@@ -1183,9 +1183,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 if key not in self._kv_nan_first_seen_keys:
                     self._kv_nan_first_seen_keys.add(key)
                     self.gauge_kv_nan_first_seen.labels(
-                        rank=key[0],
-                        layer=key[1],
-                        phase=key[2],
+                        rank=self._kv_nan_rank,
+                        layer=layer,
+                        phase=phase,
                     ).set(ts)
             if (
                 not self._kv_nan_origin_published
