@@ -4,7 +4,7 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -241,14 +241,15 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             raise ValueError("Voxtral realtime prompt must contain one audio frame")
 
         audio_array = audio_item[0] if isinstance(audio_item, tuple) else audio_item
+        audio_tensor = torch.as_tensor(audio_array)
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_config = tokenizer.instruct.audio_encoder.audio_config
-        num_audio_tokens = audio_config.num_audio_tokens(len(audio_array))
+        num_audio_tokens = audio_config.num_audio_tokens(audio_tensor.shape[0])
 
         audio_kwargs = MultiModalKwargsItem(
             {
                 "audio_arrays": MultiModalFieldElem(
-                    data=cast(Any, audio_array),
+                    data=audio_tensor,
                     field=MultiModalBatchedField(),
                 )
             }
