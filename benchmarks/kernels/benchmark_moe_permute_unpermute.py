@@ -10,6 +10,7 @@ from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
     moe_unpermute,
 )
@@ -54,6 +55,15 @@ def benchmark_permute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare(i: int):
         input_gating.copy_(gating_output[i])
@@ -65,6 +75,7 @@ def benchmark_permute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
 
     # JIT compilation & warmup
@@ -123,6 +134,15 @@ def benchmark_unpermute(
     topk_weights, topk_ids, token_expert_indices = fused_topk(
         qhidden_states, input_gating, topk, False
     )
+    scratch = MoEPermuteScratch(
+        max_num_tokens=num_tokens,
+        topk=topk,
+        num_experts=num_experts,
+        num_local_experts=num_experts,
+        device=qhidden_states.device,
+        hidden_size=hidden_size,
+        hidden_dtype=qhidden_states.dtype,
+    )
 
     def prepare():
         (
@@ -137,6 +157,7 @@ def benchmark_unpermute(
             topk_ids=topk_ids,
             n_expert=num_experts,
             expert_map=None,
+            scratch=scratch,
         )
         # convert to fp16/bf16 as gemm output
         return (
