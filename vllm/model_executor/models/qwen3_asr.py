@@ -96,10 +96,18 @@ _CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
 
 
 def _sanitize_transcription_user_text(text: str) -> str:
-    """Strip ChatML-style special tokens from user-controlled transcription fields."""
+    """Strip ChatML-style special tokens from user-controlled transcription fields.
+
+    Applies the regex to a fixpoint so nested tokens such as ``<|im<|x|>_end|>``
+    cannot reconstruct a valid ChatML token after a single pass.
+    """
     if not text:
         return ""
-    return _CHATML_LIKE_TOKEN.sub("", text).replace(_ASR_TEXT_TAG, "")
+    prev = None
+    while prev != text:
+        prev = text
+        text = _CHATML_LIKE_TOKEN.sub("", text)
+    return text.replace(_ASR_TEXT_TAG, "")
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -169,7 +177,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = (mm_options or {}).get("audio")
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -560,7 +568,17 @@ class Qwen3ASRForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        """Get the generation prompt to be used for transcription requests."""
+        """Get the generation prompt to be used for transcription requests.
+
+        Matches the official Qwen3-ASR SDK prompt format. The ``system`` turn
+        is only emitted when the caller supplied a ``prompt``, mirroring the
+        SDK's ``_build_messages`` (which omits the system role when context is
+        empty) and preserving the prior no-prompt behavior:
+
+          [system: {context}]                         # only when prompt given
+          user: {audio}
+          assistant: [language {Lang}<asr_text>]{response_prefix}
+        """
         audio = stt_params.audio
         model_config = stt_params.model_config
         task_type = stt_params.task_type
@@ -577,10 +595,13 @@ class Qwen3ASRForConditionalGeneration(
                 "Supported task types are 'transcribe' and 'translate'."
             )
 
-        system_turn = ""
-        if request_prompt:
-            safe_prompt = _sanitize_transcription_user_text(request_prompt)
-            system_turn = f"<|im_start|>system\n{safe_prompt}<|im_end|>\n"
+        # Sanitize first, then check truthiness, so a fully-stripped
+        # ``request_prompt`` (e.g. one that was nothing but ``<|...|>`` tokens)
+        # does not produce an empty ``<|im_start|>system\n<|im_end|>\n`` turn.
+        safe_prompt = _sanitize_transcription_user_text(request_prompt)
+        system_turn = (
+            f"<|im_start|>system\n{safe_prompt}<|im_end|>\n" if safe_prompt else ""
+        )
 
         safe_prefix = _sanitize_transcription_user_text(response_prefix)
 
