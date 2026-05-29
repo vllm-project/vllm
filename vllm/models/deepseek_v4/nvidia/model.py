@@ -671,7 +671,14 @@ class DeepseekV4MoE(nn.Module):
             return self._forward_fused_moe(hidden_states, input_ids)
 
         if self.use_mega_moe_pcp_token_shard:
-            return self._forward_mega_moe_pcp_token_shard(hidden_states, input_ids)
+            org_shape = hidden_states.shape
+            final_hidden_states = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+            self._run_mega_moe_pcp_token_shard(
+                hidden_states,
+                input_ids,
+                final_hidden_states,
+            )
+            return final_hidden_states.view(org_shape)
 
         return self._forward_mega_moe(hidden_states, input_ids)
 
@@ -710,17 +717,18 @@ class DeepseekV4MoE(nn.Module):
 
         return final_hidden_states.view(org_shape)
 
-    def _forward_mega_moe_pcp_token_shard(
+    def _run_mega_moe_pcp_token_shard(
         self,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None,
-    ) -> torch.Tensor:
+        out: torch.Tensor,
+    ) -> None:
         assert hidden_states.dim() == 2
-        org_shape = hidden_states.shape
         pcp_group = get_pcp_group()
         pcp_size = pcp_group.world_size
         if pcp_size == 1:
-            return self._forward_mega_moe(hidden_states, input_ids)
+            out.copy_(self._forward_mega_moe(hidden_states, input_ids))
+            return
 
         num_tokens = hidden_states.shape[0]
         shard_size = (num_tokens + pcp_size - 1) // pcp_size
@@ -745,7 +753,7 @@ class DeepseekV4MoE(nn.Module):
         )
         local_output = self._forward_mega_moe(local_hidden_states, local_input_ids)
         output = pcp_group.all_gather(local_output, dim=0)
-        return output[:num_tokens].view(org_shape)
+        out.copy_(output[:num_tokens])
 
     def _forward_fused_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
