@@ -966,10 +966,8 @@ class NixlConnectorWorker:
             )
         except KeyError as e:
             raise RuntimeError(
-                f"NIXL backend '{str(e)}' is unavailable. "
-                f"Requested backends: {self.nixl_backends}. "
-                "This may indicate missing UCX support "
-                "or an incompatible ROCm/NIXL environment."
+                    f"NIXL backend '{e}' is unavailable. "
+                    f"Requested backends: {self.nixl_backends}."
             ) from e
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
