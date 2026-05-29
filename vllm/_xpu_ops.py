@@ -854,7 +854,9 @@ class xpu_ops:
     ) -> None:
         varlen = query_start_loc is not None
         batch_size = (
-            (query_start_loc.shape[0] - 1) if varlen else u.shape[0]
+            (query_start_loc.shape[0] - 1)
+            if query_start_loc is not None
+            else u.shape[0]
         )
         dim = u.shape[0] if varlen else u.shape[1]
         total_seqlen = u.shape[1] if varlen else u.shape[2]
@@ -870,7 +872,7 @@ class xpu_ops:
 
         # out and out_z alias delta and z respectively
         out = delta
-        out_z = z_ if has_z else delta  # dummy, won't be used if not has_z
+        out_z = z_ if z_ is not None else delta  # won't be used if not has_z
 
         BLOCK_DSTATE = triton.next_power_of_2(dstate)
 
@@ -888,7 +890,7 @@ class xpu_ops:
             C_dstate_stride = C.stride(1)
             out_batch_stride = out.stride(1)
             out_d_stride = out.stride(0)
-            if has_z:
+            if z_ is not None:
                 z_batch_stride = z_.stride(1)
                 z_d_stride = z_.stride(0)
                 out_z_batch_stride = out_z.stride(1)
@@ -911,7 +913,7 @@ class xpu_ops:
             C_dstate_stride = C.stride(2)
             out_batch_stride = out.stride(0)
             out_d_stride = out.stride(1)
-            if has_z:
+            if z_ is not None:
                 z_batch_stride = z_.stride(0)
                 z_d_stride = z_.stride(1)
                 out_z_batch_stride = out_z.stride(0)
@@ -926,7 +928,7 @@ class xpu_ops:
         ssm_dim_stride = ssm_states.stride(1)
         ssm_dstate_stride = ssm_states.stride(2)
         cache_indices_stride = (
-            cache_indices.stride(0) if has_cache_indices else 0
+            cache_indices.stride(0) if cache_indices is not None else 0
         )
 
         grid = (batch_size, dim)
