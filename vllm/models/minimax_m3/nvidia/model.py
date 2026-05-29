@@ -12,12 +12,20 @@ The MiniMax-M3-preview config selects a single set of branches:
       "index" attention branch.
 """
 
+from collections.abc import Iterable
+
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -29,8 +37,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     init_vllm_registered_model,
+    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
@@ -124,9 +138,84 @@ class MiniMaxM3MoE(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if self.tp_size > config.num_local_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {config.num_local_experts}."
+            )
+
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+        self.n_shared_experts = getattr(config, "n_shared_experts", None)
+
+        # Sigmoid routing uses a per-expert score-correction bias for selection.
+        self.use_routing_bias = getattr(config, "use_routing_bias", False)
+        if self.use_routing_bias:
+            self.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.num_local_experts, dtype=torch.float32)
+            )
+            self.e_score_correction_bias.weight_loader = (
+                MiniMaxM3MoE.ebias_weight_loader
+            )
+        else:
+            self.e_score_correction_bias = None
+
+        # Router weights are stored in fp32; GateLinear upcasts the bf16
+        # activations and computes the gate in fp32 (fp32 router logits).
+        self.gate = GateLinear(
+            config.hidden_size,
+            config.num_local_experts,
+            bias=False,
+            params_dtype=torch.float32,
+            out_dtype=torch.float32,
+            prefix=f"{prefix}.gate",
+        )
+
+        self.shared_experts: MiniMaxM3MLP | None = None
+        if self.n_shared_experts:
+            self.shared_experts = MiniMaxM3MLP(
+                config=config,
+                intermediate_size=config.intermediate_size * self.n_shared_experts,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+
+        self.experts = FusedMoE(
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            scoring_func=config.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            # sglang hardcodes renormalize=True (no config field for it).
+            renormalize=True,
+            activation=config.hidden_act,
+            swiglu_limit=config.swiglu_limit,
+            routed_scaling_factor=self.routed_scaling_factor,
+            apply_routed_scale_to_output=True,
+            router_logits_dtype=self.gate.out_dtype,
+            shared_experts=self.shared_experts,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
+
+    @staticmethod
+    def ebias_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        assert param.size() == loaded_weight.size()
+        param.data.copy_(loaded_weight.to(torch.float32))
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class MiniMaxM3Attention(nn.Module):
@@ -187,12 +276,15 @@ class MiniMaxM3DecoderLayer(nn.Module):
             cache_config=cache_config,
         )
 
-        if _is_moe_layer(config, layer_id):
-            self.mlp = MiniMaxM3MoE(
+        # Dense layers store the FFN under `mlp`; MoE layers under
+        # `block_sparse_moe` -- matching the checkpoint's naming.
+        self.is_moe_layer = _is_moe_layer(config, layer_id)
+        if self.is_moe_layer:
+            self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                prefix=f"{prefix}.block_sparse_moe",
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -227,7 +319,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Fully Connected (dense MLP or MoE)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
+        hidden_states = ffn(hidden_states)
         return hidden_states, residual
 
 
@@ -285,6 +378,97 @@ class MiniMaxM3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Checkpoint experts use w1=gate, w2=down, w3=up.
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts,
+        )
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # gate_proj/up_proj -> fused gate_up_proj (dense MLP and shared expert).
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = self.get_expert_mapping()
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            # The MTP module is not modeled yet.
+            if "mtp." in name:
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                # Routed experts (w1/w2/w3) are handled below; don't let the
+                # stacked mapping rewrite them.
+                if ("block_sparse_moe.experts." in name) and name not in params_dict:
+                    continue
+                name = name.replace(weight_name, param_name)
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    expert_shard_id,
+                ) in expert_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=expert_shard_id,
+                        expert_id=expert_id,
+                    )
+                    break
+                else:
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    remapped = maybe_remap_kv_scale_name(name, params_dict)
+                    if remapped is None:
+                        continue
+                    name = remapped
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Modules not modeled yet (e.g. attention) are skipped until
+                    # they are ported.
+                    if name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class MiniMaxM3SparseForCausalLM(nn.Module):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
@@ -320,6 +504,13 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
 
 
 class MiniMaxM3SparseForConditionalGeneration(nn.Module):
@@ -357,3 +548,18 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.language_model.get_expert_mapping()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # The vision tower / multimodal projector are not modeled yet.
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=[
+                "vision_tower.",
+                "multi_modal_projector.",
+                "patch_merge_mlp.",
+            ],
+        )
+        return loader.load_weights(weights)
