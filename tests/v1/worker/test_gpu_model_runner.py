@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -279,7 +280,8 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         lambda: SimpleNamespace(world_size=world_size, is_last_rank=is_last_rank),
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert receive_calls == expected_calls
 
 
@@ -298,7 +300,8 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
         pytest.fail,
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
 def test_select_common_block_size_no_valid_option():

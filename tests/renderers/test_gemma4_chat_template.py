@@ -343,3 +343,72 @@ class TestGemma4ChatTemplate:
         assert '<|"|>Alice<|"|>' in result
         assert "active:true" in result
         assert "count:42" in result
+
+    def test_tool_response_with_multimodal_content(self, gemma4_template):
+        """Multimodal placeholders in tool messages are emitted after the
+        tool_response block."""
+        messages = [
+            {"role": "user", "content": "Download the image and describe it."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "download_image",
+                            "arguments": '{"url": "https://example.com/x.png"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": [
+                    {"type": "text", "text": "Image downloaded successfully."},
+                    {"type": "image"},
+                ],
+            },
+        ]
+        result = _render(gemma4_template, messages, add_generation_prompt=True)
+        assert "<|tool_response>" in result
+        assert "response:download_image{" in result
+        assert "<tool_response|>" in result
+        assert "<|image|>" in result
+
+    def test_tool_response_with_all_modalities(self, gemma4_template):
+        """All multimodal types (image, audio, video) in a single tool
+        response are rendered."""
+        messages = [
+            {"role": "user", "content": "Process media"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "process",
+                            "arguments": "{}",
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "Results."},
+                    {"type": "image"},
+                    {"type": "audio"},
+                    {"type": "video"},
+                ],
+            },
+        ]
+        result = _render(gemma4_template, messages, add_generation_prompt=True)
+        assert "<|image|>" in result
+        assert "<|audio|>" in result
+        assert "<|video|>" in result

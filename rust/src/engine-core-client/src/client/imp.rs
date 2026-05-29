@@ -382,6 +382,7 @@ mod tests {
     use zeromq::{RouterSocket, Socket};
 
     use super::*;
+    use crate::mock_engine::default_ready_response;
 
     async fn test_inner() -> ClientInner {
         let mut socket = RouterSocket::new();
@@ -392,7 +393,7 @@ mod tests {
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
-                ready_response: None,
+                ready_response: default_ready_response(),
             }],
         )
     }
