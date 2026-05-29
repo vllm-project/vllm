@@ -48,6 +48,7 @@ from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
     from datasets import load_dataset
@@ -1219,16 +1220,19 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         vocab_size = tokenizer.vocab_size
-        # Can't use tokenizer.all_special_ids since
-        # it returns ONLY ids from special_tokens_map.json
-        # We want to exclude placeholder tokens and all
-        # tokens that indicate start/end of image as it
-        # may break prompt replacement logic.
-        prohibited_tokens = list(
-            tok_id
-            for tok_id, token in tokenizer.added_tokens_decoder.items()
-            if token.special
-        )
+        if is_mistral_tokenizer(tokenizer):
+            prohibited_tokens = tokenizer.all_special_ids
+        else:
+            # Can't use tokenizer.all_special_ids since
+            # it returns ONLY ids from special_tokens_map.json
+            # We want to exclude placeholder tokens and all
+            # tokens that indicate start/end of image as it
+            # may break prompt replacement logic.
+            prohibited_tokens = list(
+                tok_id
+                for tok_id, token in tokenizer.added_tokens_decoder.items()
+                if token.special
+            )
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
         logger.debug(

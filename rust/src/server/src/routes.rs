@@ -6,6 +6,7 @@ mod load;
 mod metrics;
 pub(crate) mod openai;
 mod sleep;
+mod version;
 
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
+        .route("/version", get(version::version))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
