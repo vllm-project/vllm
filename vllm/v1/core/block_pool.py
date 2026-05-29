@@ -182,7 +182,7 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
-        # For Sliding Window block when VLLM_PIN_PREFIX_BLOCKS=1.
+        # For Sliding Window block when VLLM_PIN_SWA_TOKENS enabled.
         # The queue where the pinned blocks are stored
         self.pinned_block_queue: FreeKVCacheBlockQueue = FreeKVCacheBlockQueue([])
 
@@ -419,7 +419,7 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 # block is only pinned when it belongs to Sliding Window
-                # attention with VLLM_PIN_PREFIX_BLOCKS=1.
+                # attention with VLLM_PIN_SWA_TOKENS enabled.
                 if block.is_pinned:
                     self.pinned_block_queue.remove(block)
                 else:
@@ -429,7 +429,7 @@ class BlockPool:
                 self.metrics_collector.on_block_accessed(block)
 
     def demote_n(self, n: int) -> int:
-        """Only used for Sliding Window attention with VLLM_PIN_PREFIX_BLOCKS=1.
+        """Only used for Sliding Window attention with VLLM_PIN_SWA_TOKENS enabled.
 
         When free blocks are needed but blocks are pinned, move up to n oldest
         pinned blocks to the normal free queue by flipping is_pinned=False.
@@ -460,7 +460,7 @@ class BlockPool:
             block.ref_cnt -= 1
 
         freed = [b for b in blocks_list if b.ref_cnt == 0 and not b.is_null]
-        if not envs.VLLM_PIN_PREFIX_BLOCKS:
+        if not envs.VLLM_PIN_SWA_TOKENS:
             self.free_block_queue.append_n(freed)
         else:
             # Pinning enabled: route freed blocks to the regular vs pinned tier by

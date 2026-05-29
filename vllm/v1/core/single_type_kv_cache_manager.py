@@ -654,7 +654,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # to be in the prefix-cache hash map so future requests can hit them.
         # The default mask skips them, defeating the pinning. Cache everything
         # so the SWA-pin path can do its job.
-        if envs.VLLM_PIN_PREFIX_BLOCKS or envs.VLLM_PIN_SWA_TOKENS > 0:
+        if envs.VLLM_PIN_SWA_TOKENS:
             return None
         assert alignment_tokens > self.block_size
         per_segment = alignment_tokens // self.block_size
@@ -700,15 +700,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         """Sliding-window block release with prefix-cache pinning.
 
         As the window advances, the oldest in-window blocks fall out of
-        window. With VLLM_PIN_PREFIX_BLOCKS + VLLM_PIN_SWA_TOKENS>0, the most
-        recent VLLM_PIN_SWA_TOKENS of those out-of-window blocks are PINNED
-        (kept as reusable prefix cache); everything else falls back to the
-        base free-all path.
+        window. With VLLM_PIN_SWA_TOKENS enabled, the CURRENT sliding
+        window blocks are PINNED -- they are the freshest cached blocks
+        and the exact contiguous run a future request needs to anchor an
+        SWA prefix-cache hit at this chunk boundary. The window blocks stay
+        live this step; marking is_pinned routes them to the pinned tier
+        when they later fall out of window. All out-of-window blocks are
+        freed -- any previously-pinned window among them survives via its
+        is_pinned flag, which free_blocks routes to the pinned tier.
+        Everything else falls back to the base free-all path.
         """
-        pin_blocks = 0
-        if envs.VLLM_PIN_PREFIX_BLOCKS and envs.VLLM_PIN_SWA_TOKENS > 0:
-            pin_blocks = envs.VLLM_PIN_SWA_TOKENS // self.block_size
-        if pin_blocks == 0:
+        if not envs.VLLM_PIN_SWA_TOKENS:
             return super().remove_skipped_blocks(request_id, total_computed_tokens)
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
@@ -726,20 +728,24 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         if num_new_drops < envs.VLLM_PIN_MIN_DROP_SIZE:
             return super().remove_skipped_blocks(request_id, total_computed_tokens)
 
-        pin_threshold = max(0, num_skipped_blocks - pin_blocks)
+        # Pin the current sliding window (the freshest cached anchor). The
+        # blocks stay live now; is_pinned takes effect when they later drop.
+        window_blocks = cdiv(self.sliding_window, self.block_size)
+        win_end = min(num_skipped_blocks + window_blocks, len(blocks))
+        for i in range(num_skipped_blocks, win_end):
+            if blocks[i] != self._null_block:
+                blocks[i].is_pinned = True
+
+        # Free ALL out-of-window blocks. Any previously-pinned window blocks
+        # among them are routed to the pinned tier by free_blocks.
         to_free: list[KVCacheBlock] = []
-        to_pin: list[KVCacheBlock] = []
         for i in range(num_skipped_blocks - 1, -1, -1):
             if blocks[i] == self._null_block:
                 break
-            if i >= pin_threshold:
-                blocks[i].is_pinned = True
-                to_pin.append(blocks[i])
-            else:
-                to_free.append(blocks[i])
+            to_free.append(blocks[i])
             blocks[i] = self._null_block
-        if to_free or to_pin:
-            self.block_pool.free_blocks(to_free + to_pin)
+        if to_free:
+            self.block_pool.free_blocks(to_free)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
