@@ -138,6 +138,7 @@ class LlamaAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
@@ -179,7 +180,9 @@ class LlamaAttention(nn.Module):
             output_size=hidden_size,
             bias=bias_o_proj,
             quant_config=quant_config,
-            reduce_results=False,  # allreduce is fused with rmsnorm
+            # reduce_results=False lets the downstream RMSNorm fuse the
+            # all-reduce; the decoder sets this only when it fuses.
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -261,6 +264,7 @@ class LlamaDecoderLayer(nn.Module):
         prefix: str = "",
         config: LlamaConfig | None = None,
         attn_layer_type: type[nn.Module] = LlamaAttention,
+        fuse_allreduce: bool = True,
     ) -> None:
         super().__init__()
 
@@ -268,6 +272,10 @@ class LlamaDecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
 
+        # When True, o_proj/down_proj skip their all-reduce and the forward
+        # fuses it into the following RMSNorm. Subclasses with their own
+        # (unfused) forward must pass False so the linears reduce normally.
+        self.fuse_allreduce = fuse_allreduce
         self.hidden_size = config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -304,6 +312,8 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            # Only pass when fusing: subclass attention types may not accept it.
+            **({"reduce_results": False} if fuse_allreduce else {}),
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -312,7 +322,7 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
-            reduce_results=False,  # allreduce is fused with rmsnorm
+            reduce_results=not fuse_allreduce,  # fused into the next RMSNorm
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -325,6 +335,23 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.fuse_allreduce:
+            # Unfused path: o_proj/down_proj reduce internally (reduce_results
+            # True). Matches the standard pre-fusion decoder.
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = self.mlp(hidden_states)
+            return hidden_states, residual
+
         # Self Attention
         hidden_states, residual = fused_ar_rms_norm_quant(
             hidden_states,
@@ -341,7 +368,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.post_attention_layernorm,
-            consumer_linear=self.mlp.gate_up_proj,
+            consumer_linear=getattr(self.mlp, "gate_up_proj", None),
             do_allreduce=(self.tp_size > 1),
         )
         hidden_states = self.mlp(hidden_states)

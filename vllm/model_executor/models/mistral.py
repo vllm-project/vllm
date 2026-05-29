@@ -153,6 +153,7 @@ class MistralDecoderLayer(LlamaDecoderLayer):
             prefix=prefix,
             config=config,
             attn_layer_type=MistralAttention,
+            fuse_allreduce=False,  # MistralDecoderLayer has its own unfused forward
         )
 
         self.layer_idx = int(prefix.split(sep=".")[-1])

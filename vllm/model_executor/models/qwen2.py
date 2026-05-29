@@ -41,9 +41,6 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fusion.ar_rms_quant import (
-    fused_ar_rms_norm_quant,
-)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -356,7 +353,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
-        self.tp_size = get_tensor_model_parallel_world_size()
 
         if get_pp_group().is_first_rank or (
             config.tie_word_embeddings and get_pp_group().is_last_rank
@@ -424,13 +420,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = fused_ar_rms_norm_quant(
-            hidden_states,
-            residual,
-            self.norm,
-            consumer_linear=None,
-            do_allreduce=(self.tp_size > 1),
-        )
+        hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
