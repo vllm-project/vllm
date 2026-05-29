@@ -11,9 +11,7 @@ import sys
 # too many processes before we set the number of compiler threads.
 # Lazy import `cv2` to avoid bothering users who only use text models.
 # `cv2` can easily mess up the environment.
-# Lazy import `diskcache` because it is only needed for the optional outlines
-# disk cache path.
-module_names = ["torch._inductor.async_compile", "cv2", "diskcache"]
+module_names = ["torch._inductor.async_compile", "cv2"]
 
 # set all modules in `module_names` to be None.
 # if we import any modules during `import vllm`, there would be a

@@ -60,20 +60,7 @@ Key points from the PyTorch security guide:
 - Implement proper authentication and authorization for management interfaces
 - Follow the principle of least privilege for all system components
 
-### 4. **Outlines Disk Cache:**
-
-The V1 outlines structured output backend uses an in-memory cache by default.
-The optional on-disk cache is enabled only with
-`VLLM_V1_USE_OUTLINES_CACHE=1` and requires installing optional `diskcache`
-through the vLLM `outlines-cache` extra.
-
-Only enable this cache when the outlines cache directory is writable by trusted
-users. If `OUTLINES_CACHE_DIR` is not set, vLLM falls back to the user's cache
-directory, or to the system temp directory in container-like environments
-without a usable home directory. Avoid shared, world-writable, or untrusted
-cache volumes for this feature.
-
-### 5. **Restrict Domains Access for Media URLs:**
+### 4. **Restrict Domains Access for Media URLs:**
 
 Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
@@ -330,6 +317,12 @@ vLLM assumes that its cache directories are **private and trusted**. Cache conte
 
 **Do not share vLLM cache directories with untrusted users or mount them from untrusted storage.** Treat the cache directory with the same care as the vLLM installation itself.
 
+The V1 outlines structured output backend uses an in-memory cache by default.
+The optional on-disk outlines cache is enabled only with
+`VLLM_V1_USE_OUTLINES_CACHE=1` and requires installing optional `diskcache`
+through the vLLM `outlines-cache` extra. Only enable this cache when its
+directory is writable by trusted users.
+
 ### Cache Directory Configuration
 
 Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. When `torch.compile` caching is enabled (the default), vLLM also redirects `TRITON_CACHE_DIR` into this tree. If compile caching is disabled, Triton falls back to its own default location (`~/.triton/cache`).
@@ -342,10 +335,12 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
+| `OUTLINES_CACHE_DIR` | `~/.cache/outlines` | Optional V1 outlines disk cache. Used only when `VLLM_V1_USE_OUTLINES_CACHE=1`. Respects `XDG_CACHE_HOME` if set, and falls back to the system temp directory in container-like environments without a usable home directory. |
 
 ### Recommendations
 
 - **Restrict file permissions** on `VLLM_CACHE_ROOT` (and any other cache directories used by dependencies, such as `~/.triton` if compile caching is disabled) so that only the vLLM process owner can read and write to them.
+- **Restrict file permissions** on `OUTLINES_CACHE_DIR` before enabling the optional outlines disk cache. Avoid shared, world-writable, or untrusted cache volumes for this feature.
 - **Do not copy cache contents from untrusted sources.** If you distribute cache artifacts between environments, ensure they originate from a trusted build pipeline.
 - **Container deployments:** If mounting cache directories into containers, ensure the volume source is trusted.
 
