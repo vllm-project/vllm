@@ -1322,6 +1322,34 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_long_prefill_token_threshold_rejects_negative():
+    # 0 means "disabled"; any negative is silently ineffective downstream
+    # because the scheduler clamp is guarded by `0 < threshold`. Reject at
+    # admission instead. See https://github.com/vllm-project/vllm/issues/43985
+    SchedulerConfig(
+        max_model_len=4096,
+        is_encoder_decoder=False,
+        long_prefill_token_threshold=0,
+    )
+    with pytest.raises(ValidationError):
+        SchedulerConfig(
+            max_model_len=4096,
+            is_encoder_decoder=False,
+            long_prefill_token_threshold=-5,
+        )
+
+
+def test_max_logprobs_rejects_negative_other_than_minus_one():
+    # -1 is the sentinel for "no cap, use vocab size"; other negatives are
+    # silently ineffective for logprob-free traffic and produce a confusing
+    # "max allowed: <negative>" message otherwise. Reject at admission.
+    # See https://github.com/vllm-project/vllm/issues/43985
+    ModelConfig("facebook/opt-125m", max_logprobs=-1)
+    ModelConfig("facebook/opt-125m", max_logprobs=0)
+    with pytest.raises(ValidationError):
+        ModelConfig("facebook/opt-125m", max_logprobs=-5)
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
