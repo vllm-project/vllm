@@ -150,8 +150,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     reshape_kv_cache,
@@ -6996,12 +6994,7 @@ class GPUModelRunner(
                         layout=layout,
                         block_size=shape_block_size,
                     )
-                    kv_tensor = views[0]
-                    if isinstance(
-                        kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
-                    ):
-                        kv_tensor = kv_tensor.squeeze(1)
-                    kv_caches[layer_name] = kv_tensor
+                    kv_caches[layer_name] = views[0]
                 else:
                     raise NotImplementedError(
                         f"Unsupported KV cache spec: {type(kv_cache_spec)}"

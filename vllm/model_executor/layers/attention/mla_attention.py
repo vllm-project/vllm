@@ -2033,7 +2033,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             if not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
@@ -2046,7 +2046,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             else:
                 # FP8 path: gather cache without dequantization
                 ops.cp_gather_cache(
-                    src_cache=kv_c_and_k_pe_cache,
+                    src_cache=kv_c_and_k_pe_cache.squeeze(1),
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
@@ -2141,7 +2141,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             ops.cp_gather_cache(
-                src_cache=kv_c_and_k_pe_cache,
+                src_cache=kv_c_and_k_pe_cache.squeeze(1),
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
                 cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[

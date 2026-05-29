@@ -938,7 +938,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         out, lse = flash_mla_with_kvcache(
             q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).transpose(1, 2),
             block_table=kernel_metadata.dummy_block_table,
             head_dim_v=512,
             cache_seqlens=kernel_metadata.cache_lens,

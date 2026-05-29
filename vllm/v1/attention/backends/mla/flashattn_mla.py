@@ -326,6 +326,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
 
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.transpose(1, 2)
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
 
@@ -336,8 +337,8 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
         attn_out = flash_attn_varlen_func(
             q=q_pe,
-            k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
-            v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
+            k=k_pe_cache,
+            v=kv_c_cache,
             q_v=q_nope,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,

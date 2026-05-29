@@ -274,7 +274,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         o, lse = self._sm100_cutlass_mla_decode(
             q_nope,
             q_pe,
-            kv_c_and_k_pe_cache,
+            kv_c_and_k_pe_cache.squeeze(1),
             attn_metadata.decode.seq_lens,
             attn_metadata.decode.block_table,
             self._workspace.get_buf(),

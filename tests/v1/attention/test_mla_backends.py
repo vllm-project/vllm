@@ -205,7 +205,7 @@ def create_and_prepopulate_kv_cache(
         else:
             kv_entry_size = head_size
 
-        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, head_size)
+        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, kv_entry_size)
         kv_cache = torch.zeros(
             num_blocks, 1, block_size, kv_entry_size, dtype=torch.uint8, device=device
         )

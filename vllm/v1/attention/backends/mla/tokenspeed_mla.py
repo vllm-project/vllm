@@ -249,11 +249,10 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 q.device, self.num_heads, self.kv_lora_rank
             )
 
-        # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
-        # tokenspeed_mla_decode wants 3D — pass as-is (no unsqueeze, unlike trtllm).
+        # tokenspeed_mla_decode expects 3D (num_blocks, block_size, head_size).
         o = tokenspeed_mla_decode(
             query=q,
-            kv_cache=kv_c_and_k_pe_cache,
+            kv_cache=kv_c_and_k_pe_cache.squeeze(1),
             workspace_buffer=self._workspace_buffer,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
