@@ -4525,7 +4525,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 kv_cache_nans_per_layer=(kv_nans := self._collect_kv_cache_nans())
                 or None,
-                kv_cache_nan_timestamp=__import__("time").time() if kv_nans else 0.0,
+                kv_cache_nan_timestamp=time.time() if kv_nans else 0.0,
                 kv_cache_nan_first_layer=self._get_kv_nan_first_layer(kv_nans)
                 if kv_nans
                 else None,
