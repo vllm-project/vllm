@@ -194,16 +194,16 @@ class NixlConnectorWorker:
             else 0
         )
 
-        for source_idx, source_rank in enumerate(self.source_ranks[engine_id]):
+        for remote_idx, remote_rank in enumerate(self.remote_ranks[engine_id]):
             handle: list[tuple[int, int, int]] = []
             for j, (addr, local_block_len, dev) in enumerate(src_blocks_data):
                 if j < num_fa_descs:
                     chunk = local_block_len // len(fa_slices)
-                    if source_rank in fa_slices:
+                    if remote_rank in fa_slices:
                         fa_offset = (
-                            fa_slices[source_rank].local_write_offset
+                            fa_slices[remote_rank].local_write_offset
                             * local_block_len
-                            // len(fa_slices[source_rank].local_shard)
+                            // len(fa_slices[remote_rank].local_shard)
                         )
                         handle.append((addr + fa_offset, chunk, dev))
                     else:
@@ -216,10 +216,10 @@ class NixlConnectorWorker:
                     # Assume SSM always sharded
                     assert (
                         ssm_idx is not None
-                        and source_rank in self.tp_mappings[engine_id][ssm_idx]
+                        and remote_rank in self.tp_mappings[engine_id][ssm_idx]
                     )
                     chunk = local_block_len // ssm_num_splits
-                    handle.append((addr + source_idx * chunk, chunk, dev))
+                    handle.append((addr + remote_idx * chunk, chunk, dev))
             yield handle
 
     def __init__(
@@ -472,7 +472,7 @@ class NixlConnectorWorker:
         # Per-engine TP mappings. Generated during handshake.
         # tp_mappings[engine_id][group_idx] = {rank: TPTransferSlice, ...}
         self.tp_mappings: dict[EngineId, tuple[dict[int, TPTransferSlice], ...]] = {}
-        self.source_ranks: dict[EngineId, tuple[int, ...]] = {}
+        self.remote_ranks: dict[EngineId, tuple[int, ...]] = {}
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -1199,7 +1199,7 @@ class NixlConnectorWorker:
             rank_offset = (
                 fa_slice.remote_read_offset
                 * remote_block_len
-                // len(fa_slice.source_shard)
+                // len(fa_slice.remote_shard)
             )
 
             page_size = nixl_agent_meta.block_lens[i]
@@ -1363,7 +1363,7 @@ class NixlConnectorWorker:
             )
             for group in self.kv_cache_config.kv_cache_groups
         )
-        self.source_ranks[engine_id] = tuple(
+        self.remote_ranks[engine_id] = tuple(
             sorted({r for group_map in self.tp_mappings[engine_id] for r in group_map})
         )
 
@@ -2106,7 +2106,7 @@ class NixlConnectorWorker:
                     for g in range(num_groups)
                 ],
             )
-            for rank in self.source_ranks[engine_id]
+            for rank in self.remote_ranks[engine_id]
         ]
 
         # D may have to perform multiple reads from different remote ranks.

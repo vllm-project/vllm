@@ -169,7 +169,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     remote_engine_id = "remote-engine"
 
     worker.transfer_topo = MagicMock()
-    # tp_ratio not exercised (all_source_ranks is empty so no reads run),
+    # tp_ratio not exercised (remote_ranks is empty so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
@@ -180,7 +180,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     # Empty tp_mappings: no source ranks so no reads are issued.
     num_groups = len(resolved_types)
     worker.tp_mappings = {remote_engine_id: tuple({} for _ in range(num_groups))}
-    worker.source_ranks = {remote_engine_id: ()}
+    worker.remote_ranks = {remote_engine_id: ()}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(

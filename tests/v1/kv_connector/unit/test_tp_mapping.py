@@ -55,7 +55,7 @@ def _get_slices(
     )
 
 
-def _source_ranks_from_slices(
+def _remote_ranks_from_slices(
     *group_slices: dict[int, TPTransferSlice],
 ) -> tuple[int, ...]:
     """Derive deduplicated sorted source ranks from multiple group slices."""
@@ -68,17 +68,17 @@ def _source_ranks_from_slices(
 
 
 class TestTPMappingStructure:
-    def test_source_ranks_homogeneous(self):
+    def test_remote_ranks_homogeneous(self):
         slices = _get_slices(tp_size=2, tp_rank=1, remote_tp_size=2)
-        assert _source_ranks_from_slices(slices) == (1,)
+        assert _remote_ranks_from_slices(slices) == (1,)
 
-    def test_source_ranks_d_gt_p(self):
+    def test_remote_ranks_d_gt_p(self):
         slices = _get_slices(tp_size=4, tp_rank=2, remote_tp_size=2)
-        assert _source_ranks_from_slices(slices) == (1,)
+        assert _remote_ranks_from_slices(slices) == (1,)
 
-    def test_source_ranks_p_gt_d(self):
+    def test_remote_ranks_p_gt_d(self):
         slices = _get_slices(tp_size=1, tp_rank=0, remote_tp_size=2)
-        assert _source_ranks_from_slices(slices) == (0, 1)
+        assert _remote_ranks_from_slices(slices) == (0, 1)
 
     def test_per_group_slices(self):
         slices = _get_slices(tp_size=2, tp_rank=0, remote_tp_size=4)
@@ -112,7 +112,7 @@ class TestTPMappingStructure:
 def _make_mock_worker_for_splits(
     group_specs: list,
     tp_mappings: tuple,
-    source_ranks: tuple[int, ...],
+    remote_ranks: tuple[int, ...],
     engine_id: str = "remote_0",
 ):
     """Build a mock NixlConnectorWorker with the fields _build_local_splits needs."""
@@ -126,7 +126,7 @@ def _make_mock_worker_for_splits(
     kv_cache_config.kv_cache_groups = kv_cache_groups
     worker.kv_cache_config = kv_cache_config
     worker.tp_mappings = {engine_id: tp_mappings}
-    worker.source_ranks = {engine_id: source_ranks}
+    worker.remote_ranks = {engine_id: remote_ranks}
     worker.transfer_topo = MagicMock()
     return worker
 
@@ -144,12 +144,12 @@ class TestBuildSrcSplitHandles:
         fa_slices = fa_spec.get_tp_transfer_slices(
             tp_rank, tp_size, remote_tp_size, total_num_kv_heads
         )
-        source_ranks = _source_ranks_from_slices(fa_slices)
+        remote_ranks = _remote_ranks_from_slices(fa_slices)
 
         worker = _make_mock_worker_for_splits(
             group_specs=[fa_spec],
             tp_mappings=(fa_slices,),
-            source_ranks=source_ranks,
+            remote_ranks=remote_ranks,
             engine_id=engine_id,
         )
         src_blocks_data = [(0x2000 + i * 1024, 1024, 0) for i in range(8)]
@@ -184,12 +184,12 @@ class TestBuildSrcSplitHandles:
         fa_slices = fa_spec.get_tp_transfer_slices(
             tp_rank, tp_size, remote_tp_size, total_num_kv_heads
         )
-        source_ranks = _source_ranks_from_slices(fa_slices)
+        remote_ranks = _remote_ranks_from_slices(fa_slices)
 
         worker = _make_mock_worker_for_splits(
             group_specs=[fa_spec],
             tp_mappings=(fa_slices,),
-            source_ranks=source_ranks,
+            remote_ranks=remote_ranks,
             engine_id=engine_id,
         )
         base_addr = 0x4000
@@ -231,24 +231,24 @@ class TestMambaPlanSplitHandles:
         shard_mamba = ShardRange(0, 1, 1)
         ssm_slices = {
             0: TPTransferSlice(
-                source_rank=0,
-                source_shard=shard_mamba,
+                remote_rank=0,
+                remote_shard=shard_mamba,
                 local_shard=shard_mamba,
                 transfer_range=shard_mamba,
             ),
             1: TPTransferSlice(
-                source_rank=1,
-                source_shard=shard_mamba,
+                remote_rank=1,
+                remote_shard=shard_mamba,
                 local_shard=shard_mamba,
                 transfer_range=shard_mamba,
             ),
         }
-        source_ranks = _source_ranks_from_slices(fa_slices, ssm_slices)
+        remote_ranks = _remote_ranks_from_slices(fa_slices, ssm_slices)
 
         worker = _make_mock_worker_for_splits(
             group_specs=[fa_spec, mamba_spec],
             tp_mappings=(fa_slices, ssm_slices),
-            source_ranks=source_ranks,
+            remote_ranks=remote_ranks,
             engine_id=engine_id,
         )
 
@@ -267,19 +267,19 @@ class TestMambaPlanSplitHandles:
         fa_chunk = 200 // len(fa_slices)
         ssm_chunk = 400 // len(ssm_slices)
 
-        # Rank 0 (source_idx=0):
+        # Rank 0 (remote_idx=0):
         # FA: chunk=200//1=200 (only 1 FA slice)
         # offset = local_write_offset * local_block_len // len(local_shard)
-        # SSM: chunk=400//2=200, offset = source_idx(0) * 200
+        # SSM: chunk=400//2=200, offset = remote_idx(0) * 200
         sl = fa_slices[0]
         fa_offset_r0 = sl.local_write_offset * 200 // len(sl.local_shard)
         assert splits[0][0] == (1000 + fa_offset_r0, fa_chunk, 0)
         assert splits[0][1] == (2000 + fa_offset_r0, fa_chunk, 0)
         assert splits[0][2] == (3000 + 0 * ssm_chunk, ssm_chunk, 0)
 
-        # Rank 1 (source_idx=1):
+        # Rank 1 (remote_idx=1):
         # FA: rank 1 NOT in fa_slices -> GQA-deduped placeholder (addr, chunk, dev)
-        # SSM: chunk=400//2=200, offset = source_idx(1) * 200
+        # SSM: chunk=400//2=200, offset = remote_idx(1) * 200
         assert splits[1][0] == (1000, fa_chunk, 0)
         assert splits[1][1] == (2000, fa_chunk, 0)
         assert splits[1][2] == (3000 + 1 * ssm_chunk, ssm_chunk, 0)
