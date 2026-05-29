@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import csv
-import importlib.util
 import importlib
+import importlib.util
 import os
 
 import pytest
@@ -11,11 +11,11 @@ import torch
 
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
-)
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+    FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
@@ -95,9 +95,7 @@ def _check_bpreshuffle_runtime_support(weight_shape: tuple[int, int], num_tokens
     import aiter
     from aiter.ops.shuffle import shuffle_weight
 
-    x = torch.randn(
-        num_tokens, weight_shape[1], dtype=torch.bfloat16, device="cuda"
-    )
+    x = torch.randn(num_tokens, weight_shape[1], dtype=torch.bfloat16, device="cuda")
     w = torch.randn(weight_shape, dtype=torch.bfloat16, device="cuda")
 
     aiter.hipb_create_extension()
@@ -188,7 +186,8 @@ def test_hipb_mm_kernel_can_implement_success(enable_hipb_mm_kernel):
         ),
         (
             _make_config(weight_shape=(8, 4090)),
-            "requires N >= 16 and both N and K divisible by 16, received N=8 and K=4090.",
+            "requires N >= 16 and both N and K divisible by 16, "
+            "received N=8 and K=4090.",
         ),
     ],
 )
