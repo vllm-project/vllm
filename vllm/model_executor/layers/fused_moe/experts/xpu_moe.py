@@ -29,9 +29,20 @@ if current_platform.is_xpu():
 
 def prepare_fp8_moe_layer_for_xpu(
     w13: torch.Tensor,
+    w13_scale: torch.Tensor,
     w2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return w13.transpose(-1, -2).contiguous(), w2.transpose(-1, -2).contiguous()
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if w13_scale is not None and w13_scale.ndim == 3:
+        w13_scale = w13_scale.transpose(-1, -2).contiguous()
+    if w2_scale is not None and w2_scale.ndim == 3:
+        w2_scale = w2_scale.transpose(-1, -2).contiguous()
+    return (
+        w13.transpose(-1, -2).contiguous(),
+        w13_scale,
+        w2.transpose(-1, -2).contiguous(),
+        w2_scale,
+    )
 
 
 class XPUExperts(mk.FusedMoEExpertsModular):
