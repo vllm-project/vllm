@@ -1760,15 +1760,25 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
+            # NB: don't gate this on ``request_wave != self.current_wave``.
+            # Both default to 0, so the very first request after engine init
+            # would otherwise hit ``0 != 0 == False``, ``engines_running``
+            # would stay False, and no ``start_wave`` would be broadcast to
+            # the DP coordinator. The rank that received the first request
+            # enters its forward pass and blocks forever on the EP all2all
+            # collective because the other DP ranks (seeing
+            # ``engines_running=False`` and no local work) skip
+            # ``execute_dummy_batch`` and never participate.
+            # We re-broadcast whenever engines are idle and the scheduler
+            # is unpaused, which is harmless in steady-state (engines are
+            # already running) and required for the cold first wave.
+            if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
