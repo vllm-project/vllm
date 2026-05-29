@@ -1935,8 +1935,10 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             finished=True,
         )
 
-    # Collect tool-call deltas per choice from the SSE stream.
+    # Collect tool-call deltas and finish_reasons per choice from the SSE
+    # stream.
     tc_deltas_by_choice: dict[int, list[dict]] = {i: [] for i in range(num_choices)}
+    finish_reasons_by_choice: dict[int, list[str]] = {i: [] for i in range(num_choices)}
     async for chunk_str in serving_chat.chat_completion_stream_generator(
         request=request,
         result_generator=result_generator(),
@@ -1959,6 +1961,8 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                 if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         tc_deltas_by_choice[idx].append(tc)
+                if choice.get("finish_reason") is not None:
+                    finish_reasons_by_choice[idx].append(choice["finish_reason"])
 
     # Both choices must independently produce the correct tool call.
     for choice_idx in range(num_choices):
@@ -1982,4 +1986,13 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         parsed_args = json.loads(args_buf)
         assert parsed_args == {"city": "Tokyo"}, (
             f"Choice {choice_idx}: expected {{'city': 'Tokyo'}}, got {parsed_args}"
+        )
+
+        reasons = finish_reasons_by_choice[choice_idx]
+        assert len(reasons) == 1, (
+            f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
+        )
+        assert reasons[0] == "tool_calls", (
+            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+            f"got '{reasons[0]}'"
         )
