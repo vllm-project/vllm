@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import logging
 import math
 import queue
+import re
 import threading
 import time
 from collections import defaultdict
@@ -437,6 +439,67 @@ class MoRIIOConnectorScheduler:
                 )
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
+
+                # Wide-EP DP>1 fix: the disagg routing sidecar injects a
+                # STATIC ``remote_dp_rank`` (e.g. always 0) into
+                # ``kv_transfer_params``. With DP>1, that pins every
+                # decode->prefill notify to a single prefill DP rank, so
+                # all prefill ranks other than that one never receive
+                # their ``done_remote_allocate`` notify and their
+                # deferred-write tasks expire after
+                # ``VLLM_MORIIO_DEFERRED_TIMEOUT_S``. Most requests hang.
+                #
+                # Compute a per-request prefill DP rank from a stable
+                # hash of ``request_id``. The matching helper on
+                # ``AsyncLLM.add_request`` uses the same blake2s scheme,
+                # so both legs (prefill dispatch + decode notify) agree.
+                #
+                # When ``remote_dp_size_local`` is set and smaller than
+                # ``remote_dp_size`` (multi-pod DP, "Wide-EP"), cap the
+                # modulus to the per-pod size so the notify lands on the
+                # same pod that the producer dispatch routes to.
+                #
+                # By the time we reach ``request_finished``, MoRI-IO has
+                # appended a per-transfer suffix ``-<8 hex>`` to
+                # ``request.request_id`` (it isn't on the AsyncLLM rid
+                # that the dispatcher hashes). Strip that suffix so both
+                # legs hash the same canonical base id.
+                _dp_size = int(
+                    request.kv_transfer_params.get("remote_dp_size", 1) or 1
+                )
+                try:
+                    _dp_local = int(
+                        request.kv_transfer_params.get("remote_dp_size_local", 0)
+                        or 0
+                    )
+                    if _dp_local > 0:
+                        _dp_size = min(_dp_size, _dp_local)
+                except (TypeError, ValueError):
+                    pass
+                # Defense-in-depth handshake with the llm-d routing
+                # sidecar (patch 0013, shipped in
+                # pd-sidecar-moriio-write-widep-v0.8.0+): when the
+                # sidecar is in path it already pins the prefill DP rank
+                # via its own pickDPRank(uuid, dpSize) and stamps both
+                # ``remote_dp_rank`` and ``remote_dp_rank_override=True``
+                # on the kv_transfer_params. Honouring that sentinel
+                # makes this branch dormant in production while still
+                # acting as a fail-safe for sidecar-less debug runs and
+                # for any future sidecar regression that drops the
+                # override stamp. Avoids cross-language hash divergence
+                # (Go blake2s-256 vs Python blake2s-8) when both sides
+                # would otherwise hash independently.
+                if (
+                    _dp_size > 1
+                    and "remote_dp_rank_override" not in request.kv_transfer_params
+                ):
+                    _base_rid = re.sub(
+                        r"-[0-9a-f]{8}$", "", str(request.request_id)
+                    )
+                    _digest = hashlib.blake2s(
+                        _base_rid.encode("utf-8"), digest_size=8
+                    ).digest()
+                    remote_dp_rank = int.from_bytes(_digest, "big") % _dp_size
 
                 peer_zmq = get_peer_zmq_from_request_id(
                     request.request_id, is_producer=False
