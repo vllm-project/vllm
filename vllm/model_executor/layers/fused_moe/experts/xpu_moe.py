@@ -86,6 +86,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
             MoEActivation.RELU2_NO_MUL,
         ]
