@@ -63,6 +63,27 @@ def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
             except Exception:
                 logger.exception("Failed to load plugin %s", plugin.name)
 
+    # If VLLM_PLUGINS named entries that we never discovered, surface a
+    # warning so the user can debug their install rather than silently
+    # falling through to "plugin not loaded". Common causes: package not
+    # `pip install`-ed in the current interpreter; a stale `.egg-info`
+    # shadowing the new `.dist-info`; the entry-point missing from
+    # `pyproject.toml` for the requested group.
+    if allowed_plugins is not None:
+        discovered_names = {p.name for p in discovered_plugins}
+        missing = [name for name in allowed_plugins if name not in discovered_names]
+        if missing:
+            logger.warning(
+                "VLLM_PLUGINS requested %s but entry-point group %r "
+                "only discovered %s. Common causes: package not "
+                "installed in this interpreter; a stale `.egg-info` "
+                "shadowing the new `.dist-info`; the entry-point "
+                "missing from `pyproject.toml`.",
+                missing,
+                group,
+                sorted(discovered_names),
+            )
+
     return plugins
 
 
