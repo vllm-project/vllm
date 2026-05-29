@@ -72,17 +72,9 @@ def _build_engine_core_output(
     timestamp: float,
 ):
     """Build an EngineCoreOutput with the given per-layer NaN counts."""
-    import regex as re
-
     from vllm.v1.engine import EngineCoreOutput
 
-    first_layer = None
-    best_idx = float("inf")
-    for name in layer_nan_counts:
-        m = re.search(r"\.([0-9]+)\.", name)
-        if m and int(m.group(1)) < best_idx:
-            best_idx = int(m.group(1))
-            first_layer = name
+    first_layer = next(iter(layer_nan_counts)) if layer_nan_counts else None
 
     return EngineCoreOutput(
         request_id="req-test",

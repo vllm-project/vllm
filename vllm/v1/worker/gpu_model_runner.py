@@ -4514,7 +4514,7 @@ class GPUModelRunner(
         if envs.VLLM_DEBUG_MLA_CACHE:
             kv_nans = self._collect_kv_cache_nans()
             kv_nan_ts = time.time()
-            kv_nan_first = self._get_kv_nan_first_layer(kv_nans)
+            kv_nan_first = next(iter(kv_nans)) if kv_nans else None
         else:
             kv_nans = {}
             kv_nan_ts = 0.0
@@ -5467,23 +5467,6 @@ class GPUModelRunner(
             if count > 0:
                 result[name] = count
         return result
-
-    def _get_kv_nan_first_layer(self, nans: dict[str, int]) -> str | None:
-        """Return the layer name with the lowest index from nans dict."""
-        if not nans:
-            return None
-        import regex as re
-
-        best_name = None
-        best_idx = float("inf")
-        for name in nans:
-            m = re.search(r"\.([0-9]+)\.", name)
-            if m:
-                idx = int(m.group(1))
-                if idx < best_idx:
-                    best_idx = idx
-                    best_name = name
-        return best_name
 
     def _get_nans_in_logits(
         self,

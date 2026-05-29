@@ -251,49 +251,6 @@ class TestEnvVarGating:
         assert vllm.envs.VLLM_DEBUG_MLA_CACHE is True
 
 
-class TestFirstLayerDetection:
-    """Unit tests for _get_kv_nan_first_layer layer-index extraction."""
-
-    @staticmethod
-    def _get_first_layer(nans: dict[str, int]) -> str | None:
-        if not nans:
-            return None
-        import regex as re
-
-        best_name = None
-        best_idx = float("inf")
-        for name in nans:
-            m = re.search(r"\.([0-9]+)\.", name)
-            if m:
-                idx = int(m.group(1))
-                if idx < best_idx:
-                    best_idx = idx
-                    best_name = name
-        return best_name
-
-    def test_finds_lowest_index(self):
-        nans = {
-            "model.layers.5.self_attn": 10,
-            "model.layers.0.self_attn": 3,
-            "model.layers.12.self_attn": 7,
-        }
-        assert self._get_first_layer(nans) == "model.layers.0.self_attn"
-
-    def test_empty_returns_none(self):
-        assert self._get_first_layer({}) is None
-
-    def test_single_layer(self):
-        nans = {"model.layers.3.self_attn": 5}
-        assert self._get_first_layer(nans) == "model.layers.3.self_attn"
-
-    def test_adjacent_layers(self):
-        nans = {
-            "model.layers.1.self_attn": 2,
-            "model.layers.0.self_attn": 1,
-        }
-        assert self._get_first_layer(nans) == "model.layers.0.self_attn"
-
-
 class TestPhaseTracking:
     """Unit tests for IterationStats NaN phase labeling."""
 
@@ -301,15 +258,7 @@ class TestPhaseTracking:
     def _make_output(layers: dict[str, int], ts: float = 1000.0):
         from vllm.v1.engine import EngineCoreOutput
 
-        first = None
-        best_idx = float("inf")
-        import regex as re
-
-        for name in layers:
-            m = re.search(r"\.([0-9]+)\.", name)
-            if m and int(m.group(1)) < best_idx:
-                best_idx = int(m.group(1))
-                first = name
+        first = next(iter(layers)) if layers else None
         return EngineCoreOutput(
             request_id="req-test",
             new_token_ids=[1],
