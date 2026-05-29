@@ -1042,6 +1042,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="kimi_audio",
         trust_remote_code=True,
     ),
+    "MossAudioModel": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
+        trust_remote_code=True,
+    ),
     "KimiK25ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
