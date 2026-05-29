@@ -96,6 +96,36 @@ def test_deepseek_v4_enables_thinking_with_compatible_kwargs(kwargs):
     assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>")
 
 
+def test_deepseek_v4_appends_generation_prompt_for_trailing_system():
+    # Agent frameworks commonly append a context-only system message
+    # (environment details, locale, date, etc.) as the final message before
+    # asking the model to respond. The generation prompt must still be
+    # emitted; otherwise the model sees no <｜Assistant｜> turn and returns
+    # empty content.
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Environment: production"},
+        ],
+        tokenize=False,
+    )
+
+    assert prompt.endswith("<｜Assistant｜></think>")
+
+
+def test_deepseek_v4_appends_thinking_generation_prompt_for_trailing_system():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Environment: production"},
+        ],
+        tokenize=False,
+        thinking=True,
+    )
+
+    assert prompt.endswith("<｜Assistant｜><think>")
+
+
 def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():
     tools = [
         {
