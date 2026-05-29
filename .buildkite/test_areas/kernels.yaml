@@ -179,10 +179,12 @@ steps:
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backend.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
+  - vllm/model_executor/layers/attention/mla_attention.py
   - vllm/platforms/cuda.py
   - tests/kernels/test_top_k_per_row.py
   commands:
