@@ -67,7 +67,9 @@ __global__ void rms_norm_kernel(
   }
   __syncthreads();
 
-  scalar_t* out_row = out + blockIdx.x * hidden_size;
+  // Promote blockIdx.x to int64_t before multiplying by hidden_size (#42862).
+  const int64_t token_idx = blockIdx.x;
+  scalar_t* out_row = out + token_idx * hidden_size;
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
@@ -115,9 +117,10 @@ fused_add_rms_norm_kernel(
   auto* __restrict__ weight_v =
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
+  const int64_t token_idx = blockIdx.x;
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
+    int64_t id = token_idx * vec_hidden_size + idx;
+    int64_t strided_id = token_idx * vec_input_stride + idx;
     _f16Vec<scalar_t, width> temp = input_v[strided_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
@@ -134,8 +137,8 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    int id = blockIdx.x * vec_hidden_size + idx;
-    int64_t strided_id = blockIdx.x * vec_input_stride + idx;
+    int64_t id = token_idx * vec_hidden_size + idx;
+    int64_t strided_id = token_idx * vec_input_stride + idx;
     _f16Vec<scalar_t, width> res = residual_v[id];
     _f16Vec<scalar_t, width> w = weight_v[idx];
     _f16Vec<scalar_t, width> out;
@@ -164,12 +167,13 @@ fused_add_rms_norm_kernel(
   __shared__ float s_variance;
   float variance = 0.0f;
 
+  const int64_t token_idx = blockIdx.x;
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * hidden_size + idx];
+    scalar_t z = input[token_idx * input_stride + idx];
+    z += residual[token_idx * hidden_size + idx];
     float x = (float)z;
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
+    residual[token_idx * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -182,9 +186,9 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x = (float)residual[token_idx * hidden_size + idx];
     float w = (float)weight[idx];
-    input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
+    input[token_idx * input_stride + idx] = (scalar_t)(x * s_variance * w);
   }
 }
 
