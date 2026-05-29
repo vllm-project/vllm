@@ -402,8 +402,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 
 
 def empty_exponential_noise_like(
-    probs: torch.Tensor,
-    use_fp64_gumbel: bool,
+    probs: torch.Tensor, use_fp64_gumbel: bool
 ) -> torch.Tensor:
     dtype = torch.float64 if use_fp64_gumbel else probs.dtype
     return torch.empty(probs.shape, dtype=dtype, device=probs.device)
