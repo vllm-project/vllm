@@ -59,7 +59,6 @@ def make_fused_moe_layer(
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
     )

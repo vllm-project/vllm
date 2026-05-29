@@ -1097,7 +1097,6 @@ class LoRAModelManager:
         )
         if module is None:
             return None
-        # base = module.base_layer
         return MoEEPLoadSpec(
             ep_rank=module.ep_rank,
             local_num_experts=module.local_num_experts,

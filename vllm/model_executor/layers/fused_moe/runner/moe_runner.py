@@ -835,7 +835,7 @@ class MoERunner(MoERunnerInterface):
             )
             self._replace_quant_method(
                 FusedMoEModularMethod.make(
-                    self,
+                    self.routed_experts,
                     base_quant_method,
                     prepare_finalize,
                 )

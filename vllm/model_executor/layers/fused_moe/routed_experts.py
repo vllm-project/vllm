@@ -240,7 +240,7 @@ class RoutedExperts(PluggableLayer):
         # Note: ExpertMapManager.update() recalculates expert maps and
         # reinitializes routing tables internally.
         self.expert_map_manager.update(
-            self.moe_parallel_config,
+            self.moe_config.moe_parallel_config,
             global_num_experts=self.global_num_experts,
         )
 

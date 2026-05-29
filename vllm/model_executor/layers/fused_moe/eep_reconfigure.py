@@ -61,7 +61,7 @@ def make_eep_staged_quant_method(
     module: "MoERunner",
     moe_config: FusedMoEConfig,
 ) -> FusedMoEMethodBase | None:
-    quant_method = module.quant_method
+    quant_method = module._quant_method
     if not quant_method.supports_internal_mk:
         return None
     if getattr(quant_method, "wraps_legacy_quant_method", False):

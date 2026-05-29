@@ -151,11 +151,6 @@ class BaseRouter(FusedMoERouter):
         eplb_state: EplbLayerState | None = None,
     ):
         """
-        Note: the indices dtype might not be available at router construction
-        time, so we need to supply a callback to get it at runtime.  This is
-        because the indices type is supplied by modular kernels which are
-        created after MoE layer/router construction.
-
         Args:
             top_k: Number of experts to select per token
             global_num_experts: Total number of experts

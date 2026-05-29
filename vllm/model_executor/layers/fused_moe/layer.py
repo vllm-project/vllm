@@ -52,8 +52,6 @@ def make_parallel_config(
     )
     dp_size_ = dp_size if dp_size is not None else get_dp_group().world_size
     pcp_size_ = pcp_size if pcp_size is not None else get_pcp_group().world_size
-
-    is_sequence_parallel = is_sequence_parallel
     sp_size = tp_size_ if is_sequence_parallel else 1
 
     moe_parallel_config = FusedMoEParallelConfig.make(

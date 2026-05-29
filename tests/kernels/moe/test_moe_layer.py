@@ -1500,9 +1500,6 @@ def _run_one_config(
                 is_sequence_parallel=is_sequence_parallel,
             )
 
-            # if moe_layer._expert_map is not None:
-            #    moe_layer._expert_map = moe_layer._expert_map.to(device)
-
             num_tokens = m
             # num_tokens_across_dp should have one entry per DP group, not per
             # total rank.
