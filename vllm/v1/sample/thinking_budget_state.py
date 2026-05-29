@@ -250,6 +250,11 @@ class ThinkingBudgetStateHolder:
             if start_thinking >= 0:
                 start_thinking += scan_offset
                 if scan_offset > 0:
+                    # Re-entry after a forced end: budget was already exhausted
+                    # in a prior block, so immediately force-close this one.
+                    # scan_offset > 0 is only set after forced-end completion
+                    # (never after natural end), so this won't block legitimate
+                    # re-entries where budget remains.
                     state["start_thinking"] = start_thinking
                     state["in_think"] = False
                     state["in_end"] = True
