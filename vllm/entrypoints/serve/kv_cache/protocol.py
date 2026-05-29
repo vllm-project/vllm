@@ -20,8 +20,7 @@ class _KVCacheGroupBase(BaseModel):
     page_size_bytes: int
 
 
-class FullAttentionGroupSpec(_KVCacheGroupBase):
-    spec_type: Literal["FullAttentionSpec"] = "FullAttentionSpec"
+class _FullAttentionBase(_KVCacheGroupBase):
     num_kv_heads: int
     head_size: int
     head_size_v: int
@@ -30,7 +29,11 @@ class FullAttentionGroupSpec(_KVCacheGroupBase):
     attention_chunk_size: int | None = None
 
 
-class MLAAttentionGroupSpec(FullAttentionGroupSpec):
+class FullAttentionGroupSpec(_FullAttentionBase):
+    spec_type: Literal["FullAttentionSpec"] = "FullAttentionSpec"
+
+
+class MLAAttentionGroupSpec(_FullAttentionBase):
     spec_type: Literal["MLAAttentionSpec"] = "MLAAttentionSpec"
     cache_dtype_str: str | None = None
 
@@ -66,7 +69,7 @@ class CrossAttentionGroupSpec(_KVCacheGroupBase):
     dtype: str
 
 
-class SinkFullAttentionGroupSpec(FullAttentionGroupSpec):
+class SinkFullAttentionGroupSpec(_FullAttentionBase):
     spec_type: Literal["SinkFullAttentionSpec"] = "SinkFullAttentionSpec"
     sink_len: int | None = None
 
