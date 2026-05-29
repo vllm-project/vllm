@@ -38,11 +38,10 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
-        # Eagle inherits the base forward but has an Identity layer-0 norm, so
-        # it must not fuse (the fused path requires a real RMSNorm).
-        super().__init__(
-            vllm_config, prefix=prefix, config=config, fuse_allreduce=False
-        )
+        # Eagle's model forward consumes a reduced final hidden state, so the
+        # linears reduce themselves (the communicator tolerates the Identity
+        # layer-0 norm and reads it live).
+        super().__init__(vllm_config, prefix=prefix, config=config, reduce_results=True)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427

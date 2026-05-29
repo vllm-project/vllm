@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.communicator import Scatter, finalize_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -105,7 +106,14 @@ class EagleMistralModel(MistralModel):
                 hidden_states,
                 residual,
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # The migrated MistralDecoderLayer defers its final all-reduce, so the
+        # last hidden state is per-rank partial; finalize_norm reduces it.
+        hidden_states = finalize_norm(
+            self.norm,
+            hidden_states,
+            residual,
+            incoming=getattr(self.layers[-1], "output_scatter", Scatter.FULL),
+        )
         return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

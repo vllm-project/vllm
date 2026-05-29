@@ -313,8 +313,8 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
     """
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
-        # MoE MLP (no gate_up_proj) + inherited base forward -> don't fuse.
-        super().__init__(vllm_config, prefix, fuse_allreduce=False)
+        # MoE MLP reduces internally, so the linears reduce too (no deferral).
+        super().__init__(vllm_config, prefix, reduce_results=True)
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config

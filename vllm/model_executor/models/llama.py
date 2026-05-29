@@ -39,8 +39,10 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fusion.ar_rms_quant import (
-    fused_ar_rms_norm_quant,
+from vllm.model_executor.layers.fusion.communicator import (
+    LayerCommunicator,
+    Scatter,
+    finalize_norm,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -264,7 +266,7 @@ class LlamaDecoderLayer(nn.Module):
         prefix: str = "",
         config: LlamaConfig | None = None,
         attn_layer_type: type[nn.Module] = LlamaAttention,
-        fuse_allreduce: bool = True,
+        reduce_results: bool = False,
     ) -> None:
         super().__init__()
 
@@ -272,10 +274,9 @@ class LlamaDecoderLayer(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = self.get_quant_config(vllm_config)
 
-        # When True, o_proj/down_proj skip their all-reduce and the forward
-        # fuses it into the following RMSNorm. Subclasses with their own
-        # (unfused) forward must pass False so the linears reduce normally.
-        self.fuse_allreduce = fuse_allreduce
+        # reduce_results=False (default) defers o_proj/down_proj's all-reduce to
+        # the communicator, which fuses it into the next RMSNorm. Reusers whose
+        # linears must reduce themselves (e.g. MoE) pass reduce_results=True.
         self.hidden_size = config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -312,8 +313,8 @@ class LlamaDecoderLayer(nn.Module):
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            # Only pass when fusing: subclass attention types may not accept it.
-            **({"reduce_results": False} if fuse_allreduce else {}),
+            # Only pass when deferring: subclass attention types may not accept it.
+            **({"reduce_results": False} if not reduce_results else {}),
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -322,12 +323,16 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
-            reduce_results=not fuse_allreduce,  # fused into the next RMSNorm
+            reduce_results=reduce_results,  # False -> fused into the next RMSNorm
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # Distribution state this layer leaves its output in (read by the model's
+        # final norm). Deferred (fused) decoders skip o_proj/down_proj reduce.
+        self.output_scatter = Scatter.FULL if reduce_results else Scatter.PARTIAL
+        self.comm = LayerCommunicator(self)
 
     def forward(
         self,
@@ -335,42 +340,9 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self.fuse_allreduce:
-            # Unfused path: o_proj/down_proj reduce internally (reduce_results
-            # True). Matches the standard pre-fusion decoder.
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            hidden_states = self.self_attn(
-                positions=positions, hidden_states=hidden_states
-            )
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
-            hidden_states = self.mlp(hidden_states)
-            return hidden_states, residual
-
-        # Self Attention
-        hidden_states, residual = fused_ar_rms_norm_quant(
-            hidden_states,
-            residual,
-            self.input_layernorm,
-            consumer_linear=self.self_attn.qkv_proj,
-            # residual is None only at layer 0 of the first PP rank
-            do_allreduce=(residual is not None and self.tp_size > 1),
-        )
+        hidden_states, residual = self.comm.prepare_attn(hidden_states, residual)
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-
-        # Fully Connected
-        hidden_states, residual = fused_ar_rms_norm_quant(
-            hidden_states,
-            residual,
-            self.post_attention_layernorm,
-            consumer_linear=getattr(self.mlp, "gate_up_proj", None),
-            do_allreduce=(self.tp_size > 1),
-        )
+        hidden_states, residual = self.comm.prepare_mlp(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -466,24 +438,20 @@ class LlamaModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            # hidden_states stays per-rank partial across PP; receiver's first
-            # layer AR's via fused_ar_rms_norm_quant (residual is not None there).
+            # hidden_states stays per-rank partial across PP; the receiver's
+            # first layer reduces it (residual is not None -> PARTIAL there).
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        # The final norm all-reduces only when the last decoder left its output
+        # The final norm reduces only when the last decoder left its output
         # partial (fused); unfused decoders (Llama4/Mistral/GLM) already reduced.
         last_layer = self.layers[self.end_layer - 1]
-        final_allreduce = self.tp_size > 1 and getattr(
-            last_layer, "fuse_allreduce", False
-        )
-        hidden_states, _ = fused_ar_rms_norm_quant(
+        hidden_states = finalize_norm(
+            self.norm,
             hidden_states,
             residual,
-            self.norm,
-            consumer_linear=None,
-            do_allreduce=final_allreduce,
+            incoming=getattr(last_layer, "output_scatter", Scatter.FULL),
         )
 
         if len(aux_hidden_states) > 0:
