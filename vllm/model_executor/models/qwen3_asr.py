@@ -603,15 +603,10 @@ class Qwen3ASRForConditionalGeneration(
                 "Supported task types are 'transcribe' and 'translate'."
             )
 
-        # Sanitize first, then check truthiness, so a fully-stripped
-        # ``request_prompt`` (e.g. one that was nothing but ``<|...|>`` tokens)
-        # does not produce an empty ``<|im_start|>system\n<|im_end|>\n`` turn.
-        safe_prompt = _sanitize_transcription_user_text(request_prompt)
-        system_turn = (
-            f"<|im_start|>system\n{safe_prompt}<|im_end|>\n" if safe_prompt else ""
-        )
+        context = _sanitize_transcription_user_text(request_prompt)
+        system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
 
-        safe_prefix = _sanitize_transcription_user_text(response_prefix)
+        prefix = _sanitize_transcription_user_text(response_prefix)
 
         prompt = (
             f"{system_turn}"
@@ -622,9 +617,9 @@ class Qwen3ASRForConditionalGeneration(
         lang_code = to_language if task_type == "translate" else language
         if lang_code is not None:
             full_lang_name = cls.supported_languages.get(lang_code, lang_code)
-            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}{safe_prefix}"
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}{prefix}"
         else:
-            prompt += safe_prefix
+            prompt += prefix
 
         prompt_token_ids = tokenizer.encode(prompt)
 
