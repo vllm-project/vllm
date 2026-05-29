@@ -570,7 +570,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         SPARSITY_FACTOR = 8
         naive_block_assignment = (
-            expert_map is None
+            not fully_sharded
+            and expert_map is None
             and num_tokens * top_k * SPARSITY_FACTOR <= local_num_experts * max_loras
         )
 
