@@ -1439,6 +1439,51 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         return _replacement
 
 
+class AiterAllreduceFusedAddRMSNormWithCopyPattern(BasePattern, VllmPatternReplacement):
+    """Non-quant AR+RMS fusion for all_reduce with 2 users (copy_).
+
+    In GemmaRMSNorm models, the post-attention all_reduce has a copy_
+    node for cross-chunk residual state, giving it 2 users and preventing
+    the standard pattern from matching. This pattern returns ar_out as
+    an explicit output so the pattern matcher rewires external users
+    (the copy_) to the fused kernel's residual output.
+    """
+
+    def __init__(self, epsilon, dtype, device):
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.FUSED_OP = rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()
+
+    def get_inputs(self):
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        eps = self.epsilon
+
+        def _pattern(residual, input_, weight):
+            ar_out = tensor_model_parallel_all_reduce(input_)
+            rms, res_out = vllm.ir.ops.fused_add_rms_norm(ar_out, residual, weight, eps)
+            return rms, res_out, ar_out
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        eps = self.epsilon
+
+        def _replacement(residual, input_, weight):
+            fused = self.FUSED_OP(
+                input_=input_,
+                residual=residual,
+                weight=weight.to(input_.dtype),
+                epsilon=eps,
+            )
+            return fused[0], fused[1], fused[1]
+
+        return _replacement
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1503,9 +1548,13 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             return
 
         max_token_num = max_size // (hidden_dim * element_size)
+        # Cap at max_cudagraph_capture_size so fusion only fires
+        # for decode. Prefill uses quickreduce + triton rmsnorm.
+        max_cg = config.compilation_config.max_cudagraph_capture_size or 512
         self.max_token_num = min(
             max_token_num,
             config.scheduler_config.max_num_batched_tokens,
+            max_cg,
         )
 
         # Only register the AR+RMS+per-group-FP8-quant patterns when the
@@ -1523,6 +1572,15 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                 "aiter past PR #2823 to enable the trailing per-group "
                 "FP8 quant fusion."
             )
+
+        # Non-quant copy-aware pattern for post-attention allreduce
+        for epsilon in [1e-5, 1e-6]:
+            self.register(
+                AiterAllreduceFusedAddRMSNormWithCopyPattern(
+                    epsilon, self.model_dtype, self.device
+                )
+            )
+            torch._inductor.pattern_matcher._seen_patterns.clear()
 
         for epsilon in [1e-5, 1e-6]:
             # Quant-fused variants must register first so the pattern matcher

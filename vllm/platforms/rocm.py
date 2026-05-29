@@ -976,9 +976,13 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        # TODO(luka/TJ) remove env vars completely
-        if (
+        #  When allreduce+rmsnorm fusion is enabled (default on ROCm TP>1),
+        # use native priority so triton can fuse rmsnorm with adjacent ops.
+        # The aiter CK rmsnorm is opaque to triton and blocks fusion.
+        fuse_ar_rms = cc.pass_config.fuse_allreduce_rms
+        if using_inductor and fuse_ar_rms is not False:
+            rms_norm = default  # ["native"]
+        elif (
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
