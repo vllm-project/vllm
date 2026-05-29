@@ -13,6 +13,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
@@ -45,6 +46,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
@@ -130,6 +132,10 @@ class DeepseekV4MoE(nn.Module):
         self.renormalize = config.norm_topk_prob
         self.scoring_func = getattr(config, "scoring_func", "sqrtsoftplus")
 
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
+
         self.gate = GateLinear(
             input_size=config.hidden_size,
             output_size=config.n_routed_experts,
@@ -173,6 +179,7 @@ class DeepseekV4MoE(nn.Module):
                 swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 reduce_results=False,
+                is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -199,6 +206,7 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
     def forward(
@@ -208,6 +216,13 @@ class DeepseekV4MoE(nn.Module):
             raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
 
         org_shape = hidden_states.shape
+        num_tokens = org_shape[0]
+
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            if input_ids is not None:
+                input_ids = sequence_parallel_chunk(input_ids.unsqueeze(-1)).squeeze(-1)
+
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
             final_hidden_states = self.experts(
@@ -222,6 +237,12 @@ class DeepseekV4MoE(nn.Module):
                 router_logits=router_logits,
                 input_ids=input_ids,
             )
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(org_shape)
 
