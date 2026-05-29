@@ -290,10 +290,8 @@ impl EngineCoreClient {
 
         // If any engine reported a dp_stats_address in its ready response, use it
         // as the external coordinator address.
-        let dp_stats_address: Option<String> = engines
-            .iter()
-            .filter_map(|e| e.ready_response.as_ref())
-            .find_map(|r| r.dp_stats_address.clone());
+        let dp_stats_address: Option<String> =
+            engines.iter().find_map(|engine| engine.ready_response.dp_stats_address.clone());
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
@@ -368,40 +366,44 @@ impl EngineCoreClient {
     /// Return the ready responses received from all engines on the input
     /// socket.
     pub fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse> {
-        self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .collect()
+        self.engines.iter().map(|engine| &engine.ready_response).collect()
     }
 
-    /// Return the engine-reported effective model dtype, when available.
-    pub fn model_dtype(&self) -> Option<ModelDtype> {
+    /// Return the engine-reported effective model dtype.
+    pub fn model_dtype(&self) -> ModelDtype {
         self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .find_map(|response| response.dtype)
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .dtype
+    }
+
+    /// Return the engine-reported Python vLLM version.
+    pub fn vllm_version(&self) -> &str {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .vllm_version
+            .as_str()
     }
 
     /// Return the total number of GPU blocks summed across all connected
     /// engines.
     pub fn total_num_gpu_blocks(&self) -> u64 {
-        self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .map(|r| r.num_gpu_blocks)
-            .sum()
+        self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
     /// from the originally configured value.
-    pub fn max_model_len(&self) -> Option<u32> {
+    pub fn max_model_len(&self) -> u32 {
         self.engines
             .iter()
-            .filter_map(|e| e.ready_response.as_ref())
-            .map(|r| r.max_model_len as u32)
+            .map(|engine| engine.ready_response.max_model_len as u32)
             .min()
+            .expect("engine core client requires at least one engine")
     }
 
     /// Get the model name associated with this client used for metrics

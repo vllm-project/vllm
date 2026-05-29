@@ -660,6 +660,19 @@ class RoutedExperts(PluggableLayer):
             # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
 
+            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
+            # The generic assignment below would broadcast w1/w3 into the
+            # whole expert row, so the second shard would overwrite the first.
+            if (
+                "ModelOpt" in quant_method_name
+                and param.data.ndim == 2
+                and shard_id in ("w1", "w3")
+            ):
+                scale_expert_id = global_expert_id if use_global_sf else expert_id
+                scale_shard_id = 0 if shard_id == "w1" else 1
+                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
+                return True if return_success else None
+
             if (
                 "compressed" in quant_method_name.lower()
                 and param.data[expert_id] != 1
