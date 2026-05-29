@@ -567,6 +567,7 @@ _MULTIMODAL_MODELS = {
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
+    "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),
     "Tarsier2ForConditionalGeneration": (
         "qwen2_vl",
