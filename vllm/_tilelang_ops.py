@@ -169,7 +169,7 @@ def mhc_pre_big_fuse_tilelang(
             ###################################################################
             # _pre_apply_mix_fwd
             for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
-                xs = T.alloc_shared((hc_mult, hidden_block), T.float32)
+                xs = T.alloc_shared((hc_mult, hidden_block), T.bfloat16)
                 xl = T.alloc_fragment((hc_mult, hidden_block), T.float32)
                 T.copy(residual[i, 0, i0_h * hidden_block], xs)
                 T.copy(xs, xl)
