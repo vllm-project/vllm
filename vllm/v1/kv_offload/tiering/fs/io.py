@@ -51,11 +51,8 @@ def store_block(
     # indices; the raw memoryview may be multi-dimensional with itemsize > 1.
     view_slice = buffer.cast("B")[offset : offset + block_size]
 
-    use_direct = bool(O_DIRECT)
-    while True:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC
-        if use_direct:
-            flags |= O_DIRECT
+    base = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_TRUNC
+    for flags in [base | O_DIRECT, base] if O_DIRECT else [base]:
         try:
             fd = os.open(tmp_path, flags, 0o644)
             try:
@@ -76,9 +73,8 @@ def store_block(
                 logger.warning(
                     "Failed to remove temp file %s: %s", tmp_path, cleanup_exc
                 )
-            if use_direct and exc.errno == errno.EINVAL:
-                use_direct = False
-                continue
+            if exc.errno == errno.EINVAL and (flags & O_DIRECT):
+                continue  # retry without O_DIRECT
             raise
 
 
@@ -93,9 +89,7 @@ def load_block(
     """
     view_slice = view.cast("B")[offset : offset + block_size]
 
-    use_direct = bool(O_DIRECT)
-    while True:
-        flags = os.O_RDONLY | (O_DIRECT if use_direct else 0)
+    for flags in [os.O_RDONLY | O_DIRECT, os.O_RDONLY] if O_DIRECT else [os.O_RDONLY]:
         fd: int | None = None
         try:
             fd = os.open(source_path, flags)
@@ -106,17 +100,17 @@ def load_block(
                 )
             return
         except OSError as exc:
-            if use_direct and exc.errno == errno.EINVAL:
-                use_direct = False
-                continue
-            try:
-                os.remove(source_path)
-            except OSError as cleanup_exc:
-                logger.warning(
-                    "Failed to remove unreadable file %s: %s",
-                    source_path,
-                    cleanup_exc,
-                )
+            if exc.errno == errno.EINVAL and (flags & O_DIRECT):
+                continue  # retry without O_DIRECT
+            if exc.errno != errno.ENOENT:
+                try:
+                    os.remove(source_path)
+                except OSError as cleanup_exc:
+                    logger.warning(
+                        "Failed to remove unreadable file %s: %s",
+                        source_path,
+                        cleanup_exc,
+                    )
             raise
         finally:
             if fd is not None:
