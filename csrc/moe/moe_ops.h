@@ -62,9 +62,6 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
 
 bool moe_permute_unpermute_supported();
 
-int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
-                                        int64_t num_experts);
-
 void shuffle_rows(const torch::Tensor& input_tensor,
                   const torch::Tensor& dst2src_map,
                   torch::Tensor& output_tensor);
