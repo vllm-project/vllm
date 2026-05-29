@@ -203,7 +203,8 @@ class AnthropicMessagesRequest(BaseModel):
             merged_blocks = extracted_blocks
         elif isinstance(existing_system, str):
             merged_blocks = [
-                {"type": "text", "text": existing_system}, *extracted_blocks
+                {"type": "text", "text": existing_system},
+                *extracted_blocks,
             ]
         elif isinstance(existing_system, list):
             merged_blocks = [*existing_system, *extracted_blocks]
