@@ -26,6 +26,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,8 +87,10 @@ class _MockModel(SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=["dummy_buf"],
+            buffer_keys=[
+                "pixel_values",
+                "dummy_buf",
+            ],
             out_hidden_size=32,
         )
 
@@ -268,9 +271,6 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={
-                "image": "pixel_values",
-            },
             buffer_keys=["dummy_buf"],
             out_hidden_size=_HIDDEN,
         )
@@ -288,24 +288,18 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         # For tests: min=4, max=128 (small values for fast capture)
         return (4, 128)
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(mm_kwargs["image_grid_thw"])
-
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
+    ) -> list[EncoderItemSpec]:
         m = _SPATIAL_MERGE
-        return [t * (h // m) * (w // m) for t, h, w in mm_kwargs["image_grid_thw"]]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        return [t * h * w for t, h, w in mm_kwargs["image_grid_thw"]]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in mm_kwargs["image_grid_thw"]
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -355,11 +349,10 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         n_out = _count_output_tokens(grid_config, _SPATIAL_MERGE)
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=device, dtype=dtype)
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs={
+            values={
                 "pixel_values": dummy_pixel_values,
-                "image_grid_thw": grid_config,
+                "dummy_buf": dummy_buf,
             },
-            buffers={"dummy_buf": dummy_buf},
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -372,14 +365,18 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
         p = next(self.parameters())
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
-        return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
+        return EncoderCudaGraphReplayBuffers(
+            values={
+                "pixel_values": mm_kwargs["pixel_values"],
+                "dummy_buf": dummy_buf,
+            }
+        )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        return self._forward(mm_kwargs["pixel_values"])
+        return self._forward(values["pixel_values"])
 
     def encoder_eager_forward(
         self,
@@ -556,10 +553,6 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=["dummy_buf"],
             out_hidden_size=_HIDDEN,
         )
@@ -591,19 +584,18 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
     # Protocol overrides that depend on modality keys
     # ------------------------------------------------------------------
 
-    def get_encoder_cudagraph_num_items(self, mm_kwargs: dict[str, Any]) -> int:
-        return len(self._get_grid_thw(mm_kwargs))
-
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[int]:
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[EncoderItemSpec]:
         m = _SPATIAL_MERGE
-        return [t * (h // m) * (w // m) for t, h, w in self._get_grid_thw(mm_kwargs)]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self, mm_kwargs: dict[str, Any]
-    ) -> list[int]:
-        return [t * h * w for t, h, w in self._get_grid_thw(mm_kwargs)]
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in self._get_grid_thw(mm_kwargs)
+        ]
 
     def select_encoder_cudagraph_items(
         self, mm_kwargs: dict[str, Any], indices: list[int]
@@ -660,11 +652,10 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         n_out = _count_output_tokens(grid_config, _SPATIAL_MERGE)
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=device, dtype=dtype)
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs={
+            values={
                 "pixel_values": dummy_pixel_values,
-                "image_grid_thw": grid_config,
+                "dummy_buf": dummy_buf,
             },
-            buffers={"dummy_buf": dummy_buf},
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -676,14 +667,23 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         n_out = _count_output_tokens(self._get_grid_thw(mm_kwargs), _SPATIAL_MERGE)
         p = next(self.parameters())
         dummy_buf = torch.zeros(n_out, _HIDDEN, device=p.device, dtype=p.dtype)
-        return EncoderCudaGraphReplayBuffers(buffers={"dummy_buf": dummy_buf})
+        return EncoderCudaGraphReplayBuffers(
+            values={
+                "pixel_values": self._get_pixel_values(mm_kwargs),
+                "dummy_buf": dummy_buf,
+            }
+        )
 
     def encoder_cudagraph_forward(
-        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+        self,
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        return self._forward(self._get_pixel_values(mm_kwargs))
+        return self._forward(values["pixel_values"])
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 
 
@@ -718,14 +718,6 @@ class TestGetInputModality:
             "video_grid_thw": [[2, 4, 4]],
         }
         assert model.get_input_modality(mm_kwargs) == "video"
-
-    def test_video_model_config_has_both_modalities(self):
-        model = SimpleMockViTVideoModel()
-        cfg = model.get_encoder_cudagraph_config()
-        assert "image" in cfg.modalities
-        assert "video" in cfg.modalities
-        assert cfg.input_key_by_modality["image"] == "pixel_values"
-        assert cfg.input_key_by_modality["video"] == "pixel_values_videos"
 
 
 # ---------------------------------------------------------------------------

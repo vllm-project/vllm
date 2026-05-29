@@ -193,7 +193,6 @@ def make_ll_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -226,7 +225,6 @@ def make_ht_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -353,7 +351,6 @@ def triton_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         quant_config=quant_config,
     )
 
