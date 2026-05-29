@@ -819,7 +819,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_experts._ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
-        routing_tables = self._maybe_init_expert_routing_tables()
+        routing_tables = self._expert_routing_tables()
 
         if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
             base_quant_method = self.routed_experts.quant_method.old_quant_method
