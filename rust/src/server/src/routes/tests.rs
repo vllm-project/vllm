@@ -44,6 +44,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
 
@@ -3048,7 +3049,10 @@ async fn prepared_openai_request_streams_text_events() {
             "messages": [{"role": "user", "content": "hello"}]
         }))
         .expect("decode request"),
-        &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        &LoraModelResolution {
+            model_names: vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            lora_request: None,
+        },
         crate::utils::ResolvedRequestContext::default(),
     )
     .expect("prepare request");

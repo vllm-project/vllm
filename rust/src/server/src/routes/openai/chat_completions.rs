@@ -51,15 +51,10 @@ pub async fn chat_completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let mut prepared =
-        match prepare_chat_request(body, &lora_resolution.model_names, request_context) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
-    if let Some(lora_request) = lora_resolution.lora_request {
-        prepared.response_model = lora_request.lora_name.clone();
-        prepared.chat_request.lora_request = Some(lora_request);
-    }
+    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,

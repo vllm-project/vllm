@@ -33,12 +33,10 @@ pub async fn generate(
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
-    let mut prepared =
-        match prepare_generate_request(body, &lora_resolution.model_names, request_context) {
-            Ok(prepared) => prepared,
-            Err(error) => return error.into_response(),
-        };
-    prepared.text_request.lora_request = lora_resolution.lora_request;
+    let prepared = match prepare_generate_request(body, &lora_resolution, request_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return error.into_response(),
+    };
     let request_span = tracing::info_span!(
         "generate",
         request_id = %prepared.request_id,

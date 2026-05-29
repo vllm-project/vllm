@@ -2,6 +2,7 @@ use vllm_text::{SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
 use crate::error::ApiError;
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::completions::validate;
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format_value;
 use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
@@ -30,16 +31,21 @@ pub struct PreparedRequest {
 /// Validate and lower one OpenAI completions request into the internal
 /// text-generation format.
 ///
-/// `served_model_names` must be non-empty; the first entry is used as the
-/// `model` field in responses.
+/// `lora_resolution.model_names` must be non-empty; the first entry is used as
+/// the base `model` field in responses when no LoRA adapter is selected.
 pub(crate) fn prepare_completion_request(
     request: CompletionRequest,
-    served_model_names: &[String],
+    lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, served_model_names)?;
+    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
+    let response_model = lora_resolution
+        .lora_request
+        .as_ref()
+        .map(|request| request.lora_name.clone())
+        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
 
     let logprobs = match request.logprobs {
         Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
@@ -104,12 +110,12 @@ pub(crate) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
-        lora_request: None,
+        lora_request: lora_resolution.lora_request.clone(),
     };
 
     Ok(PreparedRequest {
         request_id,
-        response_model: served_model_names.first().cloned().unwrap_or_default(),
+        response_model,
         include_usage,
         text_request,
         echo,
@@ -125,6 +131,7 @@ mod tests {
     use vllm_text::Prompt;
 
     use super::prepare_completion_request;
+    use crate::lora::LoraModelResolution;
     use crate::routes::openai::completions::types::CompletionRequest;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -132,8 +139,11 @@ mod tests {
         resolve_request_context(headers, request_id)
     }
 
-    fn served(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn served(names: &[&str]) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: names.iter().map(|s| s.to_string()).collect(),
+            lora_request: None,
+        }
     }
 
     fn base_request_json() -> serde_json::Value {
