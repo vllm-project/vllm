@@ -100,7 +100,7 @@ class Fp8BlockScaledMMLinearKernel(
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,  # TODO: Update base's type
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
