@@ -353,9 +353,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
             RoutingMethodType.Simulated,
-            RoutingMethodType.SigmoidRenorm,
         ]
 
     @staticmethod

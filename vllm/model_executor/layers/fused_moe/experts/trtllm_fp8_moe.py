@@ -282,6 +282,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
                 RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
                 RoutingMethodType.Simulated,
             ]
@@ -293,6 +294,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
                 RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
                 RoutingMethodType.MiniMax2,
                 RoutingMethodType.Simulated,
             ]

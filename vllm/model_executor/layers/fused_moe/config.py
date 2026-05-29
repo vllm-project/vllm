@@ -117,8 +117,10 @@ class RoutingMethodType(IntEnum):
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
     MiniMax2 = (7,)
+    # Sigmoid: Sigmoid -> TopK
+    Sigmoid = (8,)
     # Unspecified
-    Unspecified = (8,)
+    Unspecified = (9,)
     # other routing types (not passed to FlashInfer kernels)
     # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
     DeepseekV4 = (100,)

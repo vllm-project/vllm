@@ -38,9 +38,11 @@ class CustomRoutingRouter(BaseRouter):
         # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
         if self.custom_routing_function == Llama4MoE.custom_routing_function:
             return RoutingMethodType.Llama4
-        # Cohere MoE uses a sigmoid -> top-k -> renormalize routing function.
+        # Cohere MoE uses sigmoid -> top-k, optionally followed by renormalize.
         if self.custom_routing_function == token_choice_with_bias:
-            return RoutingMethodType.SigmoidRenorm
+            if self.renormalize:
+                return RoutingMethodType.SigmoidRenorm
+            return RoutingMethodType.Sigmoid
         return RoutingMethodType.Custom
 
     def _compute_routing(
