@@ -5,14 +5,14 @@ fi
 
 echo "Checking for changes to docs-affecting files vs origin/main..."
 DOCS_PATHS=(
-  docs/
-  mkdocs.yaml
-  .readthedocs.yaml
-  examples/
-  vllm/
-  requirements/docs.txt
-  requirements/docs.in
-  requirements/test/cuda.txt
+  docs/                       # Actual docs content
+  examples/                   # Examples are rendered in docs
+  vllm/                       # API & CLI reference
+  requirements/test/cuda.txt  # CLI reference (see docs/mkdocs/hooks/generate_argparse.py)
+  mkdocs.yaml                 # Affects build process
+  .readthedocs.yaml           # Affects build process
+  requirements/docs.txt       # Affects build process
+  requirements/docs.in        # Affects build process
 )
 if git diff --quiet origin/main -- "${DOCS_PATHS[@]}"; then
   echo "No docs-affecting files changed vs origin/main; cancelling build."
