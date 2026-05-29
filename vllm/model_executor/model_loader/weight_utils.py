@@ -1090,7 +1090,8 @@ def runai_safetensors_weights_iterator(
             mininterval=2,
         )
 
-        yield from tensor_iter
+        for name, tensor in tensor_iter:
+            yield name, tensor.clone()
 
 
 def _init_fastsafetensors_loader(

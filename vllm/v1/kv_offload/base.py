@@ -7,12 +7,14 @@ Core abstractions for KV cache offloading in vLLM v1.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,6 +48,20 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+
+
+class OffloadPolicy(Enum):
+    # Offload only newly-computed blocks as they arrive; prefix-hit
+    # blocks (already offloaded by a prior request) are skipped.
+    BLOCK_LEVEL = "block_level"
+    # Offload all blocks for the request, including prefix hits.
+    # Used by tiers that need the complete KV context for a request.
+    REQUEST_LEVEL = "request_level"
+
+
+@dataclass
+class RequestOffloadingContext:
+    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
 class LoadStoreSpec(ABC):
@@ -209,6 +225,28 @@ class OffloadingManager(ABC):
         """
         return
 
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext indicating how this request's
+        blocks should be offloaded.
+
+        Args:
+            req_context: per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
+        """
+        return
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
         Take the offloading events from the manager.
@@ -348,15 +386,16 @@ class OffloadingSpec(ABC):
             * parallel_config.prefill_context_parallel_size
         )
 
-        # block size used by vLLM for hashing request tokens for the sake
-        # of enabling prefix caching
-        self.hash_block_size = (
-            vllm_config.cache_config.block_size * context_parallel_factor
-        )
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
             kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
             for kv_cache_group in kv_cache_config.kv_cache_groups
+        )
+
+        # hash_block_size must match what the scheduler uses for
+        # Request.block_hashes (resolved via resolve_kv_cache_block_sizes).
+        _, self.hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
         )
 
         for block_size in self.gpu_block_size:
