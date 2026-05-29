@@ -502,6 +502,11 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "mtp_num_hidden_layers", 0)
 
 
+class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -543,31 +548,32 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
-    "mamba": MambaModelArchConfigConvertor,
-    "falcon_mamba": MambaModelArchConfigConvertor,
-    "timm_wrapper": TerratorchModelArchConfigConvertor,
-    "medusa": MedusaModelArchConfigConvertor,
-    "zamba2": Zamba2ModelArchConfigConvertor,
-    "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
-    "falcon": FalconModelArchConfigConvertor,
-    "gemma4": Gemma4ModelArchConfigConvertor,
-    "gemma4_text": Gemma4ModelArchConfigConvertor,
-    "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
-    "RefinedWeb": FalconModelArchConfigConvertor,
-    "RefinedWebModel": FalconModelArchConfigConvertor,
-    "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
-    "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
-    "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "ernie_mtp": ErnieMTPModelArchConfigConvertor,
+    "falcon": FalconModelArchConfigConvertor,
+    "falcon_mamba": MambaModelArchConfigConvertor,
+    "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
+    "gemma4_text": Gemma4ModelArchConfigConvertor,
+    "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
+    "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "mamba": MambaModelArchConfigConvertor,
+    "medusa": MedusaModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
     "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
-    "glm4_moe_mtp": GLM4MoeMTPModelArchConfigConvertor,
-    "glm_ocr_mtp": GLM4MoeMTPModelArchConfigConvertor,
-    "ernie_mtp": ErnieMTPModelArchConfigConvertor,
+    "mpt": MPTModelArchConfigConvertor,
+    "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
-    "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
+    "RefinedWeb": FalconModelArchConfigConvertor,
+    "RefinedWebModel": FalconModelArchConfigConvertor,
+    "step3p5_mtp": Step3p5MTPModelArchConfigConvertor,
+    "timm_wrapper": TerratorchModelArchConfigConvertor,
+    "zamba2": Zamba2ModelArchConfigConvertor,
 }
