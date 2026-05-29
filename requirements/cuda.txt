@@ -26,3 +26,6 @@ quack-kernels>=0.3.3
 
 # Tokenspeed_MLA for faster mla with spec decode
 tokenspeed-mla==0.1.2
+
+# Humming kernels for quantization gemm
+humming-kernels[cu13]==0.1.2
