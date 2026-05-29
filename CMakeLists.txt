@@ -305,10 +305,6 @@ endif()
 #
 
 set(VLLM_EXT_SRC
-  "csrc/cache_kernels.cu"
-  "csrc/cache_kernels_fused.cu"
-  "csrc/attention/paged_attention_v1.cu"
-  "csrc/attention/paged_attention_v2.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
@@ -647,7 +643,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/attention/merge_attn_states.cu"
     "csrc/libtorch_stable/sampler.cu"
     "csrc/libtorch_stable/topk.cu"
-    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu")
+    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
+    "csrc/libtorch_stable/attention/paged_attention_v1.cu"
+    "csrc/libtorch_stable/attention/paged_attention_v2.cu"
+    "csrc/libtorch_stable/cache_kernels.cu"
+    "csrc/libtorch_stable/cache_kernels_fused.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -924,13 +924,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    # nvfp4_kv_cache_kernels uses non-stable torch API and is called directly
-    # from cache_kernels.cu, so it belongs in _C rather than _C_stable.
-    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
@@ -960,11 +958,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
@@ -1286,6 +1284,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
+  set(VLLM_ROCM_HAS_GFX1100 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    set(VLLM_ROCM_HAS_GFX1100 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna3.cu"
+      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1295,6 +1301,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  if(VLLM_ROCM_HAS_GFX1100)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
