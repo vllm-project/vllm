@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -69,6 +69,20 @@ def get_dynamic_override(
     return default_value
 
 
+def flatten_list(lst: list[Any]) -> list[Any]:
+    output = []
+
+    def _flatten(lst: list[Any]):
+        for i in lst:
+            if isinstance(i, list):
+                _flatten(i)
+            else:
+                output.append(i)
+
+    _flatten(lst)
+    return output
+
+
 def is_layer_gptq_quantized(
     prefix: str,
     quantized_layers: list[str],
@@ -82,6 +96,8 @@ def is_layer_gptq_quantized(
     # Full prefix ["model.layers.0.self_attn.q_proj"]
 
     proj_name = prefix.split(".")[-1]
+
+    quantized_layers = flatten_list(quantized_layers)
 
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name
