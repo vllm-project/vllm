@@ -1,0 +1,350 @@
+# Duplicates existing AMD mirror coverage onto MI300_1 only.
+# Parent steps stay optional so they do not schedule cpu-small jobs.
+# The AMD mirror blocks can be opened manually to create MI300_1 workload.
+group: AMD MI300_1 workload multiplier
+steps:
+- label: 'MI300_1 x12: Engine (1 GPU)'
+  key: mi300-1-x12-engine-1-gpu
+  timeout_in_minutes: 40
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s v1/engine/test_preprocess_error_handling.py
+      - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+
+- label: 'MI300_1 x12: e2e Scheduling (1 GPU)'
+  key: mi300-1-x12-e2e-scheduling-1-gpu
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: 'MI300_1 x12: Entrypoints Integration (LLM)'
+  key: mi300-1-x12-entrypoints-integration-llm
+  timeout_in_minutes: 40
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+      - pytest -v -s entrypoints/llm/test_generate.py
+      - pytest -v -s entrypoints/offline_mode
+
+- label: 'MI300_1 x12: Entrypoints Integration (API Server openai - Part 1)'
+  key: mi300-1-x12-entrypoints-integration-api-server-openai-part-1
+  timeout_in_minutes: 80
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+
+- label: 'MI300_1 x12: Entrypoints Integration (API Server openai - Part 2)'
+  key: mi300-1-x12-entrypoints-integration-api-server-openai-part-2
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+      - pytest -v -s entrypoints/test_chat_utils.py
+
+- label: 'MI300_1 x12: Entrypoints Integration (API Server openai - Part 3)'
+  key: mi300-1-x12-entrypoints-integration-api-server-openai-part-3
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+
+- label: 'MI300_1 x12: Entrypoints Integration (API Server 2)'
+  key: mi300-1-x12-entrypoints-integration-api-server-2
+  timeout_in_minutes: 130
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s entrypoints/serve/instrumentator
+      - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
+      - pytest -v -s tool_use
+
+- label: 'MI300_1 x12: Kernels Quantization Test %N'
+  key: mi300-1-x12-kernels-quantization-test
+  timeout_in_minutes: 90
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 24
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: 'MI300_1 x12: V1 Sample + Logits'
+  key: mi300-1-x12-v1-sample-logits
+  timeout_in_minutes: 30
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s v1/sample
+      - pytest -v -s v1/logits_processors
+      - pytest -v -s v1/test_oracle.py
+      - pytest -v -s v1/test_request.py
+      - pytest -v -s v1/test_outputs.py
+
+- label: 'MI300_1 x12: Language Models Tests (Hybrid) %N'
+  key: mi300-1-x12-language-models-tests-hybrid
+  timeout_in_minutes: 75
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 24
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: 'MI300_1 x12: Language Models Test (Extended Pooling)'
+  key: mi300-1-x12-language-models-test-extended-pooling
+  timeout_in_minutes: 100
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s models/language/pooling -m 'not core_model'
+
+- label: 'MI300_1 x12: Multi-Modal Models (Standard) 1: qwen2'
+  key: mi300-1-x12-multi-modal-models-standard-1-qwen2
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+      - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
+      - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+
+- label: 'MI300_1 x12: Multi-Modal Models (Standard) 2: qwen3 + gemma'
+  key: mi300-1-x12-multi-modal-models-standard-2-qwen3-gemma
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+      - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
+      - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+      - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
+
+- label: 'MI300_1 x12: Multi-Modal Models (Standard) 3: llava + qwen2_vl'
+  key: mi300-1-x12-multi-modal-models-standard-3-llava-qwen2-vl
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+      - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
+      - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
+
+- label: 'MI300_1 x12: Multi-Modal Models (Extended Generation 1)'
+  key: mi300-1-x12-multi-modal-models-extended-generation-1
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+      - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+      - pytest -v -s models/multimodal/test_mapping.py
+
+- label: 'MI300_1 x12: Samplers Test'
+  key: mi300-1-x12-samplers-test
+  timeout_in_minutes: 75
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/test_areas/amd_mi300_workload.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      working_dir: /vllm-workspace/tests
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s samplers
