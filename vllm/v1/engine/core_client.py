@@ -214,7 +214,7 @@ class EngineCoreClient(ABC):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
-    async def get_kv_cache_config_async(self) -> list[dict]:
+    async def get_kv_cache_config_async(self) -> dict:
         raise NotImplementedError
 
     async def get_device_info_async(self) -> list[dict]:
@@ -1097,7 +1097,7 @@ class AsyncMPClient(MPClient):
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         return await self.call_utility_async("get_supported_tasks")
 
-    async def get_kv_cache_config_async(self) -> list[dict]:
+    async def get_kv_cache_config_async(self) -> dict:
         return await self.call_utility_async("get_kv_cache_config")
 
     async def get_device_info_async(self) -> list[dict]:

@@ -46,6 +46,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
+    get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
     resolve_kv_cache_block_sizes,
@@ -420,8 +421,19 @@ class EngineCore:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_executor.supported_tasks
 
-    def get_kv_cache_config(self) -> list[dict]:
-        return _serialize_kv_cache_groups(self.scheduler.kv_cache_config)
+    def get_kv_cache_config(self) -> dict:
+        kv_cache_config = self.scheduler.kv_cache_config
+        block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+        max_concurrency = get_max_concurrency_for_kv_cache_config(
+            self.vllm_config, kv_cache_config
+        )
+        return {
+            "kv_cache_size_tokens": kv_cache_config.num_blocks * block_size,
+            "max_concurrency": max_concurrency,
+            "num_gpu_blocks": kv_cache_config.num_blocks,
+            "num_cpu_blocks": self.vllm_config.cache_config.num_cpu_blocks or 0,
+            "groups": _serialize_kv_cache_groups(kv_cache_config),
+        }
 
     def get_device_info(self) -> list[dict]:
         return self.model_executor.collective_rpc("get_device_info")

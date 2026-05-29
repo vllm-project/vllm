@@ -91,15 +91,21 @@ KVCacheGroupInfo = Annotated[
 
 
 # ---------------------------------------------------------------------------
-# Top-level response models
+# Top-level response model for GET /v1/server/kv-cache
 # ---------------------------------------------------------------------------
 
 
 class KVCacheRuntimeInfo(BaseModel):
+    kv_cache_size_tokens: int | None = None
+    max_concurrency: float | None = None
     num_gpu_blocks: int | None = None
     num_cpu_blocks: int | None = None
     groups: list[KVCacheGroupInfo] = Field(default_factory=list)
 
+
+# ---------------------------------------------------------------------------
+# Device info models (used by GET /v1/server/devices)
+# ---------------------------------------------------------------------------
 
 
 class ComputeCapability(BaseModel):
@@ -113,8 +119,3 @@ class DeviceInfo(BaseModel):
     total_memory_bytes: int
     compute_capability: ComputeCapability | None = None
     num_compute_units: int
-
-
-class RuntimeDataResponse(BaseModel):
-    kv_cache: KVCacheRuntimeInfo
-    devices: list[DeviceInfo]
