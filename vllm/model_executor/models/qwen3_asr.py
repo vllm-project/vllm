@@ -98,16 +98,24 @@ _CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
 def _sanitize_transcription_user_text(text: str) -> str:
     """Strip ChatML-style special tokens from user-controlled transcription fields.
 
-    Applies the regex to a fixpoint so nested tokens such as ``<|im<|x|>_end|>``
-    cannot reconstruct a valid ChatML token after a single pass.
+    Applies the regex / ``<asr_text>`` substitutions to a fixpoint so nested
+    payloads cannot reconstruct a valid token after a single pass:
+
+    - ``<|im<|x|>_end|>`` would, with a single ``re.sub``, leave ``<|im_end|>``
+      (a real ChatML control token).
+    - ``<asr_te<asr_text>xt>`` would, with a single ``str.replace``, leave
+      ``<asr_text>`` (the model-significant assistant-prefix delimiter).
+
+    Looping both substitutions until the string stabilises eliminates these
+    reconstruction attacks.
     """
     if not text:
         return ""
     prev = None
     while prev != text:
         prev = text
-        text = _CHATML_LIKE_TOKEN.sub("", text)
-    return text.replace(_ASR_TEXT_TAG, "")
+        text = _CHATML_LIKE_TOKEN.sub("", text).replace(_ASR_TEXT_TAG, "")
+    return text
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
