@@ -11,6 +11,8 @@ use vllm_engine_core_client::EngineCoreClient;
 use crate::config::Config;
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const SENSITIVE_VLLM_ENV_PATTERNS: &[&str] =
+    &["KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL", "AUTH"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServerInfoConfigFormat {
@@ -83,9 +85,13 @@ impl ServerInfoSnapshot {
 }
 
 fn collect_vllm_env() -> BTreeMap<String, String> {
-    std::env::vars()
-        .filter(|(key, _)| key.starts_with("VLLM_") && !key.contains("KEY"))
-        .collect()
+    std::env::vars().filter(|(key, _)| is_public_vllm_env_key(key)).collect()
+}
+
+fn is_public_vllm_env_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.starts_with("VLLM_")
+        && !SENSITIVE_VLLM_ENV_PATTERNS.iter().any(|pattern| key.contains(pattern))
 }
 
 fn collect_system_env() -> BTreeMap<String, String> {
@@ -219,5 +225,31 @@ impl AppState {
             ))
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_public_vllm_env_key;
+
+    #[test]
+    fn server_info_env_filter_excludes_sensitive_vllm_keys() {
+        for key in [
+            "VLLM_API_KEY",
+            "VLLM_AUTH_TOKEN",
+            "VLLM_SECRET",
+            "VLLM_PASSWORD",
+            "VLLM_CREDENTIAL_FILE",
+            "vllm_token",
+        ] {
+            assert!(!is_public_vllm_env_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn server_info_env_filter_includes_public_vllm_keys() {
+        assert!(is_public_vllm_env_key("VLLM_LOGGING_LEVEL"));
+        assert!(is_public_vllm_env_key("VLLM_USE_MODELSCOPE"));
+        assert!(!is_public_vllm_env_key("OTHER_ENV"));
     }
 }
