@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
+    batched_swiglu_limit_func,
     swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -51,7 +52,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-
 
 def _fused_marlin_moe(
     hidden_states: torch.Tensor,
@@ -91,6 +91,10 @@ def _fused_marlin_moe(
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
     clamp_limit: float | None = None,
+    batched_experts: bool = False,
+    expert_num_tokens_cpu: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
+    num_experts: int | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -158,17 +162,30 @@ def _fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     )
-    if clamp_limit is not None and activation == MoEActivation.SILU:
+    activation_input = intermediate_cache1.view(-1, w13_num_shards * N)
+    if activation == MoEActivation.SILU and batched_experts:
+        batched_swiglu_limit_func(
+            intermediate_cache2,
+            activation_input,
+            sorted_token_ids,
+            num_tokens_post_padded,
+            clamp_limit or 0.0,
+            expert_num_tokens_cpu=expert_num_tokens_cpu,
+            topk_ids=topk_ids,
+            num_experts=num_experts,
+            block_size_m=block_size_m,
+        )
+    elif activation == MoEActivation.SILU and clamp_limit is not None:
         swiglu_limit_func(
             intermediate_cache2,
-            intermediate_cache1.view(-1, w13_num_shards * N),
+            activation_input,
             clamp_limit,
         )
     else:
         activation_func(
             activation,
             intermediate_cache2,
-            intermediate_cache1.view(-1, w13_num_shards * N),
+            activation_input,
         )
 
     if output is None:
@@ -412,6 +429,8 @@ def batched_fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     clamp_limit: float | None = None,
+    expert_num_tokens_cpu: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -504,7 +523,6 @@ def batched_fused_marlin_moe(
     topk_weights = torch.ones(
         (M, topk), device=hidden_states.device, dtype=torch.float32
     )
-
     assert activation is not None
     output = _fused_marlin_moe(
         hidden_states=hidden_states.view(-1, K),
@@ -541,6 +559,10 @@ def batched_fused_marlin_moe(
         input_dtype=input_dtype,
         is_k_full=is_k_full,
         clamp_limit=clamp_limit,
+        batched_experts=True,
+        expert_num_tokens_cpu=expert_num_tokens_cpu,
+        topk_ids=topk_ids,
+        num_experts=E,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -993,4 +1015,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             input_dtype=self.input_dtype,
             is_k_full=self.is_k_full,
             clamp_limit=self.gemm1_clamp_limit,
+            expert_num_tokens_cpu=expert_tokens_meta.expert_num_tokens_cpu,
+            topk_ids=topk_ids,
         )
