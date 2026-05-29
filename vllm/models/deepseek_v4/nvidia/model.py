@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -23,6 +24,9 @@ from vllm.model_executor.kernels.mhc.tilelang import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    eplb_map_to_physical_and_record,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -112,48 +116,6 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
-_EPLB_REPLICA_HASH_MULTIPLIER = 2654435769
-
-
-def _map_mega_moe_logical_to_physical_and_record_load(
-    topk_ids: torch.Tensor,
-    *,
-    expert_load_view: torch.Tensor,
-    logical_to_physical_map: torch.Tensor,
-    logical_replica_count: torch.Tensor,
-) -> torch.Tensor:
-    # Clamp invalid IDs before indexing; the mask restores them afterward.
-    valid_expert_mask = topk_ids >= 0
-    safe_logical_expert_ids = topk_ids.clamp(min=0).long()
-
-    # Pick a replica slot for each routed logical expert:
-    # replica_idx[token, slot] = hash(token) % replica_count.
-    replica_counts = logical_replica_count[safe_logical_expert_ids]
-    num_routed_tokens, top_k = topk_ids.shape
-    route_positions = torch.arange(
-        num_routed_tokens * top_k, device=topk_ids.device, dtype=torch.long
-    ).view(num_routed_tokens, top_k)
-    token_indices = route_positions // top_k
-    hashed_token_indices = (token_indices * _EPLB_REPLICA_HASH_MULTIPLIER) & 0xFFFFFFFF
-    replica_indices = hashed_token_indices % replica_counts.clamp(min=1)
-
-    # Replace logical expert IDs with physical expert IDs.
-    physical_expert_ids = logical_to_physical_map[
-        safe_logical_expert_ids, replica_indices
-    ]
-    topk_ids = torch.where(
-        valid_expert_mask,
-        physical_expert_ids.to(topk_ids.dtype),
-        topk_ids,
-    )
-
-    # Record one load unit per valid routed expert assignment.
-    flat_physical_expert_ids = topk_ids.flatten().clamp(min=0).long()
-    load_increments = valid_expert_mask.flatten().to(expert_load_view.dtype)
-    expert_load_view.scatter_add_(0, flat_physical_expert_ids, load_increments)
-    return topk_ids
-
-
 def make_deepseek_v4_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
@@ -204,10 +166,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             num_logical_experts if num_logical_experts is not None else num_experts
         )
 
-        # EPLB state
-        self.expert_load_view: torch.Tensor | None = None
-        self.logical_to_physical_map: torch.Tensor | None = None
-        self.logical_replica_count: torch.Tensor | None = None
+        self.eplb_state = EplbLayerState()
 
         weight_attrs = {"weight_loader": self.weight_loader}
         self.w13_weight = nn.Parameter(
@@ -408,9 +367,12 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
     ) -> None:
-        self.expert_load_view = expert_load_view[moe_layer_idx]
-        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
-        self.logical_replica_count = logical_replica_count[moe_layer_idx]
+        self.eplb_state.set_layer_state(
+            moe_layer_idx,
+            expert_load_view,
+            logical_to_physical_map,
+            logical_replica_count,
+        )
 
     def get_expert_weights(self) -> list[torch.Tensor]:
         self.finalize_weights()
@@ -485,19 +447,18 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
 
-        # EPLB: map logical expert IDs to physical replicas.
-        logical_to_physical_map = self.logical_to_physical_map
-        if logical_to_physical_map is not None:
-            logical_replica_count = self.logical_replica_count
-            expert_load_view = self.expert_load_view
-            assert logical_replica_count is not None
-            assert expert_load_view is not None
-
-            topk_ids = _map_mega_moe_logical_to_physical_and_record_load(
-                topk_ids,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
+        # EPLB: map logical expert IDs to physical replicas and record load.
+        eplb_state = self.eplb_state
+        if eplb_state.logical_to_physical_map is not None:
+            assert eplb_state.expert_load_view is not None
+            assert eplb_state.logical_replica_count is not None
+            assert eplb_state.should_record_tensor is not None
+            topk_ids = eplb_map_to_physical_and_record(
+                topk_ids=topk_ids,
+                expert_load_view=eplb_state.expert_load_view,
+                logical_to_physical_map=eplb_state.logical_to_physical_map,
+                logical_replica_count=eplb_state.logical_replica_count,
+                record_enabled=eplb_state.should_record_tensor,
             )
 
         prepare_megamoe_inputs(
