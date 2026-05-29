@@ -4,11 +4,16 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -22,6 +27,10 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
+
+    def input_quant_key(self) -> QuantKey | None:
+        """This kernel supports dynamic quantization of the input."""
+        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -56,21 +65,28 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cutlass",
-            padded_n=x.shape[-1] + weights_padding_bytes * 2,
-        )
+        if isinstance(x, QuantizedActivation):
+            assert x.quant_key == self.input_quant_key()
+            x_fp4, x_blockscale = x.data, x.scale
+            x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
+            output_dtype = x.orig_dtype
+            output_shape = [*x.orig_shape[:-1], output_size]
+        else:
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="flashinfer-cutlass",
+                padded_n=x.shape[-1] + weights_padding_bytes * 2,
+            )
 
         out = flashinfer_scaled_fp4_mm(
             x_fp4,

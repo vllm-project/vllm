@@ -85,6 +85,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
         layer.register_parameter("input_global_scale", input_global_scale)
 
+        if (key := self.kernel.input_quant_key()) is not None:
+            layer.input_quant_key = key
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed

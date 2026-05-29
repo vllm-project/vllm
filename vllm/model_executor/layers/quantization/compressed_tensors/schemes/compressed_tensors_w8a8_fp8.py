@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -143,6 +146,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
+        if (key := self.fp8_linear.input_quant_key()) is not None:
+            layer.input_quant_key = key
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
@@ -191,7 +197,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
