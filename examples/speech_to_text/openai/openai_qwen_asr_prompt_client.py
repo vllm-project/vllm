@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Test Qwen3-ASR prompt parameter support via v1/audio/transcriptions.
+Demonstrates the optional ``prompt`` parameter on
+``v1/audio/transcriptions`` for Qwen3-ASR.
 
-Reproduces the test from PR #35415:
-  1. Transcribe mary_had_lamb.ogg WITHOUT a prompt
-  2. Transcribe mary_had_lamb.ogg WITH a vocabulary-guiding prompt
-  3. Show the diff — the prompt should guide the model toward correct vocabulary
+The prompt is mapped to the model's ``system`` turn and acts as a vocabulary
+/ context hint for the transcription. This script transcribes the same audio
+twice — once without a prompt and once with one — and prints a diff so the
+effect on the output is visible.
+
+Before running, start a vLLM server with a Qwen3-ASR model, e.g.::
+
+    vllm serve Qwen/Qwen3-ASR-0.6B
 """
 
 import argparse
