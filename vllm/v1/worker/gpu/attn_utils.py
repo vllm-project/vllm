@@ -192,8 +192,14 @@ def _allocate_and_reshape_kv_cache(
                         gid = group_for_layer[layer_name]
                         if gid < len(kernel_block_sizes):
                             kernel_block_size = kernel_block_sizes[gid]
+                            # Use storage_block_size: it equals block_size for
+                            # uncompressed specs but is smaller for compressed
+                            # ones (DeepSeek V4), which store block_size tokens
+                            # in block_size // compress_ratio slots.
                             reshape_num_blocks = (
-                                num_blocks * spec.block_size // kernel_block_size
+                                num_blocks
+                                * spec.storage_block_size
+                                // kernel_block_size
                             )
                     seen_specs[key] = reshape_kv_cache(
                         buf,
