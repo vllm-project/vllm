@@ -270,6 +270,7 @@ void _dequant_gemm_accum_small_M(
 
 template <int64_t N, int64_t ldb>
 inline int32_t load_uint4_vnni(const uint8_t* __restrict__ B, int64_t k, int64_t n) {
+  // Scalar counterpart of the AVX load_uint4_as_int8(B + ldb * k + n / 2 * 4).
   // B is packed as [_block_k / 4, N / 2, 4] for VNNI4. Each byte stores two
   // columns from adjacent 8-column groups for one K lane.
   constexpr int64_t n_group_size = 8;
@@ -469,7 +470,11 @@ void _da8w4_linear_impl(
     int64_t num_groups) {
   // weight + compensation shape = [Nc, Kc, BLOCK_N * _block_k / 2 + BLOCK_N*sizeof(int32_t)]
   // scales/qzeros shape = [Nc, G, BLOCK_N]
+#if defined(CPU_CAPABILITY_AVX512)
   const bool use_brgemm = can_use_brgemm<int8_t>(M);
+#else
+  constexpr bool use_brgemm = false;
+#endif
   int64_t block_m = [&]() -> long {
     if (M <= 48) {
       return M;
