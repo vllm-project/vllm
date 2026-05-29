@@ -69,6 +69,7 @@ async fn main() -> Result<()> {
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         enable_log_requests: false,
         disable_log_stats: false,
+        enable_server_load_tracking: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
     };

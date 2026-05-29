@@ -1482,10 +1482,62 @@ async fn http_metrics_group_error_statuses() {
     );
 }
 
+async fn test_app_with_engine_handle_and_load_tracking() -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    (
+        build_router(Arc::new(
+            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+                .with_server_load_tracking(true),
+        )),
+        engine_task,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn load_endpoint_stays_zero_when_tracking_disabled() {
+    let (app, engine_task) = test_app_with_engine_handle().await;
+
+    assert_eq!(server_load(&app).await, 0);
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(server_load(&app).await, 0);
+
+    let _body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+
+    assert_eq!(server_load(&app).await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn load_endpoint_tracks_chat_stream_lifecycle() {
-    let (app, engine_task) = test_app_with_engine_handle().await;
+    let (app, engine_task) = test_app_with_engine_handle_and_load_tracking().await;
 
     assert_eq!(server_load(&app).await, 0);
 
@@ -1565,7 +1617,7 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn load_endpoint_resets_when_stream_response_is_dropped() {
-    let (app, engine_task) = test_app_with_engine_handle().await;
+    let (app, engine_task) = test_app_with_engine_handle_and_load_tracking().await;
 
     let response = app
         .clone()

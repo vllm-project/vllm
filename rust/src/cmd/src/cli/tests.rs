@@ -5,6 +5,56 @@ use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 use super::{Cli, Command};
 
 #[test]
+fn serve_args_enable_server_load_tracking() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-server-load-tracking",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.enable_server_load_tracking, true);
+}
+
+#[test]
+fn serve_args_enable_server_load_tracking_explicit_true() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-server-load-tracking",
+        "true",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.enable_server_load_tracking, true);
+}
+
+#[test]
+fn serve_args_enable_server_load_tracking_explicit_false() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-server-load-tracking",
+        "false",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.enable_server_load_tracking, false);
+}
+
+#[test]
 fn serve_args_forward_python_flags_with_separator() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -44,6 +94,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        enable_server_load_tracking: false,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -219,6 +270,7 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        enable_server_load_tracking: false,
                         served_model_name: [],
                     },
                 },
@@ -617,6 +669,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        enable_server_load_tracking: false,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -734,6 +787,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            enable_server_load_tracking: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -796,6 +850,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            enable_server_load_tracking: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -873,6 +928,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template_content_format: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
+            enable_server_load_tracking: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }

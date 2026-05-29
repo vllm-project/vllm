@@ -17,6 +17,8 @@ pub struct AppState {
     pub chat: ChatLlm,
     /// Whether to log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Whether to track in-flight inference requests for the `/load` endpoint.
+    pub enable_server_load_tracking: bool,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
 }
@@ -39,6 +41,7 @@ impl AppState {
             served_model_names,
             chat,
             enable_log_requests: false,
+            enable_server_load_tracking: false,
             server_load: AtomicU64::new(0),
         }
     }
@@ -46,6 +49,12 @@ impl AppState {
     /// Enable per-request completion logging.
     pub fn with_log_requests(mut self, enabled: bool) -> Self {
         self.enable_log_requests = enabled;
+        self
+    }
+
+    /// Enable in-flight request tracking for the `/load` endpoint.
+    pub fn with_server_load_tracking(mut self, enabled: bool) -> Self {
+        self.enable_server_load_tracking = enabled;
         self
     }
 

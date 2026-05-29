@@ -462,15 +462,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_prompt_tokens_details: Option<Unsupported>,
 
-    /// If set to True, enable tracking server_load_metrics in the app state.
-    #[arg(
-        long,
-        visible_alias = "no-enable-server-load-tracking",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_server_load_tracking: Option<Noop>,
-
     /// If set to True, including usage on every request.
     #[arg(
         long,

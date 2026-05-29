@@ -42,6 +42,10 @@ pub async fn track_server_load(
     req: Request,
     next: Next,
 ) -> Response {
+    if !state.enable_server_load_tracking {
+        return next.run(req).await;
+    }
+
     let handler = req
         .extensions()
         .get::<MatchedPath>()

@@ -64,6 +64,8 @@ pub struct Config {
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
+    /// When `true`, track in-flight inference requests for the `/load` endpoint.
+    pub enable_server_load_tracking: bool,
     /// TCP port for the gRPC Generate service. When `None`, no gRPC server is
     /// started.
     pub grpc_port: Option<u16>,

@@ -171,6 +171,16 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// If set to True, enable tracking server_load_metrics in the app state.
+    #[arg(
+        long,
+        visible_alias = "no-enable-server-load-tracking",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_server_load_tracking: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -239,6 +249,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
+            enable_server_load_tracking: self.enable_server_load_tracking,
             grpc_port: self.grpc_port,
             shutdown_timeout,
         }
@@ -279,6 +290,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
+            enable_server_load_tracking: self.enable_server_load_tracking,
             grpc_port: self.grpc_port,
             shutdown_timeout,
         }
