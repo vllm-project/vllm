@@ -998,15 +998,16 @@ def build_ragged_indices_from_dense(
     max_width = indices.shape[1] if indices.ndim == 2 else 0
     lengths = lengths.clamp(min=0, max=max_width).contiguous()
 
-    indptr = torch.empty(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
-    indptr[0] = 0
+    indptr = torch.zeros(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
 
     if indices.numel() == 0:
         flat = torch.empty(0, dtype=torch.int32, device=indices.device)
     else:
         flat = torch.empty(
-            int(indptr[-1].item()), dtype=torch.int32, device=indices.device
+            indices.shape[0] * max_width,
+            dtype=torch.int32,
+            device=indices.device,
         )
         if flat.numel() > 0:
             block_size = 128
