@@ -67,6 +67,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -1094,8 +1095,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # In case quantization emulation backend is used, there is no need to apply
-        # MXFP4-specific padding logic as the compute happens in higher precision.
+        # The emulation backend computes in higher precision, so it skips the MXFP4
+        # kernel-tile padding that the native backends apply below.
         if (
             self.mxfp4_backend is not None
             and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
@@ -1104,6 +1105,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition
                 )
+            )
+        else:
+            # It still needs OCP_MX block alignment though: scale buffers are sized
+            # `dim // OCP_MX_BLOCK_SIZE`, so round per-partition sizes up — else a shard
+            # like 2880 // 4 = 720 truncates the buffer and corrupts the weights.
+            hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
+            intermediate_size_per_partition = round_up(
+                intermediate_size_per_partition, OCP_MX_BLOCK_SIZE
             )
         return hidden_size, intermediate_size_per_partition
 
