@@ -1154,6 +1154,7 @@ class DeepseekV4Model(nn.Module):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    success = False
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1179,6 +1180,9 @@ class DeepseekV4Model(nn.Module):
                         if success:
                             name = name_mapped
                             break
+                    if not success:
+                        # Skip when no mapping bound name_mapped (#42769).
+                        continue
                     loaded_params.add(name_mapped)
                     continue
                 elif "attn_sink" in name:
