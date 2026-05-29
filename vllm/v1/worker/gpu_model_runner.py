@@ -882,6 +882,13 @@ class GPUModelRunner(
                     device="cpu",
                     pin_memory=self.pin_memory,
                 )
+        self._use_gpu_only_num_accepted_tokens = (
+            self.num_spec_tokens > 0
+            and self.model_config.is_hybrid
+            and self.cache_config.mamba_cache_mode != "align"
+        )
+        self._num_accepted_tokens_valid = False
+        self._num_accepted_tokens_req_id_to_index: dict[str, int] = {}
 
         # Model weight offloader
         # Make sure this is called before any get_offloader call
@@ -1507,6 +1514,14 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
+        if self._use_gpu_only_num_accepted_tokens:
+            self._num_accepted_tokens_valid = True
+            self._num_accepted_tokens_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs])
+            }
+            return
+
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token
             # update without CPU-GPU sync. The metadata
@@ -1677,12 +1692,17 @@ class GPUModelRunner(
 
         return cu_num_tokens
 
-    def _compute_prev_positions(self, num_reqs: int) -> None:
+    def _compute_prev_positions(
+        self,
+        num_reqs: int,
+        prev_req_id_to_index: dict[str, int] | None = None,
+    ) -> None:
         """Build prev_positions mapping: current pos -> previous pos (-1 if new).
 
         Populates self.prev_positions.np[:num_reqs] with the mapping.
         """
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        if prev_req_id_to_index is None:
+            prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         prev_positions = self.prev_positions.np[:num_reqs]
 
         if not prev_req_id_to_index:
@@ -2014,7 +2034,23 @@ class GPUModelRunner(
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        if self._use_gpu_only_num_accepted_tokens:
+            if self._num_accepted_tokens_valid:
+                self._compute_prev_positions(
+                    num_reqs, self._num_accepted_tokens_req_id_to_index
+                )
+                self.prev_positions.copy_to_gpu(num_reqs)
+                prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
+                prev_indices_gpu = prev_positions_gpu.clamp_min(0)
+                num_accepted_tokens = self.num_accepted_tokens.gpu[prev_indices_gpu]
+                num_accepted_tokens.masked_fill_(prev_positions_gpu < 0, 1)
+                self.num_accepted_tokens.gpu[:num_reqs].copy_(
+                    num_accepted_tokens, non_blocking=True
+                )
+            else:
+                self.num_accepted_tokens.gpu.fill_(1)
+            self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+        elif self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -3504,7 +3540,14 @@ class GPUModelRunner(
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
-        if self.use_async_scheduling and self._draft_token_req_ids is not None:
+        async_needs_draft_token_ids_cpu = (
+            self.use_async_scheduling
+            and (
+                not sampling_metadata.no_penalties
+                or bool(sampling_metadata.bad_words_token_ids)
+            )
+        )
+        if async_needs_draft_token_ids_cpu and self._draft_token_req_ids is not None:
             draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
@@ -4381,9 +4424,19 @@ class GPUModelRunner(
         self._draft_token_req_ids = None
         self.valid_sampled_token_count_gpu = None
         self.input_batch.prev_sampled_token_ids = None
+        async_needs_draft_token_ids_cpu = (
+            self.use_async_scheduling
+            and (
+                not self.input_batch.sampling_metadata.no_penalties
+                or bool(self.input_batch.sampling_metadata.bad_words_token_ids)
+            )
+        )
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
+            copy_draft_token_ids_to_cpu = (
+                not self.use_async_scheduling or async_needs_draft_token_ids_cpu
+            )
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
@@ -4396,7 +4449,8 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
-                self._copy_draft_token_ids_to_cpu(scheduler_output)
+                if copy_draft_token_ids_to_cpu:
+                    self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
@@ -4474,7 +4528,13 @@ class GPUModelRunner(
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
                 self._draft_probs = None
                 self._draft_prob_req_ids = None
-                self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                copy_draft_token_ids_to_cpu = (
+                    not self.use_async_scheduling or async_needs_draft_token_ids_cpu
+                )
+                if copy_draft_token_ids_to_cpu:
+                    self._copy_draft_token_ids_to_cpu(
+                        scheduler_output, zeros_only=True
+                    )
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (

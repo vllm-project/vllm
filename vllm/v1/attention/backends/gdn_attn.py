@@ -139,6 +139,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+        self.spec_token_arange: torch.Tensor = torch.arange(
+            self.decode_cudagraph_max_bs * (self.num_spec + 1),
+            dtype=torch.int32,
+            device=device,
+        )
         self.non_spec_token_indx: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
             dtype=torch.int32,
@@ -250,17 +255,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     num_spec_decodes * (self.num_spec + 1),
                     query_start_loc_cpu[-1].item(),
                 )
-                spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=query_start_loc.device,
-                )
-                non_spec_token_indx = torch.empty(
-                    0, dtype=torch.int32, device=query_start_loc.device
-                )
-                # Filter by spec_sequence_masks to exclude padded sequences
+                spec_token_indx = self.spec_token_arange[:spec_token_size]
+                non_spec_token_indx = self.non_spec_token_indx[:0]
+                # Spec decode rows are compacted to the front; padded rows are
+                # at the back. Slice instead of CPU-mask indexing to avoid
+                # launching a tiny index kernel for every metadata build.
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks_cpu, : self.num_spec + 1
+                    :num_spec_decodes, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -401,17 +402,21 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_sequence_masks[num_spec_decodes:].fill_(False)
 
             assert non_spec_token_indx is not None and spec_token_indx is not None
-            self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
-                non_spec_token_indx, non_blocking=True
-            )
-            non_spec_token_indx = self.non_spec_token_indx[
-                : non_spec_token_indx.size(0)
-            ]
+            if non_spec_token_indx.numel() > 0:
+                self.non_spec_token_indx[: non_spec_token_indx.size(0)].copy_(
+                    non_spec_token_indx, non_blocking=True
+                )
+                non_spec_token_indx = self.non_spec_token_indx[
+                    : non_spec_token_indx.size(0)
+                ]
 
-            self.spec_token_indx[: spec_token_indx.size(0)].copy_(
-                spec_token_indx, non_blocking=True
-            )
-            spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
+            if spec_token_indx.data_ptr() == self.spec_token_arange.data_ptr():
+                spec_token_indx = self.spec_token_arange[: spec_token_indx.size(0)]
+            else:
+                self.spec_token_indx[: spec_token_indx.size(0)].copy_(
+                    spec_token_indx, non_blocking=True
+                )
+                spec_token_indx = self.spec_token_indx[: spec_token_indx.size(0)]
 
             self.spec_query_start_loc[: num_spec_decodes + 1].copy_(
                 spec_query_start_loc, non_blocking=True
