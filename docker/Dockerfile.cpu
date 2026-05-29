@@ -257,7 +257,11 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install "$(realpath dist/*.whl)[audio,triton-cpu]"
+    uv pip install "$(realpath dist/*.whl)[audio]"
+
+RUN if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        uv pip install git+https://github.com/triton-lang/triton-cpu.git@270e696d; \
+    fi
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
