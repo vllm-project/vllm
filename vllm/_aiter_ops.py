@@ -1410,7 +1410,7 @@ def _rocm_aiter_per_token_quant_with_zero_init_impl(
     assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     out_shape = x.shape
-    out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     cols = int(x.shape[-1])
@@ -1457,7 +1457,7 @@ def _rocm_aiter_per_token_quant_with_zero_init_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_shape = x.shape
     return (
-        torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(x.shape, dtype=quant_dtype, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
     )
 

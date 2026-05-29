@@ -1161,15 +1161,28 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
         # stale call site (e.g. an unfused producer/gemm) is ignored.
         producer_by_op: dict[object, str] = {}
         gemm_by_op: dict[object, str] = {}
+        # auto_functionalized appends the mutated `gemm_out_zero_init` buffer
+        # after the producer's functional returns, so its getitem index equals
+        # the number of functional outputs: 2 for the standard (fp8, scales)
+        # producers and 3 for the residual (fp8, residual, scales) producer.
+        producer_zinit_idx_by_op: dict[object, int] = {}
         for pair_key, (producer, gemm) in self._pair_specs.items():
             producer_by_op[producer.with_zero_init_op] = producer.name
             gemm_by_op[gemm.splitk_op] = gemm.name
+            _defined_indices = [
+                producer.fp8_output_index,
+                producer.scales_output_index,
+                producer.residual_output_index,
+            ]
+            producer_zinit_idx_by_op[producer.with_zero_init_op] = (
+                max(i for i in _defined_indices if i is not None) + 1
+            )
         counts: dict[str, int] = {pair_key: 0 for pair_key in self._pair_specs}
         # Walk in topological order: for each fused-producer
-        # auto_functionalized, find the gemm auto_functionalized that
-        # consumes its 3rd output (gemm_out_zero_init). The PatternMatcher
-        # always wires the replacement this way, so a producer with no
-        # such consumer is a sign of a broken rewrite -- we count it as
+        # auto_functionalized, find the gemm auto_functionalized that consumes
+        # its zero-inited Y buffer (the getitem at `zinit_idx`). The
+        # PatternMatcher always wires the replacement this way, so a producer
+        # with no such consumer is a sign of a broken rewrite -- we count it as
         # "<producer>__x__<missing-gemm>" so the discrepancy is visible.
         import operator as _operator
 
@@ -1181,13 +1194,14 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             producer_name = producer_by_op.get(node.args[0])
             if producer_name is None:
                 continue
+            zinit_idx = producer_zinit_idx_by_op[node.args[0]]
             gemm_name: str | None = None
             for user in node.users:
                 if (
                     user.op == "call_function"
                     and user.target is _operator.getitem
                     and len(user.args) >= 2
-                    and user.args[1] == 2
+                    and user.args[1] == zinit_idx
                 ):
                     for gemm_candidate in user.users:
                         if (
@@ -1314,7 +1328,13 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             ProducerSpec,
             GemmSpec,
             BlockScaleSplitKZeroInitFusionPass,
+            _make_extra_check,
             _make_2_input_producer_pattern,
+            _make_2_input_with_residual_producer_pattern,
+            _make_act_mul_group_quant_producer_pattern,
+            _make_group_quant_producer_pattern,
             _make_per_token_producer_pattern,
+            _make_fused_rms_gated_producer_pattern,
+            _make_gated_producer_pattern,
             build_default_registries,
         )

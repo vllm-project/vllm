@@ -146,7 +146,7 @@ class _BaseP2Module(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, scale = torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant(
-            x, self.weight, EPS, GROUP_SIZE
+            x=x, weight=self.weight, variance_epsilon=EPS, group_size=GROUP_SIZE
         )
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             out, self.B, scale, self.Bs, torch.bfloat16
