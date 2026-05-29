@@ -280,6 +280,7 @@ if TYPE_CHECKING:
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
 
 
 def get_default_cache_root():
@@ -1035,6 +1036,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
+    ),
+    # Retain local sliding-window KV checkpoints for prefix caching.
+    # Unset (default) preserves the dense local checkpointing behavior. `0`
+    # retains only the latest completed prompt boundary. Positive values retain
+    # checkpoints at the specified interval boundaries (rounded up to the
+    # prefix-cache alignment).
+    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
+    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+        else None
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
