@@ -760,6 +760,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and not np.any(sampling_states.top_p.np[idx] != 1.0)
             and not np.any(self.sampler.penalties_state.use_penalty[idx])
             and self.sampler.bad_words_state.num_bad_words.np[idx].max() == 0
+            and not np.any(self.sampler.logit_bias_state.use_logit_bias[idx])
         )
 
     def _remove_request(self, req_id: str) -> bool:

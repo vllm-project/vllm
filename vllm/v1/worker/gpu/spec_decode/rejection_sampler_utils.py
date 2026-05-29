@@ -18,51 +18,109 @@ def _compute_block_sumexp(block_logits, block_max):
 
 @triton.jit
 def _compute_global_lse(
-    local_max_ptr,
-    local_max_stride,
+    blocks,
+    mask,
+    global_max,
     local_sumexp_ptr,
     local_sumexp_stride,
     logit_idx,
-    vocab_num_blocks,
-    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
-    blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
-    blocks_mask = blocks < vocab_num_blocks
-    maxes = tl.load(
-        local_max_ptr + logit_idx * local_max_stride + blocks,
-        mask=blocks_mask,
-        other=float("-inf"),
-    )
     sumexps = tl.load(
         local_sumexp_ptr + logit_idx * local_sumexp_stride + blocks,
-        mask=blocks_mask,
+        mask=mask,
         other=0.0,
     )
-    global_max = tl.max(maxes, axis=0)
-    global_lse = global_max + tl.log(tl.sum(sumexps * tl.exp(maxes - global_max)))
-    return global_lse
+    return global_max + tl.log(tl.sum(sumexps))
 
 
 @triton.jit
-def _compute_block_stats_kernel(
-    # [num_logits, num_vocab_blocks]
-    target_logits_at_draft_sampled_ptr,
-    target_logits_at_draft_sampled_stride,
+def _get_block_max_kernel(
     # [num_logits, num_blocks]
     target_local_max_ptr,
     target_local_max_stride,
     # [num_logits, num_blocks]
-    target_local_sumexp_ptr,
-    target_local_sumexp_stride,
-    # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
+    # [num_logits, V]
+    target_logits_ptr,
+    target_logits_stride,
+    # [max_num_reqs, num_speculative_steps, V]
+    draft_logits_ptr,
+    draft_logits_stride_0,
+    draft_logits_stride_1,
+    # [num_logits]
+    expanded_idx_mapping_ptr,
+    # [num_logits]
+    expanded_local_pos_ptr,
+    # [max_num_reqs]
+    temp_ptr,
+    vocab_size,
+    vocab_start,
+    NUM_SPEC_STEPS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    HAS_DRAFT_LOGITS: tl.constexpr,
+):
+    logit_idx = tl.program_id(0)
+    draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
+    is_bonus = draft_step_idx == NUM_SPEC_STEPS
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
+    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_greedy = temp == 0.0
+
+    block_idx = tl.program_id(1)
+    block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block_offsets < vocab_size
+
+    target_logits = tl.load(
+        target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+        mask=mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    target_max = tl.max(target_logits, axis=0)
+    tl.store(
+        target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
+        target_max,
+    )
+
+    if HAS_DRAFT_LOGITS and not (is_bonus or is_greedy):
+        draft_logits = tl.load(
+            draft_logits_ptr
+            + req_state_idx * draft_logits_stride_0
+            + draft_step_idx * draft_logits_stride_1
+            + block_offsets
+            + vocab_start,
+            mask=mask,
+            other=float("-inf"),
+        ).to(tl.float32)
+        draft_max = tl.max(draft_logits, axis=0)
+        tl.store(
+            draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
+            draft_max,
+        )
+
+
+@triton.jit
+def _prepare_rejection_inputs_kernel(
+    # [num_logits]
+    target_max_ptr,
+    # [num_logits, num_blocks]
+    target_logits_at_draft_sampled_ptr,
+    target_logits_at_draft_sampled_stride,
+    # [num_logits, num_blocks]
+    target_local_sumexp_ptr,
+    target_local_sumexp_stride,
+    # [num_logits]
+    draft_max_ptr,
     # [num_logits, num_blocks]
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [num_logits, num_blocks]
+    target_local_max_ptr,
+    # [num_logits, num_blocks]
+    draft_local_max_ptr,
     # [max_num_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
@@ -75,21 +133,24 @@ def _compute_block_stats_kernel(
     expanded_local_pos_ptr,
     # [max_num_reqs]
     temp_ptr,
+    # [max_num_reqs]
+    min_p_ptr,
     vocab_size,
     vocab_start,
-    num_speculative_steps,
+    num_local_max,
+    NUM_LOCAL_MAX_PADDED: tl.constexpr,
+    NUM_SPEC_STEPS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    APPLY_MIN_P: tl.constexpr,
 ):
     logit_idx = tl.program_id(0)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
-
-    if draft_step_idx >= num_speculative_steps:
-        return
-
+    is_bonus = draft_step_idx == NUM_SPEC_STEPS
     req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_greedy = temp == 0.0
 
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -102,6 +163,30 @@ def _compute_block_stats_kernel(
         other=float("-inf"),
     ).to(tl.float32)
 
+    # Load block-level max from first pass.
+    blocks = tl.arange(0, NUM_LOCAL_MAX_PADDED)
+    blocks_mask = blocks < num_local_max
+    target_local_maxes = tl.load(
+        target_local_max_ptr + logit_idx * num_local_max + blocks,
+        mask=blocks_mask,
+        other=float("-inf"),
+    ).to(tl.float32)
+    target_max = tl.max(target_local_maxes, axis=0)
+
+    # Apply sampling params to the target logits.
+    if APPLY_TEMPERATURE and not is_greedy:
+        target_logits = target_logits / temp
+        target_max = target_max / temp
+    if APPLY_MIN_P:
+        min_p = tl.load(min_p_ptr + req_state_idx).to(tl.float32)
+        if min_p > 0.0:
+            threshold = target_max + tl.log(min_p)
+            target_logits = tl.where(
+                target_logits < threshold,
+                float("-inf"),
+                target_logits,
+            )
+
     # If present in this block, get the target logit for the draft
     # sampled token.
     draft_token = tl.load(draft_sampled_ptr + logit_idx + 1)
@@ -109,11 +194,6 @@ def _compute_block_stats_kernel(
     target_logit_at_draft = tl.sum(
         tl.where(block_offsets == local_draft_token, target_logits, 0.0)
     ).to(tl.float32)
-
-    if APPLY_TEMPERATURE and temp != 0.0:
-        target_logits = target_logits / temp
-        target_logit_at_draft = target_logit_at_draft / temp
-
     tl.store(
         target_logits_at_draft_sampled_ptr
         + logit_idx * target_logits_at_draft_sampled_stride
@@ -121,13 +201,9 @@ def _compute_block_stats_kernel(
         target_logit_at_draft,
     )
 
-    target_max = tl.max(target_logits, axis=0)
-    tl.store(
-        target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
-        target_max,
-    )
-
-    if temp != 0.0:
+    # Store global maxes and compute block-level exponential sums.
+    tl.store(target_max_ptr + logit_idx, target_max)
+    if not (is_bonus or is_greedy):
         target_sumexp = _compute_block_sumexp(target_logits, target_max)
         tl.store(
             target_local_sumexp_ptr
@@ -136,21 +212,24 @@ def _compute_block_stats_kernel(
             target_sumexp,
         )
         if HAS_DRAFT_LOGITS:
-            global_offsets = block_offsets + vocab_start
+            draft_local_maxes = tl.load(
+                draft_local_max_ptr + logit_idx * num_local_max + blocks,
+                mask=blocks_mask,
+                other=float("-inf"),
+            ).to(tl.float32)
             draft_logits = tl.load(
                 draft_logits_ptr
                 + req_state_idx * draft_logits_stride_0
                 + draft_step_idx * draft_logits_stride_1
-                + global_offsets,
+                + block_offsets
+                + vocab_start,
                 mask=mask,
                 other=float("-inf"),
             ).to(tl.float32)
-            draft_max = tl.max(draft_logits, axis=0)
+
+            draft_max = tl.max(draft_local_maxes, axis=0)
+            tl.store(draft_max_ptr + logit_idx, draft_max)
             draft_sumexp = _compute_block_sumexp(draft_logits, draft_max)
-            tl.store(
-                draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
-                draft_max,
-            )
             tl.store(
                 draft_local_sumexp_ptr
                 + logit_idx * draft_local_sumexp_stride
@@ -173,9 +252,8 @@ def _rejection_kernel(
     # [num_tokens, num_blocks]
     target_logits_at_draft_sampled_ptr,
     target_logits_at_draft_sampled_stride,
-    # [num_logits, num_blocks]
-    target_local_max_ptr,
-    target_local_max_stride,
+    # [num_logits]
+    target_max_ptr,
     # [num_logits, num_blocks]
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
@@ -185,9 +263,8 @@ def _rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [num_logits, num_blocks]
-    draft_local_max_ptr,
-    draft_local_max_stride,
+    # [num_logits]
+    draft_max_ptr,
     # [num_logits, num_blocks]
     draft_local_sumexp_ptr,
     draft_local_sumexp_stride,
@@ -203,8 +280,8 @@ def _rejection_kernel(
     pos_ptr,
     # [num_speculative_steps]
     synthetic_conditional_rates_ptr,
-    vocab_num_blocks,
-    PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    num_vocab_blocks,
+    NUM_VOCAB_BLOCKS_PADDED: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
 ):
@@ -215,6 +292,7 @@ def _rejection_kernel(
     num_tokens = end_idx - start_idx
     seed = tl.load(seed_ptr + req_state_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    is_greedy = temp == 0.0
 
     rejected_step = 0
     target_lse = 0.0
@@ -224,29 +302,21 @@ def _rejection_kernel(
         if accepted:
             logit_idx = start_idx + i
             draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
-            vocab_blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
-            vocab_blocks_mask = vocab_blocks < vocab_num_blocks
+            blocks = tl.arange(0, NUM_VOCAB_BLOCKS_PADDED)
+            blocks_mask = blocks < num_vocab_blocks
             target_logit = tl.sum(
                 tl.load(
                     target_logits_at_draft_sampled_ptr
                     + logit_idx * target_logits_at_draft_sampled_stride
-                    + vocab_blocks,
-                    mask=vocab_blocks_mask,
+                    + blocks,
+                    mask=blocks_mask,
                     other=0.0,
                 )
             ).to(tl.float32)
-            if temp == 0.0:
+            target_max = tl.load(target_max_ptr + logit_idx)
+            if is_greedy:
                 # Greedy sampling. Accept IFF the target logit at the
                 # draft sampled token matches the target max.
-                target_local_max = tl.load(
-                    target_local_max_ptr
-                    + logit_idx * target_local_max_stride
-                    + vocab_blocks,
-                    mask=vocab_blocks_mask,
-                    other=float("-inf"),
-                )
-                target_max = tl.max(target_local_max, axis=0)
-
                 if SYNTHETIC_MODE:
                     pos = tl.load(pos_ptr + logit_idx)
                     u = tl_rand64(seed, pos, includes_zero=False)
@@ -260,13 +330,12 @@ def _rejection_kernel(
                 )
             else:
                 target_lse = _compute_global_lse(
-                    target_local_max_ptr,
-                    target_local_max_stride,
+                    blocks,
+                    blocks_mask,
+                    target_max,
                     target_local_sumexp_ptr,
                     target_local_sumexp_stride,
                     logit_idx,
-                    vocab_num_blocks,
-                    PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
                 pos = tl.load(pos_ptr + logit_idx)
@@ -278,14 +347,14 @@ def _rejection_kernel(
                         + i * draft_logits_stride_1
                         + draft_sampled
                     ).to(tl.float32)
+                    draft_max = tl.load(draft_max_ptr + logit_idx)
                     draft_lse = _compute_global_lse(
-                        draft_local_max_ptr,
-                        draft_local_max_stride,
+                        blocks,
+                        blocks_mask,
+                        draft_max,
                         draft_local_sumexp_ptr,
                         draft_local_sumexp_stride,
                         logit_idx,
-                        vocab_num_blocks,
-                        PADDED_VOCAB_NUM_BLOCKS,
                     )
                     draft_log_prob = draft_logit - draft_lse
                 else:
@@ -317,6 +386,8 @@ def _resample_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [num_logits]
+    target_max_ptr,
     # [num_reqs]
     target_rejected_logsumexp_ptr,
     # [max_num_reqs, num_speculative_steps, V]
@@ -336,6 +407,8 @@ def _resample_kernel(
     # [max_num_reqs]
     temp_ptr,
     # [max_num_reqs]
+    min_p_ptr,
+    # [max_num_reqs]
     seed_ptr,
     # [num_logits]
     pos_ptr,
@@ -343,8 +416,9 @@ def _resample_kernel(
     vocab_start,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    USE_FP64: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    APPLY_MIN_P: tl.constexpr,
+    USE_FP64_GUMBEL: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -367,6 +441,16 @@ def _resample_kernel(
         temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         if temp != 0.0:
             target_logits = target_logits / temp
+    if APPLY_MIN_P:
+        min_p = tl.load(min_p_ptr + req_state_idx).to(tl.float32)
+        if min_p > 0.0:
+            target_max = tl.load(target_max_ptr + resample_token_idx)
+            threshold = target_max + tl.log(min_p)
+            target_logits = tl.where(
+                target_logits < threshold,
+                float("-inf"),
+                target_logits,
+            )
 
     # Compute the residual logits to resample the rejected token from.
     global_block = block + vocab_start
@@ -416,7 +500,7 @@ def _resample_kernel(
         vocab_size,
         vocab_start,
         APPLY_TEMPERATURE=False,
-        USE_FP64=USE_FP64,
+        USE_FP64=USE_FP64_GUMBEL,
     )
     token_id = vocab_start + block_idx * BLOCK_SIZE + idx
     tl.store(
@@ -439,13 +523,13 @@ def _insert_resampled_kernel(
     # [num_reqs]
     num_sampled_ptr,
     # [num_reqs, num_blocks]
-    resampled_local_argmax_ptr,
-    resampled_local_argmax_stride,
+    local_argmax_ptr,
+    local_argmax_stride,
     # [num_reqs, num_blocks]
-    resampled_local_max_ptr,
-    resampled_local_max_stride,
-    resample_num_blocks,
-    PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
+    local_max_ptr,
+    local_max_stride,
+    num_vocab_blocks,
+    NUM_VOCAB_BLOCKS_PADDED: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     num_sampled = tl.load(num_sampled_ptr + req_idx)
@@ -454,18 +538,16 @@ def _insert_resampled_kernel(
     tl.store(num_sampled_ptr + req_idx, num_sampled + 1)
 
     # Insert the resampled token.
-    block = tl.arange(0, PADDED_RESAMPLE_NUM_BLOCKS)
-    mask = block < resample_num_blocks
-    resampled_local_max = tl.load(
-        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block,
-        mask=mask,
+    blocks = tl.arange(0, NUM_VOCAB_BLOCKS_PADDED)
+    blocks_mask = blocks < num_vocab_blocks
+    local_max = tl.load(
+        local_max_ptr + req_idx * local_max_stride + blocks,
+        mask=blocks_mask,
         other=float("-inf"),
     )
-    resampled_max_block_idx = tl.argmax(resampled_local_max, axis=0)
+    max_block_idx = tl.argmax(local_max, axis=0)
     resampled = tl.load(
-        resampled_local_argmax_ptr
-        + req_idx * resampled_local_argmax_stride
-        + resampled_max_block_idx,
+        local_argmax_ptr + req_idx * local_argmax_stride + max_block_idx,
     )
     tl.store(
         sampled_ptr + req_idx * sampled_stride + num_sampled,
@@ -493,9 +575,12 @@ def rejection_sample(
     # [max_num_reqs]
     temperature: torch.Tensor,
     # [max_num_reqs]
+    min_p: torch.Tensor,
+    # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
     apply_temperature: bool,
+    apply_min_p: bool,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64_gumbel: bool = False,
@@ -513,39 +598,76 @@ def rejection_sample(
         # will never read from it when HAS_DRAFT_LOGITS=False.
         draft_logits = target_logits.new_empty(1, 1, 1)
 
-    # Compute the block-level logits stats, such as target argmax
-    # (for greedy requests), and target max + softmax exponential
-    # (for non-greedy requests).
     VOCAB_BLOCK_SIZE = 8192
-    vocab_num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
-    padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
-    # Row 0: target_logits_at_draft_sampled (per-block contributions)
-    # Row 1: target_local_max
-    # Row 2: target_local_sumexp
-    # Row 3: draft_local_max       (only when has_draft_logits)
-    # Row 4: draft_local_sumexp    (only when has_draft_logits)
-    num_stat_rows = 5 if has_draft_logits else 3
-    block_stats = target_logits.new_empty(
-        num_stat_rows, num_logits, vocab_num_blocks, dtype=torch.float32
+    num_vocab_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
+    num_vocab_blocks_padded = triton.next_power_of_2(num_vocab_blocks)
+
+    # Get block-level target and draft max logits.
+    local_max = target_logits.new_empty(
+        2 if has_draft_logits else 1,
+        num_logits,
+        num_vocab_blocks,
+        dtype=torch.float32,
     )
-    target_logits_at_draft_sampled = block_stats[0]
-    target_local_max = block_stats[1]
-    target_local_sumexp = block_stats[2]
-    draft_local_max = block_stats[3] if has_draft_logits else target_local_max
-    draft_local_sumexp = block_stats[4] if has_draft_logits else target_local_sumexp
-    _compute_block_stats_kernel[(num_logits, vocab_num_blocks)](
-        target_logits_at_draft_sampled,
-        target_logits_at_draft_sampled.stride(0),
+    target_local_max = local_max[0]
+    draft_local_max = local_max[1] if has_draft_logits else target_local_max
+    _get_block_max_kernel[(num_logits, num_vocab_blocks)](
         target_local_max,
         target_local_max.stride(0),
-        target_local_sumexp,
-        target_local_sumexp.stride(0),
         draft_local_max,
         draft_local_max.stride(0),
+        target_logits,
+        target_logits.stride(0),
+        draft_logits,
+        draft_logits.stride(0),
+        draft_logits.stride(1),
+        expanded_idx_mapping,
+        expanded_local_pos,
+        temperature,
+        vocab_size,
+        vocab_start,
+        NUM_SPEC_STEPS=num_speculative_steps,
+        BLOCK_SIZE=VOCAB_BLOCK_SIZE,
+        HAS_DRAFT_LOGITS=has_draft_logits,
+    )
+
+    # TP all-gather block maxes across ranks if the target logits
+    # are sharded.
+    if is_sharded_logits:
+        local_max = tensor_model_parallel_all_gather(local_max, dim=-1)
+        target_local_max = local_max[0]
+        draft_local_max = local_max[1] if has_draft_logits else target_local_max
+
+    # Compute the block-level target and draft exponential sums, target
+    # logits at sampled draft tokens, and global target maxes.
+    num_local_max = target_local_max.shape[-1]
+    num_local_max_padded = triton.next_power_of_2(num_local_max)
+    target_max = target_local_max.new_empty(num_logits)
+    draft_max = draft_local_max.new_empty(num_logits)
+    rejection_inputs = target_logits.new_empty(
+        3 if has_draft_logits else 2,
+        num_logits,
+        num_vocab_blocks,
+        dtype=torch.float32,
+    )
+    target_logits_at_draft_sampled = rejection_inputs[0]
+    target_local_sumexp = rejection_inputs[1]
+    draft_local_sumexp = (
+        rejection_inputs[2] if has_draft_logits else target_local_sumexp
+    )
+    _prepare_rejection_inputs_kernel[(num_logits, num_vocab_blocks)](
+        target_max,
+        target_logits_at_draft_sampled,
+        target_logits_at_draft_sampled.stride(0),
+        target_local_sumexp,
+        target_local_sumexp.stride(0),
+        draft_max,
         draft_local_sumexp,
         draft_local_sumexp.stride(0),
         target_logits,
         target_logits.stride(0),
+        target_local_max,
+        draft_local_max,
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
@@ -553,27 +675,29 @@ def rejection_sample(
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
+        min_p,
         vocab_size,
         vocab_start,
-        num_speculative_steps,
+        num_local_max,
+        NUM_LOCAL_MAX_PADDED=num_local_max_padded,
+        NUM_SPEC_STEPS=num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         APPLY_TEMPERATURE=apply_temperature,
+        APPLY_MIN_P=apply_min_p,
     )
 
-    # TP all-gather block logits stats across ranks if the target logits
-    # are sharded.
+    # TP all-gather sumexp across ranks if the target logits are sharded.
     if is_sharded_logits:
-        block_stats = tensor_model_parallel_all_gather(block_stats, dim=-1)
-        target_logits_at_draft_sampled = block_stats[0]
-        target_local_max = block_stats[1]
-        target_local_sumexp = block_stats[2]
-        if has_draft_logits:
-            draft_local_max = block_stats[3]
-            draft_local_sumexp = block_stats[4]
+        rejection_inputs = tensor_model_parallel_all_gather(rejection_inputs, dim=-1)
+        target_logits_at_draft_sampled = rejection_inputs[0]
+        target_local_sumexp = rejection_inputs[1]
+        draft_local_sumexp = (
+            rejection_inputs[2] if has_draft_logits else target_local_sumexp
+        )
         # Update the number of vocab blocks.
-        vocab_num_blocks = target_local_max.shape[-1]
-        padded_vocab_num_blocks = triton.next_power_of_2(vocab_num_blocks)
+        num_vocab_blocks = target_local_max.shape[-1]
+        num_vocab_blocks_padded = triton.next_power_of_2(num_vocab_blocks)
 
     # Sample up until the first rejected/bonus token, and store
     # the step.
@@ -591,16 +715,14 @@ def rejection_sample(
         draft_rejected_logsumexp,
         target_logits_at_draft_sampled,
         target_logits_at_draft_sampled.stride(0),
-        target_local_max,
-        target_local_max.stride(0),
+        target_max,
         target_local_sumexp,
         target_local_sumexp.stride(0),
         draft_sampled,
         draft_logits,
         draft_logits.stride(0),
         draft_logits.stride(1),
-        draft_local_max,
-        draft_local_max.stride(0),
+        draft_max,
         draft_local_sumexp,
         draft_local_sumexp.stride(0),
         cu_num_logits,
@@ -609,32 +731,33 @@ def rejection_sample(
         seed,
         pos,
         synthetic_conditional_rates,
-        vocab_num_blocks,
-        PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+        num_vocab_blocks,
+        NUM_VOCAB_BLOCKS_PADDED=num_vocab_blocks_padded,
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         num_warps=1,
     )
 
     # Resample the rejected/bonus tokens.
-    RESAMPLE_BLOCK_SIZE = 1024
-    resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
+    RESAMPLE_VOCAB_BLOCK_SIZE = 1024
+    num_vocab_blocks = triton.cdiv(vocab_size, RESAMPLE_VOCAB_BLOCK_SIZE)
+    num_vocab_blocks_padded = triton.next_power_of_2(num_vocab_blocks)
     resampled_local_argmax = target_logits.new_empty(
-        num_reqs, resample_num_blocks, dtype=torch.int64
+        num_reqs, num_vocab_blocks, dtype=torch.int64
     )
     resampled_local_max = target_logits.new_empty(
         num_reqs,
-        resample_num_blocks,
+        num_vocab_blocks,
         dtype=torch.float64 if use_fp64_gumbel else torch.float32,
     )
-    _resample_kernel[(num_reqs, resample_num_blocks)](
+    _resample_kernel[(num_reqs, num_vocab_blocks)](
         resampled_local_argmax,
         resampled_local_argmax.stride(0),
         resampled_local_max,
         resampled_local_max.stride(0),
         target_logits,
         target_logits.stride(0),
+        target_max,
         target_rejected_logsumexp,
         draft_logits,
         draft_logits.stride(0),
@@ -645,14 +768,16 @@ def rejection_sample(
         expanded_idx_mapping,
         draft_sampled,
         temperature,
+        min_p,
         seed,
         pos,
         vocab_size,
         vocab_start,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
+        BLOCK_SIZE=RESAMPLE_VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
-        USE_FP64=use_fp64_gumbel,
         APPLY_TEMPERATURE=apply_temperature,
+        APPLY_MIN_P=apply_min_p,
+        USE_FP64_GUMBEL=use_fp64_gumbel,
     )
 
     # TP all-gather resampled max/argmax across ranks if the
@@ -666,8 +791,8 @@ def rejection_sample(
         gathered = gathered.view(num_reqs, -1, 2)
         resampled_local_argmax = gathered[:, :, 0].to(torch.int64).contiguous()
         resampled_local_max = gathered[:, :, 1].contiguous()
-        resample_num_blocks = resampled_local_max.shape[-1]
-        padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
+        num_vocab_blocks = resampled_local_max.shape[-1]
+        num_vocab_blocks_padded = triton.next_power_of_2(num_vocab_blocks)
 
     # Insert the resampled tokens into the output sampled.
     _insert_resampled_kernel[(num_reqs,)](
@@ -678,7 +803,7 @@ def rejection_sample(
         resampled_local_argmax.stride(0),
         resampled_local_max,
         resampled_local_max.stride(0),
-        resample_num_blocks,
-        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        num_vocab_blocks,
+        NUM_VOCAB_BLOCKS_PADDED=num_vocab_blocks_padded,
     )
     return sampled, num_sampled
