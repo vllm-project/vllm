@@ -29,7 +29,6 @@ from .models import (
     gpt_oss_20b,
     llama3_8b,
     llama3_8b_fp4,
-    llama3_8b_fp8,
     llama4_scout_fp4,
     llama4_scout_fp8,
     qwen3_a3b,
@@ -46,7 +45,6 @@ pytestmark = pytest.mark.skipif(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     # qwen3 & dsv3 should still fuse AR+rms even though group quant is not yet supported
     [
-        llama3_8b_fp8,
         llama4_scout_fp8,
         qwen3_a3b_fp8,
         deepseek_coder_v2_lite_fp8,

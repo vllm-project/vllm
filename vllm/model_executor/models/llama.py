@@ -472,12 +472,18 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        # The final norm all-reduces only when the last decoder left its output
+        # partial (fused); unfused decoders (Llama4/Mistral/GLM) already reduced.
+        last_layer = self.layers[self.end_layer - 1]
+        final_allreduce = self.tp_size > 1 and getattr(
+            last_layer, "fuse_allreduce", False
+        )
         hidden_states, _ = fused_ar_rms_norm_quant(
             hidden_states,
             residual,
             self.norm,
             consumer_linear=None,
-            do_allreduce=(self.tp_size > 1),
+            do_allreduce=final_allreduce,
         )
 
         if len(aux_hidden_states) > 0:

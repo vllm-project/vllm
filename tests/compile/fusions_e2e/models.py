@@ -74,21 +74,18 @@ FLASHMLA_SPARSE_ATTN = pytest.param(
 llama3_8b = ModelFusionInfo(
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     matches=lambda n_layers: Matches(
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
+        # AR+RMSNorm fused in model code; compiler catches 1 leftover.
+        ar_rms_fusion=1,
     ),
 )
 
 llama3_8b_fp8 = ModelFusionInfo(
     model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
     matches=lambda n_layers: Matches(
-        rms_quant_fusion=n_layers * 2,
+        # RMSNorm+quant fused in model code; compiler finds none.
+        rms_quant_fusion=0,
         act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
     ),
 )
 
@@ -97,9 +94,8 @@ llama3_8b_fp4 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         act_quant_fusion=n_layers,
         attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 4,
+        # AR+RMSNorm+quant fused in model code; compiler catches 1 leftover.
+        ar_rms_fusion=1,
     ),
 )
 

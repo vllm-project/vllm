@@ -18,9 +18,6 @@ from .common import (
 from .models import (
     FLASHINFER_ATTN,
     TRITON_ATTN,
-    llama3_8b,
-    llama3_8b_fp4,
-    llama3_8b_fp8,
     llama4_scout_fp8,
     qwen3_a3b,
 )
@@ -31,7 +28,7 @@ pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only tes
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp8, llama4_scout_fp8],
+    [llama4_scout_fp8],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -95,7 +92,7 @@ def test_tp2_async_tp_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4],
+    [qwen3_a3b],
 )
 @pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -158,7 +155,7 @@ def test_tp2_async_tp_nvfp4_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    [qwen3_a3b],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -216,7 +213,7 @@ def test_tp2_async_tp_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp8, llama4_scout_fp8],
+    [llama4_scout_fp8],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -280,7 +277,7 @@ def test_tp2_sp_ar_rms_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b, qwen3_a3b],
+    [qwen3_a3b],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
