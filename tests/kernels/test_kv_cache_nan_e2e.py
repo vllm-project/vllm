@@ -8,6 +8,11 @@ by the CUDA kernel and published as Prometheus counters by the model runner.
 Requires: CUDA, vLLM built with custom ops.
 """
 
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
 from unittest.mock import patch
 
 import pytest
@@ -200,3 +205,169 @@ class TestKVCacheNanE2E:
         assert prom_total == 0, (
             f"No NaN injection but got {prom_total} NaN(s) in Prometheus"
         )
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
+class TestKVCacheNanMultiprocessing:
+    """Verify NaN detection works with VLLM_ENABLE_V1_MULTIPROCESSING=1.
+
+    Monkey-patching concat_and_cache_mla in the test process does not
+    propagate to vLLM worker subprocesses (spawn mode). We work around
+    this by writing a sitecustomize.py that patches the op at import
+    time in every Python process, then running the test as a subprocess.
+    """
+
+    _SITECUSTOMIZE = textwrap.dedent("""\
+        import importlib
+        import importlib.abc
+        import importlib.machinery
+        import os
+        import sys
+
+        if os.environ.get("_VLLM_TEST_INJECT_KV_NANS") == "1":
+
+            class _NanPatchFinder(importlib.abc.MetaPathFinder):
+                \"\"\"Intercept import of vllm._custom_ops to inject NaNs.\"\"\"
+
+                def find_spec(self, fullname, path, target=None):
+                    if fullname != "vllm._custom_ops":
+                        return None
+                    sys.meta_path.remove(self)
+                    try:
+                        spec = importlib.util.find_spec(fullname)
+                    finally:
+                        sys.meta_path.insert(0, self)
+                    if spec is None:
+                        return None
+                    return importlib.machinery.ModuleSpec(
+                        fullname,
+                        _NanPatchLoader(spec),
+                        origin=spec.origin,
+                        is_package=spec.submodule_search_locations is not None,
+                    )
+
+            class _NanPatchLoader(importlib.abc.Loader):
+                def __init__(self, original_spec):
+                    self._spec = original_spec
+
+                def create_module(self, spec):
+                    return None
+
+                def exec_module(self, module):
+                    self._spec.loader.exec_module(module)
+                    if hasattr(module, "concat_and_cache_mla"):
+                        _orig = module.concat_and_cache_mla
+
+                        def _patched(
+                            kv_c,
+                            k_pe,
+                            kv_cache,
+                            slot_mapping,
+                            kv_cache_dtype,
+                            scale,
+                            num_kv_cache_nan_insertions=None,
+                        ):
+                            import torch  # noqa: F811
+
+                            kv_c = kv_c.clone()
+                            n = min(4, kv_c.shape[0])
+                            kv_c[:n, 0] = float("nan")
+                            _orig(
+                                kv_c,
+                                k_pe,
+                                kv_cache,
+                                slot_mapping,
+                                kv_cache_dtype,
+                                scale,
+                                num_kv_cache_nan_insertions,
+                            )
+
+                        module.concat_and_cache_mla = _patched
+
+            sys.meta_path.insert(0, _NanPatchFinder())
+    """)
+
+    _DRIVER_SCRIPT = textwrap.dedent("""\
+        import os
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
+        os.environ["VLLM_DEBUG_MLA_CACHE"] = "1"
+        os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
+        from vllm import LLM, SamplingParams
+        from prometheus_client import REGISTRY
+
+        llm = LLM(
+            model="deepseek-ai/DeepSeek-V2-Lite",
+            hf_overrides={"num_hidden_layers": 2},
+            kv_cache_dtype="fp8",
+            enforce_eager=True,
+            load_format="dummy",
+            num_gpu_blocks_override=32,
+            max_model_len=128,
+            max_num_seqs=2,
+            disable_log_stats=False,
+            attention_config={"backend": "TRITON_MLA"},
+            kernel_config={"moe_backend": "triton"},
+        )
+        llm.generate(
+            ["Hello world"],
+            SamplingParams(temperature=0, max_tokens=2),
+        )
+
+        nan_total = 0
+        nan_layers = 0
+        phases = set()
+        for metric in REGISTRY.collect():
+            if metric.name != "vllm:kv_cache_nans":
+                continue
+            for sample in metric.samples:
+                if sample.name == "vllm:kv_cache_nans_total" and sample.value > 0:
+                    nan_total += sample.value
+                    nan_layers += 1
+                    phases.add(sample.labels["phase"])
+
+        origin_count = 0
+        for metric in REGISTRY.collect():
+            if metric.name != "vllm:kv_cache_nan_origin":
+                continue
+            for sample in metric.samples:
+                if sample.value == 1:
+                    origin_count += 1
+
+        assert nan_total > 0, f"Expected NaN counts, got {nan_total}"
+        assert nan_layers >= 2, f"Expected >= 2 layers with NaNs, got {nan_layers}"
+        assert "prefill" in phases, f"Expected prefill phase, got {phases}"
+        assert origin_count == 1, f"Expected 1 origin entry, got {origin_count}"
+        print(f"PASS: nan_total={nan_total} layers={nan_layers} phases={phases}")
+    """)
+
+    def test_nan_detection_with_multiprocessing(self):
+        """Full NaN injection test with VLLM_ENABLE_V1_MULTIPROCESSING=1.
+
+        Uses sitecustomize.py to patch concat_and_cache_mla in all
+        subprocesses, including the vLLM engine-core worker.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            site_path = os.path.join(tmpdir, "sitecustomize.py")
+            driver_path = os.path.join(tmpdir, "driver.py")
+            with open(site_path, "w") as f:
+                f.write(self._SITECUSTOMIZE)
+            with open(driver_path, "w") as f:
+                f.write(self._DRIVER_SCRIPT)
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = tmpdir + os.pathsep + env.get("PYTHONPATH", "")
+            env["_VLLM_TEST_INJECT_KV_NANS"] = "1"
+
+            result = subprocess.run(
+                [sys.executable, driver_path],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            assert result.returncode == 0, (
+                f"Multiprocessing NaN test failed (rc={result.returncode}).\n"
+                f"STDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}"
+            )
