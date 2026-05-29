@@ -3,6 +3,7 @@
 
 from transformers import AutoTokenizer
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
@@ -37,8 +38,10 @@ def test_fast_inc_detok_invalid_utf8_err_case():
         cache_salt=None,
         data_parallel_rank=None,
     )
-
-    detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+    vllm_config = VllmConfig()
+    detokenizer = IncrementalDetokenizer.from_new_request(
+        vllm_config, tokenizer, request
+    )
 
     assert detokenizer.__class__.__name__ == "FastIncrementalDetokenizer", (
         "Should use FastIncrementalDetokenizer by default"

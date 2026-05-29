@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
@@ -61,6 +62,7 @@ def _run_incremental_decode(
         skip_special_tokens=skip_special_tokens,
         spaces_between_special_tokens=spaces_between_special_tokens,
     )
+    vllm_config = VllmConfig()
     request = EngineCoreRequest(
         request_id="",
         prompt_token_ids=prompt_token_ids,
@@ -74,11 +76,13 @@ def _run_incremental_decode(
     )
 
     if fast is None:
-        detokenizer = IncrementalDetokenizer.from_new_request(tokenizer, request)
+        detokenizer = IncrementalDetokenizer.from_new_request(
+            vllm_config, tokenizer, request
+        )
     elif fast:
-        detokenizer = FastIncrementalDetokenizer(tokenizer, request)
+        detokenizer = FastIncrementalDetokenizer(vllm_config, tokenizer, request)
     else:
-        detokenizer = SlowIncrementalDetokenizer(tokenizer, request)
+        detokenizer = SlowIncrementalDetokenizer(vllm_config, tokenizer, request)
 
     output_text = ""
     for i, token_id in enumerate(all_input_ids[starting_index:]):
