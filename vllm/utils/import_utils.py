@@ -396,17 +396,26 @@ def _has_module(module_name: str) -> bool:
 
     Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
     trial import to verify that native dependencies (shared libraries, etc.)
-    are also satisfied.  The result is cached so that subsequent queries for
-    the same module incur no additional overhead.
+    are also satisfied. Any failure during the trial import is treated as the
+    module being unavailable. The result is cached so that subsequent queries
+    for the same module incur no additional overhead.
     """
-    if importlib.util.find_spec(module_name) is None:
-        return False
     try:
+        if importlib.util.find_spec(module_name) is None:
+            return False
         importlib.import_module(module_name)
-        return True
     except (ImportError, OSError) as exc:
         logger.debug("Module %s was found but failed to import: %s", module_name, exc)
         return False
+    except Exception as exc:
+        logger.warning(
+            "Module %s was found but failed to import unexpectedly (%s): %s",
+            module_name,
+            type(exc).__name__,
+            exc,
+        )
+        return False
+    return True
 
 
 def has_deep_ep() -> bool:

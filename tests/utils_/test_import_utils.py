@@ -99,6 +99,36 @@ class TestHasModule:
         ):
             assert _has_module("fake_native_ext_os") is False
 
+    def test_returns_false_on_unexpected_error_during_import(self):
+        """A broken extension may raise a non-import error (e.g. ``RuntimeError``).
+
+        Such modules are not usable, so ``_has_module`` should still return
+        ``False`` rather than letting the exception propagate.
+        """
+        fake_spec = MagicMock()
+
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                return_value=fake_spec,
+            ),
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=RuntimeError("CUDA driver version is insufficient"),
+            ),
+        ):
+            assert _has_module("fake_broken_ext") is False
+
+    def test_returns_false_when_find_spec_raises(self):
+        """``find_spec`` itself can raise for dotted names whose parent package
+        fails to import. This should be treated as the module being unavailable.
+        """
+        with patch(
+            "vllm.utils.import_utils.importlib.util.find_spec",
+            side_effect=ModuleNotFoundError("No module named 'fake_parent'"),
+        ):
+            assert _has_module("fake_parent.child") is False
+
     def test_result_is_cached(self):
         """Verify the @cache decorator prevents repeated imports."""
         _has_module("json")  # prime the cache
