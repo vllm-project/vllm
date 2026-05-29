@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -79,7 +79,6 @@ async def build_async_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool | None = None,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
@@ -98,13 +97,9 @@ async def build_async_engine_client(
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
-    if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
-
     async with build_async_engine_client_from_engine_args(
         engine_args,
         usage_context=usage_context,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
         client_config=client_config,
     ) as engine:
         yield engine
@@ -115,7 +110,6 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
     """
@@ -128,9 +122,6 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-
-    if disable_frontend_multiprocessing:
-        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -160,11 +151,13 @@ async def build_async_engine_client_from_engine_args(
         yield async_llm
     finally:
         if async_llm:
-            async_llm.shutdown()
+            async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
 def build_app(
-    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -200,7 +193,7 @@ def build_app(
         attach_router as register_sagemaker_api_router,
     )
 
-    register_sagemaker_api_router(app, supported_tasks)
+    register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
@@ -227,6 +220,12 @@ def build_app(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            register_generative_scoring_api_router,
+        )
+
+        register_generative_scoring_api_router(app)
+
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
             attach_router as attach_render_router,
@@ -234,24 +233,17 @@ def build_app(
 
         attach_render_router(app)
 
-    if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.speech_to_text.api_router import (
-            attach_router as register_speech_to_text_api_router,
+    if "transcription" in supported_tasks or "realtime" in supported_tasks:
+        from vllm.entrypoints.speech_to_text.factories import (
+            register_speech_to_text_api_routers,
         )
 
-        register_speech_to_text_api_router(app)
-
-    if "realtime" in supported_tasks:
-        from vllm.entrypoints.openai.realtime.api_router import (
-            attach_router as register_realtime_api_router,
-        )
-
-        register_realtime_api_router(app)
+        register_speech_to_text_api_routers(app, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import register_pooling_api_routers
+        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
 
-        register_pooling_api_routers(app, supported_tasks)
+        register_pooling_api_routers(app, supported_tasks, model_config)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -285,11 +277,11 @@ def build_app(
 
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
-        from vllm.entrypoints.openai.realtime.metrics import (
-            WebSocketMetricsMiddleware,
+        from vllm.entrypoints.speech_to_text.factories import (
+            add_websocket_metrics_middleware,
         )
 
-        app.add_middleware(WebSocketMetricsMiddleware)
+        add_websocket_metrics_middleware(app)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(
@@ -322,6 +314,21 @@ async def init_app_state(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+
+    # Propagate enable_in_reasoning to the API-server process. The engine core
+    # runs in a separate process, so the contextvar that backs
+    # `get_current_vllm_config_or_none()` is None on this stack. Tool parsers
+    # call `get_enable_structured_outputs_in_reasoning()` during request
+    # handling and need to see the real flag, otherwise they silently fall
+    # back to False and mismatch the engine-side bitmask gating.
+    from vllm.tool_parsers.structural_tag_registry import (
+        set_enable_structured_outputs_in_reasoning,
+    )
+
+    set_enable_structured_outputs_in_reasoning(
+        vllm_config.structured_outputs_config.enable_in_reasoning
+    )
+
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -370,7 +377,6 @@ async def init_app_state(
     state.openai_serving_render = OpenAIServingRender(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        io_processor=engine_client.io_processor,
         model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -379,6 +385,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -401,22 +408,21 @@ async def init_app_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 
-    if "transcription" in supported_tasks:
-        from vllm.entrypoints.openai.speech_to_text.api_router import (
-            init_transcription_state,
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            init_generative_scoring_state,
         )
 
-        init_transcription_state(
+        await init_generative_scoring_state(engine_client, state, args, request_logger)
+
+    if "transcription" in supported_tasks or "realtime" in supported_tasks:
+        from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
+
+        init_speech_to_text_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 
-    if "realtime" in supported_tasks:
-        from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
-
-        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
-
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import init_pooling_state
+        from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
@@ -433,13 +439,12 @@ async def init_render_app_state(
 
     Unlike :func:`init_app_state` this function does not require an
     :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
-    preprocessing pipeline (renderer, io_processor, input_processor)
+    preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-    from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
@@ -457,15 +462,11 @@ async def init_render_app_state(
         request_logger = None
 
     renderer = renderer_from_config(vllm_config)
-    io_processor = get_io_processor(
-        vllm_config, renderer, vllm_config.model_config.io_processor_plugin
-    )
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.openai_serving_render = OpenAIServingRender(
         model_config=vllm_config.model_config,
         renderer=renderer,
-        io_processor=io_processor,
         model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -474,6 +475,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -531,8 +533,7 @@ def validate_api_server_args(args):
 
 @instrument(span_name="API server setup")
 def setup_server(args):
-    """Validate API server args, set up signal handler, create socket
-    ready to serve."""
+    """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
@@ -557,12 +558,6 @@ def setup_server(args):
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
     set_ulimit()
-
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm while initializing
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, signal_handler)
 
     if args.uds:
         listen_address = f"unix:{args.uds}"
@@ -592,8 +587,10 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
+    model_config = engine_client.model_config
+
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks)
+    app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)
@@ -668,8 +665,14 @@ async def build_and_serve_renderer(
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer")
+    decorate_logs("APIServer", skip_if_decorated=True)
+
+    # Interrupt initialization if SIGTERM arrives before uvicorn installs its
+    # own signal handlers. Once uvicorn is running it replaces this.
+    def _interrupt_init(*_) -> None:
+        raise KeyboardInterrupt("terminated")
+
+    signal.signal(signal.SIGTERM, _interrupt_init)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)

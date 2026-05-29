@@ -18,11 +18,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 try:
@@ -174,6 +175,7 @@ class TestData:
             routing_method=layer.routing_method_type,
             activation=activation,
             device=w13_quantized.device,
+            max_num_tokens=next_power_of_2(m),
         )
 
         return TestData(
@@ -231,7 +233,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             td.w2_quantized,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
@@ -319,7 +320,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             td.w2_quantized,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=False,
             activation=activation,
             global_num_experts=e,
             expert_map=None,
@@ -348,6 +348,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             in_dtype=torch.bfloat16,
             is_act_and_mul=activation.is_gated,
             routing_method=RoutingMethodType.TopK,
+            max_num_tokens=next_power_of_2(m),
         )
 
         kernel = mk.FusedMoEKernel(
@@ -361,7 +362,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         flashinfer_cutlass_output = kernel.apply(

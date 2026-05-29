@@ -27,10 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -627,9 +627,8 @@ class BenchmarkWorker:
                 need_device_guard = True
 
         with (
-            torch.accelerator.device_index(self.device_id)
-            if need_device_guard
-            else nullcontext()
+            # Ray restricts each worker to one GPU; use local index 0
+            torch.accelerator.device_index(0) if need_device_guard else nullcontext()
         ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:

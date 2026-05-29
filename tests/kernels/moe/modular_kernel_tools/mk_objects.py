@@ -7,23 +7,23 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
-)
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-    TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -199,10 +199,10 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
@@ -223,7 +223,7 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
     )
 
 if has_mori():
-    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
 
@@ -232,15 +232,15 @@ if has_mori():
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        backend="mori",
+        backend="mori_high_throughput",
         supports_apply_weight_on_input=False,
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
-    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
         FlashInferNVLinkTwoSidedPrepareAndFinalize,
     )
 
@@ -271,7 +271,7 @@ if (
     and has_flashinfer_cutlass_fused_moe()
     and current_platform.has_device_capability(100)
 ):
-    from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
         FlashInferNVLinkOneSidedPrepareAndFinalize,
     )
 
@@ -298,7 +298,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 
 if has_aiter():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
     )
 
@@ -367,7 +367,9 @@ else:
     CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
     register_experts(
         CutlassExpertsFp4,

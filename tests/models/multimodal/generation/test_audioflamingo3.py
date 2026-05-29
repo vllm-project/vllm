@@ -26,6 +26,54 @@ from tests.models.registry import HF_EXAMPLE_MODELS
 from vllm import LLM, SamplingParams
 
 MODEL_NAME = "nvidia/audio-flamingo-3-hf"
+SINGLE_CONVERSATION = [
+    {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "What is surprising about the relationship between "
+                "the barking and the music?",
+            },
+            {
+                "type": "audio_url",
+                "audio_url": {
+                    "url": "https://huggingface.co/datasets/nvidia/AudioSkills/"
+                    "resolve/main/assets/"
+                    "dogs_barking_in_sync_with_the_music.wav",
+                },
+            },
+        ],
+    }
+]
+BATCHED_CONVERSATIONS = [
+    SINGLE_CONVERSATION,
+    [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Why is the philosopher's name mentioned in the "
+                    "lyrics? (A) To express a sense of nostalgia "
+                    "(B) To indicate that language cannot express clearly, "
+                    "satirizing the inversion of black and white in the world "
+                    "(C) To add depth and complexity to the lyrics "
+                    "(D) To showcase the wisdom and influence of the "
+                    "philosopher",
+                },
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": "https://huggingface.co/datasets/nvidia/"
+                        "AudioSkills/resolve/main/assets/"
+                        "Ch6Ae9DT6Ko_00-04-03_00-04-31.wav",
+                    },
+                },
+            ],
+        }
+    ],
+]
 
 
 def get_fixture_path(filename):
@@ -34,21 +82,29 @@ def get_fixture_path(filename):
     )
 
 
+def assert_output_matches(output, expected_text, expected_token_ids):
+    generated = output.outputs[0]
+    assert generated.text.strip() == expected_text
+    actual_token_ids = list(generated.token_ids)
+    assert (
+        actual_token_ids == expected_token_ids
+        or actual_token_ids == expected_token_ids[:-1]
+        or actual_token_ids[:-1] == expected_token_ids
+    )
+
+
 @pytest.fixture(scope="module")
 def llm():
-    # Check if the model is supported by the current transformers version
     model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
     model_info.check_transformers_version(on_fail="skip")
 
     try:
-        llm = LLM(
+        return LLM(
             model=MODEL_NAME,
-            trust_remote_code=True,
             dtype="bfloat16",
             enforce_eager=True,
             limit_mm_per_prompt={"audio": 1},
         )
-        return llm
     except Exception as e:
         pytest.skip(f"Failed to load model {MODEL_NAME}: {e}")
 
@@ -61,29 +117,17 @@ def test_single_generation(llm):
     with open(fixture_path) as f:
         expected = json.load(f)
 
-    audio_url = "https://huggingface.co/datasets/nvidia/AudioSkills/resolve/main/assets/Why_do_we_ask_questions_converted.wav"
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio_url", "audio_url": {"url": audio_url}},
-                {"type": "text", "text": "Transcribe the input speech."},
-            ],
-        }
-    ]
-
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
     outputs = llm.chat(
-        messages=messages,
+        messages=SINGLE_CONVERSATION,
         sampling_params=sampling_params,
     )
-    generated_text = outputs[0].outputs[0].text.strip()
-
-    expected_text = expected["transcriptions"][0]
-
-    assert expected_text in generated_text or generated_text in expected_text
+    assert_output_matches(
+        outputs[0],
+        expected["transcriptions"][0],
+        expected["token_ids"][0],
+    )
 
 
 def test_batched_generation(llm):
@@ -94,49 +138,34 @@ def test_batched_generation(llm):
     with open(fixture_path) as f:
         expected = json.load(f)
 
-    items = [
-        {
-            "audio_url": "https://huggingface.co/datasets/nvidia/AudioSkills/resolve/main/assets/dogs_barking_in_sync_with_the_music.wav",
-            "question": "What is surprising about the relationship "
-            "between the barking and the music?",
-            "expected_idx": 0,
-        },
-        {
-            "audio_url": "https://huggingface.co/datasets/nvidia/AudioSkills/resolve/main/assets/Ch6Ae9DT6Ko_00-04-03_00-04-31.wav",
-            "question": (
-                "Why is the philosopher's name mentioned in the lyrics? "
-                "(A) To express a sense of nostalgia "
-                "(B) To indicate that language cannot express clearly, "
-                "satirizing the inversion of black and white in the world "
-                "(C) To add depth and complexity to the lyrics "
-                "(D) To showcase the wisdom and influence of the philosopher"
-            ),
-            "expected_idx": 1,
-        },
-    ]
-
-    conversations = []
-    for item in items:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio_url", "audio_url": {"url": item["audio_url"]}},
-                    {"type": "text", "text": item["question"]},
-                ],
-            }
-        ]
-        conversations.append(messages)
-
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
     outputs = llm.chat(
-        messages=conversations,
+        messages=BATCHED_CONVERSATIONS,
         sampling_params=sampling_params,
     )
 
     for i, output in enumerate(outputs):
-        generated_text = output.outputs[0].text.strip()
-        expected_text = expected["transcriptions"][i]
+        assert_output_matches(
+            output,
+            expected["transcriptions"][i],
+            expected["token_ids"][i],
+        )
 
-        assert expected_text in generated_text or generated_text in expected_text
+
+def test_single_and_batched_generation_match(llm):
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
+
+    single_output = llm.chat(
+        messages=SINGLE_CONVERSATION,
+        sampling_params=sampling_params,
+    )[0]
+    batched_output = llm.chat(
+        messages=BATCHED_CONVERSATIONS,
+        sampling_params=sampling_params,
+    )[0]
+
+    assert single_output.outputs[0].text == batched_output.outputs[0].text
+    assert list(single_output.outputs[0].token_ids) == list(
+        batched_output.outputs[0].token_ids
+    )

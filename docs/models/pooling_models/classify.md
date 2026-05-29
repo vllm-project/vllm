@@ -17,6 +17,8 @@ The key distinction between (sequence) classification and token classification l
 
 Many classification models support both (sequence) classification and token classification. For further details on token classification, please refer to [this page](token_classify.md).
 
+Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled, please refer to [this page](scoring.md).
+
 ## Typical Use Cases
 
 ### Classification
@@ -54,7 +56,7 @@ If your model is not in the above list, we will try to automatically convert the
 
 Cross-encoder (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1. Most classification models can also be used as [cross-encoder models](scoring.md#cross-encoder-models). For more information on cross-encoder models, please refer to [this page](scoring.md).
 
---8<-- "docs/models/pooling_models/scoring.md:supported-score-models"
+--8<-- "docs/models/pooling_models/scoring.md:supported-cross-encoder-models"
 
 ### Reward Models
 
@@ -75,7 +77,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.classify`
 
-The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
+The [classify][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.classify] method outputs a probability vector for each prompt.
 
 ```python
 from vllm import LLM
@@ -87,11 +89,11 @@ probs = output.outputs.probs
 print(f"Class Probabilities: {probs!r} (size={len(probs)})")
 ```
 
-A code example can be found here: [examples/offline_inference/basic/classify.py](../../../examples/basic/offline_inference/classify.py)
+A code example can be found here: [examples/basic/offline_inference/classify.py](../../../examples/basic/offline_inference/classify.py)
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="classify"` when using `LLM.encode` for classification Models:
 
@@ -265,9 +267,32 @@ You can modify the `problem_type` via problem_type in the Hugging Face config. T
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
-### Logit bias
+### Affine Score Calibration
 
-You can modify the `logit_bias` (aka `sigmoid_normalize`) through the logit_bias parameter in `vllm.config.PoolerConfig`.
+Affine Score Calibration, also known as [Platt Scaling](https://en.wikipedia.org/wiki/Platt_scaling) (Platt, 1999), is the most widely used method for calibrating classifier outputs into well-calibrated probabilities.
+
+The calibration follows the transformation:
+
+`activation((logit - logit_mean) / logit_sigma)`
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `logit_mean` | `None` | Mean subtracted from logits (centers scores) |
+| `logit_sigma` | `None` | Standard deviation used to scale logits after mean subtraction |
+
+The computation order is as follows:
+
+```python
+logits -= logit_mean   # subtract mean (center scores)
+logits /= logit_sigma  # divide by sigma (scale)
+logits = activation(logits)  # e.g. sigmoid
+```
+
+Example configuration:
+
+```bash
+--pooler-config '{"use_activation": true, "logit_mean": 4.5, "logit_sigma": 1.0}'
+```
 
 ## Removed Features
 

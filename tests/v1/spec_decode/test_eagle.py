@@ -3,6 +3,7 @@
 
 from unittest import mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -27,6 +28,7 @@ from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -36,33 +38,43 @@ model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 ar_draft_model_dir = "amd/PARD-Llama-3.2-1B"  # Compatible with parallel and AR drafting
+dflash_target_dir = "Qwen/Qwen3-8B"
+dflash_dir = "z-lab/Qwen3-8B-DFlash-b16"
 
 BLOCK_SIZE = 16
+DEVICE_TYPE = current_platform.device_type
 
 
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
     attention_backend: str | None = None,
-    speculative_token_tree: list[tuple[int, ...]] | None = None,
     parallel_drafting: bool = False,
+    rejection_sample_method: str = "standard",
+    draft_sample_method: str = "greedy",
 ) -> EagleProposer:
-    model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
-
     # Method-dependent setup
     if method == "eagle":
+        target_model_dir = model_dir
         draft_model_dir = eagle_dir
     elif method == "eagle3":
+        target_model_dir = model_dir
         draft_model_dir = eagle3_dir
     elif method == "draft_model":
+        target_model_dir = model_dir
         draft_model_dir = ar_draft_model_dir
+    elif method == "dflash":
+        target_model_dir = dflash_target_dir
+        draft_model_dir = dflash_dir
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    spec_token_tree_str = None
-    if speculative_token_tree is not None:
-        assert num_speculative_tokens == len(speculative_token_tree)
-        spec_token_tree_str = str(speculative_token_tree)
+    model_config = ModelConfig(
+        model=target_model_dir,
+        runner="generate",
+        max_model_len=100,
+        trust_remote_code=(method == "dflash"),
+    )
 
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
@@ -70,14 +82,15 @@ def _create_proposer(
         model=draft_model_dir,
         method=method,
         num_speculative_tokens=num_speculative_tokens,
-        speculative_token_tree=spec_token_tree_str,
         parallel_drafting=parallel_drafting,
+        rejection_sample_method=rejection_sample_method,
+        draft_sample_method=draft_sample_method,
     )
     if parallel_drafting:
         # Overwrite pard_token to avoid crash during init
         speculative_config.draft_model_config.hf_config.pard_token = 0
 
-    device = current_platform.device_type
+    device = DEVICE_TYPE
     vllm_config = VllmConfig(
         model_config=model_config,
         cache_config=CacheConfig(block_size=16),
@@ -92,7 +105,9 @@ def _create_proposer(
         attention_config=AttentionConfig(backend=attention_backend),
     )
 
-    if "eagle" in method:
+    if method == "dflash":
+        proposer = DFlashProposer(vllm_config=vllm_config, device=device)
+    elif "eagle" in method:
         proposer = EagleProposer(vllm_config=vllm_config, device=device)
     else:
         proposer = DraftModelProposer(vllm_config=vllm_config, device=device)
@@ -107,20 +122,18 @@ def test_prepare_next_token_ids():
     either the GPU tensor of sampled_token_ids with -1 for rejected tokens,
     or the CPU python list[list[int]] with the rejected tokens removed.
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_requests = 4
     num_speculative_tokens = 4
-    batch_spec = BatchSpec(
-        seq_lens=[num_speculative_tokens + 1] * num_requests,
-        query_lens=[num_speculative_tokens + 1] * num_requests,
-    )
-
     req_ids = [f"req_{i + 1}" for i in range(num_requests)]
     mock_input_batch = mock.MagicMock(spec=InputBatch)
     mock_input_batch.req_ids = req_ids
     mock_input_batch.num_reqs = num_requests
     mock_input_batch.vocab_size = 100
+    mock_input_batch.num_tokens_no_spec = np.array(
+        [num_speculative_tokens + 1] * num_requests
+    )
 
     mock_num_scheduled_tokens = {req_id: 0 for req_id in req_ids}
     mock_requests = {}
@@ -165,19 +178,12 @@ def test_prepare_next_token_ids():
 
     assert torch.equal(next_token_ids_from_cpu, expected_next_token_ids_tensor)
 
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
-    )
-
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
 
     next_token_ids_from_padded, valid_sampled_tokens_count = (
         proposer.prepare_next_token_ids_padded(
-            common_attn_metadata,
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,
@@ -199,7 +205,7 @@ def test_prepare_inputs():
                     a, a + 1, ..., a + b - n2 - 1,
                     a + b, a + b + 1, ..., a + b + c - n3 - 1]
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     # q1 = 4, q2 = 7, q3 = 5
     # n1 = 1, n2 = 3, n3 = 2
@@ -292,7 +298,7 @@ def test_prepare_inputs_padded():
             from the original indices to sample from.
     """
 
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     expected_token_indices_to_sample = torch.tensor(
         [1, 5, 6], dtype=torch.int32, device=device
@@ -362,7 +368,7 @@ def test_set_inputs_first_pass_default_eagle():
     - After inserting next_tokens [100, 200, 300]:
         [a2, a3, 100, b2, 200, c2, c3, c4, 300]
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 3
     proposer = _create_proposer("eagle", num_speculative_tokens)
@@ -463,7 +469,7 @@ def test_set_inputs_first_pass_draft_model():
       - idx 5: token 21, pos 1
       - idx 6: token 200, pos 2 (bonus token)
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 2
     block_size = BLOCK_SIZE
@@ -601,7 +607,7 @@ def test_set_inputs_first_pass_parallel_drafting():
       - idx 9: bonus token 200
       - idx 10-11: parallel_drafting_tokens, is_masked=True
     """
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     num_speculative_tokens = 3
     block_size = BLOCK_SIZE
@@ -732,9 +738,9 @@ def test_set_inputs_first_pass_parallel_drafting():
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
 @pytest.mark.parametrize("use_distinct_lm_head", [True, False])
-@mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.eagle.get_model")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
+@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_load_model(
     mock_get_model,
     mock_get_layers,
@@ -746,12 +752,6 @@ def test_load_model(
     use_distinct_lm_head,
     monkeypatch,
 ):
-    if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
-        pytest.skip(
-            "TRITON_ATTN does not support "
-            "multi-token eagle spec decode on current platform"
-        )
-
     if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -841,17 +841,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
             "multi-token eagle spec decode on current platform"
         )
 
-    if attn_backend == "TREE_ATTN":
-        pytest.skip(
-            "TREE_ATTN is tested separately in test_propose_tree"
-            "because it requires special input mocking."
-        )
-
     if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Use GPU device
-    device = torch.device(current_platform.device_type)
+    device = torch.device(DEVICE_TYPE)
 
     # Setup test parameters
     batch_size = 2
@@ -952,10 +946,6 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         attn_metadata_builder_cls, _ = try_get_attention_backend(
             AttentionBackendEnum.TRITON_ATTN
         )
-    elif attn_backend == "TREE_ATTN":
-        attn_metadata_builder_cls, _ = try_get_attention_backend(
-            AttentionBackendEnum.TREE_ATTN
-        )
     elif attn_backend == "ROCM_AITER_FA":
         attn_metadata_builder_cls, _ = try_get_attention_backend(
             AttentionBackendEnum.ROCM_AITER_FA
@@ -1011,91 +1001,57 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
-@pytest.mark.parametrize(
-    "spec_token_tree",
-    [
-        [(0,)],  # A single token
-        [(0,), (0, 0), (0, 0, 0)],  # Chain
-        [(0,), (1,), (2,)],  # Parallel
-        [(0,), (1,), (2,), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)],  # Tree
-    ],
-)
-def test_propose_tree(spec_token_tree):
-    # Get GPU device.
-    device = torch.device(current_platform.device_type)
-
-    # Setup test parameters.
+def test_propose_stores_probabilistic_draft_probs(monkeypatch):
+    device = torch.device(DEVICE_TYPE)
     batch_size = 2
-    seq_len_1 = 5
-    seq_len_2 = 3
-    total_tokens = seq_len_1 + seq_len_2
-    vocab_size = 100
-    seq_lens = [seq_len_1, seq_len_2]
-    num_speculative_tokens = len(spec_token_tree)
+    seq_lens = [5, 3]
+    total_tokens = sum(seq_lens)
+    num_speculative_tokens = 3
+    vocab_size = 8
 
-    # Create proposer first so we can use its actual hidden_size.
     proposer = _create_proposer(
-        "eagle",
+        "draft_model",
         num_speculative_tokens,
-        speculative_token_tree=spec_token_tree,
+        rejection_sample_method="standard",
+        draft_sample_method="probabilistic",
     )
-    # Get the hidden_size from the proposer to ensure consistency.
     hidden_size = proposer.hidden_size
+    expanded_total_tokens = total_tokens + batch_size
 
-    # Helper to create deterministic logits that will produce specific tokens
-    def create_deterministic_logits(token_ids, k: int):
-        logits = torch.full((batch_size, vocab_size), -100.0, device=device)
-        for i, token_id in enumerate(token_ids):
-            # Assign decreasing values to the k, consecutive, tokens.
-            for j in range(k):
-                logits[i, token_id + j] = 100.0 - j
-        return logits
-
-    # Mock a model that returns deterministic logits.
-    base_token_ids = torch.tensor([42, 60], dtype=torch.int64, device=device)
-
-    # Skip loading the model and replace it with a mock that returns
-    # deterministic outputs.
     model_mock = mock.MagicMock()
-
-    # Mock the model forward calls.
-    forward_returns = [
-        (
-            torch.zeros(total_tokens, hidden_size, device=device),
-            torch.zeros(total_tokens, hidden_size, device=device),
-        )
-    ]
-    for cu_num_drafts in proposer.cu_drafts_per_level:
-        h_logits = torch.zeros(batch_size * cu_num_drafts, hidden_size, device=device)
-        h_states = torch.zeros(batch_size * cu_num_drafts, hidden_size, device=device)
-        forward_returns.append((h_logits, h_states))
-    model_mock.side_effect = forward_returns
-
-    # Mock the compute_logits calls.
-    cu_num_drafts_tensor = torch.tensor(
-        [0] + proposer.cu_drafts_per_level, dtype=torch.int32, device=device
-    )
+    forward_returns = []
     logits_returns = []
-    for level, num_children in enumerate(proposer.child_drafts_per_level):
-        token_ids = base_token_ids + cu_num_drafts_tensor[level]
-        level_num_drafts = cu_num_drafts_tensor[level + 1] - cu_num_drafts_tensor[level]
-        level_logits = []
-        for i in range(level_num_drafts // num_children):
-            level_logits.append(
-                create_deterministic_logits(token_ids + i * num_children, num_children)
-            )
-        logits_returns.append(torch.stack(level_logits, dim=1))
+    for step in range(num_speculative_tokens):
+        token_count = expanded_total_tokens if step == 0 else batch_size
+        forward_returns.append(torch.zeros(token_count, hidden_size, device=device))
+        logits = torch.full((batch_size, vocab_size), -10.0, device=device)
+        logits[0, step + 1] = 5.0
+        logits[1, step + 3] = 4.0
+        logits_returns.append(logits)
+
+    model_mock.side_effect = forward_returns
     model_mock.compute_logits.side_effect = logits_returns
-
-    # Assign the mock to the proposer
     proposer.model = model_mock
-
-    # Assign draft attn_layer_names since load_model is not invoked
     proposer._draft_attn_layer_names = {"layer.0"}
 
-    # Get the tree attention metadata builder.
+    def fake_compute_probs(logits, sampling_metadata):
+        probs = torch.softmax(logits, dim=-1)
+        return probs.argmax(dim=-1), probs
+
+    monkeypatch.setattr(
+        "vllm.v1.spec_decode.llm_base_proposer.compute_probs_and_sample_next_token",
+        fake_compute_probs,
+    )
+
+    batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=seq_lens)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+    )
+
     attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum.TREE_ATTN
+        AttentionBackendEnum.FLASH_ATTN
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
@@ -1103,8 +1059,6 @@ def test_propose_tree(spec_token_tree):
         vllm_config=proposer.vllm_config,
         device=device,
     )
-
-    # Mock runner and draft_attn_groups for attention metadata building.
     proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
@@ -1112,43 +1066,166 @@ def test_propose_tree(spec_token_tree):
     mock_attn_group.kv_cache_spec = attn_metadata_builder.kv_cache_spec
     proposer.draft_attn_groups = [mock_attn_group]
 
-    # Setup inputs for the proposer.
-    target_token_ids = torch.randint(0, vocab_size, (total_tokens,), device=device)
-    target_positions = torch.cat(
-        [torch.arange(seq_len_1, device=device), torch.arange(seq_len_2, device=device)]
-    )
-    target_hidden_states = torch.randn(total_tokens, hidden_size, device=device)
-    next_token_ids = torch.randint(
-        0, vocab_size, (batch_size,), dtype=torch.int32, device=device
-    )
-    batch_spec = BatchSpec(
-        seq_lens=seq_lens,
-        query_lens=seq_lens,
-    )
-    common_attn_metadata = create_common_attn_metadata(
-        batch_spec,
-        block_size=BLOCK_SIZE,
-        device=device,
-    )
     sampling_metadata = mock.MagicMock()
+    sampling_metadata.all_greedy = False
 
-    # Propose draft tokens.
     result = proposer.propose(
-        target_token_ids=target_token_ids,
-        target_positions=target_positions,
-        target_hidden_states=target_hidden_states,
-        next_token_ids=next_token_ids,
+        target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
+        target_positions=torch.cat(
+            [
+                torch.arange(seq_lens[0], device=device),
+                torch.arange(seq_lens[1], device=device),
+            ]
+        ),
+        target_hidden_states=torch.randn(total_tokens, hidden_size, device=device),
+        next_token_ids=torch.randint(
+            0, vocab_size, (batch_size,), dtype=torch.int32, device=device
+        ),
         token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )
+
     assert result.shape == (batch_size, num_speculative_tokens)
 
-    # The tokens are expected to be consecutive integers starting
-    # from the base token IDs.
-    expected_tokens = base_token_ids[:, None] + torch.arange(
-        num_speculative_tokens, dtype=torch.int64, device=device
+    draft_probs = proposer.take_last_draft_probs()
+    assert draft_probs is not None
+    assert draft_probs.shape == (batch_size, num_speculative_tokens, vocab_size)
+    for step, expected_logits in enumerate(logits_returns):
+        assert torch.allclose(
+            draft_probs[:, step, :],
+            torch.softmax(expected_logits, dim=-1),
+        )
+
+
+def test_set_inputs_first_pass_dflash():
+    """
+    Test for DFlash set_inputs_first_pass.
+
+    DFlash uses cross-attention: context tokens become K/V and only
+    query tokens (bonus + mask) are Q. This tests the DFlash-specific
+    input preparation where:
+    - Context hidden states are stored by reference (no copy)
+    - Query input_ids are [next_token, mask, mask, ...] per request
+    - Context and query positions are written to separate buffers
+    - token_indices_to_sample points to mask token positions only
+    - A new CommonAttentionMetadata is returned with causal=False
+
+    Setup:
+    - 3 requests with query_lens [3, 2, 4]
+    - num_speculative_tokens = 3
+    - num_query_per_req = 4 (1 bonus + 3 mask tokens)
+    - next_token_ids: [100, 200, 300]
+
+    Expected output layout (query tokens only, 12 total):
+    Request 0 (indices 0-3): [100, mask, mask, mask]
+    Request 1 (indices 4-7): [200, mask, mask, mask]
+    Request 2 (indices 8-11): [300, mask, mask, mask]
+
+    Expected positions layout (separate buffers):
+    Context (_context_positions_buffer, 9 tokens): copied from target_positions
+    Query (positions, 12 tokens):
+      Request 0: last_pos=9, query=[10, 11, 12, 13]
+      Request 1: last_pos=7, query=[8, 9, 10, 11]
+      Request 2: last_pos=11, query=[12, 13, 14, 15]
+    """
+    device = torch.device(current_platform.device_type)
+
+    num_speculative_tokens = 3
+    proposer = _create_proposer("dflash", num_speculative_tokens)
+    mask_token_id = proposer.parallel_drafting_token_id
+
+    # Setup batch with 3 requests
+    batch_spec = BatchSpec(
+        seq_lens=[10, 8, 12],
+        query_lens=[3, 2, 4],
     )
 
-    # Verify that the draft tokens match our expectations.
-    assert torch.equal(result, expected_tokens)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec,
+        block_size=BLOCK_SIZE,
+        device=device,
+        arange_block_indices=True,
+    )
+
+    # Input tensors
+    # Request 0: tokens [10, 11, 12] at positions [7, 8, 9]
+    # Request 1: tokens [20, 21] at positions [6, 7]
+    # Request 2: tokens [30, 31, 32, 33] at positions [8, 9, 10, 11]
+    target_token_ids = torch.tensor(
+        [10, 11, 12, 20, 21, 30, 31, 32, 33], dtype=torch.int32, device=device
+    )
+    target_positions = torch.tensor(
+        [7, 8, 9, 6, 7, 8, 9, 10, 11], dtype=torch.int64, device=device
+    )
+    target_hidden_states = torch.randn(
+        9, proposer.hidden_size, dtype=proposer.dtype, device=device
+    )
+    next_token_ids = torch.tensor([100, 200, 300], dtype=torch.int32, device=device)
+
+    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
+        target_token_ids=target_token_ids,
+        next_token_ids=next_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        token_indices_to_sample=None,
+        cad=common_attn_metadata,
+        num_rejected_tokens_gpu=None,
+    )
+
+    num_query_per_req = 1 + num_speculative_tokens  # 4
+    num_context = 9
+
+    # num_tokens is the query-only count
+    assert num_tokens == 3 * num_query_per_req  # 12
+
+    # Verify input_ids (query tokens only)
+    # Each request: [next_token, mask, mask, mask]
+    M = mask_token_id
+    expected_input_ids = torch.tensor(
+        [100, M, M, M, 200, M, M, M, 300, M, M, M],
+        dtype=torch.int32,
+        device=device,
+    )
+    assert torch.equal(proposer.input_ids[:num_tokens], expected_input_ids)
+
+    # Verify context positions (separate buffer): copied from target_positions
+    assert torch.equal(
+        proposer._context_positions_buffer[:num_context], target_positions
+    )
+
+    # Verify query positions (separate buffer, starts at index 0):
+    # req0: last_pos=9,  query=[10, 11, 12, 13]
+    # req1: last_pos=7,  query=[8, 9, 10, 11]
+    # req2: last_pos=11, query=[12, 13, 14, 15]
+    expected_query_positions = torch.tensor(
+        [10, 11, 12, 13, 8, 9, 10, 11, 12, 13, 14, 15],
+        dtype=torch.int64,
+        device=device,
+    )
+    assert torch.equal(
+        proposer.positions[:num_tokens],
+        expected_query_positions,
+    )
+
+    # Verify token_indices_to_sample (mask tokens only, skip bonus at offset 0)
+    # req0: query indices 0-3, mask at 1,2,3
+    # req1: query indices 4-7, mask at 5,6,7
+    # req2: query indices 8-11, mask at 9,10,11
+    expected_token_indices_to_sample = torch.tensor(
+        [1, 2, 3, 5, 6, 7, 9, 10, 11], dtype=torch.int32, device=device
+    )
+    assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
+
+    # Verify the new CAD has DFlash-specific properties
+    assert output_cad.causal is False  # DFlash requires non-causal attention
+    assert output_cad.num_actual_tokens == num_tokens  # query-only count
+    assert output_cad.max_query_len == num_query_per_req
+
+    expected_query_start_loc = torch.tensor(
+        [0, 4, 8, 12], dtype=torch.int32, device=device
+    )
+    assert torch.equal(output_cad.query_start_loc, expected_query_start_loc)
+
+    # Verify hidden states (stored by reference, not copied)
+    assert proposer._dflash_hidden_states is target_hidden_states

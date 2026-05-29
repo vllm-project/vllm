@@ -8,7 +8,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
@@ -29,11 +29,9 @@ def _build_renderer(
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
     )
 
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         vllm_config,
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
