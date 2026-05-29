@@ -561,11 +561,20 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         model_config = vllm_config.model_config
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
-        if scheduler_config is not None and scheduler_config.max_num_seqs != 1:
+        # The V2 model runner uses ParakeetTDTModelState, which keeps the TDT
+        # transcript per request id, so concurrency is safe there. Only the V1
+        # runner needs the single-request cap (state lives on the model).
+        uses_v2_runner = getattr(vllm_config, "use_v2_model_runner", False)
+        if (
+            not uses_v2_runner
+            and scheduler_config is not None
+            and scheduler_config.max_num_seqs != 1
+        ):
             logger.warning_once(
-                "Parakeet TDT currently stores decoder state inside the model "
-                "and supports one active request; limiting max_num_seqs to 1 "
-                "to keep decoding state correct."
+                "Parakeet TDT stores decoder state inside the model under the "
+                "V1 model runner and supports one active request; limiting "
+                "max_num_seqs to 1 to keep decoding state correct. Enable the "
+                "V2 model runner (VLLM_USE_V2_MODEL_RUNNER=1) for concurrency."
             )
             scheduler_config.max_num_seqs = 1
 

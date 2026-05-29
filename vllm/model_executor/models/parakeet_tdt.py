@@ -436,6 +436,12 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             eos_token_id=self.config.eos_token_id
         )
 
+    @staticmethod
+    def get_model_state_cls():
+        from vllm.v1.worker.gpu.model_states.parakeet_tdt import ParakeetTDTModelState
+
+        return ParakeetTDTModelState
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -490,28 +496,39 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         encoder_outputs: list[torch.Tensor] | None = None,
+        forced_token_ids: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         del intermediate_tensors, kwargs
 
-        if encoder_outputs:
-            if len(encoder_outputs) != 1:
-                raise ValueError(
-                    "Parakeet TDT currently supports one active encoder output."
+        # Two paths feed the forced tokens:
+        #  * V2 model runner: ParakeetTDTModelState precomputes a per-request
+        #    transcript and passes `forced_token_ids` for the whole batch, so
+        #    this module stays stateless and supports max_num_seqs > 1.
+        #  * V1 model runner: no per-request hook, so we keep the single-request
+        #    state on the model (decoded from `encoder_outputs` at prefill and
+        #    replayed by `positions`).
+        if forced_token_ids is None:
+            if encoder_outputs:
+                if len(encoder_outputs) != 1:
+                    raise ValueError(
+                        "Parakeet TDT (V1 runner) supports one active encoder "
+                        "output; use the V2 model runner for concurrency."
+                    )
+                self._forced_decoder_state.set_sequence(
+                    self.model.greedy_decode(encoder_outputs[0])
                 )
-            self._forced_decoder_state.set_sequence(
-                self.model.greedy_decode(encoder_outputs[0])
+
+            if input_ids is None:
+                raise ValueError("Parakeet TDT forward requires input_ids.")
+
+            forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
+                positions=positions,
+                device=input_ids.device,
             )
 
-        if input_ids is None:
-            raise ValueError("Parakeet TDT forward requires input_ids.")
-
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
-        forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
-            positions=positions,
-            device=device,
-        )
+        batch_size = forced_token_ids.shape[0]
+        device = forced_token_ids.device
 
         vocab_size = self.config.vocab_size
         logits = torch.full(
