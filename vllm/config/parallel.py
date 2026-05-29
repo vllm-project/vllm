@@ -78,6 +78,17 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    expert_load_dump_dir: str | None = None
+    """
+    Directory to which JSONL records of per-step expert load are appended
+    on every ``log_balancedness_interval`` step (one file per MoE model,
+    named ``{model_name}_expert_load.jsonl``). Only EP rank 0 writes.
+    Has effect only when ``log_balancedness`` is ``True``.
+
+    Example::
+
+        --eplb-config '{"log_balancedness":true,"expert_load_dump_dir":"./eplb_stats"}'
+    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
