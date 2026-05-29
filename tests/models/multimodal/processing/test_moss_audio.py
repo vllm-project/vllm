@@ -55,6 +55,9 @@ class _Info:
         del kwargs
         return self.processor
 
+    def get_tokenizer(self) -> object:
+        return self.processor.tokenizer
+
 
 class _ProcessingContext:
     def __init__(self) -> None:
@@ -140,6 +143,26 @@ def test_moss_audio_processor_expands_audio_placeholder() -> None:
     assert processed["audio_data_seqlens"].tolist() == [raw_mel_len]
 
 
+def test_moss_audio_processor_preserves_placeholder_without_audio() -> None:
+    processor = MossAudioProcessor(_Tokenizer())
+    prompt = (
+        f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
+    )
+
+    processed = processor(text=prompt)
+    input_ids = processed["input_ids"][0].tolist()
+
+    assert input_ids == [
+        *[ord(char) for char in "before "],
+        MOSS_AUDIO_BOS_TOKEN_ID,
+        MOSS_AUDIO_TOKEN_ID,
+        MOSS_AUDIO_EOS_TOKEN_ID,
+        *[ord(char) for char in " after"],
+    ]
+    assert "audio_data" not in processed
+    assert "audio_data_seqlens" not in processed
+
+
 def test_moss_audio_time_markers_are_not_embedding_targets() -> None:
     processor = MossAudioProcessor(_Tokenizer(), enable_time_marker=True)
     mm_processor = object.__new__(MossAudioMultiModalProcessor)
@@ -162,6 +185,62 @@ def test_moss_audio_time_markers_are_not_embedding_targets() -> None:
     assert full[-1] == MOSS_AUDIO_EOS_TOKEN_ID
     assert is_embed.sum().item() == audio_token_len
     assert len(full) > audio_token_len + 2
+
+
+def test_moss_audio_prompt_updates_match_chat_template_tokenization() -> None:
+    class _ChatTemplateTokenizer(_Tokenizer):
+        def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+            placeholder = (
+                f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+            )
+            if text == placeholder:
+                return [11, 12, 13, 14]
+            if text == f"{placeholder}\n":
+                return [11, 12, 13, 99]
+            if text == "\n":
+                return [99]
+            return super().encode(text, add_special_tokens=add_special_tokens)
+
+    processor = MossAudioProcessor(_ChatTemplateTokenizer())
+    mm_processor = object.__new__(MossAudioMultiModalProcessor)
+    mm_processor.info = _Info(processor)
+
+    updates = mm_processor._get_prompt_updates(
+        mm_items=None,
+        hf_processor_mm_kwargs={},
+        out_mm_kwargs=_OutKwargs(
+            {"audio_data_seqlens": torch.tensor([17], dtype=torch.long)}
+        ),
+    )
+    resolved_updates = [update.resolve(0) for update in updates]
+
+    assert [update.target for update in resolved_updates] == [
+        [MOSS_AUDIO_BOS_TOKEN_ID, MOSS_AUDIO_TOKEN_ID, MOSS_AUDIO_EOS_TOKEN_ID],
+        [11, 12, 13, 14],
+        [11, 12, 13, 99],
+    ]
+    assert resolved_updates[1].content.full == resolved_updates[0].content.full
+    assert resolved_updates[2].content.full == [
+        *resolved_updates[0].content.full,
+        99,
+    ]
+
+    mm_prompt_updates = mm_processor._bind_and_group_updates(updates, {"audio": 1})
+    new_token_ids, placeholders = mm_processor._apply_prompt_updates(
+        [1, 11, 12, 13, 99, 2],
+        mm_prompt_updates,
+    )
+
+    assert new_token_ids == [
+        1,
+        *resolved_updates[2].content.full,
+        2,
+    ]
+    assert len(placeholders["audio"]) == 1
+    assert placeholders["audio"][0].start_idx == 1
+    assert placeholders["audio"][0].length == len(resolved_updates[2].content.full)
+    assert placeholders["audio"][0].is_embed is not None
+    assert not bool(placeholders["audio"][0].is_embed[-1])
 
 
 def test_moss_audio_processing_info_caches_default_processor() -> None:
@@ -240,6 +319,47 @@ def test_moss_audio_field_config_and_interfaces() -> None:
     assert not supports_pp(MossAudioModel)
 
 
+def test_moss_audio_config_exposes_language_config() -> None:
+    config = MossAudioConfig(language_config=Qwen3Config(hidden_size=2560))
+
+    assert config.get_text_config() is config.language_config
+    assert config.hidden_size == config.language_config.hidden_size
+    assert config.num_attention_heads == config.language_config.num_attention_heads
+    assert config.num_key_value_heads == config.language_config.num_key_value_heads
+    assert config.head_dim == config.language_config.head_dim
+
+
+def test_moss_audio_arch_config_uses_language_config() -> None:
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        MODEL_ARCH_CONFIG_CONVERTORS,
+    )
+
+    language_config = Qwen3Config(
+        hidden_size=2560,
+        num_attention_heads=32,
+        num_key_value_heads=8,
+        head_dim=80,
+        num_hidden_layers=36,
+        vocab_size=151936,
+        max_position_embeddings=32768,
+    )
+    config = MossAudioConfig(language_config=language_config)
+    convertor = MODEL_ARCH_CONFIG_CONVERTORS["moss_audio"](config, config)
+
+    arch_config = convertor.convert()
+
+    assert arch_config.hidden_size == 2560
+    assert arch_config.total_num_attention_heads == 32
+    assert arch_config.total_num_kv_heads == 8
+    assert arch_config.head_size == 80
+    assert arch_config.total_num_hidden_layers == 36
+    assert arch_config.vocab_size == 151936
+    assert arch_config.derived_max_model_len_and_key == (
+        32768,
+        "language_config.max_position_embeddings",
+    )
+
+
 def test_moss_audio_registry_entries() -> None:
     assert _MULTIMODAL_MODELS["MossAudioModel"] == ("moss_audio", "MossAudioModel")
     assert (
@@ -313,12 +433,132 @@ def test_moss_audio_deepstack_disabled_skips_cache() -> None:
     )
 
     assert audio_encoder.output_deepstack_hidden_states is False
-    assert len(multimodal_embeddings) == 1
-    assert [embeds.shape for embeds in multimodal_embeddings[0]] == [
+    assert [embeds.shape for embeds in multimodal_embeddings] == [
         torch.Size([1, 8]),
         torch.Size([2, 8]),
     ]
     assert model.deepstack_input_embeds is None
+
+
+def test_moss_audio_embed_multimodal_packs_deepstack_per_audio() -> None:
+    class _FakeAudioEncoder:
+        dtype = torch.float32
+
+        def __init__(self) -> None:
+            self.output_deepstack_hidden_states: bool | None = None
+
+        def __call__(
+            self,
+            audio_data: torch.Tensor,
+            *,
+            feature_lens: torch.Tensor,
+            output_deepstack_hidden_states: bool,
+        ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+            del audio_data
+            self.output_deepstack_hidden_states = output_deepstack_hidden_states
+            audio_lengths = MossAudioEncoder._compute_downsampled_length(feature_lens)
+            total_tokens = int(audio_lengths.sum().item())
+            hidden_states = torch.ones(1, total_tokens, 8)
+            return hidden_states, [hidden_states * 2, hidden_states * 3]
+
+    class _ScaleAdapter:
+        def __init__(self, scale: int) -> None:
+            self.scale = scale
+
+        def __call__(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            return hidden_states * self.scale
+
+    model = object.__new__(MossAudioModel)
+    audio_encoder = _FakeAudioEncoder()
+    model.audio_encoder = audio_encoder
+    model.audio_adapter = _ScaleAdapter(5)
+    model.deepstack_audio_merger_list = [_ScaleAdapter(7), _ScaleAdapter(11)]
+    model.deepstack_input_embeds = None
+
+    multimodal_embeddings = model.embed_multimodal(
+        audio_data=torch.zeros(2, 128, 9),
+        audio_data_seqlens=torch.tensor([8, 9], dtype=torch.long),
+    )
+
+    assert audio_encoder.output_deepstack_hidden_states is True
+    assert [embeds.shape for embeds in multimodal_embeddings] == [
+        torch.Size([1, 24]),
+        torch.Size([2, 24]),
+    ]
+    main_embeddings, deepstack_embeddings = model._split_multimodal_embeddings(
+        multimodal_embeddings,
+        hidden_size=8,
+    )
+    assert [embeds.shape for embeds in main_embeddings] == [
+        torch.Size([1, 8]),
+        torch.Size([2, 8]),
+    ]
+    assert [[embeds.shape for embeds in layer] for layer in deepstack_embeddings] == [
+        [torch.Size([1, 8]), torch.Size([2, 8])],
+        [torch.Size([1, 8]), torch.Size([2, 8])],
+    ]
+    assert torch.equal(main_embeddings[0], torch.full((1, 8), 5.0))
+    assert torch.equal(deepstack_embeddings[0][0], torch.full((1, 8), 14.0))
+    assert torch.equal(deepstack_embeddings[1][0], torch.full((1, 8), 33.0))
+
+
+def test_moss_audio_embed_input_ids_caches_packed_deepstack() -> None:
+    class _FakeLanguageModel:
+        def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(input_ids.shape[0], 8)
+
+    model = object.__new__(MossAudioModel)
+    model.language_model = _FakeLanguageModel()
+    model.deepstack_audio_merger_list = [object(), object()]
+    model.deepstack_input_embeds = None
+
+    multimodal_embeddings = (
+        torch.cat(
+            [
+                torch.full((1, 8), 5.0),
+                torch.full((1, 8), 14.0),
+                torch.full((1, 8), 33.0),
+            ],
+            dim=-1,
+        ),
+        torch.cat(
+            [
+                torch.full((2, 8), 7.0),
+                torch.full((2, 8), 22.0),
+                torch.full((2, 8), 44.0),
+            ],
+            dim=-1,
+        ),
+    )
+    is_multimodal = torch.tensor([False, True, True, True, False])
+
+    inputs_embeds = model.embed_input_ids(
+        input_ids=torch.arange(5),
+        multimodal_embeddings=multimodal_embeddings,
+        is_multimodal=is_multimodal,
+    )
+
+    assert torch.equal(inputs_embeds[1], torch.full((8,), 5.0))
+    assert torch.equal(inputs_embeds[2], torch.full((8,), 7.0))
+    assert torch.equal(inputs_embeds[3], torch.full((8,), 7.0))
+    assert model.deepstack_input_embeds is not None
+    deepstack_tensors = model.deepstack_input_embeds.tensors
+    assert set(deepstack_tensors) == {
+        "deepstack_input_embeds_0",
+        "deepstack_input_embeds_1",
+    }
+    assert torch.equal(
+        deepstack_tensors["deepstack_input_embeds_0"][is_multimodal],
+        torch.cat([torch.full((1, 8), 14.0), torch.full((2, 8), 22.0)]),
+    )
+    assert torch.equal(
+        deepstack_tensors["deepstack_input_embeds_1"][is_multimodal],
+        torch.cat([torch.full((1, 8), 33.0), torch.full((2, 8), 44.0)]),
+    )
+    assert torch.equal(
+        deepstack_tensors["deepstack_input_embeds_0"][~is_multimodal],
+        torch.zeros(2, 8),
+    )
 
 
 def test_moss_audio_rejects_too_short_audio() -> None:
