@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch.nn.parameter import Parameter
@@ -1713,6 +1713,22 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         if algo is not None and "MXFP8" in algo:
             return "modelopt_mxfp8"
         return None
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "ModelOptMxFp8Config":
+        # MiniMax-style checkpoints tag `quant_method: "mxfp8"` + `ignored_layers`
+        # (same on-disk format as ModelOpt MXFP8); normalize to the ModelOpt
+        # schema and reuse the shared parser.
+        if "quantization" not in config and not config.get("quant_algo"):
+            config = {
+                "quant_method": "modelopt",
+                "quantization": {
+                    "quant_algo": "MXFP8",
+                    "kv_cache_quant_algo": config.get("kv_cache_quant_algo"),
+                    "exclude_modules": config.get("ignored_layers", []) or [],
+                },
+            }
+        return cast("ModelOptMxFp8Config", super().from_config(config))
 
     @classmethod
     def _from_config(

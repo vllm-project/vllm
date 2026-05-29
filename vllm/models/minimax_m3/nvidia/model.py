@@ -21,6 +21,7 @@ from transformers import PretrainedConfig
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
@@ -28,11 +29,15 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -219,11 +224,89 @@ class MiniMaxM3MoE(nn.Module):
 
 
 class MiniMaxM3Attention(nn.Module):
-    """Attention with per-head QK norm and partial RoPE.
+    """Dense attention with per-head QK norm and partial RoPE."""
 
-    Dense layers run standard QKV attention; sparse layers additionally run an
-    "index" branch (index_{q,k,v}_proj + index_o_proj) whose output is summed
-    into the dense output.
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_id: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        cache_config: CacheConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+
+        self.total_num_heads = config.num_attention_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = config.num_key_value_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = config.head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+
+        self.qkv_proj = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm == True).
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor.
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters={
+                "rope_theta": config.rope_theta,
+                "partial_rotary_factor": config.partial_rotary_factor,
+            },
+        )
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class MiniMaxM3SparseAttention(nn.Module):
+    """Dense attention plus the sparse "index" branch.
+
+    The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
+    attention backend. ``index_{v,o}_proj`` exist only when the layer does not
+    disable the index value/output projections (always disabled for M3).
     """
 
     def __init__(
@@ -232,13 +315,112 @@ class MiniMaxM3Attention(nn.Module):
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        is_sparse_attention_layer: bool = False,
-        disable_index_value: bool = False,
         cache_config: CacheConfig | None = None,
+        disable_index_value: bool = False,
     ) -> None:
         super().__init__()
-        self.is_sparse_attention_layer = is_sparse_attention_layer
-        self.disable_index_value = is_sparse_attention_layer and disable_index_value
+        self.hidden_size = config.hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+
+        self.total_num_heads = config.num_attention_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = config.num_key_value_heads
+        if self.total_num_kv_heads >= tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = config.head_dim
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+
+        self.qkv_proj = QKVParallelLinear(
+            self.hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm == True).
+        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor.
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters={
+                "rope_theta": config.rope_theta,
+                "partial_rotary_factor": config.partial_rotary_factor,
+            },
+        )
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
+
+        # Sparse "index" branch.
+        self.disable_index_value = disable_index_value
+
+        sparse_cfg = config.sparse_attention_config
+        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+
+        self.index_q_proj = ColumnParallelLinear(
+            self.hidden_size,
+            self.total_idx_heads * self.idx_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.index_q_proj",
+        )
+        self.index_k_proj = ReplicatedLinear(
+            self.hidden_size,
+            self.idx_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.index_k_proj",
+        )
+
+        self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
+        self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
+
+        if self.disable_index_value:
+            self.index_v_proj = None
+            self.index_o_proj = None
+        else:
+            self.index_v_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.idx_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.index_v_proj",
+            )
+            self.index_o_proj = RowParallelLinear(
+                self.total_idx_heads * self.idx_head_dim,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.index_o_proj",
+            )
+        self.index_rotary_emb = self.rotary_emb
 
     def forward(
         self,
@@ -266,15 +448,23 @@ class MiniMaxM3DecoderLayer(nn.Module):
         is_sparse_attention_layer = layer_id in _sparse_attention_layer_ids(config)
         disable_index_value = layer_id in _disable_index_value_layer_ids(config)
 
-        self.self_attn = MiniMaxM3Attention(
-            config=config,
-            layer_id=layer_id,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-            is_sparse_attention_layer=is_sparse_attention_layer,
-            disable_index_value=disable_index_value,
-            cache_config=cache_config,
-        )
+        if is_sparse_attention_layer:
+            self.self_attn = MiniMaxM3SparseAttention(
+                config=config,
+                layer_id=layer_id,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                cache_config=cache_config,
+                disable_index_value=disable_index_value,
+            )
+        else:
+            self.self_attn = MiniMaxM3Attention(
+                config=config,
+                layer_id=layer_id,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                cache_config=cache_config,
+            )
 
         # Dense layers store the FFN under `mlp`; MoE layers under
         # `block_sparse_moe` -- matching the checkpoint's naming.
@@ -389,11 +579,16 @@ class MiniMaxM3Model(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # gate_proj/up_proj -> fused gate_up_proj (dense MLP and shared expert).
-        stacked_params_mapping = [
+        # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
+        # (dense MLP and shared expert). Leading dots keep `q_proj`/`k_proj`
+        # from matching the sparse `index_q_proj`/`index_k_proj` weights.
+        stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
         ]
 
         # (param_name, weight_name, expert_id, shard_id)
@@ -405,6 +600,11 @@ class MiniMaxM3Model(nn.Module):
             # The MTP module is not modeled yet.
             if "mtp." in name:
                 continue
+
+            # The checkpoint stores block scales as ``weight_scale_inv``; the
+            # ModelOpt MXFP8 layers expose them as ``weight_scale``.
+            if "weight_scale_inv" in name:
+                name = name.replace("weight_scale_inv", "weight_scale")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
