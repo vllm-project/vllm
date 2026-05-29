@@ -53,6 +53,25 @@ impl AssistantContentBlock {
             _ => None,
         }
     }
+
+    /// Return a copy of this block with leading and trailing whitespace trimmed from all text
+    /// fields and tool call arguments, or `None` if the resulting text would be empty.
+    pub fn trim(mut self) -> Option<Self> {
+        match &mut self {
+            Self::Text { text } | Self::Reasoning { text } => {
+                let trimmed_text = text.trim();
+                if trimmed_text.is_empty() {
+                    return None;
+                } else {
+                    *text = trimmed_text.to_string();
+                }
+            }
+            Self::ToolCall(call) => {
+                call.arguments = call.arguments.trim().to_string();
+            }
+        }
+        Some(self)
+    }
 }
 
 #[easy_ext::ext(AssistantMessageExt)]
@@ -118,6 +137,13 @@ impl AssistantMessage {
     /// Push one new block to the end of the message content.
     pub(crate) fn push_block(&mut self, block: AssistantContentBlock) {
         self.content.push(block);
+    }
+
+    /// Return a copy of this message with leading and trailing whitespace trimmed from all text
+    /// fields and tool call arguments, and with any blocks that are empty after trimming removed.
+    pub fn trim(mut self) -> Self {
+        self.content = self.content.into_iter().filter_map(|block| block.trim()).collect();
+        self
     }
 }
 

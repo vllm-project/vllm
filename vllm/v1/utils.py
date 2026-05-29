@@ -29,7 +29,7 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -117,8 +117,12 @@ class CpuGpuBuffer:
         pin_memory: bool,
         with_numpy: bool = True,
     ) -> None:
-        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=pin_memory)
-        self.gpu = torch.zeros_like(self.cpu, device=device)
+        # these buffers are mutable runtime state, so allocate them as normal
+        with torch.inference_mode(False):
+            self.cpu = torch.zeros(
+                *size, dtype=dtype, device="cpu", pin_memory=pin_memory
+            )
+            self.gpu = torch.zeros_like(self.cpu, device=device)
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
@@ -144,20 +148,18 @@ class CpuGpuBuffer:
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
 
 
-def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> str:
-    """Assign a new ZMQ socket address.
+def get_engine_client_zmq_addr(
+    local_only: bool,
+    host: str,
+    port: int = 0,
+) -> str:
+    """Return an IPC path (``local_only=True``) or ``tcp://host:port``.
 
-    If local_only is True, participants are colocated and so a unique IPC
-    address will be returned.
-
-    Otherwise, the provided host and port will be used to construct a TCP
-    address (port == 0 means assign an available port)."""
-
-    return (
-        get_open_zmq_ipc_path()
-        if local_only
-        else (get_tcp_uri(host, port or get_open_port()))
-    )
+    ``port=0`` lets the kernel assign the port at ``bind()`` time; the
+    caller must recover it via ``getsockopt(zmq.LAST_ENDPOINT)``."""
+    if local_only:
+        return get_open_zmq_ipc_path()
+    return get_tcp_uri(host, port)
 
 
 class APIServerProcessManager:
@@ -181,6 +183,12 @@ class APIServerProcessManager:
     ):
         """Initialize and start API server worker processes.
 
+        ``input_addresses``/``output_addresses`` may contain
+        ``tcp://host:0`` placeholders; each child must report the actual
+        bound endpoint over its ``actual_address_pipe`` in ``client_config``
+        and the parent collects them via
+        :py:meth:`gather_actual_addresses`.
+
         Args:
             target_server_fn: Override function to call for each API server process
             listen_address: Address to listen for client connections
@@ -196,14 +204,14 @@ class APIServerProcessManager:
         self.sock = sock
         self.args = args
 
-        # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
+        self._address_pipes: list[connection.Connection] = []
 
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
-            client_config = {
+            client_config: dict[str, Any] = {
                 "input_address": in_addr,
                 "output_address": out_addr,
                 "client_count": num_servers,
@@ -214,6 +222,10 @@ class APIServerProcessManager:
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
 
+            parent_recv, child_send = spawn_context.Pipe(duplex=False)
+            self._address_pipes.append(parent_recv)
+            client_config["actual_address_pipe"] = child_send
+
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
@@ -222,14 +234,89 @@ class APIServerProcessManager:
             self.processes.append(proc)
             proc.start()
 
+            # Drop parent's write end so reader sees EOF on child death.
+            child_send.close()
+
         logger.info("Started %d API server processes", len(self.processes))
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
+    def gather_actual_addresses(
+        self,
+        timeout: float = envs.VLLM_ENGINE_READY_TIMEOUT_S,
+    ) -> tuple[list[str], list[str]]:
+        """Return (inputs, outputs) reported by each child, indexed by
+        ``client_index``. Raises ``RuntimeError`` on timeout or premature
+        child exit."""
+        n = len(self._address_pipes)
+        inputs: list[str | None] = [None] * n
+        outputs: list[str | None] = [None] * n
+        pending: dict[connection.Connection, int] = {
+            pipe: i for i, pipe in enumerate(self._address_pipes)
+        }
+        sentinel_to_idx: dict[Any, int] = {
+            proc.sentinel: i for i, proc in enumerate(self.processes)
+        }
+
+        deadline = time.monotonic() + timeout
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    missing = [self.processes[i].name for i in pending.values()]
+                    raise RuntimeError(
+                        f"Timed out after {timeout:.1f}s waiting for "
+                        f"API server(s) to report bound ZMQ addresses: "
+                        f"{missing}"
+                    )
+                waitables: list[Any] = list(pending.keys()) + list(
+                    sentinel_to_idx.keys()
+                )
+                ready = connection.wait(waitables, timeout=remaining)
+                # Drain pipes before checking sentinels: a child that sent
+                # its message and then exited can surface both events in
+                # the same poll, and we must record the success first.
+                for item in ready:
+                    if isinstance(item, connection.Connection) and item in pending:
+                        idx = pending.pop(item)
+                        try:
+                            msg: dict[str, str] = item.recv()
+                        except EOFError as e:
+                            raise RuntimeError(
+                                f"API server {self.processes[idx].name} "
+                                f"closed its address pipe without "
+                                f"reporting its bound ZMQ addresses"
+                            ) from e
+                        inputs[idx] = msg["input_address"]
+                        outputs[idx] = msg["output_address"]
+                        item.close()
+                for item in ready:
+                    if item in sentinel_to_idx:
+                        idx = sentinel_to_idx.pop(item)
+                        pipe = self._address_pipes[idx]
+                        if pipe in pending:
+                            proc = self.processes[idx]
+                            raise RuntimeError(
+                                f"API server process {proc.name} exited "
+                                f"(code={proc.exitcode}) before reporting "
+                                f"its bound ZMQ addresses"
+                            )
+        finally:
+            for pipe in pending:
+                with contextlib.suppress(Exception):
+                    pipe.close()
+
+        return inputs, outputs  # type: ignore[return-value]
+
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
+        for pipe in self._address_pipes:
+            with contextlib.suppress(Exception):
+                pipe.close()
+        self._address_pipes = []
+
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
@@ -474,10 +561,9 @@ def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
         timeout: Maximum time in seconds to wait for graceful shutdown
     """
     if timeout is None:
-        timeout = 0.0
-
-    # Allow at least 5 seconds for remaining procs to terminate.
-    timeout = max(timeout, 5.0)
+        # Keep a small grace period for best-effort cleanup paths that do not
+        # have a user-configured shutdown timeout.
+        timeout = 5.0
 
     # Shutdown the process.
     for proc in procs:

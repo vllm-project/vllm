@@ -198,7 +198,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -223,8 +223,6 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
-        DISABLE_AITER_SAMPLER = True
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
         if (k is None and p is None) or generators:
             if generators:
@@ -237,8 +235,6 @@ class TopKTopPSampler(nn.Module):
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
-        if DISABLE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(
@@ -321,7 +317,8 @@ class TopKTopPSampler(nn.Module):
         )
         # The custom XPU sampler kernel consumes RNG values internally, so advance
         # the default generator's offset to keep future draws deterministic.
-        offset += logits.numel()
+        # pytorch: offset must be multiple of 4
+        offset = (offset + logits.numel() + 3) // 4 * 4
         state.view(torch.int64)[1] = offset
         generator.set_state(state)
         return random_sampled, logits_to_return
@@ -343,8 +340,9 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    # Keep CPU logits on the PyTorch path to avoid invoking Triton kernels.
     if current_platform.is_cpu():
+        if HAS_TRITON:
+            return apply_top_k_top_p_triton(logits, k, p)
         return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
 
     if HAS_TRITON and logits.shape[0] >= 8:

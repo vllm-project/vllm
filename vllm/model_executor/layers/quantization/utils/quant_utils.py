@@ -178,8 +178,36 @@ kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 
+kInt4Static32GroupScale = ScaleDesc(torch.float16, True, GroupShape(1, 32))
+kInt4Static32 = QuantKey(INT4_DTYPE, scale=kInt4Static32GroupScale, symmetric=True)
+
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+
+# INT4 W4A8 quantization keys
+
+# For group-wise quantization (e.g., group_size=128)
+# Note: group_size will be specified at runtime, this is a generic group scale
+kInt4W4A8StaticGroupScale128 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 128))
+kInt4W4A8StaticGroup128Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale128, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale64 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 64))
+kInt4W4A8StaticGroup64Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale64, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale32 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 32))
+kInt4W4A8StaticGroup32Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale32, symmetric=True
+)
+
+# Generic group-wise with flexible group size (per-token groups)
+kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
+kInt4W4A8StaticGroupSym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
 
 
 def create_fp8_quant_key(
