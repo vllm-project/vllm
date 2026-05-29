@@ -11,7 +11,6 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.states import RequestState
 
 
 @dataclass
@@ -30,17 +29,15 @@ class PendingRecv:
     gen_at_receive_np: np.ndarray  # [num_reqs]
 
 
-def compute_need_sampled_mask(
-    input_batch: InputBatch, req_states: RequestState
-) -> np.ndarray | None:
+def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
     with outputs that might be needed in a subsequent (decode) step.
     Returns None if no sampled outputs are needed in the requests' next step."""
 
-    idx_np = input_batch.idx_mapping_np
-    old_computed = req_states.num_computed_tokens_np[idx_np]
-    prefill_len = req_states.prefill_len.np[idx_np]
-    max_seq_len = req_states.max_seq_len[idx_np]
+    old_computed = input_batch.num_computed_tokens_np
+    prefill_len = input_batch.prefill_len_np
+    max_seq_len = input_batch.max_seq_len_np
+    assert max_seq_len is not None  # always populated under PP
     # Exclude non-final prefill chunks (they don't produce a sample).
     produces_sample = old_computed + input_batch.num_scheduled_tokens >= prefill_len
     # Exclude requests that we know are finished.
@@ -125,9 +122,9 @@ class PPHandler:
             idx_mapping=slot.idx_mapping[alive_indices],
         )
 
-    def receive(self, input_batch: InputBatch, req_states: RequestState) -> bool:
+    def receive(self, input_batch: InputBatch) -> bool:
         assert not self.is_last_rank
-        need_sampled_mask = compute_need_sampled_mask(input_batch, req_states)
+        need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
             return False
@@ -191,10 +188,9 @@ class PPHandler:
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         input_batch: InputBatch,
-        req_states: RequestState,
     ) -> None:
         assert self.is_last_rank
-        if compute_need_sampled_mask(input_batch, req_states) is None:
+        if compute_need_sampled_mask(input_batch) is None:
             # No request needs sampled outputs for a subsequent decode step.
             return
 

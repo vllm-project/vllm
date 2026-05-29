@@ -84,10 +84,7 @@ class WhisperModelState(ModelState):
         return ("transcription",)
 
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> None:
         # Ensure encoder inputs are ordered consistently with input_batch.req_ids.
         encoder_inputs: dict[str, list[int]] = {}

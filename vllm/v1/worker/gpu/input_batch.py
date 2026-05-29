@@ -67,8 +67,17 @@ class InputBatch:
     seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
-    # [num_reqs] CPU bool array.
+    # [num_reqs]
+    num_computed_tokens_np: np.ndarray
+    # [num_reqs]
+    prefill_len_np: np.ndarray
+    # [num_reqs]
+    num_computed_prefill_tokens_np: np.ndarray
+    # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
+
+    # [num_reqs] only populated when pipeline parallelism is enabled.
+    max_seq_len_np: np.ndarray | None
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -148,7 +157,11 @@ class InputBatch:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,

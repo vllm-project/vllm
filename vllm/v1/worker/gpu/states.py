@@ -137,9 +137,3 @@ class RequestState:
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
         return req_idx
-
-    def is_prefilling(self, idx_mapping_np: np.ndarray) -> np.ndarray:
-        return (
-            self.num_computed_prefill_tokens[idx_mapping_np]
-            < self.prefill_len.np[idx_mapping_np]
-        )

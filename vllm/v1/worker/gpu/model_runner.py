@@ -842,7 +842,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
-        is_prefilling_np = self.req_states.is_prefilling(idx_mapping_np)
+        prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
+        computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens
+        num_computed_prefill_tokens_np = computed_prefill_tokens_np[idx_mapping_np]
+        is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):
@@ -894,13 +897,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # CPU upper bound on seq_lens; padded entries left at zero.
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
         np.add(
-            self.req_states.num_computed_tokens_np[idx_mapping_np],
+            num_computed_tokens_np,
             num_scheduled_tokens,
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
+
+        max_seq_len_np = None
+        if self.use_pp:
+            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
+            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -919,7 +928,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            num_computed_tokens_np=num_computed_tokens_np,
+            prefill_len_np=prefill_len_np,
+            num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
             is_prefilling_np=is_prefilling_np,
+            max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             logits_indices=logits_indices,
@@ -1158,9 +1171,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
             # to obtain inputs_embeds, because the compiled model expects this input.
             inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs,
-                input_batch,
-                self.req_states,
+                scheduler_output.scheduled_encoder_inputs, input_batch
             )
 
         model_inputs = {
@@ -1273,7 +1284,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # IntermediateTensors instead of final hidden states. Receive the
             # sampled tokens broadcast from the last rank and update local state.
             assert self.pp_handler is not None
-            all_decode_next = self.pp_handler.receive(input_batch, self.req_states)
+            all_decode_next = self.pp_handler.receive(input_batch)
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
@@ -1301,7 +1312,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_sampled,
                 num_rejected,
                 input_batch,
-                self.req_states,
             )
 
         assert self.prompt_logprobs_worker is not None
@@ -1312,8 +1322,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.all_token_ids.gpu,
             self.req_states.num_computed_tokens.gpu,
             self.req_states.prompt_len.np,
-            self.req_states.prefill_len.np,
-            self.req_states.num_computed_prefill_tokens,
         )
 
         # Prepare the model runner output.
@@ -1339,17 +1347,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
-            prefill_lens = self.req_states.prefill_len.np[input_batch.idx_mapping_np]
-            computed_prefill_lens = self.req_states.num_computed_prefill_tokens[
-                input_batch.idx_mapping_np
-            ]
             mm_inputs = self.model_state.encoder_runner.gather_mm_embeddings(
                 input_batch.req_ids,
                 input_batch.num_tokens,
                 input_batch.num_scheduled_tokens,
                 input_batch.query_start_loc_np,
-                prefill_lens,
-                computed_prefill_lens + 1,  # +1 to consider the skew in eagle
+                input_batch.prefill_len_np,
+                # +1 to consider the skew in eagle
+                input_batch.num_computed_prefill_tokens_np + 1,
             )
 
         # Postprocess results and update request states.

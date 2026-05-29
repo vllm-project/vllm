@@ -63,10 +63,7 @@ class ModelState(ABC):
 
     @abstractmethod
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
