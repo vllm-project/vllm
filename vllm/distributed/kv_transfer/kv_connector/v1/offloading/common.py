@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import NamedTuple
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
@@ -12,10 +11,11 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 ReqId = str
 
 
-class DirectionalTransferStats(NamedTuple):
+@dataclass(slots=True)
+class DirectionalTransferStats:
     bytes: int = 0
     time: float = 0.0
-    sizes: list[int | float] = []
+    sizes: list[int | float] = field(default_factory=list)
 
     def aggregate(
         self, other: "DirectionalTransferStats"
@@ -26,20 +26,19 @@ class DirectionalTransferStats(NamedTuple):
             sizes=[*self.sizes, *other.sizes],
         )
 
-    def record(self, num_bytes: int, time: float) -> "DirectionalTransferStats":
-        return DirectionalTransferStats(
-            bytes=self.bytes + num_bytes,
-            time=self.time + time,
-            sizes=[*self.sizes, num_bytes],
-        )
+    def record(self, num_bytes: int, time: float) -> None:
+        self.bytes += num_bytes
+        self.time += time
+        self.sizes.append(num_bytes)
 
     def is_empty(self) -> bool:
         return self.bytes == 0 and self.time == 0.0 and not self.sizes
 
 
-class TransferStats(NamedTuple):
-    load: DirectionalTransferStats = DirectionalTransferStats()
-    store: DirectionalTransferStats = DirectionalTransferStats()
+@dataclass(slots=True)
+class TransferStats:
+    load: DirectionalTransferStats = field(default_factory=DirectionalTransferStats)
+    store: DirectionalTransferStats = field(default_factory=DirectionalTransferStats)
 
     def aggregate(self, other: "TransferStats") -> "TransferStats":
         return TransferStats(
@@ -47,11 +46,11 @@ class TransferStats(NamedTuple):
             store=self.store.aggregate(other.store),
         )
 
-    def record_load(self, num_bytes: int, time: float) -> "TransferStats":
-        return TransferStats(load=self.load.record(num_bytes, time), store=self.store)
+    def record_load(self, num_bytes: int, time: float) -> None:
+        self.load.record(num_bytes, time)
 
-    def record_store(self, num_bytes: int, time: float) -> "TransferStats":
-        return TransferStats(load=self.load, store=self.store.record(num_bytes, time))
+    def record_store(self, num_bytes: int, time: float) -> None:
+        self.store.record(num_bytes, time)
 
     def is_empty(self) -> bool:
         return self.load.is_empty() and self.store.is_empty()
@@ -97,11 +96,11 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
 
     def record_load(self, num_bytes: int, time: float) -> None:
         """Record a load transfer from this worker."""
-        self.transfer_stats = self.transfer_stats.record_load(num_bytes, time)
+        self.transfer_stats.record_load(num_bytes, time)
 
     def record_store(self, num_bytes: int, time: float) -> None:
         """Record a store transfer from this worker."""
-        self.transfer_stats = self.transfer_stats.record_store(num_bytes, time)
+        self.transfer_stats.record_store(num_bytes, time)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"

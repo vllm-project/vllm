@@ -145,9 +145,14 @@ The class provides the following primitives:
 
 
 class OffloadingManager(ABC):
+    def __init__(
+        self, metric_definitions: dict[str, OffloadingMetricMetadata] | None = None
+    ):
+        self.metric_definitions = metric_definitions or {}
+
     @classmethod
     def get_metric_definitions(
-        cls, vllm_config: "VllmConfig"
+        cls, spec: "OffloadingSpec"
     ) -> dict[str, OffloadingMetricMetadata]:
         """Return Prometheus metric definitions emitted by this manager."""
         return {}
@@ -427,6 +432,7 @@ class OffloadingSpec(ABC):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
+        self.metric_definitions = self.get_manager_cls().get_metric_definitions(self)
 
         # When True, only prompt (prefill) blocks are offloaded; decode-phase
         # blocks (KV generated after the prompt) are skipped. Useful when prior

@@ -96,6 +96,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 enable_events=enable_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                metric_definitions=self.metric_definitions,
             )
         return self._manager
 

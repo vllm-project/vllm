@@ -8,6 +8,7 @@ import pytest
 
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -151,6 +152,11 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
         num_blocks=4,
         cache_policy="lru",
         store_threshold=2,
+        metric_definitions={
+            STORES_SKIPPED: OffloadingCounterMetadata(
+                "Number of KV offload stores skipped."
+            )
+        },
     )
 
     prepare_store_output = manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)

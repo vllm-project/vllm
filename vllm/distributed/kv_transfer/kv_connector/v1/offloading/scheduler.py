@@ -278,7 +278,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
         self._offloading_metric_metadata = {
             **connector_metric_metadata,
-            **type(self.manager).get_metric_definitions(spec.vllm_config),
+            **spec.metric_definitions,
         }
         self._connector_stats: OffloadingConnectorStats | None = None
 

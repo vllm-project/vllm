@@ -6,7 +6,6 @@ from dataclasses import replace
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
-    DirectionalTransferStats,
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
@@ -270,22 +269,15 @@ class OffloadingConnectorWorker:
                 transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
             ):
-                stats: DirectionalTransferStats = (
-                    self._connector_worker_meta.transfer_stats.load
-                    if is_load
-                    else self._connector_worker_meta.transfer_stats.store
-                )
-                stats = stats.record(
-                    transfer_result.transfer_size,
-                    transfer_result.transfer_time,
-                )
                 if is_load:
-                    self._connector_worker_meta.transfer_stats = (
-                        self._connector_worker_meta.transfer_stats._replace(load=stats)
+                    self._connector_worker_meta.record_load(
+                        transfer_result.transfer_size,
+                        transfer_result.transfer_time,
                     )
                 else:
-                    self._connector_worker_meta.transfer_stats = (
-                        self._connector_worker_meta.transfer_stats._replace(store=stats)
+                    self._connector_worker_meta.record_store(
+                        transfer_result.transfer_size,
+                        transfer_result.transfer_time,
                     )
 
             self._connector_worker_meta.mark_completed(job_id)

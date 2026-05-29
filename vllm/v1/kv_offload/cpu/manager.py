@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
@@ -36,21 +37,6 @@ _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
 
 # metrics
 METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
-
-
-def _build_metric_definitions(
-    store_threshold: int,
-) -> dict[str, OffloadingMetricMetadata]:
-    if store_threshold < 2:
-        return {}
-    return {
-        METRIC_STORES_SKIPPED: OffloadingCounterMetadata(
-            documentation=(
-                "Number of KV offload stores skipped because the reuse "
-                "threshold was not reached."
-            ),
-        )
-    }
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -65,13 +51,25 @@ class CPUOffloadingManager(OffloadingManager):
 
     @classmethod
     def get_metric_definitions(
-        cls, vllm_config: "VllmConfig"
+        cls, spec: "OffloadingSpec | VllmConfig"
     ) -> dict[str, OffloadingMetricMetadata]:
-        kv_transfer_config = vllm_config.kv_transfer_config
-        assert kv_transfer_config is not None
-        extra_config = kv_transfer_config.kv_connector_extra_config
+        if hasattr(spec, "extra_config"):
+            extra_config = spec.extra_config
+        else:
+            kv_transfer_config = spec.kv_transfer_config
+            assert kv_transfer_config is not None
+            extra_config = kv_transfer_config.kv_connector_extra_config
         store_threshold = int(extra_config.get("store_threshold", 0))
-        return _build_metric_definitions(store_threshold)
+        if store_threshold < 2:
+            return {}
+        return {
+            METRIC_STORES_SKIPPED: OffloadingCounterMetadata(
+                documentation=(
+                    "Number of KV offload stores skipped because the reuse "
+                    "threshold was not reached."
+                ),
+            )
+        }
 
     def __init__(
         self,
@@ -80,6 +78,7 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        metric_definitions: dict[str, OffloadingMetricMetadata] | None = None,
     ):
         self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
@@ -95,7 +94,9 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
-        self.metric_definitions = _build_metric_definitions(store_threshold)
+
+        # metrics
+        super().__init__(metric_definitions=metric_definitions)
         self.stores_skipped_in_current_batch: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
