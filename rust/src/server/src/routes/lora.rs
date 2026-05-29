@@ -54,10 +54,10 @@ fn looks_like_local_lora_path(lora_path: &str) -> bool {
 fn validate_lora_path_access(
     lora_path: &str,
     allowed_prefixes: Option<&[PathBuf]>,
-) -> Result<(), ApiError> {
+) -> Result<Option<String>, ApiError> {
     let path = Path::new(lora_path);
     if !looks_like_local_lora_path(lora_path) && !path.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
     let Some(allowed_prefixes) = allowed_prefixes else {
@@ -102,7 +102,7 @@ fn validate_lora_path_access(
         ));
     }
 
-    Ok(())
+    Ok(Some(canonical_path.to_string_lossy().into_owned()))
 }
 
 /// Dynamically load one LoRA adapter and expose it as an OpenAI model id.
@@ -117,13 +117,14 @@ pub async fn load_lora_adapter(
         ));
     }
     let allowed_prefixes = runtime_lora_allowed_path_prefixes();
-    validate_lora_path_access(&request.lora_path, allowed_prefixes.as_deref())?;
+    let lora_path = validate_lora_path_access(&request.lora_path, allowed_prefixes.as_deref())?
+        .unwrap_or(request.lora_path);
 
     let lora_name = request.lora_name;
     state
         .load_lora(
             lora_name.clone(),
-            request.lora_path,
+            lora_path,
             request.load_inplace,
             request.is_3d_lora_weight,
         )
@@ -222,7 +223,10 @@ mod tests {
 
     #[test]
     fn lora_path_allows_hf_repo_ids_without_prefixes() {
-        validate_lora_path_access("org/adapter-a", None).expect("hf repo id should be allowed");
+        assert_eq!(
+            validate_lora_path_access("org/adapter-a", None).expect("hf repo id should be allowed"),
+            None
+        );
     }
 
     #[test]
@@ -255,8 +259,19 @@ mod tests {
         fs::create_dir_all(&adapter).expect("create adapter dir");
 
         let prefixes = [allowed];
-        validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), Some(&prefixes))
-            .expect("path under configured prefix should be allowed");
+        let resolved =
+            validate_lora_path_access(adapter.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect("path under configured prefix should be allowed");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(
+                adapter
+                    .canonicalize()
+                    .expect("canonical adapter")
+                    .to_str()
+                    .expect("utf-8 temp path")
+            )
+        );
 
         fs::remove_dir_all(root).ok();
     }
