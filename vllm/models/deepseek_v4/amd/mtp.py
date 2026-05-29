@@ -18,7 +18,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -37,8 +36,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.common.ops import (
+    fused_mtp_input_rmsnorm,
+    mtp_shared_head_rmsnorm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.import_utils import has_tilelang
 
 from .model import DeepseekV4DecoderLayer
 
@@ -118,6 +122,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         self.hc_head_op = HCHeadOp()
+        self.has_tilelang = has_tilelang()
 
     def forward(
         self,
@@ -128,23 +133,29 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-
         # Target stashes pre-hc_head residual as flat (T, hc_mult * D);
-        # reshape to (T, hc_mult, D) — the training-time layout.
+        # reshape to (T, hc_mult, D) — the training-time layout — before
+        # the fused norm pass so both inputs are 3D-friendly.
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
-        previous_hidden_states = self.hnorm(previous_hidden_states)
+        # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
+        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+            inputs_embeds,
+            positions,
+            previous_hidden_states,
+            self.enorm.weight.data,
+            self.hnorm.weight.data,
+            self.enorm.variance_epsilon,
+            self.hc_mult,
+        )
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if current_platform.is_cuda():
+        if self.has_tilelang:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix
             )
@@ -242,13 +253,15 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        hidden_states = mtp_shared_head_rmsnorm(
+            hidden_states,
+            mtp_layer.shared_head.norm.weight.data,
+            mtp_layer.shared_head.norm.variance_epsilon,
         )
+        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
         return logits
 
 
-@support_torch_compile
 class DeepSeekV4MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

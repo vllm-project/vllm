@@ -7,6 +7,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
@@ -47,6 +48,20 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+
+
+class OffloadPolicy(Enum):
+    # Offload only newly-computed blocks as they arrive; prefix-hit
+    # blocks (already offloaded by a prior request) are skipped.
+    BLOCK_LEVEL = "block_level"
+    # Offload all blocks for the request, including prefix hits.
+    # Used by tiers that need the complete KV context for a request.
+    REQUEST_LEVEL = "request_level"
+
+
+@dataclass
+class RequestOffloadingContext:
+    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
 class LoadStoreSpec(ABC):
@@ -210,6 +225,28 @@ class OffloadingManager(ABC):
         """
         return
 
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext indicating how this request's
+        blocks should be offloaded.
+
+        Args:
+            req_context: per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
+        """
+        return
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
         Take the offloading events from the manager.
@@ -342,6 +379,14 @@ class OffloadingSpec(ABC):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
+
+        # When True, only prompt (prefill) blocks are offloaded; decode-phase
+        # blocks (KV generated after the prompt) are skipped. Useful when prior
+        # turns' generated tokens are dropped before the next turn (e.g.
+        # reasoning models that strip thinking).
+        self.offload_prompt_only: bool = bool(
+            self.extra_config.get("offload_prompt_only", True)
+        )
 
         parallel_config = vllm_config.parallel_config
         context_parallel_factor = (
