@@ -96,6 +96,7 @@ class TestKVCacheNanE2E:
                 disable_log_stats=False,
                 attention_config={"backend": "TRITON_MLA"},
                 kernel_config={"moe_backend": "triton"},
+                compilation_config={"cudagraph_mode": "full"},
             )
             t_before = time.time()
             llm.generate(
@@ -188,6 +189,7 @@ class TestKVCacheNanE2E:
             disable_log_stats=False,
             attention_config={"backend": "TRITON_MLA"},
             kernel_config={"moe_backend": "triton"},
+            compilation_config={"cudagraph_mode": "full"},
         )
         llm.generate(
             ["Test prompt"],
@@ -204,6 +206,76 @@ class TestKVCacheNanE2E:
 
         assert prom_total == 0, (
             f"No NaN injection but got {prom_total} NaN(s) in Prometheus"
+        )
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="Need CUDA device")
+class TestKVCacheNanCUDAGraph:
+    """Verify NaN detection works when CUDA graphs are enabled."""
+
+    @pytest.fixture(autouse=True)
+    def _setup_env(self, monkeypatch):
+        monkeypatch.setenv("VLLM_DEBUG_MLA_CACHE", "1")
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    def test_nan_detected_under_cudagraph(self):
+        """NaN counter tensor is baked into the graph and survives replay."""
+
+        with patch.object(
+            ops, "concat_and_cache_mla", _nan_injecting_concat_and_cache_mla
+        ):
+            from vllm import LLM, SamplingParams
+
+            llm = LLM(
+                model="deepseek-ai/DeepSeek-V2-Lite",
+                hf_overrides={"num_hidden_layers": 2},
+                kv_cache_dtype="fp8",
+                load_format="dummy",
+                num_gpu_blocks_override=32,
+                max_model_len=128,
+                max_num_seqs=2,
+                disable_log_stats=False,
+                attention_config={"backend": "TRITON_MLA"},
+                kernel_config={"moe_backend": "triton"},
+                compilation_config={"cudagraph_mode": "full"},
+            )
+            # max_tokens=4 to run multiple decode steps through the graph.
+            llm.generate(
+                ["Hello world"],
+                SamplingParams(temperature=0, max_tokens=4),
+            )
+
+        # Verify NaN counters were populated despite cudagraph replay.
+        ec = llm.llm_engine.engine_core.engine_core
+        mr = ec.model_executor.driver_worker.model_runner
+        sfc = mr.compilation_config.static_forward_context
+
+        layers_with_debug = 0
+        for name, layer in sfc.items():
+            nc = getattr(layer, "num_kv_cache_nan_insertions", None)
+            if nc is not None:
+                layers_with_debug += 1
+                # Counter was zeroed by model runner after reading.
+                assert nc.sum().item() == 0, f"nan counter not zeroed for {name}"
+
+        assert layers_with_debug >= 2, (
+            f"Expected >= 2 layers with debug tensor, got {layers_with_debug}"
+        )
+
+        # Check Prometheus saw NaNs.
+        from prometheus_client import REGISTRY
+
+        prom_total = 0
+        for metric in REGISTRY.collect():
+            if metric.name != METRIC_NAME:
+                continue
+            for sample in metric.samples:
+                if sample.name == SAMPLE_NAME and sample.value > 0:
+                    prom_total += sample.value
+
+        assert prom_total > 0, (
+            f"Expected NaN counts under cudagraph, got total={prom_total}"
         )
 
 
@@ -308,6 +380,7 @@ class TestKVCacheNanMultiprocessing:
             disable_log_stats=False,
             attention_config={"backend": "TRITON_MLA"},
             kernel_config={"moe_backend": "triton"},
+                compilation_config={"cudagraph_mode": "full"},
         )
         llm.generate(
             ["Hello world"],
