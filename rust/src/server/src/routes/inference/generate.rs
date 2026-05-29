@@ -166,11 +166,11 @@ async fn generate_chunk_stream(
                     );
                 }
 
-                if token_ids.is_empty() {
+                if token_ids.is_empty() && finish_reason.is_none() {
                     continue;
                 }
 
-                let logprobs = if include_logprobs {
+                let logprobs = if include_logprobs && !token_ids.is_empty() {
                     let logprobs = output.logprobs.as_ref().ok_or_else(|| {
                         server_error!(
                             "raw generate stream requested logprobs but generation returned none"

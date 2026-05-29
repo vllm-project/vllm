@@ -2558,6 +2558,56 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn stream_raw_generate_emits_empty_finish_chunk() {
+    let (mut app, engine_task) = test_app_with_stream_output_specs(vec![
+        (vec![33], None),
+        (vec![], Some(EngineCoreFinishReason::Stop)),
+    ])
+    .await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "request_id": "raw-stream-empty-finish",
+                        "token_ids": [11, 22],
+                        "stream": true,
+                        "sampling_params": {
+                            "max_tokens": 2
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_data_payloads(&text);
+    assert_eq!(payloads.len(), 3, "{text}");
+
+    let first: serde_json::Value = serde_json::from_str(payloads[0]).expect("first chunk json");
+    assert_eq!(first["choices"][0]["token_ids"], json!([33]));
+    assert!(first["choices"][0].get("finish_reason").is_none());
+
+    let second: serde_json::Value = serde_json::from_str(payloads[1]).expect("second chunk json");
+    assert_eq!(second["choices"][0]["token_ids"], json!([]));
+    assert_eq!(second["choices"][0]["finish_reason"], "stop");
+    assert_eq!(payloads[2], "[DONE]");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_raw_generate_error_finish_returns_sse_error() {
     let (mut app, engine_task) =
         test_app_with_stream_output_specs(vec![(vec![], Some(EngineCoreFinishReason::Error))])
