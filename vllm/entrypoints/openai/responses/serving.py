@@ -85,6 +85,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
+    split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
@@ -1040,7 +1041,10 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer, request.tools)
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            parser = self.parser(
+                tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
+            )
             return parser.extract_response_outputs(
                 model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
@@ -1377,7 +1381,15 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = self.parser(tokenizer, request.tools) if self.parser else None
+        parser = (
+            self.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            if self.parser
+            else None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1414,18 +1426,19 @@ class OpenAIServingResponses(OpenAIServing):
             if not delta_message:
                 continue
 
-            target_state, tool_call = processor.resolve_target_state(delta_message)
-            if target_state == _StateType.NONE:
-                continue
+            for dm in split_delta(delta_message):
+                target_state, tool_call = processor.resolve_target_state(dm)
+                if target_state == _StateType.NONE:
+                    continue
 
-            if processor.needs_transition(target_state, tool_call):
-                for event in processor.close_current():
-                    yield _increment_sequence_number_and_return(event)
-                for event in processor.open(target_state, tool_call):
-                    yield _increment_sequence_number_and_return(event)
+                if processor.needs_transition(target_state, tool_call):
+                    for event in processor.close_current():
+                        yield _increment_sequence_number_and_return(event)
+                    for event in processor.open(target_state, tool_call):
+                        yield _increment_sequence_number_and_return(event)
 
-            for event in processor.emit_delta(delta_message, output, _get_logprobs):
-                yield _increment_sequence_number_and_return(event)
+                for event in processor.emit_delta(dm, output, _get_logprobs):
+                    yield _increment_sequence_number_and_return(event)
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
