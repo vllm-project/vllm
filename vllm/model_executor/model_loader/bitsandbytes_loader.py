@@ -10,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from huggingface_hub import HfApi
 from packaging import version
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -48,6 +47,7 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -97,8 +97,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if weight_files:
                     return model_name_or_path, weight_files, pattern
         else:
-            hf_api = HfApi()
-            repo_files = hf_api.list_repo_files(repo_id=model_name_or_path)
+            repo_files = hf_api().list_repo_files(repo_id=model_name_or_path)
             for pattern in allowed_patterns:
                 matching_files = fnmatch.filter(repo_files, pattern)
                 if matching_files:
