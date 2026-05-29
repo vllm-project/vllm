@@ -524,15 +524,32 @@ def silu_and_mul_per_block_quant(
             dtype=torch.float32,
         )
 
-    # Call the C++ kernel
-    torch.ops._C.silu_and_mul_per_block_quant(
-        output,
-        input,
-        scales,
-        group_size,  # Pass directly as int
-        scale_ub,
-        is_scale_transposed,
-    )
+    # Preferred path: per-block kernel.
+    if hasattr(torch.ops._C, "silu_and_mul_per_block_quant"):
+        torch.ops._C.silu_and_mul_per_block_quant(
+            output,
+            input,
+            scales,
+            group_size,  # Pass directly as int
+            scale_ub,
+            is_scale_transposed,
+        )
+    # Compatibility fallback for older XPU kernel packs that only expose
+    # per-token quant.
+    elif hasattr(torch.ops._C, "silu_and_mul_quant"):
+        token_scales = torch.empty((num_tokens, 1),
+                                   device=input.device,
+                                   dtype=torch.float32)
+        torch.ops._C.silu_and_mul_quant(output, input, token_scales)
+        if scales.shape[1] == 1:
+            scales.copy_(token_scales)
+        else:
+            scales.copy_(token_scales.expand(num_tokens, scales.shape[1]))
+    else:
+        raise RuntimeError(
+            "Missing both _C.silu_and_mul_per_block_quant and "
+            "_C.silu_and_mul_quant custom ops."
+        )
 
     return output, scales
 
