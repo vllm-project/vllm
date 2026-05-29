@@ -1150,7 +1150,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 # Use unified_attention for speculative decoding (multi-token),
                 # sliding window, or sinks
                 # (pa_fwd_asm and paged_attention_v1 don't support sinks)
-                if self.sliding_window[0] != -1 or decode_max_query_len > 1 or self.sinks is not None:
+                if (
+                    self.sliding_window[0] != -1
+                    or decode_max_query_len > 1
+                    or self.sinks is not None
+                ):
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
                         "Shuffle KV cache layout is not supported with sliding "
                         "window, sinks, or speculative decoding (multi-token decode)."
