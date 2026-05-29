@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
@@ -117,7 +117,6 @@ def test_flashinfer_fp4_moe_no_graph(
                 use_monolithic=False,
             ),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
-            inplace=False,
         )
 
         flashinfer_output = flashinfer_experts.apply(

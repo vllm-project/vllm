@@ -105,6 +105,23 @@ ARG BUILD_OS
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Environment for uv
+# Declared BEFORE the installer + `uv venv` invocations below so the uv
+# binary, managed Python, download cache, and /opt/venv all land under
+# /opt/uv instead of /root/.local/. Without this, the venv created at
+# build time hardlinks back to /root/.local/share/uv/python and
+# descendants of this stage (`build`, `dev`, `csrc-build`,
+# `extensions-build`) inherit a root-owned, non-root-unreadable layout.
+# See #15174, #15359, #31959. Child stages inherit these via Dockerfile
+# `ENV` unless they override them explicitly.
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+ENV UV_CACHE_DIR=/opt/uv/cache
+ENV UV_INSTALL_DIR=/opt/uv/bin
+ENV PATH="/opt/venv/bin:/opt/uv/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+
 # Install system dependencies including build tools.
 # The Ubuntu path uses apt + deadsnakes-via-uv for Python; the manylinux path
 # (AlmaLinux 8, e.g. pytorch/manylinux2_28-builder) uses dnf and the Python
@@ -145,15 +162,21 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
 
 # Install uv and bootstrap /opt/venv. Both paths converge on /opt/venv so all
 # downstream stages stay distro-agnostic.
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" "${UV_INSTALL_DIR}" \
+    && chmod -R a+rX /opt/uv \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    # `--seed` installs pip/setuptools/wheel into the venv so `python3 -m
+    # pip` works regardless of how uv happens to link the venv back to the
+    # managed Python install (which, at a non-default UV_PYTHON_INSTALL_DIR,
+    # doesn't always expose ensurepip via the default venv layout).
     && if [ "${BUILD_OS}" = "manylinux" ]; then \
            # manylinux images ship Python at /opt/python/cpXY-cpXY/; point uv
            # at the matching interpreter rather than letting it fetch one.
            PYV_NODOT=$(echo ${PYTHON_VERSION} | tr -d '.') \
            && MANYLINUX_PY=/opt/python/cp${PYV_NODOT}-cp${PYV_NODOT}/bin/python${PYTHON_VERSION} \
-           && $HOME/.local/bin/uv venv /opt/venv --python "$MANYLINUX_PY"; \
+           && uv venv --seed /opt/venv --python "$MANYLINUX_PY"; \
        else \
-           $HOME/.local/bin/uv venv /opt/venv --python ${PYTHON_VERSION}; \
+           uv venv --seed /opt/venv --python ${PYTHON_VERSION}; \
        fi \
     && rm -f /usr/bin/python3 /usr/bin/python3-config /usr/bin/pip \
     && ln -sf /opt/venv/bin/python3 /usr/bin/python3 \
@@ -161,13 +184,10 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && ln -sf /opt/venv/bin/pip /usr/bin/pip \
     && python3 --version && python3 -m pip --version
 
-# Activate virtual environment and add uv to PATH
-ENV PATH="/opt/venv/bin:/root/.local/bin:$PATH"
-ENV VIRTUAL_ENV="/opt/venv"
-
-# Environment for uv
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# UV_LINK_MODE=copy applies to subsequent `uv pip install` RUNs (avoids
+# hardlink failures with BuildKit cache mounts); it must not be set during
+# `uv venv` above, which relies on hardlinking /opt/venv back to the
+# managed Python source so ensurepip / `python3 -m pip` still resolve.
 ENV UV_LINK_MODE=copy
 
 # Verify GCC version
@@ -198,8 +218,12 @@ COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' requirements/cuda.txt; \
+        sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' requirements/cuda.txt; \
+    fi \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -215,7 +239,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" > torch_lib_versions.txt \
     && TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs) \
     && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}"
@@ -227,6 +251,56 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
+
+#################### RUST BUILD IMAGE ####################
+# Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
+# build stage doesn't need the rust toolchain, protoc, or the rust source.
+# This stage runs in parallel with csrc-build/extensions-build.
+FROM ${BUILD_BASE_IMAGE} AS rust-build
+ARG BUILD_OS
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install a basic C toolchain (some rust crates compile C in their build.rs
+# scripts) and unzip (used to extract the pinned protoc release below).
+RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
+        dnf install -y --setopt=install_weak_deps=False \
+            ca-certificates curl git gcc gcc-c++ make unzip \
+        && dnf clean all && rm -rf /var/cache/dnf; \
+    else \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential unzip \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --profile minimal --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /workspace
+
+# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY rust rust
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY build_rust.sh build_rust.sh
+
+# Cap cargo parallelism to avoid exhausting the CI host's open-file limit
+# (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
+ENV CARGO_BUILD_JOBS=4
+
+# Build the release binary. Cache cargo registry/git and target/, but copy the
+# binary out of the target/ cache mount so it persists into the image layer
+# for later COPY --from=rust-build.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/rust/target \
+    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+#################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
 FROM base AS csrc-build
@@ -251,7 +325,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
@@ -296,15 +370,23 @@ ARG VLLM_MAIN_CUDA_VERSION=""
 ENV SETUPTOOLS_SCM_PRETEND_VERSION="0.0.0+csrc.build"
 
 # Use existing torch for nightly builds
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         python3 use_existing_torch.py --prefix; \
     fi
 
+# Provision one bare Python per `requires-python` entry; cmake reads
+# DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. See
+# cmake/external_projects/deepgemm.cmake for the full picture.
+COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
+ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
+
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
 # AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
@@ -328,6 +410,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -337,7 +420,7 @@ ARG vllm_target_device="cuda"
 ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/opt/uv/cache \
     if [ "$USE_SCCACHE" != "1" ]; then \
         # Clean any existing CMake artifacts
         rm -rf .deps && \
@@ -345,6 +428,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -368,7 +452,7 @@ COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
 ARG DEEPEP_COMMIT_HASH=73b6ea4
 ARG NVSHMEM_VER
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
     /tmp/install_python_libraries.sh \
@@ -402,7 +486,7 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
@@ -422,6 +506,10 @@ WORKDIR /workspace
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
 
+# Drop the pre-built rust frontend binary into the source tree. setup.py
+# detects it and ships it as-is, skipping the local cargo build.
+COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
@@ -433,15 +521,16 @@ ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 ENV VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX=1
 
 # Use existing torch for nightly builds
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         python3 use_existing_torch.py --prefix; \
     fi
 
 # Build the vLLM wheel
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=.git,target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
+        export VLLM_USE_PRECOMPILED=1; \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
@@ -496,7 +585,7 @@ COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 use_existing_torch.py --prefix \
@@ -596,9 +685,50 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
 RUN python3 -m pip install uv
 
 # Environment for uv
+# Redirect uv's managed Python and download cache out of /root/ so downstream
+# images (`FROM vllm/vllm-openai` + `USER <uid>`) and direct non-root runs
+# (`docker run --user <uid>:<gid>`) can read and execute them. See #15174,
+# #15359, #31959.
 ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
+ENV UV_CACHE_DIR=/opt/uv/cache
+RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
+    && chgrp -R 0 /opt/uv \
+    && chmod -R g+rwX,a+rX /opt/uv
+
+# ----------------------------------------------------------------------
+# Non-root support (opt-in)
+# ----------------------------------------------------------------------
+# Create a conventional `vllm` user (UID 2000, GID 0) so the image can be
+# run under `--user 2000:0` or the opt-in `vllm-openai-nonroot` target.
+#
+# Design notes:
+#   * GID 0 + group-writable cache dirs follow the OpenShift arbitrary-UID
+#     pattern, so any UID that is a member of group 0 at runtime can write
+#     to /home/vllm and /opt/uv without additional chown work.
+#   * The default `vllm-openai` image keeps `USER root`, so every existing
+#     `docker run vllm/vllm-openai ...` / K8s manifest / `FROM vllm/vllm-openai`
+#     + `RUN uv pip install --system ...` flow is unchanged.
+#   * The entrypoint wrapper below is only used by `vllm-openai-nonroot`; it
+#     handles the OpenShift arbitrary-UID case (UID not in /etc/passwd).
+# See #31959 and docs/deployment/docker.md.
+RUN useradd --uid 2000 --gid 0 --create-home --home-dir /home/vllm \
+        --shell /bin/bash vllm \
+    && mkdir -p /home/vllm/.cache /home/vllm/.config \
+    && chown -R 2000:0 /home/vllm \
+    && chmod -R g+rwX /home/vllm \
+    # Allow the entrypoint wrapper to append a /etc/passwd entry for an
+    # arbitrary runtime UID that shares GID 0. Without this, `whoami`, bash's
+    # `\u` prompt, `id -un`, and anything else that calls `getpwuid()`
+    # directly return "I have no name!" for OpenShift-style arbitrary UIDs.
+    # This matches the convention used by Red Hat UBI base images.
+    && chgrp 0 /etc/passwd /etc/group \
+    && chmod g=u /etc/passwd /etc/group
+COPY docker/entrypoints/vllm-nonroot-entrypoint.sh \
+    /usr/local/bin/vllm-nonroot-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/vllm-nonroot-entrypoint.sh
 
 # Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'
 # Only needed for datacenter/professional GPUs with older drivers.
@@ -615,7 +745,11 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
+        sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
+    fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
@@ -623,8 +757,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.8.post1
-RUN --mount=type=cache,target=/root/.cache/uv \
+ARG FLASHINFER_VERSION=0.6.11.post2
+RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -656,7 +790,7 @@ ARG BITSANDBYTES_VERSION_X86=0.46.1
 ARG BITSANDBYTES_VERSION_ARM64=0.42.0
 ARG TIMM_VERSION=">=1.0.17"
 ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_ARM64}"; \
     else \
@@ -681,7 +815,7 @@ ARG PYTORCH_NIGHTLY
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
@@ -695,7 +829,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
 . /etc/environment && \
 uv pip list
 
@@ -704,7 +838,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
 # Install EP kernels wheels (DeepEP) that have been built in the `build` stage
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
-    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
@@ -734,6 +868,7 @@ FROM vllm-base AS test
 ADD . /vllm-workspace/
 
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -759,7 +894,7 @@ COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -773,13 +908,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         else \
             echo "Installing dev requirements..." \
+            && if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+                echo "Recompiling test requirements for arm64..." \
+                && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+            fi \
             && uv pip install --system -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         fi \
     fi
 
 # install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
@@ -819,7 +959,7 @@ ENV UV_HTTP_TIMEOUT=500
 # install kv_connectors if requested
 ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
-RUN --mount=type=cache,target=/root/.cache/uv \
+RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
@@ -829,9 +969,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13; \
-        fi; \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
@@ -841,6 +978,30 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
+        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
+    fi
+
+# Optional override: install mooncake-transfer-engine from a URL instead of the
+# PyPI release pulled in above. Use this for wheels built with non-default CMake
+# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
+# floor must be <= the FINAL_BASE_IMAGE's glibc.
+ARG MOONCAKE_WHEEL_AARCH64
+ARG MOONCAKE_WHEEL_X86_64
+RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
+            WHEEL="${MOONCAKE_WHEEL_AARCH64}"; \
+        else \
+            WHEEL="${MOONCAKE_WHEEL_X86_64}"; \
+        fi && \
+        if [ -n "${WHEEL}" ]; then \
+            uv pip install --system "${WHEEL}" && \
+            CUDA_MAJOR="${CUDA_VERSION%%.*}" && \
+            if [ ! -f /usr/local/cuda/lib64/libcudart.so ] && \
+               [ -f "/usr/local/cuda/lib64/libcudart.so.${CUDA_MAJOR}" ]; then \
+                ln -s "libcudart.so.${CUDA_MAJOR}" /usr/local/cuda/lib64/libcudart.so; \
+            fi; \
+        fi; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
@@ -860,11 +1021,38 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
-COPY examples/online_serving/sagemaker-entrypoint.sh .
+COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 
 FROM vllm-openai-base AS vllm-openai
 
+# To run the image as non-root, either build the `vllm-openai-nonroot` target
+# below, or in a derived Dockerfile uncomment the following line and ensure
+# any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
+# user (UID 2000, GID 0) is already created in the `vllm-base` stage.
+# See docs/deployment/docker.md.
+# USER vllm
 ENTRYPOINT ["vllm", "serve"]
 #################### OPENAI API SERVER ####################
+
+#################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################
+# Non-root-ready variant of `vllm-openai`. Built via:
+#   docker build --target vllm-openai-nonroot -t vllm:openai-nonroot \
+#       -f docker/Dockerfile .
+#
+# Runtime behavior:
+#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-base`.
+#   * HOME is /home/vllm, pre-created group-0-writable so arbitrary UIDs in
+#     group 0 (OpenShift / `--user <uid>:0`) can also use the image.
+#   * Entrypoint wrapper handles the "UID not in /etc/passwd" case for truly
+#     arbitrary UIDs by falling back HOME/USER to sane writable defaults.
+#   * All cache/config envs (HF_HOME, VLLM_CACHE_ROOT, TRITON_CACHE_DIR, ...)
+#     remain unset so their library defaults resolve to $HOME/.cache/... ,
+#     which is writable.
+FROM vllm-openai AS vllm-openai-nonroot
+
+USER vllm
+WORKDIR /home/vllm
+ENTRYPOINT ["/usr/local/bin/vllm-nonroot-entrypoint.sh"]
+#################### OPENAI API SERVER (NON-ROOT, OPT-IN) ####################

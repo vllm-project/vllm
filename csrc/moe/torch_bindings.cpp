@@ -93,16 +93,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
 
   m.def(
-      "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
-      "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
-      "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
-      "int b_q_type, SymInt size_m, "
-      "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
-      "topk, "
-      "int moe_block_size, bool replicate_input, bool apply_weights)"
-      " -> Tensor");
-
-  m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
@@ -111,12 +101,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "permuted_idx)->()");
 
   m.def(
+      "moe_permute_with_scratch(Tensor input, Tensor topk_ids,"
+      "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
+      "int n_local_expert,"
+      "int topk, Tensor! permuted_input, Tensor! "
+      "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
+      "permuted_idx, Tensor! sort_workspace, Tensor! permuted_experts_id, "
+      "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort)->()");
+
+  m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
       "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
       "int topk, Tensor! hidden_states)->()");
 
   m.def("moe_permute_unpermute_supported() -> bool");
+  m.def(
+      "moe_permute_sort_workspace_size(int num_expanded_rows, int n_expert) -> "
+      "int");
   m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
+  m.impl("moe_permute_sort_workspace_size", &moe_permute_sort_workspace_size);
 
   // Row shuffle for MoE
   m.def(

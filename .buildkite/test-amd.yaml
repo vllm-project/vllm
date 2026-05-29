@@ -139,19 +139,6 @@ steps:
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
-#--------------------------------------------------------  mi250 · benchmarks  ---------------------------------------------------------#
-
-- label: Benchmarks # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/.buildkite"
-  source_file_dependencies:
-  - benchmarks/
-  - vllm/platforms/rocm.py
-  commands:
-  - bash scripts/run-benchmarks.sh
-
 #----------------------------------------------------------  mi250 · compile  ----------------------------------------------------------#
 
 - label: PyTorch Compilation Unit Tests # TBD
@@ -394,8 +381,8 @@ steps:
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # Features demo
     - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 deployment/llm_engine_example.py
+    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -460,7 +447,7 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
 
@@ -485,7 +472,7 @@ steps:
   - pytest -v -s model_executor -m '(not slow_test)'
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
-#----------------------------------------------------------  mi250 · models  -----------------------------------------------------------#
+#------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
@@ -546,6 +533,8 @@ steps:
   commands:
   - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
+#-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
+
 - label: Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -589,6 +578,8 @@ steps:
   commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+#----------------------------------------------------  mi250 · models / multimodal  ----------------------------------------------------#
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
@@ -798,32 +789,6 @@ steps:
   commands:
   - pytest -v -s v1/attention
 
-- label: V1 Core + KV + Metrics # TBD
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/core
-  - tests/v1/executor
-  - tests/v1/kv_offload
-  - tests/v1/worker
-  - tests/v1/kv_connector/unit
-  - tests/v1/metrics
-  - tests/entrypoints/openai/correctness/test_lmeval.py
-  commands:
-  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - pytest -v -s -m 'not cpu_test' v1/core
-  - pytest -v -s v1/executor
-  - pytest -v -s v1/kv_offload
-  - pytest -v -s v1/worker
-  - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-  - pytest -v -s -m 'not cpu_test' v1/metrics
-  - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
-  - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
-
 - label: V1 Sample + Logits # TBD
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -880,7 +845,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+  - ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 - label: V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -929,6 +894,7 @@ steps:
   - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/parser
   - tests/transformers_utils
   - tests/config
   commands:
@@ -942,6 +908,7 @@ steps:
   - pytest -v -s tokenizers_
   - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
   - pytest -v -s tool_parsers
+  - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -999,18 +966,6 @@ steps:
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
-
-- label: Benchmarks # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite"
-  source_file_dependencies:
-  - benchmarks/
-  - vllm/platforms/rocm.py
-  commands:
-  - bash scripts/run-benchmarks.sh
 
 - label: Benchmarks CLI Test # TBD
   timeout_in_minutes: 180
@@ -1100,13 +1055,13 @@ steps:
   - vllm/compilation/
   - vllm/model_executor/layers
   - tests/compile/passes/distributed/
+  - tests/compile/fusions_e2e/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
-  - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
-  - pytest -v -s tests/compile/passes/distributed/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
@@ -1277,6 +1232,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1297,6 +1253,7 @@ steps:
   agent_pool: mi300_1
   fast_check: true
   torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1310,6 +1267,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1320,13 +1278,13 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1336,7 +1294,21 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+
+- label: Entrypoints Integration (Speech to Text) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/speech_to_text
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
@@ -1649,8 +1621,8 @@ steps:
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # Features demo
     - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 deployment/llm_engine_example.py
+    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -1713,6 +1685,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1760,17 +1733,18 @@ steps:
   - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
-  - pytest -v -s -x lora/test_llm_with_multi_loras.py
+  - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
 
-#----------------------------------------------------------  mi300 · models  -----------------------------------------------------------#
+#-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
 - label: Language Models Test (Extended Pooling)  # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1792,6 +1766,8 @@ steps:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
+#----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
+
 - label: Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1803,9 +1779,10 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
-  - pytest -v -s models/multimodal/test_mapping.py
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
@@ -1817,8 +1794,10 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
@@ -1894,10 +1873,11 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
-- label: Multi-Modal Processor (CPU) # TBD
+- label: Multi-Modal Processor (CPU) %N # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  parallelism: 4
   no_gpu: true
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -1907,7 +1887,9 @@ steps:
   - tests/models/registry.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+#-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
 
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
@@ -1923,7 +1905,31 @@ steps:
   commands:
   - pytest -v -s models/quantization
 
-- label: Transformers Nightly Models # TBD
+#--------------------------------------------------  mi300 · models / transformers  ---------------------------------------------------#
+
+- label: Transformers Nightly Models (Shardable) %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  parallelism: 4
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/multimodal/
+  - vllm/model_executor/layers/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/models/
+  commands:
+  - pip install --upgrade git+https://github.com/huggingface/transformers
+  - pytest -v -s tests/models/test_initialization.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s tests/models/multimodal/processing/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: Transformers Nightly Models (Single) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
@@ -1942,9 +1948,7 @@ steps:
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_initialization.py
   - pytest -v -s tests/models/test_transformers.py
-  - pytest -v -s tests/models/multimodal/processing/
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -2005,7 +2009,7 @@ steps:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - vllm/v1/sample/
-  - vllm/beam_search.py
+  - vllm/entrypoints/generate/beam_search/
   - tests/samplers
   - tests/conftest.py
   - vllm/_aiter_ops.py
@@ -2393,7 +2397,7 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Hyrbid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
+- label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -2595,7 +2599,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
-#----------------------------------------------------------  mi325 · models  -----------------------------------------------------------#
+#-----------------------------------------------------  mi325 · models / language  -----------------------------------------------------#
 
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
@@ -2625,6 +2629,8 @@ steps:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+#----------------------------------------------------  mi325 · models / multimodal  ----------------------------------------------------#
 
 - label: Multi-Modal Models (Extended Pooling) # TBD
   timeout_in_minutes: 180
@@ -2697,19 +2703,35 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
+  - csrc/custom_quickreduce.cu
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - vllm/distributed/
-  - vllm/v1/distributed/
+  - vllm/model_executor/layers/
+  - vllm/entrypoints/llm.py
+  - vllm/config/parallel.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/engine/
+  - vllm/v1/executor/
+  - vllm/v1/worker/
+  - vllm/v1/distributed/
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
-  - tests/distributed/test_context_parallel.py
-  - tests/v1/distributed/test_dbo.py
-  - examples/features/data_parallel/data_parallel_offline.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - examples/offline_inference/data_parallel.py
+  - tests/distributed/test_context_parallel.py
+  - tests/distributed/test_rocm_quick_reduce.py
+  - tests/distributed/test_quick_all_reduce.py
+  - tests/v1/distributed/test_dbo.py
+  - tests/utils.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
+  - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
@@ -2763,7 +2785,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
@@ -2779,7 +2800,21 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+
+- label: Entrypoints Integration (Speech to Text) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/speech_to_text
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
@@ -2930,8 +2965,8 @@ steps:
   - python3 pooling/embed/vision_embedding_offline.py --seed 0
   # Features demo
   - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-  - python3 offline_inference/llm_engine_example.py
-  - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -3032,7 +3067,7 @@ steps:
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
-#----------------------------------------------------------  mi355 · models  -----------------------------------------------------------#
+#-----------------------------------------------------  mi355 · models / language  -----------------------------------------------------#
 
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
@@ -3043,7 +3078,7 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
@@ -3099,6 +3134,8 @@ steps:
   commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
+
+#----------------------------------------------------  mi355 · models / multimodal  ----------------------------------------------------#
 
 - label: Multi-Modal Models (Extended Generation 1) # TBD
   timeout_in_minutes: 180
@@ -3170,6 +3207,8 @@ steps:
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
+
+#-----------------------------------------------------  mi355 · models / quantized  -----------------------------------------------------#
 
 - label: Quantized Models Test # TBD
   timeout_in_minutes: 180
@@ -3318,7 +3357,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+  - ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 - label: Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180

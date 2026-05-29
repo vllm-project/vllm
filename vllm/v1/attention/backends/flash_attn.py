@@ -22,7 +22,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
-    flash_attn_supports_fp8,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
@@ -147,7 +146,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -158,24 +157,17 @@ class FlashAttentionBackend(AttentionBackend):
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (2, 0, 1, 3, 4, 5)
+            return (1, 0, 2, 3, 4, 5)
         elif cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
         elif cache_layout == "HND" and include_num_layers_dimension:
             # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
-            return (2, 4, 0, 1, 3, 5)
+            return (1, 4, 0, 2, 3, 5)
         elif cache_layout == "HND":
             stride_order = (0, 1, 3, 2, 4)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
-
-    @staticmethod
-    def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
-        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            return torch.float8_e4m3fn
-        else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
@@ -191,8 +183,13 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if is_quantized_kv_cache(kv_cache_dtype):
-            return flash_attn_supports_fp8()
+        if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+            if current_platform.is_xpu():
+                return True
+            return (
+                get_flash_attn_version() == 3
+                and current_platform.is_device_capability_family(90)
+            )
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
@@ -297,7 +294,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
+        if get_flash_attn_version() == 3 or current_platform.is_xpu()
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
@@ -450,9 +447,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         ):
             cache_dtype = self.cache_config.cache_dtype
             if is_quantized_kv_cache(cache_dtype):
-                qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                    cache_dtype
-                )
+                qkv_dtype = current_platform.fp8_dtype()
             else:
                 qkv_dtype = self.kv_cache_dtype
             if aot_schedule:
@@ -645,11 +640,6 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
-            raise NotImplementedError(
-                "FlashAttention does not support fp8 kv-cache on this device."
-            )
-
         self.sinks = sinks
         if self.sinks is not None:
             assert flash_attn_supports_sinks(), (
@@ -693,7 +683,7 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -741,7 +731,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         # For decoder and cross-attention, use KV cache as before
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
@@ -762,11 +752,8 @@ class FlashAttentionImpl(AttentionImpl):
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
-            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                self.kv_cache_dtype
-            )
-            key_cache = key_cache.view(dtype)
-            value_cache = value_cache.view(dtype)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
@@ -875,7 +862,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
