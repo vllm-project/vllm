@@ -6,9 +6,8 @@ import ctypes
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
-import numpy as np
-import torch
 from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
+from nixl._bindings import nixlXferDList
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
@@ -25,6 +24,10 @@ NIXL_WRITE = "WRITE"
 NIXL_READ = "READ"
 NIXL_PROC = "PROC"
 NIXL_DONE = "DONE"
+
+# Device ID for CPU DRAM descriptors. DRAM is not a multi-device resource so
+# the device ID is always 0.
+NIXL_DEV_ID: int = 0
 
 # Fields for NIXL OBJ descriptors: (addr, len, dev_id, obj_key).
 # For existence probes addr and len are placeholders — no data is read.
@@ -62,19 +65,24 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._agent.create_backend("OBJ", params)
         self._transfers: dict[int, TransferEntry] = {}
         self._primary_reg = None
-        self._base_addr: int = 0
-        self._stride: int = 0
+        self._dram_mem_t = self._agent.nixl_mems["DRAM"]
+        self._block_dram_tuples: list[tuple[int, int, int]] = []
+        self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
         self._file_mapper = FileMapper.from_offloading_spec(root_dir, offloading_spec)
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
         self._probe_connectivity()
 
-        self._base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
+        base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
+        stride = primary_kv_view.strides[0]
         self._primary_reg = self._agent.register_memory(
-            [(self._base_addr, primary_kv_view.nbytes, 0, "")], "DRAM"
+            [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
         )
-        self._stride = primary_kv_view.strides[0]
+        self._block_size_bytes = stride
+        self._block_dram_tuples = [
+            (base_addr + i * stride, stride, NIXL_DEV_ID) for i in range(len(primary_kv_view))
+        ]
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -111,20 +119,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         op: str,
     ) -> bool:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
-        blocks_data = [
-            (self._base_addr + int(bid) * self._stride, self._stride, 0)
-            for bid in block_ids
-        ]
+        xfer_desc = nixlXferDList(
+            self._dram_mem_t,
+            [self._block_dram_tuples[int(bid)] for bid in block_ids],
+        )
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
-        nixl_files = [(0, self._stride, dev_id, key)
+        nixl_files = [(0, self._block_size_bytes, dev_id, key)
                       for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)]
         self._next_obj_dev_id += len(nixl_files)
-
-        xfer_desc = self._agent.get_xfer_descs(blocks_data, "DRAM")
-        if xfer_desc is None:
-            logger.warning("get_xfer_descs failed for job %d", job_id)
-            return False
 
         files_desc = self._agent.register_memory(nixl_files, "OBJ")
         if files_desc is None:
