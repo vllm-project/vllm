@@ -48,6 +48,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
     "nvfp4": torch.uint8,
+    "int4_kivi": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -77,7 +78,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
         or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype == "nvfp4"
+        or kv_cache_dtype in ("nvfp4", "int4_kivi")
     )
 
 
@@ -414,6 +415,23 @@ def set_random_seed(seed: int | None) -> None:
 
 def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+    return head_size // 2 + head_size // 16
+
+
+def int4_kivi_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for the INT4-KIVI KV cache.
+
+    Per token per head: ``head_size // 2`` bytes of nibble-packed INT4 data
+    (2 codes/byte) plus ``head_size // 16`` bytes of fp8/uint8 block scales
+    (1 scale per 16-element block).  Identical formula and physical layout to
+    NVFP4, so the same page-size budgeting and split-view helpers apply.
+
+    NOTE (active layout): the int4_kivi vLLM backend currently quantizes BOTH
+    K and V *per token* (head_dim 16-blocks).  The per-channel-K KIVI layout
+    (the quality-optimal one) uses the same byte budget but needs 16-token-page
+    completion logic; per-token is the simplest correct store that fits vLLM's
+    per-token slot mapping cleanly.
+    """
     return head_size // 2 + head_size // 16
 
 
