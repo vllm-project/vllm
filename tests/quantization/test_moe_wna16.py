@@ -3,12 +3,15 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Method
+from vllm.platforms import current_platform
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA")
 def test_moe_wna16_apply_passes_layer_activation(monkeypatch):
     captured_kwargs = {}
 
