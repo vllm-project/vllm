@@ -97,7 +97,7 @@ class NixlConnectorWorker:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
         num_ssm_regions = (
-            len(self.block_len_per_layer) * len(self._conv_decomp.local_conv_offsets)  # type: ignore[union-attr]
+            len(self.block_len_per_layer) * self._ssm_regions_per_layer
             if self._has_mamba
             else 0
         )
@@ -272,6 +272,19 @@ class NixlConnectorWorker:
                 vllm_config.parallel_config.tensor_parallel_size,
             )
             mamba_ssm_size = self._conv_decomp.state_sizes
+
+        # Number of NIXL descriptor regions per SSM layer per block.
+        # KDA: 4 (conv_q, conv_k, conv_v, recurrent)
+        # Mamba2/GDN: 3 conv sub-projections + 1 SSM temporal = 4
+        self._ssm_regions_per_layer: int = 0
+        if self._has_mamba and self._conv_decomp is not None:
+            if isinstance(self._conv_decomp, KDAStateSplitInfo):
+                self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets)
+            else:
+                # MambaConvSplitInfo: 3 conv sub-projections + 1 SSM temporal
+                self._ssm_regions_per_layer = (
+                    len(self._conv_decomp.local_conv_offsets) + 1
+                )
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
@@ -1041,6 +1054,18 @@ class NixlConnectorWorker:
                 for blk in range(num_blocks):
                     result.append(
                         (base_addr + blk * page_stride + off, sz, self.device_id)
+                    )
+            # Mamba2/GDN: local_conv_offsets only covers the 3 conv sub-projections.
+            # Append the SSM temporal state separately.
+            if isinstance(self._conv_decomp, MambaConvSplitInfo):
+                conv_size, ssm_size = self._mamba_ssm_size
+                for blk in range(num_blocks):
+                    result.append(
+                        (
+                            base_addr + blk * page_stride + conv_size,
+                            ssm_size,
+                            self.device_id,
+                        )
                     )
         return result
 
