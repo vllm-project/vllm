@@ -45,7 +45,6 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
