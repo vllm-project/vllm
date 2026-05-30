@@ -117,11 +117,11 @@ class MiniMaxM3MLP(nn.Module):
                 f"Unsupported activation: {config.hidden_act}. "
                 "Only swigluoai is supported."
             )
-        # gate * sigmoid(alpha * gate) * (up + 1), with both halves clamped.
+        # gate * sigmoid(alpha * gate) * (up + beta), with both halves clamped.
         self.act_fn = SiluAndMulWithClamp(
             swiglu_limit=config.swiglu_limit,
             alpha=config.swiglu_alpha,
-            beta=1.0,
+            beta=config.swiglu_beta,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -193,10 +193,11 @@ class MiniMaxM3MoE(nn.Module):
             intermediate_size=config.intermediate_size,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            # sglang hardcodes renormalize=True (no config field for it).
             renormalize=True,
             activation=config.hidden_act,
             swiglu_limit=config.swiglu_limit,
+            swiglu_alpha=config.swiglu_alpha,
+            swiglu_beta=config.swiglu_beta,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,

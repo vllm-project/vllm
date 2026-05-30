@@ -2141,6 +2141,9 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             a1_scale=None,
             a2_scale=None,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
     def apply_monolithic(

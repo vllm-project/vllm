@@ -34,6 +34,7 @@ class MiniMaxM3TextConfig(PretrainedConfig):
         partial_rotary_factor: float = 0.5,
         hidden_act: str = "swigluoai",
         swiglu_alpha: float = 1.702,
+        swiglu_beta: float = 1.0,
         swiglu_limit: float = 7.0,
         use_qk_norm: bool = True,
         qk_norm_type: str = "per_head",
@@ -67,6 +68,7 @@ class MiniMaxM3TextConfig(PretrainedConfig):
         self.partial_rotary_factor = partial_rotary_factor
         self.hidden_act = hidden_act
         self.swiglu_alpha = swiglu_alpha
+        self.swiglu_beta = swiglu_beta
         self.swiglu_limit = swiglu_limit
         self.use_qk_norm = use_qk_norm
         self.qk_norm_type = qk_norm_type

@@ -159,6 +159,8 @@ def _silu_mul_quant_fp8_packed_kernel(
     output_q_stride_m,
     output_scale_stride_k,
     clamp_limit,
+    alpha,
+    beta,
     N: tl.constexpr,
     NUM_GROUPS: tl.constexpr,
     fp8_min: tl.constexpr,
@@ -204,7 +206,10 @@ def _silu_mul_quant_fp8_packed_kernel(
                 act_f32 = tl.minimum(act_f32, clamp_limit)
                 mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
 
-            y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
+            # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+            #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+            glu = act_f32 / (1.0 + tl.exp(-act_f32 * alpha))
+            y = (mul_f32 + beta) * glu
             # Round through bf16 to match unfused precision path
             y = y.to(tl.bfloat16).to(tl.float32)
 
@@ -235,6 +240,8 @@ def silu_mul_quant_fp8_packed_triton(
     group_size: int = 128,
     output_q: torch.Tensor | None = None,
     clamp_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.dim() == 2
     assert input.is_contiguous()
@@ -277,6 +284,8 @@ def silu_mul_quant_fp8_packed_triton(
         output_q.stride(0),
         output_scale_packed.stride(1),
         clamp_limit if has_clamp else 0.0,
+        alpha,
+        beta,
         N=N,
         NUM_GROUPS=num_groups_per_row,
         fp8_min=fp8_min,
@@ -303,6 +312,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     # Information for float8
     eps,
     clamp_limit,
+    alpha,
+    beta,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
@@ -348,10 +359,14 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
         mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
             y_ptr.dtype.element_ty
         )
+    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+    # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
+    # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
     act_in = act_in.to(tl.float32)
-    one_f32 = tl.cast(1, tl.float32)
-    silu_out = (act_in / (one_f32 + tl.exp(-act_in))).to(y_ptr.dtype.element_ty)
-    y = (silu_out * mul_in).to(tl.float32)
+    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
+    up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
+    y = (glu * up).to(tl.float32)
 
     # quant
     _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
@@ -379,11 +394,15 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     use_ue8m0: bool | None = None,
     eps: float = 1e-10,
     clamp_limit: float | None = None,
+    group_size: int = 128,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     """
-    silu+mul + block-fp8 quant with group size 128.
+    Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
     """
-    GROUP_SIZE = 128
+    GROUP_SIZE = group_size
     assert input.ndim == 2
     if output is not None:
         assert output.ndim == 2
@@ -431,6 +450,8 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         output_scales.stride(-1),
         eps,
         clamp_limit if has_clamp else 0.0,
+        alpha,
+        beta,
         fp8_min,
         fp8_max,
         use_ue8m0,
@@ -1020,9 +1041,10 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
-    if ws.dtype == torch.float8_e8m0fnu:
-        # Scales already in E8M0 from checkpoint — upcast to fp32
-        # and skip requantization (weights already have power-of-two scales).
+    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
+        # Scales already in E8M0 from checkpoint (float8_e8m0fnu, or raw E8M0
+        # bits as uint8 for MXFP8) — upcast to fp32 and skip requantization
+        # (weights already have power-of-two scales).
         ws = _upcast_e8m0_to_fp32(ws)
     else:
         assert ws.dtype == torch.float32, (
@@ -1062,7 +1084,8 @@ def deepgemm_post_process_fp8_weight_block(
         ws = ws.unsqueeze(0)
 
     # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
-    recipe = (1, 128, 128)
+    # (1, block_n, block_k): (1, 128, 128) for FP8 block, (1, 1, 32) for MXFP8.
+    recipe = (1, quant_block_shape[0], quant_block_shape[1])
 
     # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
     # DeepGemm uses the `transform_sf_into_required_layout` function to

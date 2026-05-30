@@ -33,7 +33,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
@@ -123,12 +126,26 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
-        assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
-        assert quant_config.quant_dtype == torch.float8_e4m3fn
+        # MXFP8: FP8 e4m3 values + UE8M0 1x32 block scales (Blackwell). Reuses
+        # the same grouped GEMM (aliased to fp8_fp4) with recipe (1, 32).
+        self.mxfp8 = quant_config.block_shape == [1, 32]
+        if self.mxfp8:
+            assert quant_config.quant_dtype == "mxfp8"
+        else:
+            assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
+            assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
 
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        # FP8 (silu) configs leave these None, reproducing plain silu.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -147,14 +164,23 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        SUPPORTED_W_A = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+            return True
+        # MXFP8 1x32 uses the fp8_fp4 grouped GEMM with recipe (1, 32) — only
+        # available on Blackwell (SM100).
+        if (weight_key, activation_key) == (kMxfp8Static, kMxfp8Dynamic):
+            return current_platform.is_device_capability_family(100)
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.SWIGLUSTEP]
+        # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
+        # uses the unfused activation path.
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -201,14 +227,20 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         M_sum, N = input.size()
         activation_out_dim = self.adjust_N_for_activation(N, activation)
 
-        # 1. DeepGemm UE8M0: fused SiLU+mul+clamp+quant+pack
+        # silu and swigluoai are both expressible by the fused gated kernel via
+        # (alpha, beta): silu uses alpha=1, beta=0; swigluoai uses config values.
+        fused_gated = activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+
+        # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:
-            if activation == MoEActivation.SILU:
+            if fused_gated:
                 return fused_silu_mul_fp8_quant_packed(
                     input=input,
                     output_q=output,
                     group_size=block_k,
                     clamp_limit=self.gemm1_clamp_limit,
+                    alpha=self.gemm1_alpha,
+                    beta=self.gemm1_beta,
                 )
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
@@ -221,14 +253,17 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             )
             return a2q, a2q_scale
 
-        # 2. Hopper / non‑E8M0: prefer the fused SiLU+mul+quant kernel
-        if activation == MoEActivation.SILU:
+        # 2. Hopper / non‑E8M0: prefer the fused gate+mul+quant kernel
+        if fused_gated:
             use_ue8m0 = scale_fmt == DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
             return silu_mul_per_token_group_quant_fp8_colmajor(
                 input=input,
                 output=output,
                 use_ue8m0=use_ue8m0,
                 clamp_limit=self.gemm1_clamp_limit,
+                group_size=block_k,
+                alpha=self.gemm1_alpha,
+                beta=self.gemm1_beta,
             )
 
         # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
@@ -295,9 +330,17 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         )
         assert a1q.size(0) == M_sum
 
+        # MXFP8 (1x32) drives the fp8_fp4-aliased grouped GEMM with recipe
+        # (1, 32); the FP8 block path keeps the default (128) recipe.
+        gemm_kwargs = (
+            {"recipe_a": (1, self.block_shape[1]), "recipe_b": (1, self.block_shape[1])}
+            if self.mxfp8
+            else {}
+        )
+
         mm1_out = _resize_cache(workspace2, (M_sum, N))
         m_grouped_fp8_gemm_nt_contiguous(
-            (a1q, a1q_scale), (w1, self.w1_scale), mm1_out, expert_ids
+            (a1q, a1q_scale), (w1, self.w1_scale), mm1_out, expert_ids, **gemm_kwargs
         )
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -310,7 +353,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
         mm2_out = _resize_cache(workspace2, (M_sum, K))
         m_grouped_fp8_gemm_nt_contiguous(
-            (a2q, a2q_scale), (w2, self.w2_scale), mm2_out, expert_ids
+            (a2q, a2q_scale), (w2, self.w2_scale), mm2_out, expert_ids, **gemm_kwargs
         )
 
         if apply_router_weight_on_input:

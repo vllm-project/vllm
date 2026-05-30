@@ -17,15 +17,35 @@ logger = init_logger(__name__)
 
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
+    Fp8MoeBackend.DEEPGEMM,
     Fp8MoeBackend.MARLIN,
     Fp8MoeBackend.XPU,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
 }
+
+
+def _mxfp8_backend_to_kernel_cls(
+    backend: Fp8MoeBackend,
+) -> list[type[mk.FusedMoEExperts]]:
+    """Resolve the MXFP8 expert classes for a backend.
+
+    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
+    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
+    """
+    if backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
+
+        return [DeepGemmExperts]
+    return backend_to_kernel_cls(backend)
 
 
 def _select_kernel_cls(
@@ -39,7 +59,7 @@ def _select_kernel_cls(
         else mk.FusedMoEActivationFormat.Standard
     )
     last_reason: str | None = None
-    for cls in backend_to_kernel_cls(backend):
+    for cls in _mxfp8_backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
             cls,
             config,
