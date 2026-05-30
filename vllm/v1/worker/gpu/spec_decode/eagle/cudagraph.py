@@ -61,6 +61,24 @@ class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
             )
             attn_state = full_cg_attn_states[desc]
             attn_metadata, slot_mappings = attn_state
+
+            # NOTE: Band-aid fix for Deepseek V4 FlashMLA tile scheduler planner.
+            # Draft prefill reuses the target's captured metadata, so its
+            # FlashMLA tile schedulers are already planned. Reset them so the
+            # planner re-runs inside the draft's own FULL graph on capture.
+            if isinstance(attn_metadata, dict):
+                for md in attn_metadata.values():
+                    for name in (
+                        "tile_sched_swaonly",
+                        "tile_sched_c4a",
+                        "tile_sched_c128a",
+                    ):
+                        sched = getattr(md, name, None)
+                        if sched is not None:
+                            sched.have_initialized = False
+                            sched.tile_scheduler_metadata = None
+                            sched.num_splits = None
+
             fwd = lambda cg_mode: forward_fn(
                 num_reqs,
                 num_tokens,
