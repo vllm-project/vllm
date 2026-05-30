@@ -151,7 +151,7 @@ async def build_async_engine_client_from_engine_args(
         yield async_llm
     finally:
         if async_llm:
-            async_llm.shutdown()
+            async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
 def build_app(
@@ -665,8 +665,7 @@ async def build_and_serve_renderer(
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer")
+    decorate_logs("APIServer", skip_if_decorated=True)
 
     # Interrupt initialization if SIGTERM arrives before uvicorn installs its
     # own signal handlers. Once uvicorn is running it replaces this.

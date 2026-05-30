@@ -27,11 +27,14 @@ WORKDIR /workspace
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
+ARG max_jobs=32
+ENV MAX_JOBS=${max_jobs}
+
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
-    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
+    && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates zlib1g-dev \
     gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof make xz-utils \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -123,9 +126,6 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
 
-ARG max_jobs=32
-ENV MAX_JOBS=${max_jobs}
-
 ARG GIT_REPO_CHECK=0
 # Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
 ARG VLLM_CPU_X86=0
@@ -164,6 +164,23 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+
+######################### TRITON-CPU BUILD IMAGE #########################
+FROM base AS vllm-triton-cpu-build
+
+WORKDIR /vllm-workspace
+
+RUN mkdir dist
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        git clone --recurse-submodules "https://github.com/triton-lang/triton-cpu.git"; \
+        cd triton-cpu; \
+        git checkout "270e696d"; \
+        uv build --wheel --out-dir=../dist; \
+    fi
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
@@ -257,8 +274,14 @@ WORKDIR /vllm-workspace
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
-    uv pip install dist/*.whl && \
-    uv pip install "vllm[audio]"
+    uv pip install "$(realpath dist/*.whl)[audio]"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=bind,from=vllm-triton-cpu-build,src=/vllm-workspace/dist,target=dist \
+    if [ "$TARGETARCH" = "amd64" ] || [ "$VLLM_CPU_X86" != "0" ]; then \
+        uv pip install "$(realpath dist/*.whl)"; \
+    fi
 
 # Add labels to document build configuration
 LABEL org.opencontainers.image.title="vLLM CPU"
