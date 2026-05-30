@@ -312,8 +312,11 @@ MYPYTHONPATH="/vllm-workspace"
 
 container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
 container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
-CONTAINER_TMPDIR="/tmp/vllm-buildkite-${container_job_id}"
-CONTAINER_CACHE_ROOT="${CONTAINER_TMPDIR}/cache"
+container_job_id_short="${container_job_id:0:8}"
+# Keep TMPDIR short because Ray creates AF_UNIX sockets under it and Linux
+# limits socket paths to 107 bytes.
+CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
+CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
 CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
