@@ -484,6 +484,22 @@ class MoERunner(MoERunnerInterface):
                 value=0.0,
             )
 
+        # Truncation sizes for stripping kernel padding from the output.
+        # None means no truncation needed (no padding was applied).
+        #
+        # Two truncation points exist in forward():
+        #   pre_xform:  applied to fused_output BEFORE routed_output_transform
+        #   post_xform: applied to the final result AFTER all-reduce
+        #
+        # Latent MoE with shared experts (NemotronH):
+        #   - pre_xform strips padding from the latent dim so
+        #     routed_output_transform receives the correct input size
+        #   - post_xform truncates to shared_experts_hidden_dim (full hidden)
+        #     after shared + routed outputs are combined and all-reduced
+        #
+        # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
+        #   - pre_xform is None (no early truncation)
+        #   - post_xform strips padding after all-reduce (or None if unpadded)
         if transformed_hidden_dim == hidden_states.shape[-1]:
             transformed_hidden_dim = None
 
