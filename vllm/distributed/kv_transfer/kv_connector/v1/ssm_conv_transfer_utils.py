@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Mamba conv-state sub-projection decomposition for the 3-read transfer.
+"""Mamba/SSM state sub-projection decomposition for NIXL transfer.
 
-With DS conv state layout (dim, state_len), sub-projections are
-contiguous in memory.  Each D rank reads its slices via 3 separate
-RDMA transfers — no P-side permutation needed.
+With DS conv state layout (dim, state_len), sub-projections are contiguous
+in memory.  Each D rank reads its slices via separate RDMA transfers.
 
 Supported model types:
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
+  - KDA (Kimi Delta Attention): 4 separate states (conv_q, conv_k, conv_v,
+    recurrent) — no sub-projection decomposition needed.
 """
 
 import math
@@ -38,6 +39,10 @@ class MambaConvSplitInfo:
     local_proj_dims: tuple[int, int, int]  # per-rank column counts per sub-proj
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
+
+    @property
+    def state_sizes(self) -> tuple[int, ...]:
+        return self.ssm_sizes
 
     @property
     def local_conv_dim(self) -> int:
@@ -100,25 +105,72 @@ class MambaConvSplitInfo:
             ]
 
 
+@dataclass(frozen=True)
+class KDAStateSplitInfo:
+    """Per-rank byte sizes of KDA's 4 state tensors.
+
+    KDA states are already separated in memory -- no sub-projection
+    decomposition needed (unlike Mamba2/GDN's conv split).
+
+    DS memory layout within one page (contiguous in memory):
+        |--- conv_q ---|--- conv_k ---|--- conv_v ---|--- recurrent ---|
+    """
+
+    state_sizes: tuple[int, int, int, int]
+
+    @property
+    def local_conv_offsets(self) -> list[tuple[int, int]]:
+        offsets: list[tuple[int, int]] = []
+        offset = 0
+        for sz in self.state_sizes:
+            offsets.append((offset, sz))
+            offset += sz
+        return offsets
+
+    def remote_state_offsets(
+        self, local_rank_offset: int, tp_ratio: int
+    ) -> list[tuple[int, int]]:
+        """(byte_offset, byte_size) for each KDA state from remote P page."""
+        effective_ratio = max(tp_ratio, 1)
+        result: list[tuple[int, int]] = []
+        offset_acc = 0
+        for sz in self.state_sizes:
+            remote_total = sz * effective_ratio
+            result.append((offset_acc + local_rank_offset * sz, sz))
+            offset_acc += remote_total
+        return result
+
+
+def derive_kda_state_split(
+    mamba_spec: MambaSpec,
+    local_tp: int,
+) -> KDAStateSplitInfo:
+    assert len(mamba_spec.shapes) == 4, (
+        f"KDA expects 4 shapes, got {len(mamba_spec.shapes)}"
+    )
+    assert is_conv_state_dim_first(), "KDA transfer requires DS conv state layout"
+    state_bytes: list[int] = []
+    for shape, dtype in zip(mamba_spec.shapes, mamba_spec.dtypes):
+        dtype_size = torch.tensor([], dtype=dtype).element_size()  # type: ignore[misc]
+        state_bytes.append(torch.Size(shape).numel() * dtype_size)
+    return KDAStateSplitInfo(
+        state_sizes=(state_bytes[0], state_bytes[1], state_bytes[2], state_bytes[3])
+    )
+
+
 def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
-) -> MambaConvSplitInfo:
-    """Derive per-rank sub-projection byte sizes from a MambaSpec.
+) -> MambaConvSplitInfo | KDAStateSplitInfo:
+    """Derive per-rank byte sizes from a MambaSpec.
 
-    Called once at init on both P and D.  Decomposes the conv dimension
-    into its sub-projection parts based on the model type.
-
-    Args:
-        mamba_spec: MambaSpec whose shapes are:
-            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
-            shapes[1] = temporal state (model-specific shape).
-        local_tp: this engine's tensor-parallel size.
-
-    Returns:
-        MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
-        conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
+    Called once at init on both P and D.  Dispatches based on the number of
+    state shapes: 4 shapes for KDA (conv_q, conv_k, conv_v, recurrent),
+    2 shapes for Mamba2/GDN (conv_state, ssm_state with sub-projection
+    decomposition).
     """
+    if len(mamba_spec.shapes) == 4:
+        return derive_kda_state_split(mamba_spec, local_tp)
     _supported = (
         MambaAttentionBackendEnum.MAMBA2,
         MambaAttentionBackendEnum.GDN_ATTN,
@@ -209,9 +261,5 @@ def compute_physical_blocks_per_logical(
 
     The remote engine's ratio is not sent directly in the handshake, so we
     reconstruct it: total mamba state per logical block / block_len.
-
-    Args:
-        ssm_sizes: (conv_state_bytes, ssm_state_bytes) from NixlAgentMetadata.
-        block_len: the engine's block_len in bytes (from block_lens[0]).
     """
-    return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
+    return math.ceil(sum(ssm_sizes) / block_len)

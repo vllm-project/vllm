@@ -34,8 +34,9 @@ GET_META_MSG = b"get_meta_msg"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Generalize ssm_sizes to variable-length tuple for KDA (4-state) support
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -48,7 +49,7 @@ class NixlAgentMetadata:
     block_lens: list[int]
     kv_cache_layout: str
     block_size: int
-    ssm_sizes: tuple[int, int]
+    ssm_sizes: tuple[int, ...]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
 

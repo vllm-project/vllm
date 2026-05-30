@@ -579,9 +579,8 @@ class TransferTopology:
         """
         if isinstance(layer_spec, MambaSpec):
             # Register the whole kv cache shared tensor, including
-            # SSM/Conv.
-            conv, ssm = cache
-            return [conv]
+            # SSM/Conv.  Works for both 2-state (Mamba2) and 4-state (KDA).
+            return [cache[0]]
 
         # Check may be hacky but it's matching
         # `_update_hybrid_attention_mamba_layout`.
