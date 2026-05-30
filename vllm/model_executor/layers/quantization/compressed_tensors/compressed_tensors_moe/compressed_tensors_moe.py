@@ -32,7 +32,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         layer_name: str,
     ) -> FusedMoEMethodBase:
-        # FusedMoE was made by combining multiple Linears so need to
+        # RoutedExperts was made by combining multiple Linears so need to
         # make sure quantization config for Linear can target it
         quant_config._add_fused_moe_to_target_scheme_map()
         unfused_names = [
@@ -67,6 +67,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             )
 
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
+
+        if quant_config._is_mxfp8(weight_quant):
+            from .compressed_tensors_moe_w8a8_mxfp8 import (
+                CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+
+            return CompressedTensorsW8A8Mxfp8MoEMethod(layer.moe_config)
 
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise

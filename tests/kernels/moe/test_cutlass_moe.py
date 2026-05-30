@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
@@ -214,7 +214,6 @@ def run_with_expert_maps(
                 moe_config=moe_config,
                 quant_config=new_quant_config,
             ),
-            inplace=False,
         )
         out_tensor = out_tensor + kernel.apply(**kwargs)
 
@@ -284,7 +283,6 @@ def run_8_bit(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
         return kernel.apply(**kwargs)
 
