@@ -694,8 +694,7 @@ class Gemma3ForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=[],
+            buffer_keys=["pixel_values"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -793,10 +792,10 @@ class Gemma3ForConditionalGeneration(
             device=device,
             dtype=dtype,
         )
+        values = {"pixel_values": dummy_pixel_values}
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs={"pixel_values": dummy_pixel_values},
-            buffers={},
+            values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -809,14 +808,15 @@ class Gemma3ForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        return EncoderCudaGraphReplayBuffers(buffers={})
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]},
+        )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        pixel_values = mm_kwargs["pixel_values"]
+        pixel_values = values["pixel_values"]
         image_features = self.vision_tower(pixel_values)
         image_features = self.multi_modal_projector(image_features)
         return image_features.flatten(end_dim=1)
