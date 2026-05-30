@@ -78,7 +78,7 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    use_async: bool = False
+    use_async: bool = True
     """
     Whether to use non-blocking EPLB.
     """
