@@ -100,9 +100,6 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -255,9 +252,6 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
         routing_method: RoutingMethodType,
     ) -> bool:
         return True
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     def apply(
         self,

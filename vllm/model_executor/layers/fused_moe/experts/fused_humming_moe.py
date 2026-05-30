@@ -156,9 +156,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     ) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     @staticmethod
     def _supports_current_device() -> bool:
         platform = current_platform
