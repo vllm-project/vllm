@@ -201,6 +201,9 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "flashinfer_cudnn": {
         FlashInferCudnnNvFp4LinearKernel,
     },
+    "flashinfer_b12x": {
+        FlashInferB12xNvFp4LinearKernel,
+    },
     "marlin": {
         MarlinFP8ScaledMMLinearKernel,
         MarlinLinearKernel,
@@ -375,9 +378,6 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
-        # upstream CUTLASS SM121 MMA op guard is resolved; use
-        # VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x to opt in explicitly.
         FlashInferCutlassNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
@@ -389,6 +389,13 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
     ],
+}
+
+_EXPLICIT_ONLY_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
+    # FlashInferB12xNvFp4LinearKernel is excluded from auto-selection until
+    # upstream CUTLASS SM121 MMA op guard is resolved. Users can opt in with
+    # --linear-backend flashinfer_b12x.
+    PlatformEnum.CUDA: [FlashInferB12xNvFp4LinearKernel],
 }
 
 _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
@@ -906,6 +913,8 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
 
     # Apply --linear-backend filtering when set.
     if linear_backend != "auto":
+        possible.extend(_EXPLICIT_ONLY_NVFP4_KERNELS.get(platform, []))
+        possible = list(dict.fromkeys(possible))
         filtered = _filter_kernels_by_backend(linear_backend, possible)
         if not filtered:
             raise ValueError(

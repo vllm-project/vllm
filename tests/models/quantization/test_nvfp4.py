@@ -15,6 +15,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_b12x_gemm
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
@@ -105,6 +106,7 @@ SM_100_NVFP4_BACKENDS = [
         "flashinfer_cudnn",
         "flashinfer_trtllm",  # the small seq_len ensures trtllm_8x4_layout backend is used
         "flashinfer_cutlass",
+        "flashinfer_b12x",
     ],
 )
 def test_nvfp4(vllm_runner, model, eager, backend):
@@ -115,6 +117,11 @@ def test_nvfp4(vllm_runner, model, eager, backend):
         pytest.skip(
             f"The backend {backend} is not supported with current_platform.has_device_capability(100) == False"
         )
+    if backend == "flashinfer_b12x" and (
+        not current_platform.has_device_capability(120)
+        or not has_flashinfer_b12x_gemm()
+    ):
+        pytest.skip(f"The backend {backend} requires SM120+ and FlashInfer B12x GEMM")
 
     with vllm_runner(model, enforce_eager=eager, linear_backend=backend) as llm:
         output = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
