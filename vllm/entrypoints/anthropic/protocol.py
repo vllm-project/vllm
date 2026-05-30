@@ -114,6 +114,37 @@ class AnthropicOutputConfig(BaseModel):
     format: AnthropicJsonOutputFormat | None = None
 
 
+def _normalize_system_blocks(content: Any) -> list[dict[str, Any]]:
+    """Normalize Anthropic system content to a list of text content blocks.
+
+    Accepts the shapes a system prompt may take — ``None``, a plain string, a
+    list of content blocks (dicts or already-parsed objects), or a stray
+    object — and returns a list of ``{"type": "text", "text": ...}`` blocks.
+    Non-text blocks are passed through unchanged so downstream consumers can
+    still inspect them. Used by ``AnthropicMessagesRequest.hoist_system_messages``
+    to merge hoisted ``role="system"`` entries with any existing top-level
+    ``system`` field.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if isinstance(content, list):
+        blocks: list[dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, str):
+                if block:
+                    blocks.append({"type": "text", "text": block})
+            elif isinstance(block, dict):
+                blocks.append(block)
+            else:
+                # Already-parsed block model (e.g. AnthropicContentBlock).
+                dump = getattr(block, "model_dump", None)
+                blocks.append(dump(exclude_none=True) if dump else block)
+        return blocks
+    return [{"type": "text", "text": str(content)}]
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -143,6 +174,50 @@ class AnthropicMessagesRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def hoist_system_messages(cls, data: Any) -> Any:
+        """Hoist ``role="system"`` entries from ``messages[]`` into ``system``.
+
+        Anthropic's spec only allows ``user``/``assistant`` roles inside
+        ``messages[]`` and carries the system prompt in the top-level ``system``
+        field. However, Claude Code (and some other clients) emit the system
+        prompt as a ``role="system"`` entry *inside* ``messages[]``, which the
+        strict per-message ``Literal["user", "assistant"]`` validator rejects
+        with HTTP 400. Be lenient: pull any such entries out and prepend them to
+        the top-level ``system`` field before per-message validation runs.
+
+        Order is preserved and any pre-existing top-level ``system`` content is
+        kept ahead of the hoisted entries. Content is normalized to a list of
+        content blocks so downstream handling (e.g. billing-header stripping in
+        the serving layer) still applies. Returns ``data`` unchanged when there
+        is nothing to hoist or the shape is unexpected, so it is safe to run
+        unconditionally.
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+
+        hoisted: list[dict[str, Any]] = []
+        kept: list[Any] = []
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "system":
+                hoisted.extend(_normalize_system_blocks(message.get("content")))
+            else:
+                kept.append(message)
+
+        if not hoisted:
+            return data
+
+        blocks = _normalize_system_blocks(data.get("system")) + hoisted
+
+        patched = dict(data)
+        patched["messages"] = kept
+        patched["system"] = blocks
+        return patched
 
     @field_validator("model")
     @classmethod
