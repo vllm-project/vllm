@@ -187,6 +187,7 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_DISABLE_FLASHINFER_AUTOTUNE_CACHE: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
@@ -1535,6 +1536,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
         "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
     ),
+    # Disable the persistent file cache for FlashInfer autotune results.
+    "VLLM_DISABLE_FLASHINFER_AUTOTUNE_CACHE": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_FLASHINFER_AUTOTUNE_CACHE", "0"))
+    ),
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
@@ -2043,6 +2048,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_DISABLE_FLASHINFER_AUTOTUNE_CACHE",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
