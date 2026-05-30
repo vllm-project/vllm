@@ -9,7 +9,6 @@ import pytest
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
-    SupportsPP,
 )
 from vllm.v1.engine import core as engine_core_module
 
@@ -158,7 +157,7 @@ class _LegacyConnector(KVConnectorBase_V1):
         self.legacy_metadata = metadata
 
 
-class _PPAwareConnector(_LegacyConnector, SupportsPP):
+class _PPAwareConnector(_LegacyConnector):
     def __init__(self) -> None:
         super().__init__()
         self.pp_aware_metadata: (

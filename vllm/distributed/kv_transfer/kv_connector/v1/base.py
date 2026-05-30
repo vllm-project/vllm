@@ -121,39 +121,6 @@ def supports_hma(connector: Any) -> bool:
         return isinstance(connector, SupportsHMA)
 
 
-class SupportsPP(ABC):
-    """
-    The class that indicates the corresponding connector supports
-    pipeline-parallel (PP) disaggregated serving.
-
-    Connectors that inherit from this class receive KV connector handshake
-    metadata keyed by ``(pp_rank, tp_rank)`` instead of just ``tp_rank``, so
-    they can track per-PP-rank remote state.
-    """
-
-    @abstractmethod
-    def set_xfer_handshake_metadata_pp_aware(
-        self, metadata: dict[tuple[int, int], "KVConnectorHandshakeMetadata"]
-    ) -> None:
-        """
-        Set PP-aware KV connector handshake metadata for this connector.
-
-        NOTE: This function is only supported by connectors that support PP
-        disaggregation (inherit from ``SupportsPP``). Connectors that do not
-        inherit from ``SupportsPP`` keep receiving ``{tp_rank: metadata}``
-        via ``set_xfer_handshake_metadata``; engine core unwraps the
-        tuple-keyed dict at the dispatch site.
-        """
-        raise NotImplementedError
-
-
-def supports_pp(connector: Any) -> bool:
-    if isinstance(connector, type):
-        return issubclass(connector, SupportsPP)
-    else:
-        return isinstance(connector, SupportsPP)
-
-
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
@@ -676,6 +643,26 @@ class KVConnectorBase_V1(ABC):
             metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
         """
         return None
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
+
+        Default implementation supports only single-PP-rank producers: it keeps
+        the ``pp_rank == 0`` entries, drops the rest, and forwards the resulting
+        ``{tp_rank: metadata}`` to ``set_xfer_handshake_metadata``. Connectors
+        that support PP-disaggregated transfer override this to consume metadata
+        from all PP producer shards.
+        """
+        self.set_xfer_handshake_metadata(
+            {
+                tp_rank: meta
+                for (pp_rank, tp_rank), meta in metadata.items()
+                if pp_rank == 0
+            }
+        )
 
     @classmethod
     def build_prom_metrics(
