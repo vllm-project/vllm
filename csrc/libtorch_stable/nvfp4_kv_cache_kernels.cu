@@ -17,11 +17,8 @@
 #define NVFP4_ENABLE_ELTS16 1
 #include "libtorch_stable/quantization/fp4/nvfp4_utils.cuh"
 
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
-
-#include "dispatch_utils.h"
+#include "libtorch_stable/dispatch_utils.h"
+#include "libtorch_stable/torch_utils.h"
 
 namespace vllm {
 
@@ -184,12 +181,13 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 // Receives key_cache/value_cache as kv_cache[:, 0] and kv_cache[:, 1].
 // Each KV side contains both data and scale:
 //   page = [K_data | K_scale | V_data | V_scale]
-void reshape_and_cache_nvfp4_dispatch(torch::Tensor& key, torch::Tensor& value,
-                                      torch::Tensor& key_cache,
-                                      torch::Tensor& value_cache,
-                                      torch::Tensor& slot_mapping,
-                                      torch::Tensor& k_scale,
-                                      torch::Tensor& v_scale) {
+void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
+                                      torch::stable::Tensor& value,
+                                      torch::stable::Tensor& key_cache,
+                                      torch::stable::Tensor& value_cache,
+                                      torch::stable::Tensor& slot_mapping,
+                                      torch::stable::Tensor& k_scale,
+                                      torch::stable::Tensor& v_scale) {
   int num_tokens = slot_mapping.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -200,17 +198,18 @@ void reshape_and_cache_nvfp4_dispatch(torch::Tensor& key, torch::Tensor& value,
   // key_cache is kv_cache[:, 0] with shape
   // [num_blocks, block_size, num_heads, full_dim] in logical order.
   // Strides encode the physical layout (HND or NHD).
-  TORCH_CHECK(key_cache.dim() == 4, "key_cache must be 4D");
-  TORCH_CHECK(key_cache.size(3) == full_dim,
-              "key_cache last dim must be data_dim + scale_dim, got ",
-              key_cache.size(3), " expected ", full_dim);
+  STD_TORCH_CHECK(key_cache.dim() == 4, "key_cache must be 4D");
+  STD_TORCH_CHECK(key_cache.size(3) == full_dim,
+                  "key_cache last dim must be data_dim + scale_dim, got ",
+                  key_cache.size(3), " expected ", full_dim);
 
   int block_size = key_cache.size(1);
 
-  TORCH_CHECK(head_size % 16 == 0,
-              "head_size must be divisible by 16 for NVFP4 KV cache");
-  TORCH_CHECK(block_size % 4 == 0,
-              "block_size must be divisible by 4 for NVFP4 KV cache swizzle");
+  STD_TORCH_CHECK(head_size % 16 == 0,
+                  "head_size must be divisible by 16 for NVFP4 KV cache");
+  STD_TORCH_CHECK(block_size % 4 == 0,
+                  "block_size must be divisible by 4 for NVFP4 KV cache "
+                  "swizzle");
 
   // Detect physical layout from strides (based on full_dim).
   // HND: head stride > block_offset stride.
@@ -230,8 +229,9 @@ void reshape_and_cache_nvfp4_dispatch(torch::Tensor& key, torch::Tensor& value,
   // Scale follows data within each KV side.
   int64_t data_per_kv = (int64_t)num_heads * block_size * data_dim;
 
-  uint8_t* key_scale_ptr = key_cache.data_ptr<uint8_t>() + data_per_kv;
-  uint8_t* value_scale_ptr = value_cache.data_ptr<uint8_t>() + data_per_kv;
+  uint8_t* key_scale_ptr = key_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
+  uint8_t* value_scale_ptr =
+      value_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
 
   // Scale strides: same page stride, inner strides from layout.
   int64_t scale_block_stride = data_block_stride;
@@ -244,8 +244,8 @@ void reshape_and_cache_nvfp4_dispatch(torch::Tensor& key, torch::Tensor& value,
     scale_block_offset_stride = (int64_t)num_heads * scale_dim;
   }
 
-  const float* k_scale_ptr = k_scale.data_ptr<float>();
-  const float* v_scale_ptr = v_scale.data_ptr<float>();
+  const float* k_scale_ptr = k_scale.const_data_ptr<float>();
+  const float* v_scale_ptr = v_scale.const_data_ptr<float>();
 
   int groups_per_head = head_size / CVT_FP4_SF_VEC_SIZE;
   int total_groups = num_heads * groups_per_head;
@@ -256,20 +256,22 @@ void reshape_and_cache_nvfp4_dispatch(torch::Tensor& key, torch::Tensor& value,
   dim3 grid(num_tokens);
   dim3 block(num_threads);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      key.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
         vllm::reshape_and_cache_nvfp4_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
-                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-                key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
-                key_scale_ptr, value_scale_ptr,
-                slot_mapping.data_ptr<int64_t>(), k_scale_ptr, v_scale_ptr,
-                key.stride(0), value.stride(0), num_heads, head_size,
-                block_size, data_block_stride, data_head_stride,
-                data_block_offset_stride, scale_block_stride, scale_head_stride,
-                scale_block_offset_stride);
+                key.const_data_ptr<scalar_t>(),
+                value.const_data_ptr<scalar_t>(),
+                key_cache.mutable_data_ptr<uint8_t>(),
+                value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                num_heads, head_size, block_size, data_block_stride,
+                data_head_stride, data_block_offset_stride, scale_block_stride,
+                scale_head_stride, scale_block_offset_stride);
       });
 }
