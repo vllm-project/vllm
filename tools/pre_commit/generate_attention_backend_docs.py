@@ -508,7 +508,7 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         metadata = backend_metadata.get(backend_name, {})
         display_name = backend_info.get("name", backend_name)
 
-        # Add marker for default Blackwell backend
+        # Add marker for the highest-priority automatic backend.
         marker = ""
         if backend_name == priority_order[0] and priorities.get("blackwell"):
             marker = "‡"
@@ -1595,8 +1595,9 @@ def generate_mla_section(
     lines.extend(
         [
             "",
-            "> **‡** TRT-LLM Ragged is the default on Blackwell (SM100).",
-            "> On other GPUs, FlashAttention is used as the default.",
+            "> **‡** Automatic selection tries FlashAttention first. On Blackwell",
+            "> (SM100), the fallback order is TRT-LLM Ragged, FlashInfer, then",
+            "> TokenSpeed MLA. On other GPUs, only FlashAttention is considered.",
             "",
             "### Decode Backends",
             "",

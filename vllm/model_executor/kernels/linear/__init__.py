@@ -51,6 +51,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.machete import (
 from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.rdna3_w4a16 import (
+    RDNA3W4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
     TritonW4A16LinearKernel,
 )
@@ -336,8 +339,10 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        RDNA3W4A16LinearKernel,
         TritonW4A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
