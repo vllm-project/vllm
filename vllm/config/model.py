@@ -782,6 +782,21 @@ class ModelConfig:
             return value.lower()
         return value
 
+    @field_validator("max_logprobs", mode="after")
+    @classmethod
+    def _check_max_logprobs(cls, v: int) -> int:
+        # -1 is a sentinel meaning "auto-derive to vocab size"; any other
+        # negative value is silently lost downstream — `validate_logprobs`
+        # rewrites only `-1` to `vocab_size`, so a `-5` cap produces a
+        # confusing "max allowed: -5" error or a silent no-op. Reject at
+        # config-construction time, matching #43794 / #44057 et al.
+        if v == -1 or v >= 0:
+            return v
+        raise ValueError(
+            f"max_logprobs must be a non-negative integer or -1 "
+            f"(auto-derive to vocab size), got {v}."
+        )
+
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
         """Called after __post_init__"""

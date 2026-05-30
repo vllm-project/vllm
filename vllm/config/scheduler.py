@@ -221,6 +221,20 @@ class SchedulerConfig:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
 
+    @field_validator("long_prefill_token_threshold", mode="after")
+    @classmethod
+    def _check_long_prefill_token_threshold(cls, v: int) -> int:
+        # The clamp at `__post_init__` is guarded by `0 < threshold <
+        # num_new_tokens`, and the cap is guarded by `threshold > max_model_len`,
+        # so a negative value matches neither path and silently flows through.
+        # Reject at config-construction time, same shape as #43794.
+        if v < 0:
+            raise ValueError(
+                f"long_prefill_token_threshold must be >= 0 "
+                f"(0 = off, > 0 = clamp), got {v}."
+            )
+        return v
+
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.

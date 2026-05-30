@@ -1487,3 +1487,44 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+@pytest.mark.parametrize("bad", [-2, -5, -10, -1000])
+def test_max_logprobs_rejects_negative_other_than_minus_one(bad):
+    """Regression for #43985: max_logprobs must be >=0 or exactly -1 (auto).
+    Bare negatives like -5 used to flow through and either land as the cap in
+    a misleading 'max allowed: -5' error or get silently skipped."""
+    with pytest.raises(ValidationError, match="max_logprobs"):
+        ModelConfig("facebook/opt-125m", max_logprobs=bad)
+
+
+@pytest.mark.parametrize("good", [-1, 0, 1, 20, 100])
+def test_max_logprobs_accepts_minus_one_and_non_negative(good):
+    cfg = ModelConfig("facebook/opt-125m", max_logprobs=good)
+    assert cfg.max_logprobs == good
+
+
+@pytest.mark.parametrize("bad", [-1, -5, -100])
+def test_long_prefill_token_threshold_rejects_negative(bad):
+    """Regression for #43985: long_prefill_token_threshold is guarded by
+    `0 < threshold < num_new_tokens` so negatives silently slipped past
+    both the clamp and the cap. Reject at construction."""
+    with pytest.raises(ValidationError, match="long_prefill_token_threshold"):
+        SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            long_prefill_token_threshold=bad,
+        )
+
+
+@pytest.mark.parametrize("good", [0, 1, 256, 4096])
+def test_long_prefill_token_threshold_accepts_non_negative(good):
+    cfg = SchedulerConfig(
+        max_model_len=8192,
+        is_encoder_decoder=False,
+        long_prefill_token_threshold=good,
+    )
+    # 0 means off; > 0 may be re-clamped by __post_init__ when
+    # max_num_partial_prefills > 1, but for the default-single-partial path
+    # we just confirm the validator accepted it.
+    assert cfg.long_prefill_token_threshold >= 0
