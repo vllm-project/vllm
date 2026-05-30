@@ -1484,7 +1484,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
-- label: DeepSeek V2-Lite Accuracy (4xH100-4xMI300) # TBD
+- label: DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -1526,7 +1526,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (4xH100-4xMI300) # TBD
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -2703,19 +2703,35 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
+  - csrc/custom_quickreduce.cu
+  - csrc/ops.h
+  - csrc/torch_bindings.cpp
   - vllm/distributed/
-  - vllm/v1/distributed/
+  - vllm/model_executor/layers/
+  - vllm/entrypoints/llm.py
+  - vllm/config/parallel.py
   - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/engine/
+  - vllm/v1/executor/
+  - vllm/v1/worker/
+  - vllm/v1/distributed/
   - vllm/v1/attention/backends/
   - vllm/v1/attention/selector.py
-  - tests/distributed/test_context_parallel.py
-  - tests/v1/distributed/test_dbo.py
-  - examples/features/data_parallel/data_parallel_offline.py
   - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
   - vllm/platforms/rocm.py
+  - vllm/envs.py
+  - examples/offline_inference/data_parallel.py
+  - tests/distributed/test_context_parallel.py
+  - tests/distributed/test_rocm_quick_reduce.py
+  - tests/distributed/test_quick_all_reduce.py
+  - tests/v1/distributed/test_dbo.py
+  - tests/utils.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
+  - pytest -v -s tests/distributed/test_quick_all_reduce.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
@@ -2879,7 +2895,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200-MI355) # TBD
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
