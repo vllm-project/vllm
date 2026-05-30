@@ -145,9 +145,6 @@ class EagleSpeculator:
             cudagraph_mode,
             decode_query_len=1,
         )
-        # Share a single pool between prefill and decode since they never
-        # execute concurrently.
-        self.decode_cudagraph_manager.pool = self.prefill_cudagraph_manager.pool
 
     def load_model(self, target_model: nn.Module) -> None:
         target_attn_layer_names = get_layers_from_vllm_config(
