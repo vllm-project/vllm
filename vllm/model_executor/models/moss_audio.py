@@ -3,6 +3,7 @@
 """Inference-only MOSS-Audio model compatible with HuggingFace weights."""
 
 import math
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -52,6 +53,7 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -73,6 +75,87 @@ MOSS_AUDIO_TOKEN_ID = 151654
 MOSS_AUDIO_BOS_TOKEN_ID = 151669
 MOSS_AUDIO_EOS_TOKEN_ID = 151670
 DEFAULT_MAX_AUDIO_SECONDS = 30
+DEFAULT_MOSS_AUDIO_MEL_CONFIG = {
+    "mel_dim": 128,
+    "mel_sr": 16000,
+    "mel_hop_length": 160,
+    "mel_n_fft": 400,
+}
+MOSS_AUDIO_PLACEHOLDER = (
+    f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+)
+MOSS_AUDIO_SPAN_RE = re.compile(
+    f"{re.escape(MOSS_AUDIO_BOS_TOKEN)}"
+    f"(?:{re.escape(MOSS_AUDIO_TOKEN)})+"
+    f"{re.escape(MOSS_AUDIO_EOS_TOKEN)}"
+)
+MOSS_AUDIO_PROCESSOR_CONFIG_KEYS = {
+    "audio_token_id",
+    "audio_start_id",
+    "audio_end_id",
+    "enable_time_marker",
+    "mel_config",
+}
+
+
+def _normalize_moss_audio_mel_config(
+    mel_config: Mapping[str, object] | None = None,
+) -> dict[str, int]:
+    config = dict(DEFAULT_MOSS_AUDIO_MEL_CONFIG)
+    config.update(_extract_moss_audio_mel_config(mel_config))
+    return config
+
+
+def _extract_moss_audio_mel_config(
+    mel_config: Mapping[str, object] | None = None,
+) -> dict[str, int]:
+    config: dict[str, int] = {}
+    if mel_config is None:
+        return config
+
+    aliases = {
+        "mel_dim": ("mel_dim", "feature_size", "n_mels", "num_mel_bins"),
+        "mel_sr": ("mel_sr", "sampling_rate", "sample_rate"),
+        "mel_hop_length": ("mel_hop_length", "hop_length"),
+        "mel_n_fft": ("mel_n_fft", "n_fft"),
+    }
+    for target_key, source_keys in aliases.items():
+        for source_key in source_keys:
+            if source_key in mel_config:
+                config[target_key] = int(mel_config[source_key])
+                break
+
+    return config
+
+
+def _filter_moss_audio_processor_config(
+    config: Mapping[str, object] | None,
+) -> dict[str, object]:
+    if not config:
+        return {}
+
+    return {
+        key: value
+        for key, value in config.items()
+        if key in MOSS_AUDIO_PROCESSOR_CONFIG_KEYS
+    }
+
+
+def _merge_moss_audio_processor_configs(
+    *configs: Mapping[str, object] | None,
+) -> dict[str, object]:
+    merged: dict[str, object] = {}
+    merged_mel_config: dict[str, int] = {}
+    for config in configs:
+        filtered = _filter_moss_audio_processor_config(config)
+        mel_config = filtered.pop("mel_config", None)
+        merged.update(filtered)
+        if isinstance(mel_config, Mapping):
+            merged_mel_config.update(_extract_moss_audio_mel_config(mel_config))
+
+    if merged_mel_config:
+        merged["mel_config"] = merged_mel_config
+    return merged
 
 
 @dataclass
@@ -795,19 +878,23 @@ class MossAudioProcessor:
         audio_start_id: int = MOSS_AUDIO_BOS_TOKEN_ID,
         audio_end_id: int = MOSS_AUDIO_EOS_TOKEN_ID,
         enable_time_marker: bool = False,
+        mel_config: Mapping[str, object] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.audio_token_id = int(audio_token_id)
         self.audio_start_id = int(audio_start_id)
         self.audio_end_id = int(audio_end_id)
         self.enable_time_marker = bool(enable_time_marker)
+        self.mel_config = _normalize_moss_audio_mel_config(mel_config)
         self.feature_extractor = WhisperFeatureExtractor(
-            feature_size=128,
-            sampling_rate=16000,
-            hop_length=160,
-            n_fft=400,
+            feature_size=self.mel_config["mel_dim"],
+            sampling_rate=self.mel_config["mel_sr"],
+            hop_length=self.mel_config["mel_hop_length"],
+            n_fft=self.mel_config["mel_n_fft"],
         )
-        self.audio_tokens_per_second = 12.5
+        self.audio_tokens_per_second = self.mel_config["mel_sr"] / (
+            self.mel_config["mel_hop_length"] * 8
+        )
         self.time_marker_every_seconds = 2
         self.time_marker_every_audio_tokens = int(
             self.audio_tokens_per_second * self.time_marker_every_seconds
@@ -842,6 +929,22 @@ class MossAudioProcessor:
             wav[None, ...], device="cpu"
         )
         return torch.from_numpy(feats[0])
+
+    def _get_default_audio_prompt(self) -> str:
+        return MOSS_AUDIO_PLACEHOLDER
+
+    def _ensure_audio_placeholders(
+        self,
+        prompt_text: str,
+        num_audios: int,
+    ) -> str:
+        if num_audios == 0 or MOSS_AUDIO_SPAN_RE.search(prompt_text):
+            return prompt_text
+
+        audio_prompt = self._get_default_audio_prompt() * num_audios
+        if prompt_text:
+            return f"{audio_prompt}\n{prompt_text}"
+        return audio_prompt
 
     def _build_audio_tokens_with_time_markers(self, audio_seq_len: int) -> list[int]:
         total_duration_seconds = audio_seq_len / self.audio_tokens_per_second
@@ -908,7 +1011,10 @@ class MossAudioProcessor:
 
         if mels:
             max_length = max(raw_lengths)
-            audio_batch = torch.zeros((len(mels), 128, max_length), dtype=torch.float32)
+            audio_batch = torch.zeros(
+                (len(mels), self.mel_config["mel_dim"], max_length),
+                dtype=torch.float32,
+            )
             for index, mel in enumerate(mels):
                 audio_batch[index, :, : mel.shape[-1]] = mel
             audio_data_seqlens = torch.tensor(raw_lengths, dtype=torch.long)
@@ -916,22 +1022,19 @@ class MossAudioProcessor:
             audio_batch = None
             audio_data_seqlens = None
 
+        prompt_text = self._ensure_audio_placeholders(prompt_text, len(audio_list))
         input_ids = []
         cursor = 0
-        placeholder = f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
         if not audio_list:
-            while True:
-                match_idx = prompt_text.find(placeholder, cursor)
-                if match_idx < 0:
-                    break
-                prefix = prompt_text[cursor:match_idx]
+            for match in MOSS_AUDIO_SPAN_RE.finditer(prompt_text):
+                prefix = prompt_text[cursor : match.start()]
                 input_ids.extend(
                     self.tokenizer.encode(prefix, add_special_tokens=False)
                 )
                 input_ids.extend(
                     [self.audio_start_id, self.audio_token_id, self.audio_end_id]
                 )
-                cursor = match_idx + len(placeholder)
+                cursor = match.end()
             suffix = prompt_text[cursor:]
             input_ids.extend(self.tokenizer.encode(suffix, add_special_tokens=False))
             data: dict[str, torch.Tensor] = {
@@ -940,22 +1043,23 @@ class MossAudioProcessor:
             }
             return BatchFeature(data=data, tensor_type=return_tensors)
 
+        span_iter = iter(MOSS_AUDIO_SPAN_RE.finditer(prompt_text))
         for item_idx, _ in enumerate(audio_list):
-            match_idx = prompt_text.find(placeholder, cursor)
-            if match_idx < 0:
+            match = next(span_iter, None)
+            if match is None:
                 raise ValueError(
                     "Audio placeholder count mismatch: expected one "
-                    f"{placeholder!r} span per audio item."
+                    f"{MOSS_AUDIO_PLACEHOLDER!r} span per audio item."
                 )
-            prefix = prompt_text[cursor:match_idx]
+            prefix = prompt_text[cursor : match.start()]
             input_ids.extend(self.tokenizer.encode(prefix, add_special_tokens=False))
             input_ids.append(self.audio_start_id)
             input_ids.extend(self.build_audio_placeholder_ids(token_lens[item_idx]))
             input_ids.append(self.audio_end_id)
-            cursor = match_idx + len(placeholder)
+            cursor = match.end()
 
         suffix = prompt_text[cursor:]
-        if placeholder in suffix:
+        if MOSS_AUDIO_SPAN_RE.search(suffix):
             raise ValueError(
                 "Audio placeholder count mismatch: found more placeholder spans "
                 "than audio items."
@@ -993,39 +1097,82 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
             ),
         )
 
-    def get_hf_processor(self, **kwargs: object) -> MossAudioProcessor:
-        enable_time_marker = bool(kwargs.get("enable_time_marker", False))
-        processor_kwargs = {
-            key: kwargs[key]
-            for key in ("audio_token_id", "audio_start_id", "audio_end_id")
-            if key in kwargs
-        }
-        has_custom_kwargs = (
-            enable_time_marker
-            or bool(processor_kwargs)
-            or any(
-                key
-                not in {
-                    "enable_time_marker",
-                    "audio_token_id",
-                    "audio_start_id",
-                    "audio_end_id",
-                }
-                for key in kwargs
-            )
-        )
-        if not has_custom_kwargs:
-            default_processor = getattr(self, "_default_hf_processor", None)
-            if default_processor is None:
-                default_processor = MossAudioProcessor(self.get_tokenizer())
-                self._default_hf_processor = default_processor
-            return default_processor
+    def _get_processor_config_defaults(self) -> dict[str, object]:
+        cached_defaults = getattr(self, "_processor_config_defaults", None)
+        if cached_defaults is not None:
+            return cached_defaults
 
-        return MossAudioProcessor(
+        model_config = self.ctx.model_config
+        for file_name in ("processor_config.json", "preprocessor_config.json"):
+            config = get_hf_file_to_dict(
+                file_name,
+                model_config.model,
+                model_config.revision,
+            )
+            defaults = _filter_moss_audio_processor_config(config)
+            if defaults:
+                self._processor_config_defaults = defaults
+                return defaults
+
+        defaults = {}
+        self._processor_config_defaults = defaults
+        return defaults
+
+    @staticmethod
+    def _get_processor_cache_key(kwargs: Mapping[str, object]) -> tuple[object, ...]:
+        mel_config = _normalize_moss_audio_mel_config(
+            kwargs.get("mel_config") if isinstance(kwargs.get("mel_config"), Mapping)
+            else None
+        )
+        return (
+            int(kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)),
+            int(kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)),
+            int(kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)),
+            bool(kwargs.get("enable_time_marker", False)),
+            tuple(sorted(mel_config.items())),
+        )
+
+    def get_hf_processor(self, **kwargs: object) -> MossAudioProcessor:
+        merged_kwargs = _merge_moss_audio_processor_configs(
+            self._get_processor_config_defaults(),
+            self.ctx.get_merged_mm_kwargs({}),
+            kwargs,
+        )
+        mel_config = _normalize_moss_audio_mel_config(
+            merged_kwargs.get("mel_config")
+            if isinstance(merged_kwargs.get("mel_config"), Mapping)
+            else None
+        )
+        processor_kwargs = {
+            "audio_token_id": int(
+                merged_kwargs.get("audio_token_id", MOSS_AUDIO_TOKEN_ID)
+            ),
+            "audio_start_id": int(
+                merged_kwargs.get("audio_start_id", MOSS_AUDIO_BOS_TOKEN_ID)
+            ),
+            "audio_end_id": int(
+                merged_kwargs.get("audio_end_id", MOSS_AUDIO_EOS_TOKEN_ID)
+            ),
+            "enable_time_marker": bool(merged_kwargs.get("enable_time_marker", False)),
+            "mel_config": mel_config,
+        }
+
+        cache = getattr(self, "_hf_processor_cache", None)
+        if cache is None:
+            cache = {}
+            self._hf_processor_cache = cache
+
+        cache_key = self._get_processor_cache_key(processor_kwargs)
+        processor = cache.get(cache_key)
+        if processor is not None:
+            return processor
+
+        processor = MossAudioProcessor(
             self.get_tokenizer(),
-            enable_time_marker=enable_time_marker,
             **processor_kwargs,
         )
+        cache[cache_key] = processor
+        return processor
 
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.get_hf_processor(**kwargs).feature_extractor
@@ -1034,8 +1181,9 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
         return {"audio": None}
 
     def get_data_parser(self) -> MultiModalDataParser:
+        processor = self.get_hf_processor()
         return MossAudioMultiModalDataParser(
-            target_sr=16000,
+            target_sr=processor.mel_config["mel_sr"],
             target_channels=1,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
@@ -1047,17 +1195,18 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
     ) -> Mapping[str, int] | None:
         if mm_counts.get("audio", 0) <= 0:
             return {}
-        raw_mel_len = math.ceil((16000 * DEFAULT_MAX_AUDIO_SECONDS) / 160)
+        processor = self.get_hf_processor()
+        raw_mel_len = math.ceil(
+            (processor.mel_config["mel_sr"] * DEFAULT_MAX_AUDIO_SECONDS)
+            / processor.mel_config["mel_hop_length"]
+        )
         return {"audio": MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)}
 
 
 class MossAudioDummyInputsBuilder(BaseDummyInputsBuilder[MossAudioProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
-        return (
-            f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
-            * num_audios
-        )
+        return MOSS_AUDIO_PLACEHOLDER * num_audios
 
     def get_dummy_mm_data(
         self,
@@ -1088,8 +1237,14 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         audios = mm_data.pop("audios", [])
         if audios:
             mm_data["audio"] = audios
+        mm_kwargs = dict(mm_kwargs)
+        processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
+        tok_kwargs = {
+            key: value for key, value in tok_kwargs.items()
+            if key not in MOSS_AUDIO_PROCESSOR_CONFIG_KEYS
+        }
         return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            self.info.get_hf_processor(**processor_kwargs),
             dict(text=prompt, **mm_data),
             dict(**tok_kwargs),
         )
@@ -1152,7 +1307,6 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
                 ),
             )
 
-        placeholder = f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
         prompt_update_specs = [
             (
                 [
@@ -1165,7 +1319,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         ]
         for suffix in ("", "\n"):
             tokenizer_target = processor.tokenizer.encode(
-                placeholder + suffix,
+                MOSS_AUDIO_PLACEHOLDER + suffix,
                 add_special_tokens=False,
             )
             suffix_token_ids = processor.tokenizer.encode(
@@ -1226,7 +1380,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
-            return f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+            return MOSS_AUDIO_PLACEHOLDER
         raise ValueError("Only audio modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -1524,5 +1678,8 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["audio_encoder.embed_positions"],
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

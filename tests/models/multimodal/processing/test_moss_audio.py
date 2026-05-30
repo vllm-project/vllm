@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+from pathlib import Path
 
 import pytest
 import torch
 from transformers import Qwen3Config
 
+from vllm.config.multimodal import MultiModalConfig
 from vllm.model_executor.models.interfaces import supports_multimodal, supports_pp
 from vllm.model_executor.models.interfaces_base import is_text_generation_model
 from vllm.model_executor.models.moss_audio import (
@@ -21,6 +23,7 @@ from vllm.model_executor.models.moss_audio import (
     MossAudioEncoder,
     MossAudioEncoderConfig,
     MossAudioModel,
+    MOSS_AUDIO_PLACEHOLDER,
     MossAudioMultiModalProcessor,
     MossAudioProcessingInfo,
     MossAudioProcessor,
@@ -60,11 +63,52 @@ class _Info:
 
 
 class _ProcessingContext:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        model: str = ".",
+        revision: str | None = None,
+        mm_processor_kwargs: dict[str, object] | None = None,
+    ) -> None:
         self.tokenizer = _Tokenizer()
+        self.model_config = _ProcessingModelConfig(
+            model=model,
+            revision=revision,
+            multimodal_config=MultiModalConfig(
+                mm_processor_kwargs=mm_processor_kwargs
+            ),
+            hf_config=MossAudioConfig(language_config=Qwen3Config()),
+        )
 
     def get_tokenizer(self) -> _Tokenizer:
         return self.tokenizer
+
+    def get_hf_config(self) -> MossAudioConfig:
+        return self.model_config.hf_config
+
+    def get_merged_mm_kwargs(
+        self,
+        kwargs: dict[str, object],
+    ) -> dict[str, object]:
+        return self.model_config.multimodal_config.merge_mm_processor_kwargs(kwargs)
+
+
+class _ProcessingModelConfig:
+    def __init__(
+        self,
+        *,
+        model: str,
+        revision: str | None,
+        multimodal_config: MultiModalConfig,
+        hf_config: MossAudioConfig,
+    ) -> None:
+        self.model = model
+        self.revision = revision
+        self.multimodal_config = multimodal_config
+        self.hf_config = hf_config
+
+    def get_multimodal_config(self) -> MultiModalConfig:
+        return self.multimodal_config
 
 
 class _OutKwargs:
@@ -126,9 +170,7 @@ def _patch_tensor_parallel_for_linear_layers(
 
 def test_moss_audio_processor_expands_audio_placeholder() -> None:
     processor = MossAudioProcessor(_Tokenizer())
-    prompt = (
-        f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
-    )
+    prompt = f"before {MOSS_AUDIO_PLACEHOLDER} after"
     raw_mel_len = 17
     audio = torch.zeros(160 * raw_mel_len)
 
@@ -143,11 +185,27 @@ def test_moss_audio_processor_expands_audio_placeholder() -> None:
     assert processed["audio_data_seqlens"].tolist() == [raw_mel_len]
 
 
-def test_moss_audio_processor_preserves_placeholder_without_audio() -> None:
+def test_moss_audio_processor_expands_multi_token_audio_span() -> None:
     processor = MossAudioProcessor(_Tokenizer())
     prompt = (
-        f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
+        f"before {MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}"
+        f"{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN} after"
     )
+    raw_mel_len = 17
+    audio = torch.zeros(160 * raw_mel_len)
+
+    processed = processor(text=prompt, audio=[audio])
+    input_ids = processed["input_ids"][0].tolist()
+    expected_audio_tokens = MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)
+
+    assert input_ids.count(MOSS_AUDIO_BOS_TOKEN_ID) == 1
+    assert input_ids.count(MOSS_AUDIO_EOS_TOKEN_ID) == 1
+    assert input_ids.count(MOSS_AUDIO_TOKEN_ID) == expected_audio_tokens
+
+
+def test_moss_audio_processor_preserves_placeholder_without_audio() -> None:
+    processor = MossAudioProcessor(_Tokenizer())
+    prompt = f"before {MOSS_AUDIO_PLACEHOLDER} after"
 
     processed = processor(text=prompt)
     input_ids = processed["input_ids"][0].tolist()
@@ -161,6 +219,72 @@ def test_moss_audio_processor_preserves_placeholder_without_audio() -> None:
     ]
     assert "audio_data" not in processed
     assert "audio_data_seqlens" not in processed
+
+
+def test_moss_audio_processor_inserts_default_prompt_without_placeholder() -> None:
+    processor = MossAudioProcessor(_Tokenizer())
+    raw_mel_len = 17
+    audio = torch.zeros(160 * raw_mel_len)
+
+    processed = processor(text="Describe this audio.", audio=[audio])
+    input_ids = processed["input_ids"][0].tolist()
+    expected_audio_tokens = MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)
+    expected_prefix = [
+        MOSS_AUDIO_BOS_TOKEN_ID,
+        *([MOSS_AUDIO_TOKEN_ID] * expected_audio_tokens),
+        MOSS_AUDIO_EOS_TOKEN_ID,
+        ord("\n"),
+    ]
+
+    assert input_ids[: len(expected_prefix)] == expected_prefix
+    assert processed["audio_data"].shape == (1, 128, raw_mel_len)
+
+
+def test_moss_audio_processor_uses_custom_mel_config() -> None:
+    processor = MossAudioProcessor(
+        _Tokenizer(),
+        mel_config={
+            "mel_dim": 80,
+            "mel_sr": 8000,
+            "mel_hop_length": 80,
+            "mel_n_fft": 200,
+        },
+    )
+    raw_mel_len = 17
+    audio = torch.zeros(80 * raw_mel_len)
+
+    processed = processor(text=MOSS_AUDIO_PLACEHOLDER, audio=[audio])
+
+    assert processor.mel_config == {
+        "mel_dim": 80,
+        "mel_sr": 8000,
+        "mel_hop_length": 80,
+        "mel_n_fft": 200,
+    }
+    assert processed["audio_data"].shape == (1, 80, raw_mel_len)
+    assert processed["audio_data"].dtype == torch.float32
+
+
+def test_moss_audio_processor_uses_manual_audio_token_ids() -> None:
+    processor = MossAudioProcessor(
+        _Tokenizer(),
+        audio_token_id=901,
+        audio_start_id=902,
+        audio_end_id=903,
+        enable_time_marker=True,
+    )
+    raw_mel_len = 320
+    audio = torch.zeros(160 * raw_mel_len)
+
+    processed = processor(text=MOSS_AUDIO_PLACEHOLDER, audio=[audio])
+    input_ids = processed["input_ids"][0].tolist()
+    audio_token_len = MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)
+
+    assert input_ids[0] == 902
+    assert input_ids[-1] == 903
+    assert input_ids.count(901) == audio_token_len
+    assert MOSS_AUDIO_BOS_TOKEN_ID not in input_ids
+    assert MOSS_AUDIO_EOS_TOKEN_ID not in input_ids
 
 
 def test_moss_audio_time_markers_are_not_embedding_targets() -> None:
@@ -190,9 +314,7 @@ def test_moss_audio_time_markers_are_not_embedding_targets() -> None:
 def test_moss_audio_prompt_updates_match_chat_template_tokenization() -> None:
     class _ChatTemplateTokenizer(_Tokenizer):
         def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
-            placeholder = (
-                f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
-            )
+            placeholder = MOSS_AUDIO_PLACEHOLDER
             if text == placeholder:
                 return [11, 12, 13, 14]
             if text == f"{placeholder}\n":
@@ -258,6 +380,145 @@ def test_moss_audio_processing_info_caches_default_processor() -> None:
     assert time_marker_processor.enable_time_marker
 
 
+def test_moss_audio_processing_info_reads_processor_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "processor_config.json").write_text(
+        """
+        {
+          "audio_token_id": 301,
+          "audio_start_id": 302,
+          "audio_end_id": 303,
+          "enable_time_marker": true,
+          "mel_config": {
+            "mel_dim": 80,
+            "mel_sr": 8000,
+            "mel_hop_length": 80,
+            "mel_n_fft": 200
+          },
+          "processor_class": "PalomarProcessor"
+        }
+        """,
+    )
+    info = MossAudioProcessingInfo(_ProcessingContext(model=str(tmp_path)))
+
+    processor = info.get_hf_processor()
+
+    assert processor.audio_token_id == 301
+    assert processor.audio_start_id == 302
+    assert processor.audio_end_id == 303
+    assert processor.enable_time_marker
+    assert processor.mel_config == {
+        "mel_dim": 80,
+        "mel_sr": 8000,
+        "mel_hop_length": 80,
+        "mel_n_fft": 200,
+    }
+
+
+def test_moss_audio_processing_info_reads_preprocessor_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "preprocessor_config.json").write_text(
+        """
+        {
+          "audio_token_id": 401,
+          "mel_config": {
+            "sampling_rate": 12000,
+            "feature_size": 64,
+            "hop_length": 120,
+            "n_fft": 240
+          }
+        }
+        """,
+    )
+    info = MossAudioProcessingInfo(_ProcessingContext(model=str(tmp_path)))
+
+    processor = info.get_hf_processor()
+
+    assert processor.audio_token_id == 401
+    assert processor.audio_start_id == MOSS_AUDIO_BOS_TOKEN_ID
+    assert processor.audio_end_id == MOSS_AUDIO_EOS_TOKEN_ID
+    assert not processor.enable_time_marker
+    assert processor.mel_config == {
+        "mel_dim": 64,
+        "mel_sr": 12000,
+        "mel_hop_length": 120,
+        "mel_n_fft": 240,
+    }
+
+
+def test_moss_audio_processing_info_merges_processor_kwargs(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "processor_config.json").write_text(
+        """
+        {
+          "audio_token_id": 501,
+          "audio_start_id": 502,
+          "audio_end_id": 503,
+          "enable_time_marker": false,
+          "mel_config": {
+            "mel_dim": 80,
+            "mel_sr": 8000,
+            "mel_hop_length": 80,
+            "mel_n_fft": 200
+          }
+        }
+        """,
+    )
+    info = MossAudioProcessingInfo(
+        _ProcessingContext(
+            model=str(tmp_path),
+            mm_processor_kwargs={
+                "audio_token_id": 601,
+                "mel_config": {
+                    "mel_dim": 96,
+                    "mel_sr": 12000,
+                },
+            },
+        )
+    )
+
+    processor = info.get_hf_processor(
+        audio_end_id=603,
+        enable_time_marker=True,
+        mel_config={"mel_hop_length": 120},
+    )
+
+    assert processor.audio_token_id == 601
+    assert processor.audio_start_id == 502
+    assert processor.audio_end_id == 603
+    assert processor.enable_time_marker
+    assert processor.mel_config == {
+        "mel_dim": 96,
+        "mel_sr": 12000,
+        "mel_hop_length": 120,
+        "mel_n_fft": 200,
+    }
+
+
+def test_moss_audio_processing_info_cache_key_includes_processor_config() -> None:
+    info = MossAudioProcessingInfo(_ProcessingContext())
+
+    processor = info.get_hf_processor(audio_token_id=701)
+    same_processor = info.get_hf_processor(audio_token_id=701)
+    different_token_processor = info.get_hf_processor(audio_token_id=702)
+    different_time_marker_processor = info.get_hf_processor(
+        audio_token_id=701,
+        enable_time_marker=True,
+    )
+    different_mel_processor = info.get_hf_processor(
+        audio_token_id=701,
+        mel_config={"mel_dim": 80},
+    )
+
+    assert same_processor is processor
+    assert different_token_processor is not processor
+    assert different_time_marker_processor is not processor
+    assert different_mel_processor is not processor
+
+
 def test_moss_audio_encoder_vectorized_mask_matches_token_count() -> None:
     config = MossAudioEncoderConfig(
         output_dim=8,
@@ -310,10 +571,7 @@ def test_moss_audio_field_config_and_interfaces() -> None:
     fields = _moss_audio_field_config({})
 
     assert set(fields) == {"audio_data", "audio_data_seqlens"}
-    assert (
-        MossAudioModel.get_placeholder_str("audio", 0)
-        == f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
-    )
+    assert MossAudioModel.get_placeholder_str("audio", 0) == MOSS_AUDIO_PLACEHOLDER
     assert supports_multimodal(MossAudioModel)
     assert is_text_generation_model(MossAudioModel)
     assert not supports_pp(MossAudioModel)
@@ -360,12 +618,84 @@ def test_moss_audio_arch_config_uses_language_config() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    (
+        "language_config",
+        "expected_hidden_size",
+        "expected_num_heads",
+        "expected_kv_heads",
+        "expected_head_dim",
+        "expected_vocab_size",
+    ),
+    [
+        (
+            Qwen3Config(
+                hidden_size=2560,
+                num_attention_heads=32,
+                num_key_value_heads=8,
+                head_dim=80,
+                num_hidden_layers=36,
+                vocab_size=151936,
+                max_position_embeddings=32768,
+            ),
+            2560,
+            32,
+            8,
+            80,
+            151936,
+        ),
+        (
+            Qwen3Config(
+                hidden_size=4096,
+                num_attention_heads=32,
+                num_key_value_heads=8,
+                head_dim=128,
+                num_hidden_layers=36,
+                vocab_size=151936,
+                max_position_embeddings=32768,
+            ),
+            4096,
+            32,
+            8,
+            128,
+            151936,
+        ),
+    ],
+)
+def test_moss_audio_arch_config_supports_4b_and_8b_language_configs(
+    language_config: Qwen3Config,
+    expected_hidden_size: int,
+    expected_num_heads: int,
+    expected_kv_heads: int,
+    expected_head_dim: int,
+    expected_vocab_size: int,
+) -> None:
+    from vllm.transformers_utils.model_arch_config_convertor import (
+        MODEL_ARCH_CONFIG_CONVERTORS,
+    )
+
+    config = MossAudioConfig(language_config=language_config)
+    convertor = MODEL_ARCH_CONFIG_CONVERTORS["moss_audio"](config, config)
+
+    arch_config = convertor.convert()
+
+    assert config.hidden_size == expected_hidden_size
+    assert arch_config.hidden_size == expected_hidden_size
+    assert arch_config.total_num_attention_heads == expected_num_heads
+    assert arch_config.total_num_kv_heads == expected_kv_heads
+    assert arch_config.head_size == expected_head_dim
+    assert arch_config.vocab_size == expected_vocab_size
+
+
 def test_moss_audio_registry_entries() -> None:
     assert _MULTIMODAL_MODELS["MossAudioModel"] == ("moss_audio", "MossAudioModel")
-    assert (
-        _MULTIMODAL_EXAMPLE_MODELS["MossAudioModel"].default
-        == "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
-    )
+    info = _MULTIMODAL_EXAMPLE_MODELS["MossAudioModel"]
+    assert info.default == "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
+    assert info.extras == {
+        "4b-thinking": "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
+        "8b-instruct": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+        "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
+    }
 
 
 @pytest.mark.parametrize(
@@ -561,9 +891,24 @@ def test_moss_audio_embed_input_ids_caches_packed_deepstack() -> None:
     )
 
 
+def test_moss_audio_model_load_weights_skips_sinusoid_buffer() -> None:
+    model = object.__new__(MossAudioModel)
+    torch.nn.Module.__init__(model)
+
+    weights = [
+        (
+            "audio_encoder.embed_positions.inv_timescales",
+            torch.empty(1),
+        ),
+    ]
+    loaded = model.load_weights(weights)
+
+    assert loaded == set()
+
+
 def test_moss_audio_rejects_too_short_audio() -> None:
     processor = MossAudioProcessor(_Tokenizer())
-    prompt = f"{MOSS_AUDIO_BOS_TOKEN}{MOSS_AUDIO_TOKEN}{MOSS_AUDIO_EOS_TOKEN}"
+    prompt = MOSS_AUDIO_PLACEHOLDER
 
     with pytest.raises(ValueError, match="too short"):
         processor(text=prompt, audio=[torch.empty(0)])
@@ -577,7 +922,7 @@ def test_moss_audio_rejects_too_short_audio() -> None:
 
 
 def test_moss_audio_max_tokens_uses_default_30s_limit() -> None:
-    info = object.__new__(MossAudioProcessingInfo)
+    info = MossAudioProcessingInfo(_ProcessingContext())
 
     raw_mel_len = math.ceil((DEFAULT_MAX_AUDIO_SECONDS * 16000) / 160)
     assert info.get_mm_max_tokens_per_item(seq_len=2048, mm_counts={"audio": 1}) == {
