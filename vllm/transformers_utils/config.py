@@ -12,7 +12,7 @@ from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
 import torch
-from huggingface_hub import constants, get_safetensors_metadata
+from huggingface_hub import constants
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
@@ -43,6 +43,7 @@ from .gguf_utils import (
 from .repo_utils import (
     file_or_path_exists,
     get_hf_file_to_dict,
+    hf_api,
     list_repo_files,
     try_get_local_file,
     with_retry,
@@ -94,6 +95,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
+    cosmos3_omni="Cosmos3Config",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
@@ -112,7 +114,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
-    jais="JAISConfig",
     mlp_speculator="MLPSpeculatorConfig",
     medusa="MedusaConfig",
     midashenglm="MiDashengLMConfig",
@@ -1143,7 +1144,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata, model, revision=revision
+        hf_api().get_safetensors_metadata, model, revision=revision
     )
 
     try:
@@ -1237,7 +1238,7 @@ def get_safetensors_params_metadata(
     # local HF cache: weights may already be cached from a prior run, and
     # weight loading itself uses the same cache.
     try:
-        local_dir = huggingface_hub.snapshot_download(
+        local_dir = hf_api().snapshot_download(
             repo_id=model,
             revision=revision,
             allow_patterns=["*.safetensors"],
