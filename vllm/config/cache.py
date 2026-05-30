@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import field
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -24,10 +25,15 @@ CacheDType = Literal[
     "fp8_e5m2",
     "fp8_inc",
     "fp8_ds_mla",
+    "turboquant_k8v4",
+    "turboquant_4bit_nc",
+    "turboquant_k3v4_nc",
+    "turboquant_3bit_nc",
     "int8_per_token_head",
     "fp8_per_token_head",
+    "nvfp4",
 ]
-MambaDType = Literal["auto", "float32", "float16"]
+MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -39,17 +45,29 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
+    hash_block_size: int | None = Field(default=None, gt=0)
+    """Block size (in tokens) used for computing Request's block_hashes.
+
+    This can be set to a finer granularity than the physical KV cache block
+    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
+    by it. This enables prefix-caching keys to be computed at the finest common
+    granularity and then merged for larger physical block sizes.
+
+    This config is not static default. If left unspecified, vLLM will choose a
+    default based on the resolved KV cache groups (typically the smallest KV
+    cache block size when there are multiple groups).
+    """
+    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.9. This is a
+    utilization. If unspecified, will use the default value of 0.92. This is a
     per-instance limit, and only applies to the current vLLM instance. It does
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
@@ -97,8 +115,6 @@ class CacheConfig:
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
-    cpu_kvcache_space_bytes: int | None = None
-    """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
@@ -123,14 +139,6 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
-    enable_mamba_cache_stochastic_rounding: bool = False
-    """Enable stochastic rounding when writing SSM state to fp16 cache.
-    Uses random bits to unbias the rounding error, which can improve
-    numerical stability for long sequences."""
-    mamba_cache_philox_rounds: int = 0
-    """Number of Philox PRNG rounds for stochastic rounding random number
-    generation. 0 uses the Triton default. Higher values improve randomness
-    quality at the cost of compute."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -187,7 +195,8 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            "cpu_kvcache_space_bytes",
+            # Prefix-caching implementation detail (doesn't affect compiled graph).
+            "hash_block_size",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
@@ -212,19 +221,26 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
+    @field_validator("block_size", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
         # another pydantic model (e.g. VllmConfig). Guard against that.
         if self._block_size_resolved:
             return self
-        object.__setattr__(self, "_block_size_resolved", True)
+        self._block_size_resolved = True
         if self.block_size is None:
-            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+            self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
-            object.__setattr__(self, "user_specified_block_size", True)
+            self.user_specified_block_size = True
         if self.mamba_block_size is not None:
-            object.__setattr__(self, "user_specified_mamba_block_size", True)
+            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("calculate_kv_scales", mode="after")
@@ -258,29 +274,3 @@ class CacheConfig:
                 str(cache_dtype),
             )
         return cache_dtype
-
-    def __post_init__(self):
-        if self.enable_mamba_cache_stochastic_rounding:
-            from vllm.platforms import current_platform
-
-            if not current_platform.is_cuda():
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache is only supported "
-                    "on NVIDIA CUDA platforms. Please do not specify  "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )
-            if not current_platform.is_device_capability_family(100):
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache requires compute "
-                    "capability 10.0 (data center Blackwell). The `cvt.rs` PTX "
-                    "instruction is not supported on your GPU. Please do not specify "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )
-            if self.mamba_ssm_cache_dtype != "float16":
-                raise ValueError(
-                    "Stochastic rounding for Mamba cache requires "
-                    "the SSM cache to be float16. Please set it explicitly, "
-                    "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
-                    "stochastic rounding by not specifying "
-                    "`--enable-mamba-cache-stochastic-rounding`."
-                )

@@ -23,11 +23,29 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.deep_gemm import set_num_sms as deep_gemm_set_num_sms
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
+
+
+def _cat_ubatch_outputs(
+    sorted_results: list,
+) -> "torch.Tensor | tuple[torch.Tensor, ...]":
+    """Concatenate per-ubatch model outputs along the batch dim.
+
+    Most models return a single hidden-states tensor per ubatch. Target
+    models running with auxiliary output (e.g. EAGLE3 speculative decoding,
+    which collects aux hidden states for the drafter) return a tuple of
+    tensors instead. Fan out over tuple components so `torch.cat` sees
+    matching shapes and the caller receives the same structure the model
+    produced for a single ubatch (#40769).
+    """
+    if sorted_results and isinstance(sorted_results[0], tuple):
+        return tuple(torch.cat(parts, dim=0) for parts in zip(*sorted_results))
+    return torch.cat(sorted_results, dim=0)
 
 
 @dataclass
@@ -70,8 +88,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for computation.
         """
 
-        assert current_platform.is_cuda(), (
-            "SM control is currently only supported on CUDA"
+        assert current_platform.is_cuda() or current_platform.is_rocm(), (
+            "SM/CU control is supported on CUDA and ROCm platforms"
         )
         device = torch.accelerator.current_device_index()
         total_sms = num_compute_units(device)
@@ -158,9 +176,7 @@ class UBatchWrapper:
         # TODO(lucas): support other kernels besides DeepGEMM
         set_compute_sms = lambda sms: None
         if has_deep_gemm() and comm_sms > 0:
-            import deep_gemm as dg
-
-            set_compute_sms = lambda sms: dg.set_num_sms(sms)
+            set_compute_sms = lambda sms: deep_gemm_set_num_sms(sms)
 
         return SMControlContextManager(
             comm_sms=comm_sms,
@@ -267,7 +283,7 @@ class UBatchWrapper:
                 for thread in ubatch_threads:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
-                result = torch.cat(sorted_results, dim=0)
+                result = _cat_ubatch_outputs(sorted_results)
                 cudagraph_metadata.outputs = result
                 # Join offloader's copy stream after forward to avoid unjoined
                 # stream error. The last layer's start_prefetch forks copy_stream,
@@ -311,7 +327,7 @@ class UBatchWrapper:
             for thread in ubatch_threads:
                 thread.join()
         sorted_results = [value for position, value in sorted(results)]
-        result = torch.cat(sorted_results, dim=0)
+        result = _cat_ubatch_outputs(sorted_results)
         return result
 
     def _make_ubatch_metadata(

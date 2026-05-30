@@ -6,14 +6,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    NvFp4LinearBackend,
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -29,12 +24,8 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
-        self.backend = select_nvfp4_linear_backend()
+        self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
-
-        self.swizzle = None
-        if self.backend == NvFp4LinearBackend.EMULATION:
-            self.swizzle = False
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -130,7 +121,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -138,10 +129,4 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-            swizzle=self.swizzle,
-        )
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

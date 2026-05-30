@@ -5,12 +5,10 @@ from typing import Any
 
 import torch
 
-from vllm.config.quantization import (
-    OnlineQuantizationConfigArgs,
-    OnlineQuantScheme,
-)
+from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -33,29 +31,57 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.int8 import (
+    Int8OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.mxfp8 import (
+    Mxfp8OnlineLinearMethod,
+    Mxfp8OnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kInt8StaticChannelSym,
+    kMxfp8Dynamic,
+)
+
+logger = init_logger(__name__)
+
+
+# Online dispatch tables, keyed by the QuantSpec.weight QuantKey. The
+# corresponding method class handles the activation choice via its
+# `supported_activation_quant` set.
+_ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
+    kFp8StaticTensorSym: Fp8PerTensorOnlineLinearMethod,
+    kFp8Static128BlockSym: Fp8PerBlockOnlineLinearMethod,
+    kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
+}
+
+_ONLINE_MOE_METHODS: dict[QuantKey, type] = {
+    kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
+    kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
+    kMxfp8Dynamic: Mxfp8OnlineMoEMethod,
+    kInt8StaticChannelSym: Int8OnlineMoEMethod,
+}
 
 
 class OnlineQuantizationConfig(QuantizationConfig):
-    """Model-level config class for online quantization (quantize fp16/bf16 weights
+    """Model-level config for online quantization (quantize fp16/bf16 weights
     during model loading, without requiring a pre-quantized checkpoint)."""
 
     def __init__(
         self,
-        args: OnlineQuantizationConfigArgs,
+        args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
-        if (
-            args.global_scheme is None
-            and args.linear_scheme_override is None
-            and args.moe_scheme_override is None
-        ):
+        if args.linear is None and args.moe is None:
             raise ValueError(
                 "OnlineQuantizationConfig requires at least one of "
-                "global_scheme, linear_scheme_override, or "
-                "moe_scheme_override to be set."
+                "quantization_config.linear or quantization_config.moe "
+                "to be set."
             )
         self.args = args
-        self.quant_scheme = args.global_scheme
         self.ignored_layers: list[str] = args.ignore
 
     @classmethod
@@ -84,6 +110,33 @@ class OnlineQuantizationConfig(QuantizationConfig):
             "quantization='fp8_per_tensor'/'fp8_per_block' instead."
         )
 
+    def _dispatch(
+        self,
+        spec: QuantSpec | None,
+        table: dict[QuantKey, type],
+        layer: torch.nn.Module,
+    ) -> "QuantizeMethodBase | None":
+        if spec is None or spec.weight is None:
+            return None
+        cls = table.get(spec.weight)
+        if cls is None:
+            raise ValueError(
+                f"online quantization for {type(layer).__name__} with "
+                f"weight={spec.weight} is not supported; supported weight "
+                f"keys: {sorted(str(k) for k in table)}"
+            )
+        # Online method classes pick their own activation format internally.
+        # Per-class activation overrides are not yet wired through; reject
+        # explicit overrides until the relevant method class opts in.
+        if spec.activation is not None:
+            raise ValueError(
+                f"activation override (activation={spec.activation}) is not "
+                f"yet supported for online {cls.__name__}"
+            )
+        if isinstance(layer, RoutedExperts):
+            return cls(layer=layer)
+        return cls()
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -94,23 +147,19 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-
-            linear_scheme = self.args.linear_scheme_override or self.args.global_scheme
-            if linear_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
-                return Fp8PerBlockOnlineLinearMethod()
-            else:
-                return Fp8PerTensorOnlineLinearMethod()
-        elif isinstance(layer, FusedMoE):
+            method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
+            return method if method is not None else UnquantizedLinearMethod()
+        elif isinstance(layer, RoutedExperts):
             if should_ignore_layer(
                 prefix,
                 ignore=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-
-            moe_scheme = self.args.moe_scheme_override or self.args.global_scheme
-            if moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
-                return Fp8PerBlockOnlineMoEMethod(layer=layer)
-            else:
-                return Fp8PerTensorOnlineMoEMethod(layer=layer)
+            method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)
+            return (
+                method
+                if method is not None
+                else UnquantizedFusedMoEMethod(layer.moe_config)
+            )
         return None

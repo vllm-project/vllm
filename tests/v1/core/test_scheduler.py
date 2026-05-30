@@ -774,6 +774,27 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+def test_reset_connector_cache_no_connector_is_no_op_success():
+    """``reset_connector_cache`` must return True when no connector is
+    configured.
+
+    Without this, ``reset_prefix_cache(reset_connector=True)`` returns
+    ``False`` on every engine that doesn't have a KV connector configured —
+    even when the local prefix cache reset succeeded — and any caller that
+    interprets the return value as "did the reset I asked for succeed?"
+    sees a spurious failure.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    assert scheduler.connector is None
+
+    # No-connector reset is treated as success.
+    assert scheduler.reset_connector_cache() is True
+
+    # End-to-end: reset_prefix_cache(reset_connector=True) on an idle
+    # scheduler succeeds with or without a connector.
+    assert scheduler.reset_prefix_cache(reset_connector=True) is True
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
@@ -1037,6 +1058,54 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert output.num_scheduled_tokens[req.request_id] == 4
     assert req.request_id in output.scheduled_spec_decode_tokens
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
+
+
+def test_scheduler_stats_waiting_queues():
+    """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
+    # Create scheduler with limited capacity so we can have waiting requests
+    scheduler = create_scheduler(max_num_batched_tokens=100)
+
+    # Create requests: some will be scheduled, some will wait on capacity,
+    # and some will be blocked by constraints
+    all_requests = create_requests(num_requests=5, num_tokens=50)
+
+    # Add 3 requests - only 2 can be scheduled (2 * 50 = 100 tokens)
+    # The 3rd will remain in waiting queue (capacity constraint)
+    for request in all_requests[:3]:
+        scheduler.add_request(request)
+
+    # Manually add 2 more to skipped_waiting to simulate constraint-blocked
+    for request in all_requests[3:]:
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler.skipped_waiting.add_request(request)
+
+    # Schedule - this will schedule 2 requests, leaving 1 in waiting
+    output = scheduler.schedule()
+
+    # Verify: 2 scheduled, 1 still waiting on capacity, 2 blocked by constraints
+    assert len(output.scheduled_new_reqs) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.skipped_waiting) == 2
+
+    # Call update_from_output() to get frontend-facing stat
+    scheduled_req_ids = list(output.num_scheduled_tokens.keys())
+    model_runner_output = ModelRunnerOutput(
+        req_ids=scheduled_req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(scheduled_req_ids)},
+        sampled_token_ids=[[1]] * len(scheduled_req_ids),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert engine_core_outputs and len(engine_core_outputs) > 0
+    stats = engine_core_outputs[0].scheduler_stats
+    assert stats is not None
+
+    # Verify stats match queue lengths after scheduling
+    assert stats.num_running_reqs == 2  # 2 were scheduled
+    assert stats.num_waiting_reqs == 1  # 1 waiting on capacity
+    assert stats.num_skipped_waiting_reqs == 2  # 2 blocked by constraints
 
 
 def _assert_right_scheduler_output(
@@ -1844,6 +1913,7 @@ def create_scheduler_with_priority(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
         block_size=block_size,
+        hash_block_size=block_size,
     )
 
 
@@ -2496,6 +2566,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
@@ -3878,6 +3949,45 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_delayed_kv_connector_free_keeps_scheduler_active():
+    scheduler = create_scheduler(use_kv_connector=True)
+    queued_request, request = create_requests(
+        num_requests=2, req_ids=["queued", "finished"]
+    )
+    scheduler.add_request(queued_request)
+
+    assert not scheduler.has_finished_requests()
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    scheduler.requests[request.request_id] = request
+    scheduler.finished_req_ids = set()
+
+    assert scheduler.has_finished_requests()
+    assert scheduler.has_requests()
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={request.request_id}),
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.has_finished_requests()
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -3960,6 +4070,7 @@ def _create_encoder_decoder_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         block_size=block_size,
+        hash_block_size=block_size,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
 

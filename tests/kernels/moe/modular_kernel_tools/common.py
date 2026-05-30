@@ -46,6 +46,7 @@ from vllm.utils.import_utils import (
     has_deep_gemm,
     has_mori,
 )
+from vllm.utils.math_utils import next_power_of_2
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -223,10 +224,6 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return info.blocked_quantization_support
 
-    def supports_expert_map(self):
-        info = expert_info(self.fused_experts_type)
-        return info.supports_expert_map
-
     def supports_apply_weight_on_input(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.supports_apply_weight_on_input
@@ -248,7 +245,7 @@ class Config:
 
     def needs_mori(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "mori"
+        return info.backend in ("mori_high_throughput", "mori_low_latency")
 
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -324,6 +321,15 @@ class Config:
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
+
+        try:
+            if not self.fused_experts_type._supports_current_device():
+                return (
+                    False,
+                    f"{self.fused_experts_type} not supported on the current device.",
+                )
+        except NotImplementedError:
+            pass
 
         return True, None
 
@@ -470,7 +476,7 @@ class RankTensors:
         topk_ids = topk_ids.to(device=device)
 
         expert_map = None
-        if config.world_size > 1 and config.supports_expert_map():
+        if config.world_size > 1:
             expert_map = torch.full(
                 (global_num_experts,), fill_value=-1, dtype=torch.int32
             )
@@ -604,13 +610,6 @@ def make_modular_kernel(
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEKernel:
-    def next_power_of_2(x):
-        import math
-
-        if x == 0:
-            return 1
-        return 2 ** math.ceil(math.log2(x))
-
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),
@@ -653,7 +652,6 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
     return modular_kernel
