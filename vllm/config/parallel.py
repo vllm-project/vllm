@@ -122,11 +122,17 @@ class ParallelConfig:
     """Number of local data parallel groups. A value of 0 is a sentinel used by
     the engine-args layer to signal that data parallelism was specified
     externally (see `ParallelConfig.__post_init__`)."""
-    data_parallel_rank: int = 0
-    """Rank of the data parallel group."""
+    data_parallel_rank: int = Field(default=0, ge=0)
+    """Rank of the data parallel group. The runtime check at
+    ``__post_init__`` further bounds this by ``data_parallel_size``."""
     data_parallel_rank_local: int | None = None
-    """Local rank of the data parallel group,
-    set only in SPMD mode."""
+    """Local rank of the data parallel group, set only in SPMD mode.
+
+    Intentionally NOT constrained with ``ge=0``: ``vllm/envs.py`` defines
+    ``VLLM_DP_RANK_LOCAL: int = -1`` as the "not set" sentinel, and
+    ``ParallelConfig.__post_init__`` assigns that env value directly to this
+    field in the offline SPMD path. A non-negative constraint here would
+    reject the sentinel and break that path."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = 29550
@@ -262,8 +268,8 @@ class ParallelConfig:
     master_port: int = 29501
     """distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    node_rank: int = 0
-    """distributed node rank for multi-node distributed 
+    node_rank: int = Field(default=0, ge=0)
+    """distributed node rank for multi-node distributed
     inference when distributed_executor_backend is mp."""
     nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
