@@ -183,9 +183,10 @@ def ep_scatter(
     output_tensor_scale: torch.Tensor,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
+    block_size: int = 128,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
-    BLOCK_D = 128  # block size of quantization
+    BLOCK_D = block_size  # block size of activation-scale quantization
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
@@ -352,6 +353,7 @@ def deepgemm_moe_permute(
     expert_map: torch.Tensor | None,
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
     aq_out: torch.Tensor | None = None,
+    block_size: int | None = None,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -359,6 +361,10 @@ def deepgemm_moe_permute(
     device = aq.device
 
     block_m, block_k = get_mk_alignment_for_contiguous_layout()
+    # The activation-scale group size may differ from the M/K tile alignment
+    # (e.g. MXFP8 uses a 32-element scale group while block_k stays 128).
+    if block_size is not None:
+        block_k = block_size
 
     M_sum = compute_aligned_M(
         M=topk_ids.size(0),
@@ -412,6 +418,7 @@ def deepgemm_moe_permute(
         output_tensor_scale=aq_scale_out,
         m_indices=expert_ids,
         output_index=inv_perm,
+        block_size=block_k,
     )
 
     return aq_out, aq_scale_out, expert_ids, inv_perm

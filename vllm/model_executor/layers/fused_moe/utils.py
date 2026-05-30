@@ -258,6 +258,7 @@ def moe_kernel_quantize_input(
     ocp_mx_scheme: str | None = None,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
+    use_deep_gemm_packed_mxfp8: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
@@ -313,6 +314,13 @@ def moe_kernel_quantize_input(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
             )
+        # DeepGEMM consumes per-(1, group) float32 scales (cast to UE8M0
+        # internally), exactly like the FP8 128-block path but with group=32.
+        # The expert permute (deepgemm_moe_permute) is given the same group so
+        # the scale width matches.
+        if use_deep_gemm_packed_mxfp8:
+            assert block_shape is not None
+            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,

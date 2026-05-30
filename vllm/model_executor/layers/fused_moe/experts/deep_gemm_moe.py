@@ -205,7 +205,9 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         assert self.block_shape is not None
-        block_m = self.block_shape[0]
+        # Use the contiguous-layout M alignment (matches apply()); block_shape[0]
+        # is the quant block (1 for MXFP8) and would under-size the workspace.
+        block_m = get_mk_alignment_for_contiguous_layout()[0]
         M_sum = compute_aligned_M(
             M, topk, local_num_experts, block_m, expert_tokens_meta
         )
@@ -327,6 +329,9 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             expert_map=expert_map,
             expert_tokens_meta=expert_tokens_meta,
             aq_out=a1q_perm,
+            # MXFP8 uses a 32-element activation-scale group (block_shape[1]);
+            # FP8-block keeps the default (128) alignment.
+            block_size=self.block_shape[1] if self.mxfp8 else None,
         )
         assert a1q.size(0) == M_sum
 

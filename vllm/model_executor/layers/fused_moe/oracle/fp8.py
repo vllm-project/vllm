@@ -560,10 +560,11 @@ def make_fp8_moe_quant_config(
             g2_alphas=(w2_scale * a2_scale).squeeze(),
             gemm1_clamp_limit=swiglu_limit,
         )
-    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
-    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
-    # Non-swizzled layout is required since the TRTLLM kernel expects
-    # scales in (num_tokens, hidden_dim // 32) format.
+    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to the
+    # mxfp8 activation quant rather than standard FP8 block quantization.
+    # Non-swizzled layout is required since the TRTLLM kernel expects scales in
+    # (num_tokens, hidden_dim // 32) format. DeepGEMM instead needs its packed
+    # UE8M0 scale layout, selected via use_deep_gemm_packed_mxfp8.
     if block_shape == [1, 32]:
         return FusedMoEQuantConfig.make(
             "mxfp8",
@@ -578,6 +579,7 @@ def make_fp8_moe_quant_config(
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
+            use_deep_gemm_packed_mxfp8=(fp8_backend == Fp8MoeBackend.DEEPGEMM),
         )
 
     # All other backends use normal config.

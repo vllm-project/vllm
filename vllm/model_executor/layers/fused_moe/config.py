@@ -256,6 +256,11 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # When True, MXFP8 (1x32) activations are quantized into DeepGEMM's packed
+    # UE8M0 scale layout in the prepare phase. Set only for the DeepGEMM mxfp8
+    # backend; other backends (FlashInfer/Marlin) want the unpacked layout.
+    use_deep_gemm_packed_mxfp8: bool = False
+
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -506,6 +511,7 @@ class FusedMoEQuantConfig:
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
+        use_deep_gemm_packed_mxfp8: bool = False,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -577,6 +583,7 @@ class FusedMoEQuantConfig:
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
+            use_deep_gemm_packed_mxfp8=use_deep_gemm_packed_mxfp8,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant

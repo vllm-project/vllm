@@ -389,9 +389,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             },
         )
 
-        # Sparse "index" branch.
+        # Sparse "index" branch. index_q_proj is column-parallel, so each rank
+        # holds total_idx_heads // tp_size index heads.
         sparse_cfg = config.sparse_attention_config
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.num_idx_heads = self.total_idx_heads // tp_size
         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
 
         self.index_q_proj = ColumnParallelLinear(
@@ -439,7 +441,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             init_blocks=sparse_cfg.get("sparse_init_block", 0),
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
-            num_index_heads=self.total_idx_heads,
+            num_index_heads=self.num_idx_heads,
             index_head_dim=self.idx_head_dim,
         )
 
@@ -527,7 +529,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_q, _ = self.index_q_proj(hidden_states)
         index_k, _ = self.index_k_proj(hidden_states)
         index_q = self.index_q_norm(
-            index_q.view(*index_q.shape[:-1], self.total_idx_heads, self.idx_head_dim)
+            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim)
         ).view(index_q.shape)
         index_k = self.index_k_norm(index_k)  # single shared index head
         index_q, index_k = self.index_rotary_emb(positions, index_q, index_k)
