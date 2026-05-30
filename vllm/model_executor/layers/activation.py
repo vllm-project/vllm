@@ -169,7 +169,9 @@ class SiluAndMulWithClamp(CustomOp):
     def __init__(self, swiglu_limit: float, *, compile_native: bool = True):
         super().__init__(compile_native=compile_native)
         self.swiglu_limit = float(swiglu_limit)
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -188,7 +190,7 @@ class SiluAndMulWithClamp(CustomOp):
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        return self.forward_native(x)
 
 
 # --8<-- [start:mul_and_silu]
@@ -710,6 +712,7 @@ _ACTIVATION_REGISTRY = LazyDict(
         "relu": lambda: nn.ReLU(),
         "relu2": lambda: ReLUSquaredActivation(),
         "silu": lambda: nn.SiLU(),
+        "swish": lambda: nn.SiLU(),
         "quick_gelu": lambda: QuickGELU(),
         "tanh": lambda: nn.Tanh(),
         "sigmoid": lambda: nn.Sigmoid(),
@@ -749,17 +752,25 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
     {
         "gelu": lambda: GeluAndMul(),
+        "gelu_pytorch_tanh": lambda: GeluAndMul(approximate="tanh"),
         "silu": lambda: SiluAndMul(),
+        "swish": lambda: SiluAndMul(),
         "geglu": lambda: GeluAndMul(),
         "swigluoai": lambda: SwigluOAIAndMul(),
     }
 )
 
 
-def get_act_and_mul_fn(act_fn_name: str) -> nn.Module:
+def get_act_and_mul_fn(act_fn_name: str, *, compile_native: bool = True) -> nn.Module:
     """Get an activation-and-mul (i.e. SiluAndMul) function by name."""
     act_fn_name = act_fn_name.lower()
-    if act_fn_name not in _ACTIVATION_AND_MUL_REGISTRY:
-        raise ValueError(f"Activation function {act_fn_name!r} is not supported.")
 
-    return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    if not compile_native and act_fn_name in ("silu", "swish"):
+        return SiluAndMul(compile_native=False)
+
+    try:
+        return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    except KeyError:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported."
+        ) from None

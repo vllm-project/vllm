@@ -96,7 +96,7 @@ class SharedExperts:
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
-        if self._quant_method.mk_owns_shared_expert:
+        if self._quant_method.mk_can_overlap_shared_experts:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (
@@ -119,7 +119,6 @@ class SharedExperts:
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
-            assert self._moe_config.disable_inplace
 
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone
