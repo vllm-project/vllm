@@ -9,7 +9,11 @@ Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients.
 """
 
+import pytest
+from pydantic import ValidationError
+
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -28,6 +32,86 @@ def _make_request(
         messages=messages,
         **kwargs,
     )
+
+
+# ======================================================================
+# Claude Code role normalization
+# ======================================================================
+
+
+class TestClaudeCodeRoleNormalization:
+    def test_system_role_message_moves_to_system_prompt(self):
+        request = _make_request(
+            [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+
+        result = _convert(request)
+
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "You are terse.",
+        }
+        assert result.messages[1] == {"role": "user", "content": "Hello"}
+
+    def test_system_role_message_merges_after_existing_system(self):
+        request = _make_request(
+            [
+                {"role": "system", "content": "Add this too."},
+                {"role": "user", "content": "Hello"},
+            ],
+            system="Keep this. ",
+        )
+
+        result = _convert(request)
+
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "Keep this. Add this too.",
+        }
+
+    def test_system_role_message_preserves_content_blocks(self):
+        request = _make_request(
+            [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "Block system."}],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+            system=[{"type": "text", "text": "Existing system. "}],
+        )
+
+        result = _convert(request)
+
+        assert result.messages[0] == {
+            "role": "system",
+            "content": "Existing system. Block system.",
+        }
+
+    def test_count_tokens_request_normalizes_claude_code_system_role(self):
+        request = AnthropicCountTokensRequest(
+            model="test-model",
+            system="Keep this. ",
+            messages=[
+                {"role": "system", "content": "Add this too."},
+                {"role": "user", "content": "User request"},
+            ],
+        )
+
+        result = _convert(request)
+
+        assert [message.role for message in request.messages] == ["user"]
+        assert result.messages == [
+            {"role": "system", "content": "Keep this. Add this too."},
+            {"role": "user", "content": "User request"},
+        ]
+
+    def test_unknown_role_still_fails_validation(self):
+        with pytest.raises(ValidationError):
+            _make_request([{"role": "tool", "content": "not accepted"}])
 
 
 # ======================================================================

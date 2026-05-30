@@ -8,6 +8,75 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+def _content_to_system_blocks(content: Any) -> list[Any]:
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return content
+    return [{"type": "text", "text": str(content)}]
+
+
+def _merge_system_content(
+    existing_system: Any, system_message_content: list[Any]
+) -> str | list[Any] | None:
+    if not system_message_content:
+        return existing_system
+
+    if existing_system is None and len(system_message_content) == 1:
+        content = system_message_content[0]
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return content
+
+    system_blocks: list[Any] = []
+    if existing_system is not None:
+        system_blocks.extend(_content_to_system_blocks(existing_system))
+    for content in system_message_content:
+        system_blocks.extend(_content_to_system_blocks(content))
+    return system_blocks
+
+
+def _normalize_claude_code_message_roles(data: Any) -> Any:
+    """Move Claude Code system messages into the Anthropic system field."""
+    if not isinstance(data, dict):
+        return data
+
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return data
+
+    normalized_messages: list[Any] = []
+    system_message_content: list[Any] = []
+    changed = False
+
+    for message in messages:
+        if not isinstance(message, dict):
+            normalized_messages.append(message)
+            continue
+
+        role = message.get("role")
+        if role == "system":
+            system_message_content.append(message.get("content", ""))
+            changed = True
+            continue
+
+        normalized_messages.append(message)
+
+    if not changed:
+        return data
+
+    normalized_data = dict(data)
+    normalized_data["messages"] = normalized_messages
+    if system_message_content:
+        normalized_data["system"] = _merge_system_content(
+            data.get("system"), system_message_content
+        )
+    return normalized_data
+
+
 class AnthropicError(BaseModel):
     """Error structure for Anthropic API"""
 
@@ -144,6 +213,11 @@ class AnthropicMessagesRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_claude_code_message_roles(cls, data: Any) -> Any:
+        return _normalize_claude_code_message_roles(data)
+
     @field_validator("model")
     @classmethod
     def validate_model(cls, v):
@@ -246,6 +320,11 @@ class AnthropicCountTokensRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_claude_code_message_roles(cls, data: Any) -> Any:
+        return _normalize_claude_code_message_roles(data)
 
     @field_validator("model")
     @classmethod
