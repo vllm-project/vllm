@@ -16,9 +16,11 @@ from compressed_tensors.quantization import (
 )
 
 from tests.models.utils import check_logprobs_close
+from vllm.config.quantization import QuantSpec
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.base import NvFp4LinearKernel
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
@@ -32,6 +34,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
+    QuantSpecScheme,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.builders.nvfp4 import (  # noqa: E501
+    NvFp4DynamicActivationBuilder,
+    NvFp4StaticWeightBuilder,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
@@ -39,6 +46,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -66,6 +77,108 @@ ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
+@pytest.mark.parametrize("wrap_weight", [False, True])
+def test_nvfp4_builders_normalize_scales_and_kernel_builds_alpha(
+    monkeypatch, wrap_weight
+):
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    layer = torch.nn.Module()
+    weight_builder = NvFp4StaticWeightBuilder(wrap_weight=wrap_weight)
+    activation_builder = NvFp4DynamicActivationBuilder()
+
+    output_partition_sizes = [2, 4]
+    input_size_per_partition = 32
+    weight_builder.create(
+        layer=layer,
+        output_partition_sizes=output_partition_sizes,
+        input_size_per_partition=input_size_per_partition,
+        params_dtype=torch.bfloat16,
+        weight_loader=Mock(),
+    )
+    activation_builder.create(
+        layer=layer,
+        output_partition_sizes=output_partition_sizes,
+        input_size_per_partition=input_size_per_partition,
+        params_dtype=torch.bfloat16,
+        weight_loader=Mock(),
+    )
+
+    original_weight = layer.weight_packed
+    layer.weight_global_scale.data.copy_(torch.tensor([2.0, 4.0]))
+    layer.input_global_scale.data.copy_(torch.tensor([8.0, 16.0]))
+
+    weight_builder.post_load(layer)
+    activation_builder.post_load(layer)
+    NvFp4LinearKernel._set_alpha_after_loading(layer)
+
+    assert not hasattr(layer, "weight_packed")
+    if wrap_weight:
+        assert layer.weight is not original_weight
+        assert layer.weight.data_ptr() == original_weight.data_ptr()
+    else:
+        assert layer.weight is original_weight
+
+    assert torch.equal(layer.weight_global_scale, torch.tensor(0.25))
+    assert torch.equal(layer.input_global_scale, torch.tensor(0.0625))
+    assert torch.equal(layer.input_global_scale_inv, torch.tensor(16.0))
+    assert torch.equal(layer.alpha, torch.tensor(0.015625))
+
+    layer.input_global_scale = torch.nn.Parameter(torch.ones(2), requires_grad=False)
+    with pytest.raises(ValueError, match="scalar input and weight global scales"):
+        NvFp4LinearKernel._set_alpha_after_loading(layer)
+
+
+def test_quant_spec_scheme_uses_nvfp4_builders(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+    class DummyKernel:
+        def process_weights_after_loading(self, layer):
+            NvFp4LinearKernel._set_alpha_after_loading(layer)
+
+        def apply_weights(self, layer, x, bias=None):
+            return x
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "quant_spec_scheme.init_linear_kernel_for_spec",
+        lambda spec: DummyKernel(),
+    )
+
+    scheme = QuantSpecScheme(QuantSpec(weight=kNvfp4Static, activation=kNvfp4Dynamic))
+    layer = torch.nn.Module()
+    scheme.create_weights(
+        layer=layer,
+        output_partition_sizes=[2, 4],
+        input_size_per_partition=32,
+        params_dtype=torch.bfloat16,
+        weight_loader=Mock(),
+    )
+
+    layer.weight_global_scale.data.copy_(torch.tensor([2.0, 4.0]))
+    layer.input_global_scale.data.copy_(torch.tensor([8.0, 16.0]))
+
+    scheme.process_weights_after_loading(layer)
+
+    assert scheme.group_size == 16
+    assert QuantSpecScheme.get_min_capability() == 75
+    assert scheme.get_min_capability() == 75
+    assert not hasattr(layer, "weight_packed")
+    assert torch.equal(layer.weight_global_scale, torch.tensor(0.25))
+    assert torch.equal(layer.input_global_scale_inv, torch.tensor(16.0))
+    assert torch.equal(layer.alpha, torch.tensor(0.015625))
 
 
 @pytest.mark.parametrize(
@@ -392,6 +505,11 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             if (
                 isinstance(qkv_proj.scheme, scheme)
+                or (
+                    isinstance(qkv_proj.scheme, QuantSpecScheme)
+                    and qkv_proj.scheme.spec.weight == kNvfp4Static
+                    and qkv_proj.scheme.spec.activation == kNvfp4Dynamic
+                )
                 or isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
                 and not cutlass_fp4_supported()
             ):

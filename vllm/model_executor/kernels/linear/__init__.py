@@ -160,7 +160,11 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
@@ -951,6 +955,15 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     )
 
 
+def init_linear_kernel_for_spec(spec) -> NvFp4LinearKernel:
+    if (spec.weight, spec.activation) == (kNvfp4Static, kNvfp4Dynamic):
+        return init_nvfp4_linear_kernel()
+    raise NotImplementedError(
+        "No linear kernel registered for "
+        f"weight={spec.weight}, activation={spec.activation}"
+    )
+
+
 def register_linear_kernel(
     kernel_class: type,
     platform: PlatformEnum,
@@ -1000,6 +1013,7 @@ __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "init_nvfp4_linear_kernel",
+    "init_linear_kernel_for_spec",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
     "init_wfp8_a16_linear_kernel",

@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from torch.nn.parameter import Parameter
 
 
 @dataclass
@@ -46,6 +47,27 @@ class NvFp4LinearKernel(ABC):
     def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         """Return whether this kernel can handle *config*."""
         raise NotImplementedError
+
+    @staticmethod
+    def _set_alpha_after_loading(layer: torch.nn.Module) -> None:
+        if not (
+            hasattr(layer, "input_global_scale")
+            and hasattr(layer, "weight_global_scale")
+        ):
+            return
+        if (
+            layer.input_global_scale.numel() != 1
+            or layer.weight_global_scale.numel() != 1
+        ):
+            raise ValueError(
+                "NVFP4 alpha must be built from scalar input and weight global "
+                "scales. Ensure checkpoint global scales are normalized before "
+                "kernel processing."
+            )
+        layer.alpha = Parameter(
+            layer.input_global_scale * layer.weight_global_scale,
+            requires_grad=False,
+        )
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

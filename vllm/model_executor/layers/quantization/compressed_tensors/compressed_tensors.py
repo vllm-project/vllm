@@ -13,6 +13,7 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
+from vllm.config.quantization import QuantSpec
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -46,6 +47,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
+    QuantSpecScheme,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod,
@@ -57,6 +59,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
@@ -65,7 +72,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-__all__ = ["CompressedTensorsLinearMethod"]
+__all__ = [
+    "CompressedTensorsLinearMethod",
+    "CompressedTensorsW4A4Fp4",
+]
 
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
@@ -419,6 +429,25 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_mxfp8_scale_dtype
         )
 
+    @classmethod
+    def _ct_args_to_quant_key(
+        cls,
+        quant_args: QuantizationArgs,
+        *,
+        is_activation: bool = False,
+    ) -> QuantKey:
+        if cls._is_nvfp4_format(quant_args):
+            if is_activation:
+                if not quant_args.dynamic:
+                    raise ValueError(
+                        "NVFP4 input activation quantization must be dynamic"
+                    )
+                return kNvfp4Dynamic
+            if quant_args.dynamic:
+                raise ValueError("NVFP4 weight quantization must be static")
+            return kNvfp4Static
+        raise NotImplementedError(f"No QuantKey mapping for {quant_args}")
+
     @staticmethod
     def _is_static_tensor_w8a8(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
@@ -653,7 +682,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
             ):
-                return CompressedTensorsW4A4Fp4()
+                weight_key = self._ct_args_to_quant_key(weight_quant)
+                activation_key = self._ct_args_to_quant_key(
+                    input_quant,
+                    is_activation=True,
+                )
+                return QuantSpecScheme(
+                    QuantSpec(weight=weight_key, activation=activation_key)
+                )
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(

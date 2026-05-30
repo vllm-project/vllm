@@ -44,6 +44,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False
         )
@@ -105,6 +106,7 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
         weight = layer.weight.data
@@ -172,6 +174,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self._set_alpha_after_loading(layer)
         # cuDNN uses the same swizzled + padded layout as CUTLASS
         layer.weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.weight_scale.data), requires_grad=False

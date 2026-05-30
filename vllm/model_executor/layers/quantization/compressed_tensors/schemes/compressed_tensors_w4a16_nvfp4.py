@@ -3,19 +3,16 @@
 from collections.abc import Callable
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes.builders.nvfp4 import (  # noqa: E501
+    NvFp4StaticWeightBuilder,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     apply_fp4_marlin_linear,
     prepare_fp4_layer_for_marlin,
-)
-from vllm.model_executor.parameter import (
-    GroupQuantScaleParameter,
-    ModelWeightParameter,
-    PerTensorScaleParameter,
 )
 
 __all__ = ["CompressedTensorsW4A16Fp4"]
@@ -23,7 +20,8 @@ __all__ = ["CompressedTensorsW4A16Fp4"]
 
 class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
     def __init__(self):
-        self.group_size = 16
+        self.weight_builder = NvFp4StaticWeightBuilder(wrap_weight=True)
+        self.group_size = self.weight_builder.group_size
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -44,51 +42,17 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
 
-        # Weight
-        weight = ModelWeightParameter(
-            data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // 2,
-                dtype=torch.uint8,
-            ),
-            input_dim=1,
-            output_dim=0,
+        self.weight_builder.create(
+            layer=layer,
+            output_partition_sizes=output_partition_sizes,
+            input_size_per_partition=input_size_per_partition,
+            params_dtype=params_dtype,
             weight_loader=weight_loader,
+            **kwargs,
         )
-        layer.register_parameter("weight_packed", weight)
-
-        # Global Weight Scale
-        weight_global_scale = PerTensorScaleParameter(
-            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("weight_global_scale", weight_global_scale)
-
-        # Per Group Weight Scale
-        weight_scale = GroupQuantScaleParameter(
-            data=torch.empty(
-                sum(output_partition_sizes),
-                input_size_per_partition // self.group_size,
-                dtype=torch.float8_e4m3fn,
-            ),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader,
-        )
-
-        layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Process parameters for marlin repacking
-
-        # Rename weight_packed to weight that marlin expects
-        layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
-        del layer.weight_packed
-        # ct stores the inverse of what is expected by the marlin kernel
-        layer.weight_global_scale = Parameter(
-            1.0 / layer.weight_global_scale.max().to(torch.float32), requires_grad=False
-        )
-
+        self.weight_builder.post_load(layer)
         prepare_fp4_layer_for_marlin(layer)
 
     def apply_weights(
