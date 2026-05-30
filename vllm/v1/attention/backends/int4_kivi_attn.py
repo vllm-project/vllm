@@ -18,6 +18,7 @@ Cache shape (uint8): (num_blocks, 2, block_size, num_kv_heads, full_dim)
   full_dim = head_size//2 (INT4 data) + head_size//16 (fp8 scales)
 """
 
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -45,8 +46,13 @@ from vllm.v1.attention.backends.fa_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.triton_int4_kivi import (
     int4_kivi_gather_dequant,
+    int4_kivi_paged_decode,
     int4_kivi_store,
 )
+
+# Fused paged decode is the fast path; set VLLM_INT4_NO_FUSED_DECODE=1 to force
+# the dense gather+flash fallback (used to A/B correctness and speed).
+_USE_FUSED_DECODE = os.environ.get("VLLM_INT4_NO_FUSED_DECODE") != "1"
 
 logger = init_logger(__name__)
 
@@ -274,10 +280,20 @@ class Int4KiviAttentionImpl(AttentionImpl["Int4KiviMetadata"]):
                 attn_metadata.max_query_len,
                 window=self.sliding_window,
             )
+        elif (
+            _USE_FUSED_DECODE
+            and self.sliding_window is None
+            and attn_metadata.max_query_len == 1
+        ):
+            # Pure-decode batch (one query token per request): fused flash-decode
+            # straight off the packed int4 cache — no dense (B,H,max_seq,D)
+            # materialization, K/V read at 4 bits.  This is the decode-speed path.
+            attn_out = self._fused_decode(q, kv_cache, attn_metadata)
         else:
-            # General path (decode / continuation / mixed): dequant the cached
-            # INT4 K/V (already stored by do_kv_cache_update, including this
-            # step's tokens) and run flash_attn against the full bf16 context.
+            # General path (continuation / mixed prefill+decode / windowed):
+            # dequant the cached INT4 K/V (already stored by do_kv_cache_update,
+            # including this step's tokens) and run flash_attn against the full
+            # bf16 context.
             attn_out = self._dequant_and_attend(q, kv_cache, attn_metadata)
 
         if output.ndim == 3:
@@ -285,6 +301,19 @@ class Int4KiviAttentionImpl(AttentionImpl["Int4KiviMetadata"]):
         else:
             output[:N] = attn_out.reshape(N, -1).to(output.dtype)
         return output
+
+    def _fused_decode(
+        self,
+        q: torch.Tensor,  # (N, Hq, D), N == num requests (1 query token each)
+        kv_cache: torch.Tensor,
+        attn_metadata: "Int4KiviMetadata",
+    ) -> torch.Tensor:
+        """Fused paged INT4-KIVI flash-decode (no dense KV materialization)."""
+        seq_lens = attn_metadata.seq_lens.to(torch.int32)
+        block_table = attn_metadata.block_table.to(torch.int32)
+        return int4_kivi_paged_decode(
+            q, kv_cache, block_table, seq_lens, self.scale
+        )
 
     def _dequant_and_attend(
         self,

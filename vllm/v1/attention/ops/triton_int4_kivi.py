@@ -465,6 +465,213 @@ def int4_kivi_store(
         )
 
 
+# =========================================================================== #
+# Fused paged flash-decode over the packed INT4-KIVI cache.
+#
+# The general decode path (``int4_kivi_gather_dequant`` + flash) materializes the
+# WHOLE cached context as dense bf16 ``(B, H, max_seq, D)`` every decode step and
+# re-reads it — O(B*H*max_seq*D) HBM writes+reads of *bf16* per step, the bulk of
+# decode latency at long context.  This kernel instead streams the packed int4
+# cache directly: one program handles one ``(request, kv_head, sequence-split)``
+# and processes ALL ``GROUP`` query heads of that kv head together (GQA-grouped),
+# dequantizing K (per-channel for full blocks, per-token for the trailing partial
+# block) and V (per-token) in registers, flash-style online softmax, never
+# materializing dense KV.  The K/V reads move ~3.2x fewer bytes (4-bit vs bf16).
+#
+# Partials ``(B, H, GROUP, SPLIT)`` are reduced by ``_decode_combine_kernel``.
+# Layout note: ``((b*H + kvh)*GROUP + gr) == b*n_qh + qh`` so the combine output
+# is exactly ``[B*n_qh, D]`` row-major in (b, qh).
+# =========================================================================== #
+@triton.jit
+def _paged_decode_kernel(
+    q_ptr,  # bf16 [B, n_qh, D]
+    cache_ptr,  # uint8 [num_blocks, 2, block_size, H, full_dim]
+    block_table_ptr,  # int32 [B, max_blocks]
+    seq_lens_ptr,  # int32 [B]
+    pm_ptr,  # fp32 [B, H, GROUP, SPLIT]
+    pl_ptr,  # fp32 [B, H, GROUP, SPLIT]
+    pacc_ptr,  # fp32 [B, H, GROUP, SPLIT, D]
+    sm_scale,
+    n_qh,
+    GROUP: tl.constexpr,
+    GPAD: tl.constexpr,  # next-pow2(GROUP), >=16 for tl.dot
+    D: tl.constexpr,
+    H: tl.constexpr,
+    ND: tl.constexpr,  # D // BLOCK
+    DATA_BYTES: tl.constexpr,  # D // 2
+    BLOCK_SIZE: tl.constexpr,  # paged block (page) size in tokens
+    SPLIT: tl.constexpr,
+    BLOCK_N: tl.constexpr,  # tokens streamed per inner step
+    s_cache_blk,
+    s_cache_side,
+    s_cache_tok,
+    s_cache_h,
+    s_bt,
+):
+    pid = tl.program_id(0)
+    s = pid % SPLIT
+    tmp = pid // SPLIT
+    kvh = tmp % H
+    b = tmp // H
+    qh0 = kvh * GROUP
+
+    d = tl.arange(0, D)  # [D] head-dim lanes
+    db = d // _BLOCK  # [D] dblock of each lane
+    cin = d % _BLOCK  # [D] in-block channel
+    dbyte = db * _PACK + cin // 2  # [D] data byte holding lane d
+    dhi = (cin % 2) == 1  # [D] lane d in high nibble?
+
+    gr = tl.arange(0, GPAD)  # [GPAD] query heads within the group
+    gmask = gr < GROUP
+    qoff = (b * n_qh + qh0 + gr[:, None]) * D + d[None, :]
+    q = tl.load(q_ptr + qoff, mask=gmask[:, None], other=0.0).to(tl.float32) * sm_scale
+
+    seq_len = tl.load(seq_lens_ptr + b)
+    seg = (seq_len + SPLIT - 1) // SPLIT
+    seg0 = s * seg
+    seg1 = tl.minimum(seg0 + seg, seq_len)
+
+    m_i = tl.full([GPAD], -float("inf"), tl.float32)
+    l_i = tl.zeros([GPAD], tl.float32)
+    acc = tl.zeros([GPAD, D], tl.float32)
+
+    t = seg0
+    while t < seg1:
+        tok = t + tl.arange(0, BLOCK_N)  # [BLOCK_N]
+        tmask = tok < seg1
+        logical_blk = tok // BLOCK_SIZE
+        tok_in_blk = tok % BLOCK_SIZE
+        phys = tl.load(
+            block_table_ptr + b * s_bt + logical_blk, mask=tmask, other=0
+        ).to(tl.int64)  # [BLOCK_N]
+        is_full = (logical_blk + 1) * BLOCK_SIZE <= seq_len  # [BLOCK_N] per-channel K?
+
+        # byte offset of each token's K row (side 0) and V row (side 1).
+        rowK = phys * s_cache_blk + tok_in_blk.to(tl.int64) * s_cache_tok + kvh * s_cache_h
+        rowV = rowK + s_cache_side
+        blkK = phys * s_cache_blk + kvh * s_cache_h  # block base (K side, scales)
+
+        # ---- dequant K -> [D, BLOCK_N] ----
+        koff = rowK[None, :] + dbyte[:, None]  # [D, BLOCK_N]
+        kb = tl.load(cache_ptr + koff, mask=tmask[None, :], other=0).to(tl.int32)
+        knib = tl.where(dhi[:, None], (kb >> 4) & 0xF, kb & 0xF)
+        knib = tl.where(knib >= 8, knib - 16, knib)
+        # scale: per-channel for full blocks, per-token for the partial tail.
+        ks_pc = blkK[None, :] + (d // ND)[:, None] * s_cache_tok + DATA_BYTES + (d % ND)[:, None]
+        ks_pt = rowK[None, :] + DATA_BYTES + db[:, None]
+        ksaddr = tl.where(is_full[None, :], ks_pc, ks_pt)
+        ksb = tl.load(cache_ptr + ksaddr, mask=tmask[None, :], other=0).to(tl.uint8)
+        ksc = ksb.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        kdeq = knib.to(tl.float32) * ksc  # [D, BLOCK_N]
+
+        qk = tl.dot(q, kdeq)  # [GPAD, BLOCK_N]
+        qk = tl.where(tmask[None, :], qk, -float("inf"))
+        m_new = tl.maximum(m_i, tl.max(qk, axis=1))  # [GPAD]
+        alpha = tl.exp(m_i - m_new)
+        pblk = tl.exp(qk - m_new[:, None])
+        pblk = tl.where(tmask[None, :], pblk, 0.0)  # [GPAD, BLOCK_N]
+
+        # ---- dequant V -> [BLOCK_N, D] (always per-token) ----
+        voff = rowV[:, None] + dbyte[None, :]  # [BLOCK_N, D]
+        vb = tl.load(cache_ptr + voff, mask=tmask[:, None], other=0).to(tl.int32)
+        vnib = tl.where(dhi[None, :], (vb >> 4) & 0xF, vb & 0xF)
+        vnib = tl.where(vnib >= 8, vnib - 16, vnib)
+        vsaddr = rowV[:, None] + DATA_BYTES + db[None, :]  # [BLOCK_N, D]
+        vsb = tl.load(cache_ptr + vsaddr, mask=tmask[:, None], other=0).to(tl.uint8)
+        vsc = vsb.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        vdeq = vnib.to(tl.float32) * vsc  # [BLOCK_N, D]
+
+        acc = acc * alpha[:, None] + tl.dot(pblk.to(tl.float32), vdeq)  # [GPAD, D]
+        l_i = l_i * alpha + tl.sum(pblk, axis=1)
+        m_i = m_new
+        t += BLOCK_N
+
+    base = ((b * H + kvh) * GROUP + gr) * SPLIT + s  # [GPAD]
+    tl.store(pm_ptr + base, m_i, mask=gmask)
+    tl.store(pl_ptr + base, l_i, mask=gmask)
+    tl.store(pacc_ptr + base[:, None] * D + d[None, :], acc, mask=gmask[:, None])
+
+
+@triton.jit
+def _decode_combine_kernel(
+    pm_ptr,
+    pl_ptr,
+    pacc_ptr,
+    out_ptr,  # bf16 [B*n_qh, D]
+    D: tl.constexpr,
+    SPLIT: tl.constexpr,
+):
+    pid = tl.program_id(0)  # over B*n_qh
+    d = tl.arange(0, D)
+    m = -float("inf")
+    for sp in range(0, SPLIT):
+        m = tl.maximum(m, tl.load(pm_ptr + pid * SPLIT + sp))
+    l = 0.0
+    acc = tl.zeros([D], dtype=tl.float32)
+    for sp in range(0, SPLIT):
+        ms = tl.load(pm_ptr + pid * SPLIT + sp)
+        ls = tl.load(pl_ptr + pid * SPLIT + sp)
+        a = tl.load(pacc_ptr + (pid * SPLIT + sp) * D + d)
+        scale = tl.exp(ms - m)
+        acc += a * scale
+        l += ls * scale
+    l = tl.where(l > 0.0, l, 1.0)  # empty request guard (l==0 -> out 0)
+    tl.store(out_ptr + pid * D + d, (acc / l).to(tl.bfloat16))
+
+
+def int4_kivi_paged_decode(
+    q: torch.Tensor,  # bf16 [N, Hq, D], N == B (one decode token per request)
+    kv_cache: torch.Tensor,  # uint8 [num_blocks, 2, block_size, H, full_dim]
+    block_table: torch.Tensor,  # int32 [B, max_blocks]
+    seq_lens: torch.Tensor,  # int32 [B]
+    sm_scale: float,
+    split: int = 8,
+    block_n: int = 64,
+) -> torch.Tensor:
+    """Fused INT4-KIVI flash-decode: attention straight off the packed cache.
+
+    Returns ``out`` bf16 [N, Hq, D].  Equivalent to dequantizing the whole cache
+    and running causal attention with a single query per request, but without
+    materializing the dense bf16 KV.
+    """
+    N, Hq, D = q.shape
+    B = seq_lens.shape[0]
+    assert N == B, "paged decode expects exactly one query token per request"
+    H = kv_cache.shape[3]
+    GROUP = Hq // H
+    ND = D // BLOCK
+    DATA_BYTES = D // 2
+    BLOCK_SIZE = kv_cache.shape[2]
+    dev = q.device
+
+    max_seq = int(seq_lens.max().item())
+    split = max(1, min(split, (max_seq + block_n - 1) // block_n))
+    GPAD = 1 << max(0, (GROUP - 1)).bit_length()
+    GPAD = max(GPAD, 16)  # tl.dot needs M >= 16
+
+    qc = q.reshape(B, Hq, D).contiguous()
+    bt = block_table.to(torch.int32)
+    sl = seq_lens.to(torch.int32)
+
+    npart = B * H * GROUP * split
+    pm = torch.empty((npart,), dtype=torch.float32, device=dev)
+    pl = torch.empty((npart,), dtype=torch.float32, device=dev)
+    pacc = torch.empty((npart, D), dtype=torch.float32, device=dev)
+
+    _paged_decode_kernel[(B * H * split,)](
+        qc, kv_cache, bt, sl, pm, pl, pacc,
+        sm_scale, Hq,
+        GROUP=GROUP, GPAD=GPAD, D=D, H=H, ND=ND, DATA_BYTES=DATA_BYTES,
+        BLOCK_SIZE=BLOCK_SIZE, SPLIT=split, BLOCK_N=block_n,
+        s_cache_blk=kv_cache.stride(0), s_cache_side=kv_cache.stride(1),
+        s_cache_tok=kv_cache.stride(2), s_cache_h=kv_cache.stride(3),
+        s_bt=bt.stride(0), num_warps=4,
+    )
+    out = torch.empty((B * Hq, D), dtype=torch.bfloat16, device=dev)
+    _decode_combine_kernel[(B * Hq,)](pm, pl, pacc, out, D=D, SPLIT=split)
+    return out.reshape(N, Hq, D)
+
+
 def int4_kivi_gather_dequant(
     kv_cache: torch.Tensor,  # uint8 [num_blocks, 2, block_size, H, full_dim]
     block_table: torch.Tensor,  # int32 [B, max_blocks]
