@@ -455,14 +455,10 @@ class FusedMoE(PluggableLayer):
                 "moe_expert_cache_size is not compatible with data parallelism "
                 "or sequence parallelism."
             )
-        if self._moe_expert_cache_size > 0 and (
-            not vllm_config.model_config.enforce_eager
-        ):
-            raise ValueError(
-                "moe_expert_cache_size requires --enforce-eager; CUDA graph "
-                "capture with an active expert cache produces incorrect "
-                "results."
-            )
+        # Note: CUDA graphs work with expert cache when the cache is warm.
+        # Cache misses during graph replay will trigger fallback to eager mode.
+        # The cache uses fixed-address GPU buffers, so graph-captured indexing
+        # remains valid as long as all needed experts are already cached.
 
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues

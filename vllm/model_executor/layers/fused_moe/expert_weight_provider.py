@@ -135,6 +135,15 @@ class CachedWeightProvider:
             entry = self._lru.pop(expert_id)
             self._free_slots.append(entry[0])
 
+    def all_cached(self, topk_ids: torch.Tensor) -> bool:
+        """Check if all experts in topk_ids are already cached.
+
+        Use this before CUDA graph replay to verify no cache misses will occur.
+        If this returns False, fall back to eager execution for this forward.
+        """
+        unique_ids = topk_ids.unique().tolist()
+        return all(eid in self._lru for eid in unique_ids)
+
     @torch.compiler.disable
     def prepare(self, topk_ids: torch.Tensor) -> ExpertWeightResult:
         """Populate the GPU buffer and return slot-remapped expert IDs.

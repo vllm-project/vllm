@@ -296,7 +296,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                         moe_config=self.moe,
                         backend=self.unquantized_backend,
                         experts_cls=self.experts_cls,
-                        routing_tables=layer._maybe_init_expert_routing_tables(),
+                        routing_tables=layer._expert_routing_tables(),
                     )
             else:
                 w13 = layer.w13_weight

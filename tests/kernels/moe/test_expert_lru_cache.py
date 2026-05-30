@@ -125,6 +125,30 @@ def test_output_dtype_matches_input(dtype: torch.dtype):
     assert result.topk_ids.dtype == dtype
 
 
+def test_all_cached_returns_true_when_all_present():
+    """all_cached returns True when every expert in topk_ids is cached."""
+    provider, *_ = _make_provider(capacity=4)
+    provider.prepare(_topk([0, 1, 2, 3]))
+    assert provider.all_cached(_topk([0, 1])) is True
+    assert provider.all_cached(_topk([2, 3])) is True
+    assert provider.all_cached(_topk([0, 1, 2, 3])) is True
+
+
+def test_all_cached_returns_false_when_any_missing():
+    """all_cached returns False if any expert in topk_ids is not cached."""
+    provider, *_ = _make_provider(capacity=4)
+    provider.prepare(_topk([0, 1, 2, 3]))
+    assert provider.all_cached(_topk([4])) is False
+    assert provider.all_cached(_topk([0, 4])) is False
+    assert provider.all_cached(_topk([0, 1, 2, 7])) is False
+
+
+def test_all_cached_empty_cache():
+    """all_cached returns False when cache is empty."""
+    provider, *_ = _make_provider(capacity=4)
+    assert provider.all_cached(_topk([0])) is False
+
+
 # -- LFRU eviction semantics --
 
 
