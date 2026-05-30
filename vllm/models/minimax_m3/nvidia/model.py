@@ -299,7 +299,17 @@ class MiniMaxM3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
+        q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
+        q = self.q_norm(q_by_head).view(q.shape)
+        k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
+        k = self.k_norm(k_by_head).view(k.shape)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MiniMaxM3SparseAttention(nn.Module):
