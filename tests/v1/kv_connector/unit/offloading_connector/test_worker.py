@@ -502,3 +502,77 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
         assert group_refs[1] == CanonicalKVCacheRef(
             tensor_idx=1, page_size_bytes=spec_b.page_size_bytes
         )
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
+    ".worker.get_layers_from_vllm_config"
+)
+def test_register_kv_caches_accepts_split_kv_views_with_storage_offset(mock_get_layers):
+    """Ascend returns (k_cache, v_cache) views with non-zero storage offsets."""
+
+    class SplitKVBackend:
+        @staticmethod
+        def get_kv_cache_shape(num_blocks, block_size, num_kv_heads, head_size):
+            return (num_blocks, block_size, num_kv_heads, head_size)
+
+    layer_name = "model.layers.0.self_attn.attn"
+    attn_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    half_page_size = attn_spec.page_size_bytes // 2
+
+    def make_offset_cache(offset_bytes: int):
+        assert offset_bytes % get_dtype_size(DTYPE) == 0
+        raw = torch.arange(
+            offset_bytes + NUM_BLOCKS * half_page_size,
+            dtype=torch.int8,
+            device="cpu",
+        )
+        raw = raw[offset_bytes:]
+        assert raw.storage_offset() != 0
+        return raw.view(DTYPE).view(
+            NUM_BLOCKS,
+            BLOCK_SIZE,
+            NUM_KV_HEADS,
+            HEAD_SIZE,
+        )
+
+    k_cache = make_offset_cache(16)
+    v_cache = make_offset_cache(32)
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=attn_spec.page_size_bytes * NUM_BLOCKS,
+                shared_by=[layer_name],
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=attn_spec)
+        ],
+    )
+
+    mock_get_layers.return_value = {
+        layer_name: _make_mock_layer(SplitKVBackend),
+    }
+
+    worker, spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches({layer_name: (k_cache, v_cache)})
+
+    canonical = spec.get_handlers.call_args[0][0]
+    assert isinstance(canonical, CanonicalKVCaches)
+    assert len(canonical.tensors) == 2
+    assert canonical.tensors[0].tensor.dtype == torch.int8
+    assert canonical.tensors[1].tensor.dtype == torch.int8
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, half_page_size)
+    assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, half_page_size)
+    assert canonical.tensors[0].tensor.data_ptr() == k_cache.data_ptr()
+    assert canonical.tensors[1].tensor.data_ptr() == v_cache.data_ptr()
+    assert canonical.group_data_refs == [[
+        CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=half_page_size),
+        CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=half_page_size),
+    ]]

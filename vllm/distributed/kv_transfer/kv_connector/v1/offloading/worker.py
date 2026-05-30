@@ -39,6 +39,30 @@ from vllm.v1.kv_offload.worker.worker import (
 logger = init_logger(__name__)
 
 
+def _byte_storage_offset(tensor: torch.Tensor) -> int:
+    try:
+        return int(tensor.data_ptr() - tensor.untyped_storage().data_ptr())
+    except AttributeError:
+        return int(tensor.storage_offset() * tensor.element_size())
+
+
+def _byte_storage_view(tensor: torch.Tensor, shape: tuple[int, ...]) -> torch.Tensor:
+    assert tensor.is_contiguous(), (
+        "KV offload expects contiguous KV cache tensors when rebuilding byte views"
+    )
+    return torch.tensor(
+        [],
+        dtype=torch.int8,
+        device=tensor.device,
+    ).set_(tensor.untyped_storage(), _byte_storage_offset(tensor), shape)
+
+
+def _page_size_from_tensor(tensor: torch.Tensor, num_blocks: int) -> int:
+    total_bytes = tensor.numel() * tensor.element_size()
+    assert total_bytes % num_blocks == 0
+    return total_bytes // num_blocks
+
+
 class OffloadingConnectorWorker:
     """Implementation of Worker side methods"""
 
@@ -96,8 +120,25 @@ class OffloadingConnectorWorker:
                 )
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     layer_kv_cache = kv_caches[layer_name]
+                    if isinstance(layer_kv_cache, (tuple, list)):
+                        page_sizes = tuple(
+                            _page_size_from_tensor(tensor, num_blocks)
+                            for tensor in layer_kv_cache
+                        )
+                        assert len(set(page_sizes)) == 1, (
+                            "Split KV cache tensors must have the same page size "
+                            "for canonical offloading refs"
+                        )
+                        page_size = page_sizes[0]
+                        tensors_per_block[layer_name] = tuple(
+                            _byte_storage_view(tensor, (num_blocks, page_size))
+                            for tensor in layer_kv_cache
+                        )
+                        page_size_bytes[layer_name] = page_size
+                        unpadded_page_size_bytes[layer_name] = page_size
+                        continue
+
                     assert isinstance(layer_kv_cache, torch.Tensor)
-                    assert layer_kv_cache.storage_offset() == 0
 
                     # get the logical dimension for num_blocks
                     test_shape = attn_backends[layer_name].get_kv_cache_shape(
@@ -122,20 +163,11 @@ class OffloadingConnectorWorker:
                         num_blocks_logical_dim
                     )
                     if num_blocks_physical_dim == 0:
-                        storage = layer_kv_cache.untyped_storage()
                         page = layer_kv_cache_spec.page_size_bytes
                         tensors_per_block[layer_name] = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(num_blocks, page),
+                            _byte_storage_view(layer_kv_cache, (num_blocks, page)),
                         )
-                        page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.page_size_bytes
-                        )
+                        page_size_bytes[layer_name] = page
                     else:
                         # Flash Attention case: (2, num_blocks, ...)
                         assert test_shape[0] == 2
@@ -144,15 +176,9 @@ class OffloadingConnectorWorker:
 
                         # unbind the tensor to separate K and V tensors
                         half_page_size = layer_kv_cache_spec.page_size_bytes // 2
-                        storage = layer_kv_cache.untyped_storage()
-                        raw = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(2, num_blocks, half_page_size)
+                        raw = _byte_storage_view(
+                            layer_kv_cache,
+                            (2, num_blocks, half_page_size),
                         )
                         tensors_per_block[layer_name] = tuple(raw.unbind(0))
 
@@ -168,15 +194,9 @@ class OffloadingConnectorWorker:
                     # from the first state tensor
                     assert len(state_tensors) > 0
                     first_state_tensor = state_tensors[0]
-                    assert first_state_tensor.storage_offset() == 0
-                    tensor = (
-                        torch.tensor(
-                            [],
-                            dtype=torch.int8,
-                            device=first_state_tensor.device,
-                        )
-                        .set_(first_state_tensor.untyped_storage())
-                        .view((num_blocks, layer_kv_cache_spec.page_size_bytes))
+                    tensor = _byte_storage_view(
+                        first_state_tensor,
+                        (num_blocks, layer_kv_cache_spec.page_size_bytes),
                     )
                     tensors_per_block[layer_name] = (tensor,)
 
