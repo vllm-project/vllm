@@ -140,9 +140,9 @@ class KDAStateSplitInfo:
                        P page.  Local dims are scaled down by |tp_ratio|
                        to get P-sized offsets.
         """
+        result: list[tuple[int, int]] = []
+        offset_acc = 0
         if tp_ratio >= 1:
-            result: list[tuple[int, int]] = []
-            offset_acc = 0
             for sz in self.state_sizes:
                 remote_total = sz * tp_ratio
                 result.append((offset_acc + local_rank_offset * sz, sz))
@@ -153,8 +153,6 @@ class KDAStateSplitInfo:
             # are smaller than D's.  Local dims are D-sized, but we need
             # P-sized offsets.  Scale down by |tp_ratio|.
             abs_ratio = -tp_ratio
-            result: list[tuple[int, int]] = []
-            offset_acc = 0
             for sz in self.state_sizes:
                 remote_sz = sz // abs_ratio
                 result.append((offset_acc, remote_sz))
