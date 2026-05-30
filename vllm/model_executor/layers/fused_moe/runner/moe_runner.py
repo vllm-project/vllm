@@ -423,6 +423,7 @@ class MoERunner(MoERunnerInterface):
     def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
+        trunc_size: int | None,
     ) -> torch.Tensor:
         """All-reduce the combined output if needed.
 
@@ -441,7 +442,7 @@ class MoERunner(MoERunnerInterface):
         ):
             states = tensor_model_parallel_all_reduce(states)
 
-        return states
+        return states[..., :trunc_size] if trunc_size is not None else states
 
     def _encode_layer_name(self) -> str | LayerName:
         if _USE_LAYERNAME:
@@ -458,7 +459,7 @@ class MoERunner(MoERunnerInterface):
         self,
         shared_experts_input: torch.Tensor | None,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, int | None, int | None]:
         """Pad hidden_states to moe_config.hidden_dim and compute the
         original dimension for later truncation.
 
@@ -470,11 +471,12 @@ class MoERunner(MoERunnerInterface):
         shared_experts_hidden_dim = (
             shared_experts_input.shape[-1] if shared_experts_input is not None else 0
         )
-        transformed_hidden_dim = hidden_states.shape[-1]
+        transformed_hidden_dim: int | None = hidden_states.shape[-1]
         if (
             not self._quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
+            assert transformed_hidden_dim is not None
             hidden_states = F.pad(
                 hidden_states,
                 (0, self.moe_config.hidden_dim - transformed_hidden_dim),
@@ -482,12 +484,17 @@ class MoERunner(MoERunnerInterface):
                 value=0.0,
             )
 
-        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
-            orig_hidden_dims = shared_experts_hidden_dim
-        else:
-            orig_hidden_dims = transformed_hidden_dim
+        if transformed_hidden_dim == hidden_states.shape[-1]:
+            transformed_hidden_dim = None
 
-        return hidden_states, orig_hidden_dims
+        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
+            pre_xform_trunc_size = transformed_hidden_dim
+            post_xform_trunc_size = shared_experts_hidden_dim
+        else:
+            pre_xform_trunc_size = None
+            post_xform_trunc_size = transformed_hidden_dim
+
+        return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
 
     def _maybe_apply_shared_experts(
         self,
@@ -629,9 +636,11 @@ class MoERunner(MoERunnerInterface):
         # so routed output can be trimmed before
         # shared+routed add / latent up proj if needed.
 
-        hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
-            shared_experts_input,
-            hidden_states,
+        hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
+            self._maybe_pad_hidden_states(
+                shared_experts_input,
+                hidden_states,
+            )
         )
 
         result = self._forward_entry(
@@ -657,6 +666,9 @@ class MoERunner(MoERunnerInterface):
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
+        if og_hidden_dim_pre_xform is not None:
+            fused_output = fused_output[..., :og_hidden_dim_pre_xform]
+
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
@@ -669,14 +681,11 @@ class MoERunner(MoERunnerInterface):
         fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
-            result = shared_output + fused_output[:, :og_hidden_dim]
+            result = shared_output + fused_output
         else:
             result = fused_output
 
-        result = self._maybe_reduce_final_output(result)
-
-        if shared_output is None:
-            result = result[..., :og_hidden_dim]
+        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
         return self._maybe_add_zero_expert_output(result)
 
