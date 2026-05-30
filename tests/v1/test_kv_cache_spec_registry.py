@@ -203,73 +203,16 @@ class TestKVCacheSpecRegistry:
         assert KVCacheSpecRegistry.get_manager_class(spec) is manager
         assert KVCacheSpecRegistry.get_uniform_type_base_spec(spec) is uniform_base_spec
 
-    def test_custom_spec_register_rejects_invalid_args(self):
+    def test_custom_spec_register_requires_manager(self):
         """Invalid register decorator arguments fail early."""
 
-        with pytest.raises(
-            AssertionError, match="Unexpected target_kv_cache_spec_cls:"
-        ):
-
-            @register_kv_cache_spec(
-                manager_class=FullAttentionManager,
-                uniform_type_base_spec=FullAttentionSpec,
-                target_kv_cache_spec_cls=FullAttentionSpec,
-            )
-            @dataclass(frozen=True, kw_only=True)
-            class _CustomFullSpecWithTargetSpec(FullAttentionSpec):
-                custom_param: int = 16
-
-        with pytest.raises(
-            AssertionError, match="manager_class is required when override=False"
-        ):
+        with pytest.raises(AssertionError, match="manager_class is required"):
 
             @register_kv_cache_spec(
                 uniform_type_base_spec=FullAttentionSpec,
             )
             @dataclass(frozen=True, kw_only=True)
             class _CustomFullSpecWithoutManager(FullAttentionSpec):
-                custom_param: int = 16
-
-    @pytest.mark.parametrize("spec_cls", list(spec_manager_map))
-    def test_custom_spec_override(self, spec_cls):
-        """A decorated custom spec resolves to the declared manager."""
-        manager = spec_manager_map[spec_cls]
-        uniform_base_spec = spec_uniform_base_map[spec_cls]
-
-        @register_kv_cache_spec(
-            manager_class=manager,
-            uniform_type_base_spec=uniform_base_spec,
-            target_kv_cache_spec_cls=spec_cls,
-            override=True,
-        )
-        @dataclass(frozen=True, kw_only=True)
-        class _CustomOverrideSpec(spec_cls):  # type: ignore[valid-type,misc]
-            custom_param: int = 16
-
-        spec = _CustomOverrideSpec(**spec_args_map[spec_cls], custom_param=100)
-
-        assert KVCacheSpecRegistry.get_manager_class(spec) is manager
-        assert KVCacheSpecRegistry.get_uniform_type_base_spec(spec) is uniform_base_spec
-        assert (
-            _REGISTRY_KVCACHESPEC_LIST[spec_cls].kvcache_spec_cls == _CustomOverrideSpec
-        )
-
-    def test_custom_spec_override_rejects_invalid_args(self):
-        """Invalid override decorator arguments fail early."""
-
-        with pytest.raises(
-            AssertionError,
-            match="Please specify a target_kv_cache_spec_cls when override a"
-            " KVCacheSpec",
-        ):
-
-            @register_kv_cache_spec(
-                manager_class=FullAttentionManager,
-                uniform_type_base_spec=FullAttentionSpec,
-                override=True,
-            )
-            @dataclass(frozen=True, kw_only=True)
-            class _CustomOverrideFullSpecWithNoTargetSpec(FullAttentionSpec):
                 custom_param: int = 16
 
     def test_unregistered_spec_no_registered_parent_raises(self):

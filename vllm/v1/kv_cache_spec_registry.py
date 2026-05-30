@@ -77,9 +77,7 @@ class KVCacheSpecRegistry:
                 and `uniform_type_base_spec` will be trated as uniform type.
                 If None, defaults to kvcache_spec_cls itself (for built-in base specs).
         """
-        assert manager_class is not None, (
-            "manager_class is required when override=False"
-        )
+        assert manager_class is not None, "manager_class is required"
         if uniform_type_base_spec is None:
             uniform_type_base_spec = kvcache_spec_cls
         if kvcache_spec_cls in _REGISTRY_KVCACHESPEC_LIST:
@@ -97,73 +95,6 @@ class KVCacheSpecRegistry:
             kvcache_spec_cls=kvcache_spec_cls,
             manager_class=manager_class,
             uniform_type_base_spec=uniform_type_base_spec,
-        )
-
-    @classmethod
-    def override(
-        cls,
-        kvcache_spec_cls: type["KVCacheSpec"],
-        target_kv_cache_spec_cls: type["KVCacheSpec"] | None = None,
-        manager_class: type["SingleTypeKVCacheManager"] | None = None,
-        uniform_type_base_spec: type["KVCacheSpec"] | None = None,
-    ) -> None:
-        """
-        Override the target_kv_cache_spec_cls, manager and/or uniform_type_base_spec
-        by kvcache_spec_cls.
-
-        Args:
-            kvcache_spec_cls: The custom KVCacheSpec class to override.
-            target_kv_cache_spec_cls: The target KVCacheSpec class to be overridden
-            manager_class: New manager class. If None, keeps existing value.
-            uniform_type_base_spec: New grouping base class. If None, keeps existing.
-
-        Raises:
-            ValueError: If target_kv_cache_spec_cls is not already registered
-
-        Example::
-
-            # Replace FullAttentionSpec with a CustomFullAttentionSpec:
-            KVCacheSpecRegistry.override(
-                kvcache_spec_cls=CustomFullAttentionSpec,
-                target_kv_cache_spec_cls=FullAttentionSpec,
-                manager_class=CustomFullAttentionManager,
-            )
-        """
-        assert target_kv_cache_spec_cls is not None, (
-            "Please specify a target_kv_cache_spec_cls when override a KVCacheSpec"
-        )
-        if target_kv_cache_spec_cls not in _REGISTRY_KVCACHESPEC_LIST:
-            raise ValueError(
-                f"Cannot override unregistered spec {kvcache_spec_cls.__name__}. "
-                f"Use register() to add new specs."
-            )
-
-        target_kv_cache_spec = _REGISTRY_KVCACHESPEC_LIST[target_kv_cache_spec_cls]
-        new_manager = (
-            manager_class
-            if manager_class is not None
-            else target_kv_cache_spec.manager_class
-        )
-        new_grouping_base = (
-            uniform_type_base_spec
-            if uniform_type_base_spec is not None
-            else target_kv_cache_spec.uniform_type_base_spec
-        )
-
-        logger.info(
-            "Overriding KVCacheSpec %s: manager %s -> %s, "
-            "uniform_type_base_spec %s -> %s",
-            kvcache_spec_cls.__name__,
-            target_kv_cache_spec.manager_class.__name__,
-            new_manager.__name__,
-            target_kv_cache_spec.uniform_type_base_spec.__name__,
-            new_grouping_base.__name__,
-        )
-
-        _REGISTRY_KVCACHESPEC_LIST[target_kv_cache_spec_cls] = KVCacheSpecMetadata(
-            kvcache_spec_cls=kvcache_spec_cls,
-            manager_class=new_manager,
-            uniform_type_base_spec=new_grouping_base,
         )
 
     @classmethod
@@ -240,23 +171,16 @@ class KVCacheSpecRegistry:
 def register_kv_cache_spec(
     manager_class: type["SingleTypeKVCacheManager"] | None = None,
     uniform_type_base_spec: type["KVCacheSpec"] | None = None,
-    override: bool = False,
-    target_kv_cache_spec_cls: type["KVCacheSpec"] | None = None,
 ):
     """
     Decorator to register a custom KVCacheSpec class.
 
     Args:
         manager_class: The SingleTypeKVCacheManager to use for this spec.
-            Required when override=False, optional when override=True.
+            Required for all registered specs.
         uniform_type_base_spec: The base spec class for uniform type kv cache specs
             compatibility. If None, the spec is treated as a new base
-            type (when override=False) or keeps existing value (when override=True).
-        override: If True, calls override() instead of register(). Use this when
-            you want to change the manager for an existing spec without creating
-            a new subclass.
-        target_kv_cache_spec_cls: The target KVCacheSpec class to be overridden.
-            Required when override=True, and required to be None when override=False.
+            type.
 
     Examples:
     - Register a new specs:
@@ -267,38 +191,14 @@ def register_kv_cache_spec(
         @dataclass(frozen=True, kw_only=True)
         class CustomFullAttentionSpec(FullAttentionSpec):
             pass
-
-    - Override an existing spec:
-        @register_kv_cache_spec(
-            manager_class=FullAttentionManager,
-            override=True,
-            target_kv_cache_spec_cls=FullAttentionSpec
-        )
-        @dataclass(frozen=True, kw_only=True)
-        class CustomFullAttentionSpec(FullAttentionSpec):
-            pass
     """
 
     def decorator(kvcache_spec_cls: type["KVCacheSpec"]) -> type["KVCacheSpec"]:
-        if override:
-            # Use override() method for existing specs
-            KVCacheSpecRegistry.override(
-                kvcache_spec_cls=kvcache_spec_cls,
-                manager_class=manager_class,
-                uniform_type_base_spec=uniform_type_base_spec,
-                target_kv_cache_spec_cls=target_kv_cache_spec_cls,
-            )
-        else:
-            # Use register() method for new specs
-            assert target_kv_cache_spec_cls is None, (
-                f"Unexpected target_kv_cache_spec_cls: {target_kv_cache_spec_cls}"
-                " when just registering a KVCacheSpec"
-            )
-            KVCacheSpecRegistry.register(
-                kvcache_spec_cls=kvcache_spec_cls,
-                manager_class=manager_class,
-                uniform_type_base_spec=uniform_type_base_spec,
-            )
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=kvcache_spec_cls,
+            manager_class=manager_class,
+            uniform_type_base_spec=uniform_type_base_spec,
+        )
         return kvcache_spec_cls
 
     return decorator

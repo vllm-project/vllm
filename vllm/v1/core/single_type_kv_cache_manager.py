@@ -1216,8 +1216,8 @@ def get_manager_for_kv_cache_spec(
     Get the appropriate manager for a given KVCacheSpec.
 
     Uses the KVCacheSpecRegistry to look up the manager class, supporting
-    both built-in and custom specs registered via @register_kv_cache_spec,
-    KVCacheSpecRegistry.register and KVCacheSpecRegistry.override.
+    both built-in and custom specs registered via @register_kv_cache_spec
+    and KVCacheSpecRegistry.register.
 
     Args:
         kv_cache_spec: The KVCacheSpec instance
