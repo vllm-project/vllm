@@ -211,6 +211,9 @@ class AsyncLookupWorker:
                 unresolved = list(keys)
                 found: dict[int, int] = {}   # slot → tier_idx
                 not_found: list[int] = []
+                # Slots where at least one tier returned None (busy); these
+                # must remain _IN_FLIGHT so the scheduler retries next step.
+                busy_slots: set[int] = set()
 
                 for tier_idx, tier in enumerate(self._tiers):
                     if not unresolved:
@@ -229,15 +232,18 @@ class AsyncLookupWorker:
                         if hit is True:
                             found[_slot(key)] = tier_idx
                         elif hit is None:
-                            # Tier busy — keep as _IN_FLIGHT for this step.
+                            busy_slots.add(_slot(key))
                             still_unresolved.append(key)
-                        else:
+                        else:  # False — not in this tier, try the next
                             still_unresolved.append(key)
                     unresolved = still_unresolved
 
-                # Keys not found in any tier.
+                # Keys not found in any tier: only mark NOT_FOUND if no tier
+                # was busy for that key; busy keys stay _IN_FLIGHT for retry.
                 for key in unresolved:
-                    not_found.append(_slot(key))
+                    slot = _slot(key)
+                    if slot not in busy_slots:
+                        not_found.append(slot)
 
                 for slot, tier_idx in found.items():
                     results.append((slot, FOUND, tier_idx))
