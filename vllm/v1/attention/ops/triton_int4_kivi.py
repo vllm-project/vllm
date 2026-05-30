@@ -265,9 +265,14 @@ def _gather_dequant_kernel(
     s_out_h,
     s_out_s,
 ):
-    """One program per (req, pos, head).  Dequant full head_dim of one token."""
-    pid_b = tl.program_id(0)
-    pid_pos = tl.program_id(1)
+    """One program per (req, pos, head).  Dequant full head_dim of one token.
+
+    Grid is (pos, req, head): the position axis is on grid.x because it is the
+    only dimension that can exceed the CUDA 65535 grid.y/z limit (B and H are
+    small).  See ``int4_kivi_gather_dequant`` for the launch.
+    """
+    pid_pos = tl.program_id(0)
+    pid_b = tl.program_id(1)
     pid_h = tl.program_id(2)
 
     seq_len = tl.load(seq_lens_ptr + pid_b)
@@ -481,7 +486,10 @@ def int4_kivi_gather_dequant(
 
     k_out = torch.zeros((B, H, max_seq, D), dtype=torch.bfloat16, device=device)
     v_out = torch.zeros((B, H, max_seq, D), dtype=torch.bfloat16, device=device)
-    grid = (B, max_seq, H)
+    # (pos, req, head): pos goes on grid.x (limit ~2**31) since max_seq is the
+    # only axis that can exceed the CUDA grid.y/z limit of 65535; B and H stay
+    # on y/z where they comfortably fit.
+    grid = (max_seq, B, H)
     for side, out in ((0, k_out), (1, v_out)):
         _gather_dequant_kernel[grid](
             kv_cache,
