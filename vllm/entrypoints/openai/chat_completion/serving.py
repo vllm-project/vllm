@@ -65,6 +65,8 @@ from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
@@ -149,6 +151,10 @@ class OpenAIServingChat(OpenAIServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        model_cls = get_model_cls(self.model_config)
+        self._transcription_model_cls = (
+            model_cls if supports_transcription(model_cls) else None
+        )
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -177,6 +183,12 @@ class OpenAIServingChat(OpenAIServing):
                 chat_template_kwargs=self.default_chat_template_kwargs,
             )
         )
+
+    def _post_process_chat_output_text(self, text: str) -> str:
+        """Strip ASR-specific prefixes when using chat completions on STT models."""
+        if self._transcription_model_cls is None:
+            return text
+        return self._transcription_model_cls.post_process_output(text)
 
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
@@ -1113,17 +1125,18 @@ class OpenAIServingChat(OpenAIServing):
                 choices.append(choice_data)
                 continue
 
+            processed_text = self._post_process_chat_output_text(output.text)
             if reasoning_parser:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
                 reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+                    processed_text, request=request
                 )
                 if not request.include_reasoning:
                     reasoning = None
             else:
                 reasoning = None
-                content = output.text
+                content = processed_text
 
             auto_tools_called = False
             # if auto tools are not enabled, and a named tool choice using

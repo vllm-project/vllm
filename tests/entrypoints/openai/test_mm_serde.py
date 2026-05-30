@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Roundtrip tests for multimodal serde used by the disagg generate endpoint."""
 
+import json
+
+import pytest
 import torch
 
 from vllm.entrypoints.serve.disagg.mm_serde import (
@@ -17,8 +20,31 @@ from vllm.multimodal.inputs import (
     MultiModalFieldElem,
     MultiModalFlatField,
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalSharedField,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
+
+
+def test_unencoded_mm_kwargs_items_are_not_json_serializable():
+    """Raw multimodal kwargs must be encoded before JSON transport (#37581)."""
+    raw = MultiModalKwargsItems(
+        {
+            "audio": [
+                MultiModalKwargsItem(
+                    {
+                        "input_audio_features": MultiModalFieldElem(
+                            data=torch.tensor([1.0]),
+                            field=MultiModalBatchedField(),
+                        ),
+                    }
+                )
+            ]
+        }
+    )
+    with pytest.raises(TypeError):
+        json.dumps({"kwargs_data": {"audio": [raw]}})
 
 
 def test_mm_kwargs_item_roundtrip():
