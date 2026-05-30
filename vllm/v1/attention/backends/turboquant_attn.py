@@ -165,10 +165,6 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def supports_per_head_quant_scales(cls) -> bool:
         return False
 
-    @classmethod
-    def supports_mm_prefix(cls) -> bool:
-        return True
-
     @staticmethod
     def get_impl_cls() -> type["TurboQuantAttentionImpl"]:
         return TurboQuantAttentionImpl
