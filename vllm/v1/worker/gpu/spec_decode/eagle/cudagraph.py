@@ -66,7 +66,7 @@ class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
             # Draft prefill reuses the target's captured metadata, so its
             # FlashMLA tile schedulers are already planned. Reset them so the
             # planner re-runs inside the draft's own FULL graph on capture.
-            if isinstance(attn_metadata, dict):
+            if desc.cg_mode == CUDAGraphMode.FULL and isinstance(attn_metadata, dict):
                 for md in attn_metadata.values():
                     for name in (
                         "tile_sched_swaonly",
