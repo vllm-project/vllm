@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.v1.core.ec_connector_cache_manager import ECConnectorCacheManager
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -139,10 +140,24 @@ class Scheduler(SchedulerInterface):
             self.parallel_config.data_parallel_index,
         )
         self.ec_connector = None
+        self.ec_connector_cache_manager: ECConnectorCacheManager | None = None
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
             )
+            if type(self.ec_connector).supports_ec_connector_cache_manager:
+                ec_transfer_config = self.vllm_config.ec_transfer_config
+                assert ec_transfer_config is not None
+                capacity = ec_transfer_config.get_ec_connector_capacity_embeds()
+                self.ec_connector_cache_manager = ECConnectorCacheManager(
+                    cache_size=capacity, vllm_config=self.vllm_config
+                )
+                logger.info(
+                    "Scheduler enabled ECConnectorCacheManager "
+                    "ec_connector=%s ec_connector_capacity_embeds=%d",
+                    type(self.ec_connector).__name__,
+                    capacity,
+                )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
@@ -527,12 +542,16 @@ class Scheduler(SchedulerInterface):
                 # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
+                    if self.ec_connector_cache_manager is not None:
+                        self.ec_connector_cache_manager.allocate(request, i)
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
             if external_load_encoder_input:
                 for i in external_load_encoder_input:
                     self.encoder_cache_manager.allocate(request, i)
+                    if self.ec_connector_cache_manager is not None:
+                        self.ec_connector_cache_manager.allocate(request, i)
                     if self.ec_connector is not None:
                         self.ec_connector.update_state_after_alloc(request, i)
 
@@ -743,6 +762,8 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                        if self.ec_connector_cache_manager is not None:
+                            self.ec_connector_cache_manager.free(request)
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -814,6 +835,8 @@ class Scheduler(SchedulerInterface):
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
+                        if self.ec_connector_cache_manager is not None:
+                            self.ec_connector_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
@@ -821,6 +844,8 @@ class Scheduler(SchedulerInterface):
                 if external_load_encoder_input:
                     for i in external_load_encoder_input:
                         self.encoder_cache_manager.allocate(request, i)
+                        if self.ec_connector_cache_manager is not None:
+                            self.ec_connector_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
 
@@ -905,6 +930,11 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            free_ec_connector_mm_hashes=(
+                self.ec_connector_cache_manager.get_freed_mm_hashes()
+                if self.ec_connector_cache_manager is not None
+                else []
+            ),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
 
@@ -943,6 +973,8 @@ class Scheduler(SchedulerInterface):
         )
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
+        if self.ec_connector_cache_manager is not None:
+            self.ec_connector_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         if request.spec_token_ids:
@@ -1225,6 +1257,19 @@ class Scheduler(SchedulerInterface):
                     # the request in this step.
                     num_new_tokens = 0
                 break
+            if (
+                self.ec_connector_cache_manager is not None
+                and not self.ec_connector_cache_manager.can_allocate(
+                    request, i, encoder_compute_budget, num_embeds_to_schedule
+                )
+            ):
+                if num_computed_tokens + shift_computed_tokens < start_pos:
+                    num_new_tokens = start_pos - (
+                        num_computed_tokens + shift_computed_tokens
+                    )
+                else:
+                    num_new_tokens = 0
+                break
 
             # Calculate the number of embeddings to schedule in the current range
             # of scheduled encoder placeholder tokens.
@@ -1323,6 +1368,16 @@ class Scheduler(SchedulerInterface):
                 kv_connector_output.invalid_block_ids,
                 num_scheduled_tokens,
             )
+
+        ec_connector_output = model_runner_output.ec_connector_output
+        if (
+            ec_connector_output is not None
+            and self.ec_connector_cache_manager is not None
+        ):
+            for mm_hash in ec_connector_output.finished_sending or ():
+                self.ec_connector_cache_manager.mark_consumer_received(mm_hash)
+            for mm_hash in ec_connector_output.finished_recving or ():
+                self.ec_connector_cache_manager.mark_consumer_received(mm_hash)
 
         # Persist per-step routed experts into the scheduler-side slot
         # buffer (CPU->CPU fancy-index assign; ~few MB per step).
@@ -1689,10 +1744,18 @@ class Scheduler(SchedulerInterface):
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
+                if self.ec_connector_cache_manager is not None:
+                    self.ec_connector_cache_manager.free_encoder_input(
+                        request, input_id
+                    )
             elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
+                if self.ec_connector_cache_manager is not None:
+                    self.ec_connector_cache_manager.free_encoder_input(
+                        request, input_id
+                    )
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(
@@ -1852,6 +1915,8 @@ class Scheduler(SchedulerInterface):
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
+        if self.ec_connector_cache_manager is not None:
+            self.ec_connector_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:

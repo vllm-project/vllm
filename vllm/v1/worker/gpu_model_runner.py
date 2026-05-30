@@ -1152,6 +1152,8 @@ class GPUModelRunner(
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
 
+        self.maybe_free_ec_connector_physical(scheduler_output)
+
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
         # or running requests that are not scheduled in this step. We remove

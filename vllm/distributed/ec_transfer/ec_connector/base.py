@@ -24,7 +24,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
@@ -57,6 +57,9 @@ class ECConnectorMetadata(ABC):  # noqa: B024
 
 
 class ECConnectorBase(ABC):
+    supports_ec_connector_cache_manager: ClassVar[bool] = False
+    """Whether scheduler-side :class:`ECConnectorCacheManager` is required."""
+
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         self._connector_metadata: ECConnectorMetadata | None = None
         self._vllm_config = vllm_config
@@ -189,6 +192,13 @@ class ECConnectorBase(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def free_physical_cache(self, mm_hash: str) -> None:
+        """Drop connector backing storage for ``mm_hash`` on this worker.
+
+        Default is a no-op; connectors that own out-of-band storage override.
+        """
+        return
 
     # ==============================
     # Scheduler-side methods

@@ -35,6 +35,17 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
     @staticmethod
+    def maybe_free_ec_connector_physical(scheduler_output: "SchedulerOutput") -> None:
+        if not has_ec_transfer():
+            return
+        hashes = scheduler_output.free_ec_connector_mm_hashes
+        if not hashes:
+            return
+        connector = get_ec_transfer()
+        for mm_hash in hashes:
+            connector.free_physical_cache(mm_hash)
+
+    @staticmethod
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
