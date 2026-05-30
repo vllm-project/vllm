@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Object store secondary tier implementation."""
 
+import ctypes
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -69,10 +70,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
         self._probe_connectivity()
 
-        """Register the entire primary CPU buffer with NIXL once."""
-        base_addr = ctypes.addressof(ctypes.c_char.from_buffer(view))
-        self._primary_reg = self._agent.register_memory([(base_addr, view.nbytes, 0, "")], "DRAM")
-        self._stride = view.strides[0]
+        self._base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
+        self._primary_reg = self._agent.register_memory(
+            [(self._base_addr, primary_kv_view.nbytes, 0, "")], "DRAM"
+        )
+        self._stride = primary_kv_view.strides[0]
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
