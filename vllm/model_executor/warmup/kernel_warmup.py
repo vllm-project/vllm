@@ -106,12 +106,6 @@ def kernel_warmup(worker: "Worker"):
         )
 
 
-# TODO: remove once FlashInfer upstream fixes the persistent file cache
-# to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
-# invalid tactics to be chosen
-_FLASHINFER_USE_PERSISTENT_CACHE = False
-
-
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -128,7 +122,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
 
-    if not _FLASHINFER_USE_PERSISTENT_CACHE:
+    # TODO: enable by default once FlashInfer upstream fixes the persistent file
+    # cache to resolve collisions like `use_8x4_sf_layout=True/False`, which can
+    # cause invalid tactics to be chosen.
+    if not envs.VLLM_ENABLE_FLASHINFER_AUTOTUNE_CACHE:
         with torch.inference_mode(), fi_utils.autotune():
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
