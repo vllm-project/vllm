@@ -54,6 +54,7 @@ from vllm.entrypoints.utils import (
     log_version_and_model,
     process_lora_modules,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -259,6 +260,7 @@ def build_app(
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
+    app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
