@@ -48,6 +48,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
+    ZentorchWNA16LinearKernel,
+)
 
 __all__ = [
     "MPLinearKernel",
@@ -67,4 +70,5 @@ __all__ = [
     "TritonW4A16LinearKernel",
     "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
+    "ZentorchWNA16LinearKernel",
 ]
