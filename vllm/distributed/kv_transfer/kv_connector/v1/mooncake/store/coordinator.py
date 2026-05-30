@@ -233,7 +233,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
-                use_eagle=(0 in eagle_indices),
+                drop_eagle=(0 in eagle_indices),
                 alignment_tokens=spec.block_size,
             )
             num_groups = len(self.kv_cache_groups)
@@ -273,7 +273,7 @@ class MooncakeStoreCoordinator:
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
-                    use_eagle=use_eagle,
+                    drop_eagle=use_eagle,
                     alignment_tokens=self.lcm_block_size,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
