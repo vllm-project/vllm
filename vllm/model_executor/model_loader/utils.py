@@ -289,3 +289,37 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+            _expand_packed_modules_in_block_to_quantize(quant_config, packed_mapping)
+
+
+def _expand_packed_modules_in_block_to_quantize(
+    quant_config: QuantizationConfig,
+    packed_mapping: dict[str, list[str]],
+) -> None:
+    """Expand fused module names in modules_in_block_to_quantize.
+
+    When a GPTQ model's config lists fused names (e.g. ``mlp.gate_up_proj``)
+    in ``modules_in_block_to_quantize``, the per-shard quantization check
+    in ``is_layer_gptq_quantized`` will fail because the individual shard
+    names (``gate_proj``, ``up_proj``) won't match the fused entry.
+
+    This replaces each fused entry with its constituent shard names so that
+    the downstream check works correctly.
+    """
+    modules = getattr(quant_config, "modules_in_block_to_quantize", None)
+    if not modules:
+        return
+
+    expanded: list[str] = []
+    for layer in modules:
+        matched = False
+        for packed_name, shard_names in packed_mapping.items():
+            if layer.endswith(packed_name):
+                prefix = layer[: -len(packed_name)]
+                expanded.extend(prefix + s for s in shard_names)
+                matched = True
+                break
+        if not matched:
+            expanded.append(layer)
+
+    quant_config.modules_in_block_to_quantize = expanded  # type: ignore[attr-defined]
