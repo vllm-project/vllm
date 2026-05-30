@@ -25,7 +25,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
 @functools.lru_cache
@@ -121,8 +120,7 @@ class ChunkedLocalAttention(Attention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         assert self.attention_chunk_size
 
-        return KVCacheSpecRegistry.create(
-            kvcache_spec_cls=ChunkedLocalAttentionSpec,
+        return ChunkedLocalAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,

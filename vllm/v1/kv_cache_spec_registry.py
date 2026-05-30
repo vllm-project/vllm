@@ -60,28 +60,6 @@ class KVCacheSpecRegistry:
         register_all_kvcache_specs(vllm_config)
 
     @classmethod
-    def create(
-        cls, kvcache_spec_cls: type["KVCacheSpec"], *args, **kwargs
-    ) -> "KVCacheSpec":
-        """
-        Create KVCacheSpec according to the _REGISTRY_KVCACHESPEC_LIST
-
-        Args:
-            kvcache_spec_cls: the KVCacheSpec to be created. When an override occurs,
-                the class being overridden should be passed in.
-
-        Returns:
-            KVCacheSpec: the KVCacheSpec created
-        """
-        cls._ensure_registered()
-        assert kvcache_spec_cls in _REGISTRY_KVCACHESPEC_LIST, (
-            f"KV cache spec type not registered: {kvcache_spec_cls}. "
-            "Please register it using @register_kv_cache_spec decorator."
-        )
-        cur_spec_cls = _REGISTRY_KVCACHESPEC_LIST[kvcache_spec_cls].kvcache_spec_cls
-        return cur_spec_cls(*args, **kwargs)
-
-    @classmethod
     def register(
         cls,
         kvcache_spec_cls: type["KVCacheSpec"],

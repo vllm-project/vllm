@@ -11,7 +11,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
 class MambaBase(AttentionLayerBase):
@@ -47,8 +46,7 @@ class MambaBase(AttentionLayerBase):
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
 
-        return KVCacheSpecRegistry.create(
-            kvcache_spec_cls=MambaSpec,
+        return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
             block_size=mamba_block_size,

@@ -44,7 +44,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     get_kv_quant_mode,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
@@ -575,8 +574,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
-            return KVCacheSpecRegistry.create(
-                kvcache_spec_cls=SlidingWindowSpec,
+            return SlidingWindowSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -594,8 +592,7 @@ class Attention(nn.Module, AttentionLayerBase):
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size
             )
-            return KVCacheSpecRegistry.create(
-                kvcache_spec_cls=TQFullAttentionSpec,
+            return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
@@ -604,8 +601,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 tq_slot_size=tq_config.slot_size_aligned,
             )
         else:
-            return KVCacheSpecRegistry.create(
-                kvcache_spec_cls=FullAttentionSpec,
+            return FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,

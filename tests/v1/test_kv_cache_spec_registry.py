@@ -253,10 +253,6 @@ class TestKVCacheSpecRegistry:
         assert (
             _REGISTRY_KVCACHESPEC_LIST[spec_cls].kvcache_spec_cls == _CustomOverrideSpec
         )
-        assert (
-            type(KVCacheSpecRegistry.create(spec_cls, **spec_args_map[spec_cls]))
-            is _CustomOverrideSpec
-        )
 
     def test_custom_spec_override_rejects_invalid_args(self):
         """Invalid override decorator arguments fail early."""

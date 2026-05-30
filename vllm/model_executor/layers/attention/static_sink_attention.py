@@ -33,7 +33,6 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     get_kv_quant_mode,
 )
-from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 logger = init_logger(__name__)
 
@@ -219,8 +218,7 @@ class StaticSinkAttention(Attention, CustomOp):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
 
-        return KVCacheSpecRegistry.create(
-            kvcache_spec_cls=SinkFullAttentionSpec,
+        return SinkFullAttentionSpec(
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
