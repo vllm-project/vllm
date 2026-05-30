@@ -18,10 +18,13 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm import _custom_ops as ops
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
@@ -52,6 +55,19 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+)
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
+from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backends.minimax_m3_sparse import (
+    MiniMaxM3IndexerCache,
+    MiniMaxM3SparseBackend,
+    MiniMaxM3SparseImpl,
+    MiniMaxM3SparseMetadata,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
 )
 
 
@@ -301,12 +317,18 @@ class MiniMaxM3Attention(nn.Module):
         return output
 
 
-class MiniMaxM3SparseAttention(nn.Module):
-    """Dense attention plus the sparse "index" branch.
+class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
+    """Block-sparse attention layer with the lightning-indexer branch.
+
+    This is a merged attention layer: it owns the projections (qkv + index
+    q/k), per-head QK norms and RoPE, *and* the attention-backend wiring that a
+    generic ``Attention`` layer would normally provide — it binds the
+    ``MiniMaxM3SparseBackend`` + impl, registers the main paged K/V cache, and
+    holds the lightning-indexer side cache (``MiniMaxM3IndexerCache``).
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
-    attention backend. M3 always disables the index value/output projections
-    (``sparse_disable_index_value`` is set for every sparse layer), so
+    top-k block selection. M3 always disables the index value/output
+    projections (``sparse_disable_index_value`` set for every sparse layer), so
     ``index_{v,o}_proj`` are never created.
     """
 
@@ -367,16 +389,6 @@ class MiniMaxM3SparseAttention(nn.Module):
             },
         )
 
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
-
         # Sparse "index" branch.
         sparse_cfg = config.sparse_attention_config
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
@@ -401,12 +413,139 @@ class MiniMaxM3SparseAttention(nn.Module):
         self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
         self.index_rotary_emb = self.rotary_emb
 
+        # Attention-backend wiring.
+        vllm_config = get_current_vllm_config()
+        self.layer_name = f"{prefix}.attn"
+        self.attn_type = AttentionType.DECODER
+        self.kv_cache_dtype = (
+            cache_config.cache_dtype if cache_config is not None else "auto"
+        )
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+
+        self.attn_backend = MiniMaxM3SparseBackend
+        # impl subclasses AttentionImplBase, broader than the AttentionImpl that
+        # AttentionLayerBase annotates `impl` as.
+        self.impl: MiniMaxM3SparseImpl = self.attn_backend.get_impl_cls()(  # type: ignore[assignment]
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            kv_cache_dtype=self.kv_cache_dtype,
+            attn_type=self.attn_type,
+            topk_blocks=sparse_cfg["sparse_topk_blocks"],
+            sparse_block_size=sparse_cfg["sparse_block_size"],
+            init_blocks=sparse_cfg.get("sparse_init_block", 0),
+            local_blocks=sparse_cfg.get("sparse_local_block", 0),
+            score_type=sparse_cfg.get("sparse_score_type", "max"),
+            num_index_heads=self.total_idx_heads,
+            index_head_dim=self.idx_head_dim,
+        )
+
+        # Register the main K/V cache so the KV-cache manager allocates it.
+        compilation_config = vllm_config.compilation_config
+        if self.layer_name in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {self.layer_name}")
+        compilation_config.static_forward_context[self.layer_name] = self
+        self.kv_cache = torch.tensor([])  # replaced by bind_kv_cache
+
+        # Lightning-indexer side cache (index keys).
+        self.index_cache = MiniMaxM3IndexerCache(
+            head_dim=self.idx_head_dim,
+            dtype=self.kv_cache_torch_dtype,
+            prefix=f"{self.layer_name}.index_cache",
+            cache_config=cache_config,
+        )
+
+    def get_attn_backend(self) -> type[MiniMaxM3SparseBackend]:
+        return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
+        # Main GQA K/V cache. Block size may change after load, refresh it.
+        return FullAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            head_size_v=self.head_dim,
+            dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+        )
+
+    def _insert_kv(
+        self, key: torch.Tensor, value: torch.Tensor, index_key: torch.Tensor
+    ) -> None:
+        """Write main K/V and index-K into their paged caches.
+
+        No-op during the profiling run, where caches are not yet bound and
+        ``attn_metadata`` is None.
+        """
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return
+        main_meta = attn_metadata[self.layer_name]
+        index_meta = attn_metadata[self.index_cache.prefix]
+        assert isinstance(main_meta, MiniMaxM3SparseMetadata)
+        assert isinstance(index_meta, MiniMaxM3SparseMetadata)
+
+        # Main cache layout: [num_blocks, 2, block, num_kv_heads, head_dim].
+        # Identity scale: unused for the bf16 cache, required arg of the op.
+        key_cache, value_cache = self.kv_cache.unbind(1)
+        scale = torch.ones((), device=key.device)
+        ops.reshape_and_cache_flash(
+            key.view(-1, self.num_kv_heads, self.head_dim),
+            value.view(-1, self.num_kv_heads, self.head_dim),
+            key_cache,
+            value_cache,
+            main_meta.slot_mapping,
+            self.kv_cache_dtype,
+            scale,
+            scale,
+        )
+
+        # Index-key cache: single vector per token, scatter by slot.
+        idx_cache = self.index_cache.kv_cache.view(-1, self.idx_head_dim)
+        idx_cache[index_meta.slot_mapping] = index_key.to(idx_cache.dtype)
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        raise NotImplementedError
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
+        q = self.q_norm(q.view(*q.shape[:-1], self.num_heads, self.head_dim)).view(
+            q.shape
+        )
+        k = self.k_norm(k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)).view(
+            k.shape
+        )
+        q, k = self.rotary_emb(positions, q, k)
+
+        # Lightning-indexer branch: project, per-head norm, RoPE.
+        index_q, _ = self.index_q_proj(hidden_states)
+        index_k, _ = self.index_k_proj(hidden_states)
+        index_q = self.index_q_norm(
+            index_q.view(*index_q.shape[:-1], self.total_idx_heads, self.idx_head_dim)
+        ).view(index_q.shape)
+        index_k = self.index_k_norm(index_k)  # single shared index head
+        index_q, index_k = self.index_rotary_emb(positions, index_q, index_k)
+
+        # Pre-insert K/V and index-K; the sparse attention reads them from cache.
+        self._insert_kv(k, v, index_k)
+
+        output = torch.empty_like(q)
+        attn_output = self.impl.forward(
+            self,
+            q,
+            index_q,
+            self.kv_cache,
+            self.index_cache.kv_cache,
+            output,
+        )
+        output, _ = self.o_proj(attn_output)
+        return output
 
 
 class MiniMaxM3DecoderLayer(nn.Module):

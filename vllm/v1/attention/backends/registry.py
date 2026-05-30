@@ -77,6 +77,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend"
     )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    MINIMAX_M3_SPARSE = (
+        "vllm.v1.attention.backends.minimax_m3_sparse.MiniMaxM3SparseBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (
