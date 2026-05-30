@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
 import random
 from typing import TYPE_CHECKING
 
@@ -268,25 +267,22 @@ def _validate_parallel_sampling_outputs(
         )
 
 
-@pytest.mark.parametrize(
-    "output_kind",
-    [
-        RequestOutputKind.CUMULATIVE,
-        RequestOutputKind.DELTA,
-        RequestOutputKind.FINAL_ONLY,
-    ],
-)
 @pytest.mark.asyncio
 async def test_parallel_sampling_async_llm(
-    output_kind: RequestOutputKind,
     example_prompts: list[str],
 ) -> None:
-    """Test parallel sampling `n>1` yields `n` unique completions via AsyncLLM.
+    """Test parallel sampling via AsyncLLM.generate() streaming.
+
+    Only tests FINAL_ONLY mode: the streaming API yields per-child outputs
+    for CUMULATIVE/DELTA (each with a single completion), so the last yield
+    may not contain all n completions. FINAL_ONLY aggregates all n in one
+    output. CUMULATIVE/DELTA are covered by test_parallel_sampling via
+    LLM.generate().
 
     Args:
-      output_kind: RequestOutputKind variant under test.
       example_prompts: test fixture providing prompts for testing.
     """
+    output_kind = RequestOutputKind.FINAL_ONLY
     engine_args = AsyncEngineArgs(
         model=MODEL,
         dtype=DTYPE,
@@ -315,28 +311,24 @@ async def test_parallel_sampling_async_llm(
         engine.shutdown()
 
 
-@pytest.mark.parametrize(
-    "output_kind",
-    [
-        RequestOutputKind.CUMULATIVE,
-        RequestOutputKind.DELTA,
-        RequestOutputKind.FINAL_ONLY,
-    ],
-)
 def test_parallel_sampling_llm_engine(
     vllm_model,
     example_prompts: list[str],
-    output_kind: RequestOutputKind,
 ) -> None:
-    """Test parallel sampling `n>1` yields `n` unique completions via LLMEngine.
+    """Test parallel sampling via LLMEngine.add_request() + step().
 
-    Uses LLMEngine.add_request() + step() for fine-grained control.
+    Only tests FINAL_ONLY mode: step() returns per-child outputs for
+    CUMULATIVE/DELTA (each with a single completion), so collecting all n
+    requires accumulating across child completions. FINAL_ONLY aggregates
+    all n completions in a single finished output — the natural fit for
+    the step() API. CUMULATIVE/DELTA are covered by test_parallel_sampling
+    via LLM.generate().
 
     Args:
       vllm_model: VllmRunner instance under test.
       example_prompts: test fixture providing prompts for testing.
-      output_kind: RequestOutputKind variant under test.
     """
+    output_kind = RequestOutputKind.FINAL_ONLY
     sampling_params_list, n_list = _get_test_sampling_params(example_prompts)
     for sp in sampling_params_list:
         sp.output_kind = output_kind
@@ -356,16 +348,17 @@ def test_parallel_sampling_llm_engine(
             params=sp,
         )
 
-    # Collect outputs by request
-    outputs_by_req: dict[str, list] = {rid: [] for rid in n_map}
+    # Collect finished outputs. step() returns outputs with external_req_id
+    # (set from parent request), which differs from the internal request_id
+    # passed to add_request. Collect without filtering by request_id.
+    finished_outputs: list = []
     while engine.has_unfinished_requests():
         for out in engine.step():
-            if out.request_id in outputs_by_req:
-                outputs_by_req[out.request_id].append(out)
+            if out.finished:
+                finished_outputs.append(out)
 
-    # Validate each request
-    for req_id, n in n_map.items():
-        all_outputs = outputs_by_req[req_id]
-        assert len(all_outputs) > 0, f"No outputs for request {req_id}"
-        final_out = all_outputs[-1]
-        _validate_parallel_sampling_outputs(final_out.outputs, n)
+    assert len(finished_outputs) == len(n_map), (
+        f"Expected {len(n_map)} finished outputs, got {len(finished_outputs)}"
+    )
+    for out, (req_id, n) in zip(finished_outputs, n_map.items()):
+        _validate_parallel_sampling_outputs(out.outputs, n)
