@@ -130,15 +130,36 @@ class KDAStateSplitInfo:
     def remote_state_offsets(
         self, local_rank_offset: int, tp_ratio: int
     ) -> list[tuple[int, int]]:
-        """(byte_offset, byte_size) for each KDA state from remote P page."""
-        effective_ratio = max(tp_ratio, 1)
-        result: list[tuple[int, int]] = []
-        offset_acc = 0
-        for sz in self.state_sizes:
-            remote_total = sz * effective_ratio
-            result.append((offset_acc + local_rank_offset * sz, sz))
-            offset_acc += remote_total
-        return result
+        """(byte_offset, byte_size) for each KDA state from remote P page.
+
+        Args:
+            local_rank_offset: which slice this D rank reads.
+            tp_ratio: signed TP ratio.
+                >= 1:  D_TP >= P_TP — P page is larger, D reads its slice.
+                < 0:   P_TP > D_TP — P pages are smaller, D reads entire
+                       P page.  Local dims are scaled down by |tp_ratio|
+                       to get P-sized offsets.
+        """
+        if tp_ratio >= 1:
+            result: list[tuple[int, int]] = []
+            offset_acc = 0
+            for sz in self.state_sizes:
+                remote_total = sz * tp_ratio
+                result.append((offset_acc + local_rank_offset * sz, sz))
+                offset_acc += remote_total
+            return result
+        else:
+            # NOTE: tp_ratio < 0 means P_TP > D_TP, so P pages
+            # are smaller than D's.  Local dims are D-sized, but we need
+            # P-sized offsets.  Scale down by |tp_ratio|.
+            abs_ratio = -tp_ratio
+            result: list[tuple[int, int]] = []
+            offset_acc = 0
+            for sz in self.state_sizes:
+                remote_sz = sz // abs_ratio
+                result.append((offset_acc, remote_sz))
+                offset_acc += remote_sz
+            return result
 
 
 def derive_kda_state_split(

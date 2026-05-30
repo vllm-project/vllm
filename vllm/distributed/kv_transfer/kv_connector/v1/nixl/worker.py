@@ -1098,7 +1098,7 @@ class NixlConnectorWorker:
         assert isinstance(self._conv_decomp, KDAStateSplitInfo)
         effective_ratio = max(tp_ratio, 1)
         local_offset = self.tp_rank % effective_ratio
-        offsets = self._conv_decomp.remote_state_offsets(local_offset, effective_ratio)
+        offsets = self._conv_decomp.remote_state_offsets(local_offset, tp_ratio)
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
