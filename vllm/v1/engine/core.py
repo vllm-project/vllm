@@ -436,6 +436,61 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def compute_spec_decode_stats(
+            self,
+            scheduler_output,
+            model_output,
+        ):
+            """
+            Returns:
+                {
+                    req_id: {
+                        "num_accepted_tokens": int,
+                        "num_generated_tokens": int,
+                        "accept_rate": float,
+                    }
+                }
+            """
+            results = {}
+            scheduled_spec_tokens = (
+                scheduler_output.scheduled_spec_decode_tokens
+            )
+        
+            for req_id in model_output.req_ids:
+        
+                # speculative draft tokens
+                draft_tokens = scheduled_spec_tokens.get(req_id, [])
+        
+                # final sampled tokens from target model
+                idx = model_output.req_id_to_index[req_id]
+                generated_tokens = model_output.sampled_token_ids[idx]
+        
+                # count prefix match
+                accepted = 0
+        
+                for d, g in zip(draft_tokens, generated_tokens):
+                    if d == g:
+                        accepted += 1
+                    else:
+                        break
+        
+                num_generated = len(generated_tokens)
+                num_draft = len(draft_tokens)
+        
+                accept_rate = (
+                    accepted / num_draft
+                    if num_draft > 0
+                    else 0.0
+                )
+        
+                results[req_id] = {
+                    "num_accepted_tokens": accepted,
+                    "num_generated_tokens": num_generated,
+                    "accept_rate": accept_rate,
+                }
+        
+            return results
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -457,6 +512,17 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+                tmp = self.compute_spec_decode_stats(scheduler_output, model_output)
+                for key, value in tmp.items():
+                    model_output.num_accepted_spec_tokens[key] = (
+                        model_output.num_accepted_spec_tokens.get(key, 0)
+                        + value['num_accepted_tokens']
+                    )
+                    
+                    model_output.num_generated_tokens[key] = (
+                        model_output.num_generated_tokens.get(key, 0)
+                        + value['num_generated_tokens']
+                    )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.

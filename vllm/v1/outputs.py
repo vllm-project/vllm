@@ -280,6 +280,9 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    num_accepted_spec_tokens: dict[str, int] = field(default_factory=dict)
+    num_generated_tokens: dict[str, int] = field(default_factory=dict)
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

@@ -593,6 +593,7 @@ class OfflineInferenceMixin:
         total_out_toks = 0
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
+            print("step_outputs: ", step_outputs)  # the last one is going to make the list unempty
             for output in step_outputs:
                 assert isinstance(output, output_type)
                 if output.finished:

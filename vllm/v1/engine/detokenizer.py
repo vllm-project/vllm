@@ -30,6 +30,8 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
+        self.num_total_accepted_spec_tokens = 0
+        self.num_total_generated_tokens = 0
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -42,6 +44,16 @@ class IncrementalDetokenizer:
         self.token_ids.extend(new_token_ids)
         return None
 
+    def update_spec(self, new_accepted_spec_tokens: int, new_generated_tokens: int) -> str | None:
+        self.num_total_accepted_spec_tokens += new_accepted_spec_tokens
+        self.num_total_generated_tokens += new_generated_tokens
+        return None
+
+    def spec_accept_rate(self) -> float | None:
+        if self.num_total_generated_tokens == 0:
+            return None
+        return float(self.num_total_accepted_spec_tokens) / self.num_total_generated_tokens
+        
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
 
