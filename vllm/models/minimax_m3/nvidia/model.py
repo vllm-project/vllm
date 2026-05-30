@@ -66,17 +66,6 @@ def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
     return {i for i, f in enumerate(freq) if f != 0}
 
 
-def _disable_index_value_layer_ids(config: PretrainedConfig) -> set[int]:
-    """Sparse layer ids that omit the index value/output projections."""
-    cfg = getattr(config, "sparse_attention_config", None)
-    if not cfg:
-        return set()
-    flags = cfg.get("sparse_disable_index_value")
-    if flags is None:
-        return set()
-    return {i for i, f in enumerate(flags) if f != 0}
-
-
 def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
     """Whether this layer's MLP is a sparse MoE block (vs a dense MLP)."""
     moe_layer_freq = getattr(config, "moe_layer_freq", None)
@@ -316,8 +305,9 @@ class MiniMaxM3SparseAttention(nn.Module):
     """Dense attention plus the sparse "index" branch.
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
-    attention backend. ``index_{v,o}_proj`` exist only when the layer does not
-    disable the index value/output projections (always disabled for M3).
+    attention backend. M3 always disables the index value/output projections
+    (``sparse_disable_index_value`` is set for every sparse layer), so
+    ``index_{v,o}_proj`` are never created.
     """
 
     def __init__(
@@ -327,7 +317,6 @@ class MiniMaxM3SparseAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         cache_config: CacheConfig | None = None,
-        disable_index_value: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -389,8 +378,6 @@ class MiniMaxM3SparseAttention(nn.Module):
         )
 
         # Sparse "index" branch.
-        self.disable_index_value = disable_index_value
-
         sparse_cfg = config.sparse_attention_config
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
@@ -412,25 +399,6 @@ class MiniMaxM3SparseAttention(nn.Module):
 
         self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
         self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
-
-        if self.disable_index_value:
-            self.index_v_proj = None
-            self.index_o_proj = None
-        else:
-            self.index_v_proj = ReplicatedLinear(
-                self.hidden_size,
-                self.idx_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.index_v_proj",
-            )
-            self.index_o_proj = RowParallelLinear(
-                self.total_idx_heads * self.idx_head_dim,
-                self.hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.index_o_proj",
-            )
         self.index_rotary_emb = self.rotary_emb
 
     def forward(
@@ -457,7 +425,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.layer_id = layer_id
 
         is_sparse_attention_layer = layer_id in _sparse_attention_layer_ids(config)
-        disable_index_value = layer_id in _disable_index_value_layer_ids(config)
 
         if is_sparse_attention_layer:
             self.self_attn = MiniMaxM3SparseAttention(
@@ -466,7 +433,6 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
-                disable_index_value=disable_index_value,
             )
         else:
             self.self_attn = MiniMaxM3Attention(
