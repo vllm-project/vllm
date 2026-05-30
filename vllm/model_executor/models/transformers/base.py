@@ -377,6 +377,10 @@ class Base(
         """
         Check if the model has tied word embeddings.
         """
+        # Composite models (e.g. audio) inherit tie_word_embeddings=True on the
+        # top-level config; using text_config which reflects the actual lm_head.
+        if self.config is not self.text_config:
+            return getattr(self.text_config, "tie_word_embeddings", False)
         # Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
