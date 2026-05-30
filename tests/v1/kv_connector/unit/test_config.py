@@ -16,9 +16,11 @@ pytestmark = pytest.mark.cpu_test
         ("native", 4.0, 1, 1, "OffloadingConnector", 4.0 * (1 << 30)),
         # bytes per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
         ("native", 8.0, 2, 2, "OffloadingConnector", 8.0 * (1 << 30)),
-        ("lmcache", 4.0, 1, 1, "LMCacheConnectorV1", 4.0),
-        # size per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
-        ("lmcache", 8.0, 2, 2, "LMCacheConnectorV1", 2.0),
+        # ``lmcache`` backend now defaults to LMCacheMPConnector. The KV
+        # storage capacity is owned by the standalone LMCache server, so
+        # ``kv_offloading_size`` is intentionally not propagated.
+        ("lmcache", 4.0, 1, 1, "LMCacheMPConnector", None),
+        ("lmcache", 8.0, 2, 2, "LMCacheMPConnector", None),
         # When kv_offloading_size is None, offloading is disabled (backend is ignored)
         ("native", None, 1, 1, None, None),
     ],
@@ -59,10 +61,12 @@ def test_kv_connector(
         # Existing config should be preserved
         assert kv_connector_extra_config["existing_key"] == "existing_value"
     elif kv_offloading_backend == "lmcache":
-        assert kv_connector_extra_config["lmcache.local_cpu"] is True
-        assert kv_connector_extra_config["lmcache.max_local_cpu_size"] == expected_bytes
-        # Existing config should be replaced
-        assert "existing_key" not in kv_connector_extra_config
+        # MP mode does not push lmcache.local_cpu / max_local_cpu_size into
+        # extra config (the LMCache server owns capacity). Pre-existing
+        # extra config entries are preserved as-is.
+        assert "lmcache.local_cpu" not in kv_connector_extra_config
+        assert "lmcache.max_local_cpu_size" not in kv_connector_extra_config
+        assert kv_connector_extra_config["existing_key"] == "existing_value"
 
 
 def _build_config(
