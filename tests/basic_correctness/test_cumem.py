@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from typing import Literal
 
 import pytest
 import torch
@@ -15,45 +14,24 @@ from vllm.utils.mem_constants import GiB_bytes
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
-CUMEM_PROCESS_METHOD: Literal["spawn", "fork"] = (
-    "spawn" if current_platform.is_rocm() else "fork"
-)
-ROCM_SLEEP_MODE_GPU_MEMORY_UTILIZATION = 0.05
-ROCM_SLEEP_MODE_MAX_MODEL_LEN = 1024
 
 
-def _rocm_sleep_mode_llm_kwargs() -> dict:
-    if not current_platform.is_rocm():
-        return {}
-    return {
-        "gpu_memory_utilization": ROCM_SLEEP_MODE_GPU_MEMORY_UTILIZATION,
-        "max_model_len": ROCM_SLEEP_MODE_MAX_MODEL_LEN,
-    }
-
-
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_python_error():
     """
     Test if Python error occurs when there's low-level
     error happening from the C++ side.
     """
     allocator = CuMemAllocator.get_instance()
-    free_bytes, total_bytes = torch.cuda.mem_get_info()
-    if current_platform.is_rocm():
-        alloc_bytes = free_bytes * 3 // 5
-    else:
-        alloc_bytes = int(total_bytes * 0.7)
+    total_bytes = torch.cuda.mem_get_info()[1]
+    alloc_bytes = int(total_bytes * 0.7)
     tensors = []
     with allocator.use_memory_pool():
-        # allocate enough memory that waking up after another large
-        # allocation fails
+        # allocate 70% of the total memory
         x = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
         tensors.append(x)
     # release the memory
-    if current_platform.is_rocm():
-        allocator.sleep(tuple())
-    else:
-        allocator.sleep()
+    allocator.sleep()
 
     # allocate more memory than the total memory
     y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
@@ -64,7 +42,7 @@ def test_python_error():
         allocator.wake_up()
 
 
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -97,7 +75,7 @@ def test_basic_cumem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
@@ -142,7 +120,7 @@ def test_cumem_with_cudagraph():
     assert torch.allclose(y, x + 1)
 
 
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
 @pytest.mark.parametrize(
     "model",
     [
@@ -155,7 +133,7 @@ def test_cumem_with_cudagraph():
 def test_end_to_end(model: str):
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True, **_rocm_sleep_mode_llm_kwargs())
+    llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
@@ -199,12 +177,12 @@ def test_end_to_end(model: str):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test()
 def test_deep_sleep():
     model = "hmellor/tiny-random-LlamaForCausalLM"
     free, total = torch.cuda.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
-    llm = LLM(model, enable_sleep_mode=True, **_rocm_sleep_mode_llm_kwargs())
+    llm = LLM(model, enable_sleep_mode=True)
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)
@@ -230,7 +208,7 @@ def test_deep_sleep():
     assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
+@create_new_process_for_each_test()
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
@@ -239,7 +217,6 @@ def test_deep_sleep_async():
         engine_args = AsyncEngineArgs(
             model=model,
             enable_sleep_mode=True,
-            **_rocm_sleep_mode_llm_kwargs(),
         )
 
         llm = AsyncLLMEngine.from_engine_args(engine_args)
@@ -271,17 +248,11 @@ def test_deep_sleep_async():
 
 
 @requires_fp8
-@create_new_process_for_each_test(CUMEM_PROCESS_METHOD)
 def test_deep_sleep_fp8_kvcache():
     model = "Qwen/Qwen2-0.5B"
     used_bytes_baseline = current_platform.get_current_memory_usage()
 
-    llm = LLM(
-        model,
-        enable_sleep_mode=True,
-        kv_cache_dtype="fp8",
-        **_rocm_sleep_mode_llm_kwargs(),
-    )
+    llm = LLM(model, enable_sleep_mode=True, kv_cache_dtype="fp8")
     prompt = "How are you?"
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
     output = llm.generate(prompt, sampling_params)

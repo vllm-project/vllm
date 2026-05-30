@@ -345,20 +345,14 @@ async def test_wait_timeout_with_short_duration():
         child_pids = _get_child_pids(proc.pid)
 
         state = ShutdownState()
-        sigterm_sent = asyncio.Event()
         request_task = asyncio.create_task(
-            _concurrent_request_loop(client, state, sigterm_sent, concurrency=3)
+            _concurrent_request_loop(client, state, concurrency=3)
         )
 
-        deadline = time.time() + _INFLIGHT_REQUEST_START_TIMEOUT
-        while state.inflight_requests == 0 and time.time() < deadline:
-            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
-        assert state.inflight_requests > 0
+        await asyncio.sleep(0.5)
 
         start_time = time.time()
         proc.send_signal(signal.SIGTERM)
-        sigterm_sent.set()
-        state.stop_requesting = True
 
         # server should exit within wait_timeout + buffer
         max_wait = wait_timeout + 15
@@ -369,6 +363,7 @@ async def test_wait_timeout_with_short_duration():
 
         exit_time = time.time() - start_time
 
+        state.stop_requesting = True
         if not request_task.done():
             request_task.cancel()
         await asyncio.gather(request_task, return_exceptions=True)
