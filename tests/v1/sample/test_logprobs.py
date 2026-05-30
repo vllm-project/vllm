@@ -4,6 +4,7 @@
 import itertools
 import math
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -20,6 +21,7 @@ from tests.v1.sample.utils import (
 from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
@@ -76,6 +78,14 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
 def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
     with hf_runner(MODEL, dtype=DTYPE) as hf_model:
         yield hf_model
+
+
+def _model_config(vocab_size: int = 10):
+    return SimpleNamespace(
+        max_logprobs=20,
+        logits_processors=None,
+        get_vocab_size=lambda: vocab_size,
+    )
 
 
 def _repeat_logprob_config(
@@ -395,6 +405,27 @@ def test_max_logprobs():
         bad_sampling_params = SamplingParams(logprobs=2)
         with pytest.raises(ValueError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+
+
+@pytest.mark.parametrize("token_ids", [[0], [0, 9]])
+def test_logprob_token_ids_validate_vocab_bounds_valid(token_ids: list[int]):
+    SamplingParams(logprob_token_ids=token_ids).verify(
+        _model_config(),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+
+
+@pytest.mark.parametrize("token_ids", [[-1], [10], [-35, 1873042417]])
+def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
+    with pytest.raises(VLLMValidationError, match="logprob_token_ids"):
+        SamplingParams(logprob_token_ids=token_ids).verify(
+            _model_config(),
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
 
 
 def test_none_logprobs(vllm_model, example_prompts):
