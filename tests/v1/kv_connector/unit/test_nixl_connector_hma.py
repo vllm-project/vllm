@@ -1006,3 +1006,74 @@ def test_logical_to_remote_kernel_block_ids(
     assert list(result) == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {result}"
     )
+
+
+# ---- KDA (Kimi Delta Attention) state offset tests ----
+
+
+@pytest.mark.cpu_test
+def test_kda_state_split_info_local_offsets():
+    """KDAStateSplitInfo.local_conv_offsets returns cumulative offsets for
+    4 contiguous states within a page."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        KDAStateSplitInfo,
+    )
+
+    info = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
+    offsets = info.local_conv_offsets
+    assert offsets == [
+        (0, 100),
+        (100, 200),
+        (300, 150),
+        (450, 512),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_kda_state_split_info_remote_offsets_tp_positive():
+    """tp_ratio >= 1 (D_TP >= P_TP): D rank reads its slice from a larger
+    P page."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        KDAStateSplitInfo,
+    )
+
+    # 4 states with known sizes. tp_ratio=2 means P has 2x the heads per rank.
+    info = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
+    # D rank 0 reads its slice
+    offsets_r0 = info.remote_state_offsets(local_rank_offset=0, tp_ratio=2)
+    # Each state in P page is 2x local size. D rank 0 reads from offset 0.
+    assert offsets_r0 == [
+        (0, 100),
+        (200, 200),
+        (600, 150),
+        (900, 512),
+    ]
+
+    # D rank 1 reads its slice (offset by 1 local-size within each region)
+    offsets_r1 = info.remote_state_offsets(local_rank_offset=1, tp_ratio=2)
+    assert offsets_r1 == [
+        (100, 100),
+        (400, 200),
+        (750, 150),
+        (1412, 512),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_kda_state_split_info_remote_offsets_tp_negative():
+    """tp_ratio < 0 (P_TP > D_TP): P pages are smaller, D reads entire
+    P page with scaled-down sizes."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        KDAStateSplitInfo,
+    )
+
+    # D has 4x the state per rank. P pages are 4x smaller.
+    info = KDAStateSplitInfo(state_sizes=(400, 800, 600, 2048))
+    offsets = info.remote_state_offsets(local_rank_offset=0, tp_ratio=-4)
+    # Each state size is divided by |tp_ratio|=4
+    assert offsets == [
+        (0, 100),
+        (100, 200),
+        (300, 150),
+        (450, 512),
+    ]
