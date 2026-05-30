@@ -751,13 +751,6 @@ class FusedMoEExperts(ABC):
         """
         return False
 
-    @abstractmethod
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps
-        """
-        raise NotImplementedError
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -1566,12 +1559,6 @@ class FusedMoEKernel:
             self.prepare_finalize.activation_format
             == self.fused_experts.activation_format()
         )
-
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps.
-        """
-        return self.fused_experts.supports_expert_map()
 
     def output_is_reduced(self) -> bool:
         """
