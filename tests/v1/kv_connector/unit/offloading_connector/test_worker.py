@@ -503,6 +503,7 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
             tensor_idx=1, page_size_bytes=spec_b.page_size_bytes
         )
 
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
     ".worker.get_layers_from_vllm_config"
@@ -572,7 +573,9 @@ def test_register_kv_caches_accepts_split_kv_views_with_storage_offset(mock_get_
     assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, half_page_size)
     assert canonical.tensors[0].tensor.data_ptr() == k_cache.data_ptr()
     assert canonical.tensors[1].tensor.data_ptr() == v_cache.data_ptr()
-    assert canonical.group_data_refs == [[
-        CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=half_page_size),
-        CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=half_page_size),
-    ]]
+    assert canonical.group_data_refs == [
+        [
+            CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=half_page_size),
+            CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=half_page_size),
+        ]
+    ]
