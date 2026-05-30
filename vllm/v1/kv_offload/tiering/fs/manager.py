@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
+    RequestOffloadingContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -99,6 +100,9 @@ class FileSystemTierManager(SecondaryTierManager):
             n_write_threads,
             thread_name_prefix="vllm_kv_py_fs",
         )
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def lookup(
         self, key: OffloadKey, req_context: ReqContext | None = None
