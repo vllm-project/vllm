@@ -69,11 +69,14 @@ inline int64_t get_available_l2_size() {
       }
     }
     if (l2_cache_size == 0) {
-      l2_cache_size = 256 * 1024;  // Default fallback: 256KB
+      l2_cache_size = 256 * 1024;
     }
-    return static_cast<int64_t>(l2_cache_size) >> 1;  // use 50% of L2 cache
+    return static_cast<int64_t>(l2_cache_size) >> 1;
   }();
   return size;
+#else
+  return at::cpu::get_cpu_capability("L2_CACHE_SIZE");
+#endif
 }
 
 template <int32_t alignment_v, typename T>
