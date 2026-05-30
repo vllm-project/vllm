@@ -125,7 +125,7 @@ class SpecDecodeBaseProposer:
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
-            vllm_config.model_config
+            self.draft_model_config
         )
 
         self.draft_attn_groups: list[AttentionGroup] = []
@@ -151,6 +151,11 @@ class SpecDecodeBaseProposer:
         self.uses_mrope = self.draft_model_config.uses_mrope
         self.uses_xdrope_dim = self.vllm_config.model_config.uses_xdrope_dim
         self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
+        # 1D positions buffer: always created because the kernel
+        # (copy_and_expand_eagle_inputs_kernel) always writes 1D positions here.
+        self.positions = torch.zeros(
+            self.max_num_tokens, dtype=torch.int64, device=device
+        )
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -194,8 +199,6 @@ class SpecDecodeBaseProposer:
 
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
-            self._warn_if_multimodal()
-            self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
         self.is_masked_token_mask: torch.Tensor | None = None
@@ -352,12 +355,93 @@ class SpecDecodeBaseProposer:
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
             self.xdrope_positions[:, :num_tokens] = positions
         else:
-            # Convert M-RoPE positions if target model uses M-RoPE
-            # but draft doesn't, For text inputs, all M-RoPE
-            # dimensions are identical
-            if self.vllm_config.model_config.uses_mrope:
+            if self.vllm_config.model_config.uses_mrope and positions.ndim > 1:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
+
+    def _get_positions_for_copy_expand_eagle_inputs_kernel(
+        self,
+        target_positions: torch.Tensor,
+        cad: CommonAttentionMetadata,
+        batch_size: int,
+        total_num_input_tokens: int,
+    ) -> torch.Tensor:
+        """1D positions passed to ``copy_and_expand_eagle_inputs_kernel``."""
+        kernel_positions = target_positions
+        if self.vllm_config.model_config.uses_mrope:
+            if not self.uses_mrope:
+                extend_lens = (
+                    cad.query_start_loc[1 : batch_size + 1]
+                    - cad.query_start_loc[:batch_size]
+                )
+                num_computed = cad.seq_lens[:batch_size] - extend_lens
+                seq_pos = torch.zeros(
+                    total_num_input_tokens,
+                    dtype=target_positions[0].dtype,
+                    device=self.device,
+                )
+                seq_pos.scatter_(
+                    0,
+                    cad.query_start_loc[:batch_size].long(),
+                    num_computed.to(target_positions[0].dtype),
+                )
+                kernel_positions = seq_pos
+            else:
+                kernel_positions = target_positions[0]
+        elif (
+            self.vllm_config.model_config.uses_xdrope_dim > 0
+            and self.draft_uses_xdrope_dim == 0
+        ):
+            kernel_positions = target_positions[0]
+        return kernel_positions
+
+    def _populate_mrope_positions_after_copy_expand_inputs(
+        self,
+        cad: CommonAttentionMetadata,
+        batch_size: int,
+        total_num_input_tokens: int,
+        total_num_output_tokens: int,
+        target_positions: torch.Tensor,
+        query_end_loc: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+    ) -> None:
+        """Fill draft ``mrope_positions`` after ``copy_and_expand_eagle_inputs_kernel``.
+
+        When the target uses M-RoPE, copies per-token dims from ``target_positions``
+        and sets speculative slots to (last valid time) + 1; otherwise copies 1D
+        ``self.positions`` from the kernel output.
+        """
+        if not self.uses_mrope:
+            return
+        if self.vllm_config.model_config.uses_mrope:
+            extend_lens_batch = (
+                cad.query_start_loc[1 : batch_size + 1]
+                - cad.query_start_loc[:batch_size]
+            )
+            req_ranks = torch.repeat_interleave(
+                torch.arange(batch_size, dtype=torch.long, device=self.device),
+                extend_lens_batch.long(),
+                output_size=total_num_input_tokens,
+            )
+            out_indices_for_input = (
+                torch.arange(
+                    total_num_input_tokens,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                + req_ranks
+            )
+            self.mrope_positions[:, out_indices_for_input] = target_positions[
+                :, :total_num_input_tokens
+            ]
+            last_valid_times = target_positions[0, query_end_loc]
+            self.mrope_positions[:, token_indices_to_sample] = (
+                last_valid_times.unsqueeze(0) + 1
+            )
+        else:
+            self.mrope_positions[:, :total_num_output_tokens] = self.positions[
+                :total_num_output_tokens
+            ]
 
     def _get_slot_mapping(
         self,
@@ -595,7 +679,7 @@ class SpecDecodeBaseProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.hidden_states[:batch_size] = hidden_states
-            if self.supports_mm_inputs:
+            if self.supports_mm_inputs and self.pass_hidden_states_to_model:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
@@ -768,14 +852,19 @@ class SpecDecodeBaseProposer:
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
 
+            # Determine positions to pass to the kernel.
+            kernel_positions = self._get_positions_for_copy_expand_eagle_inputs_kernel(
+                target_positions, cad, batch_size, total_num_input_tokens
+            )
+
             copy_and_expand_eagle_inputs_kernel[grid](
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
-                target_positions_ptr=target_positions,
+                target_positions_ptr=kernel_positions,
                 next_token_ids_ptr=next_token_ids,  # sampled tokens, one per request
                 # Outputs to the drafting buffers
                 out_input_ids_ptr=self.input_ids,
-                out_positions_ptr=self.positions,  # Doesn't support mrope for now
+                out_positions_ptr=self.positions,  # kernel always writes 1D positions
                 out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
                 out_is_masked_token_mask_ptr=self.is_masked_token_mask,
                 out_new_token_indices_ptr=token_indices_to_sample,
@@ -802,6 +891,18 @@ class SpecDecodeBaseProposer:
                     self.parallel_drafting_hidden_state_tensor,
                     self.hidden_states[:total_num_output_tokens],
                     out=self.hidden_states[:total_num_output_tokens],
+                )
+
+            # Populate mrope_positions for draft models that use M-RoPE.
+            if self.uses_mrope:
+                self._populate_mrope_positions_after_copy_expand_inputs(
+                    cad,
+                    batch_size,
+                    total_num_input_tokens,
+                    total_num_output_tokens,
+                    target_positions,
+                    query_end_loc,
+                    token_indices_to_sample,
                 )
 
             # 2.
@@ -1484,7 +1585,7 @@ class SpecDecodeBaseProposer:
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=slot_mapping_dict,
             ):
-                if self.supports_mm_inputs:
+                if self.supports_mm_inputs and self.pass_hidden_states_to_model:
                     input_ids = None
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
