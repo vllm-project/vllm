@@ -132,13 +132,11 @@ def test_audio_multimodal_processor(model_id):
 )
 def test_audio_model_loading(monkeypatch, vllm_runner, model_id):
     """Single-process workaround for V1 fork safety deadlock issue
-    (vllm-project/vllm/issues/17676) in models with nested CausalLMs.
-    For other models (i.e., Voxtral, VibeVoice, GLM-ASR-Nano) this workaround
-    is not strictly required in practice, but running them together under pytest
-    can cause (possibly flaky) hangs, so they are grouped under the same config.
-    Using VLLM_WORKER_MULTIPROC_METHOD=spawn avoids the deadlock and allows worker
-    processes to terminate cleanly, and release GPU memory between test runs until the
-    issue is fixed."""
+    (vllm-project/vllm/issues/17676). Running multiple audio models together
+    under pytest can cause (possibly flaky) hangs, so they are grouped under
+    the same config. Using VLLM_WORKER_MULTIPROC_METHOD=spawn avoids the
+    deadlock and allows worker processes to terminate cleanly, and release
+    GPU memory between test runs until the issue is fixed."""
     # TODO: Remove monkeypatch once
     # https://github.com/vllm-project/vllm/issues/17676 is fixed.
     disable_envs_cache()

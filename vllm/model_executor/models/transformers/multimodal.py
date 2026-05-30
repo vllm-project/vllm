@@ -585,16 +585,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             with torch.nn.attention.sdpa_kernel(
                 backends=[torch.nn.attention.SDPBackend.MATH]
             ):
-                audio_output = self.model.get_audio_features(input_features, **kwargs)
+                audio_output = self.model.get_audio_features(
+                    input_features, return_dict=True, **kwargs
+                )
         else:
-            audio_output = self.model.get_audio_features(input_features, **kwargs)
-
-        if isinstance(audio_output, tuple):
-            audio_embeddings = audio_output[1]
-        elif hasattr(audio_output, "pooler_output"):
-            audio_embeddings = audio_output.pooler_output
-        else:
-            audio_embeddings = audio_output
+            audio_output = self.model.get_audio_features(
+                input_features, return_dict=True, **kwargs
+            )
+        audio_embeddings = audio_output.pooler_output
 
         split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
