@@ -123,3 +123,28 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+def test_lru_cache_popitem_skips_stale_order_entry():
+    cache = TestLRUCache(2)
+    cache.touch("stale")
+    cache.put("a", 1)
+    cache.put("b", 2)
+
+    assert list(cache.order) == ["stale", "a", "b"]
+
+    assert cache.popitem() == ("a", 1)
+    assert list(cache.order) == ["b"]
+    assert set(cache.cache) == {"b"}
+    assert "stale" not in cache.pinned_items
+
+
+def test_lru_cache_put_cleans_stale_order_entry_before_eviction():
+    cache = TestLRUCache(1)
+    cache.touch("stale")
+    cache.put("a", 1)
+
+    cache.put("b", 2)
+
+    assert list(cache.order) == ["b"]
+    assert set(cache.cache) == {"b"}
