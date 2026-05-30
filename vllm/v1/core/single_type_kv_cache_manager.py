@@ -1148,10 +1148,6 @@ class MambaManager(SingleTypeKVCacheManager):
             if num_required_blocks <= len(req_blocks):
                 return []
             else:
-                assert num_required_blocks > len(req_blocks), (
-                    "num_required_blocks "
-                    f"{num_required_blocks} < len(req_blocks) {len(req_blocks)}"
-                )
                 prev_block_len = len(req_blocks)
                 blocks_allocated = request_id in self._allocated_block_reqs
                 # Record the last state block
