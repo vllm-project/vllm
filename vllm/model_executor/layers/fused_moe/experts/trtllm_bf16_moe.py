@@ -99,12 +99,6 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return True
 
-    def supports_chunking(self) -> bool:
-        return False
-
-    def supports_expert_map(self) -> bool:
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -140,5 +134,6 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
         )

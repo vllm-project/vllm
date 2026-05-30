@@ -650,6 +650,51 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
+def gptq_gemm_rdna3(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_g_idx: torch.Tensor,
+    use_v2_format: bool,
+) -> torch.Tensor:
+    return torch.ops._rocm_C.gptq_gemm_rdna3(
+        a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3"):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna3")
+    def _gptq_gemm_rdna3_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3_wmma"):
+
+    @register_fake("_rocm_C::gptq_gemm_rdna3_wmma")
+    def _gptq_gemm_rdna3_wmma_fake(
+        a: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_g_idx: torch.Tensor,
+        use_v2_format: bool,
+    ) -> torch.Tensor:
+        return torch.empty(
+            (a.size(0), b_q_weight.size(1)), dtype=a.dtype, device=a.device
+        )
+
+
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
     @register_fake("_C::allspark_w8a16_gemm")
@@ -2367,6 +2412,31 @@ def dsv3_router_gemm(
     return output
 
 
+def fp32_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    torch.ops._C.fp32_router_gemm(output, hidden_states, router_weight)
+    return output
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
+
+    @register_fake("_C::fp32_router_gemm")
+    def fp32_router_gemm_fake(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        return
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -3717,29 +3787,6 @@ def matmul_mxf4_bf16_tn(
     alpha: torch.Tensor,
 ) -> torch.Tensor:
     return torch.ops._qutlass_C.matmul_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
-
-
-if hasattr(torch.ops._qutlass_C, "matmul_ada_mxf4_bf16_tn"):
-
-    @register_fake("_qutlass_C::matmul_ada_mxf4_bf16_tn")
-    def _fake_matmul_ada_mxf4_bf16_tn(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        a_sf: torch.Tensor,
-        b_sf: torch.Tensor,
-        alpha: torch.Tensor,
-    ):
-        return a.new_empty(*a.shape[:-1], b.shape[0], dtype=torch.bfloat16)
-
-
-def matmul_ada_mxf4_bf16_tn(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_sf: torch.Tensor,
-    b_sf: torch.Tensor,
-    alpha: torch.Tensor,
-) -> torch.Tensor:
-    return torch.ops._qutlass_C.matmul_ada_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeMxQuest"):
