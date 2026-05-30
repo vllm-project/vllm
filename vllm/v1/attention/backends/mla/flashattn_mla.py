@@ -646,6 +646,168 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
             suffix_lse=new_tokens_lse,
         )
 
+    def _sink_prefill_attn_latent(
+        self,
+        q_pe: torch.Tensor,
+        ql_nope: torch.Tensor,
+        attn_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Attention over static sink tokens in latent space (for paged SWA)."""
+        prefill = attn_metadata.prefill
+        num_prefills = attn_metadata.num_prefills
+        assert self.sink_k_pe is not None and self.sink_compressed_kv is not None
+        sink_k_pe = self.sink_k_pe.repeat(num_prefills, 1, 1)
+        sink_kv_c = self.sink_compressed_kv
+        if sink_kv_c.dim() == 2:
+            sink_kv_c = sink_kv_c.unsqueeze(1)
+        sink_kv_c = sink_kv_c.repeat(num_prefills, 1, 1)
+        cu_seqlens_k = torch.arange(
+            0,
+            num_prefills * self.sink_len + 1,
+            self.sink_len,
+            device=q_pe.device,
+            dtype=torch.int32,
+        )
+        return flash_attn_varlen_func(
+            q=q_pe,
+            k=sink_k_pe,
+            v=sink_kv_c,
+            q_v=ql_nope,
+            max_seqlen_q=prefill.max_query_len,
+            cu_seqlens_q=prefill.query_start_loc,
+            max_seqlen_k=self.sink_len,
+            cu_seqlens_k=cu_seqlens_k,
+            softmax_scale=self.scale,
+            causal=False,
+            return_softmax_lse=True,
+            fa_version=3,
+            num_splits=0,
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
+            cp_tot_seqused_k=None,
+            window_size=None,
+        )
+
+    def _ensure_mqa_bmm_weights(self) -> None:
+        if getattr(self, "_w_uk_t", None) is not None:
+            return
+        kv_b_proj_weight = self.kv_b_proj.weight.T.view(
+            self.kv_lora_rank,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        w_uk, w_uv = kv_b_proj_weight.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        self._w_uk_t = w_uk.permute(1, 2, 0)
+        self._w_uv = w_uv.transpose(0, 1)
+
+    def _absorb_uk_into_q(self, q_nope: torch.Tensor) -> torch.Tensor:
+        self._ensure_mqa_bmm_weights()
+        # (T, N, P) -> (N, T, P) @ (N, P, L) -> (T, N, L)
+        q_nope_t = q_nope.transpose(0, 1)
+        ql_nope = torch.bmm(q_nope_t, self._w_uk_t)
+        return ql_nope.transpose(0, 1)
+
+    def _v_up_proj_latent(self, x: torch.Tensor) -> torch.Tensor:
+        self._ensure_mqa_bmm_weights()
+        # (T, N, L) -> (N, T, L) @ (N, L, V) -> (T, N, V)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        out = torch.bmm(x, self._w_uv)
+        return out.transpose(0, 1)
+
+    def _prefill_seq_lens(self, prefill_metadata) -> torch.Tensor:
+        assert prefill_metadata.chunked_context is not None
+        query_lens = (
+            prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
+        )
+        # chunked_context.seq_lens is built on CPU in MLACommonMetadataBuilder.
+        context_lens = prefill_metadata.chunked_context.seq_lens.sum(dim=0).to(
+            query_lens.device, non_blocking=True
+        )
+        return (query_lens + context_lens).to(dtype=torch.int32)
+
+    def _forward_mha_merge_sink_with_swa_paged_attn(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> None:
+        """SWA extend via paged latent KV cache (same kernel path as MQA decode)."""
+        assert self.dcp_world_size == 1, (
+            "SWA prefill paged attention is not supported with DCP yet."
+        )
+        prefill = attn_metadata.prefill
+        assert prefill is not None
+        num_prefills = attn_metadata.num_prefills
+
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        ql_nope = self._absorb_uk_into_q(q_nope)
+        sink_o, sink_lse = self._sink_prefill_attn_latent(q_pe, ql_nope, attn_metadata)
+
+        kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank].unsqueeze(-2)
+        k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :].unsqueeze(-2)
+        block_size = kv_c_and_k_pe_cache.size(1)
+        seq_lens = self._prefill_seq_lens(prefill)
+        max_seqlen_q = max(prefill.max_query_len, 1)
+        max_seqlen_k = max(int(seq_lens.max().item()), 1)
+        sliding_window_size = (
+            list(self.window_size) if self.window_size is not None else None
+        )
+
+        scheduler_metadata = get_scheduler_metadata(
+            batch_size=num_prefills,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            num_heads_q=self.num_heads * self.dcp_world_size,
+            num_heads_kv=1,
+            headdim=self.qk_rope_head_dim,
+            cache_seqlens=seq_lens,
+            qkv_dtype=kv_c_and_k_pe_cache.dtype,
+            headdim_v=self.kv_lora_rank,
+            page_size=block_size,
+            cu_seqlens_q=prefill.query_start_loc,
+            causal=True,
+            num_splits=0,
+            window_size=sliding_window_size,
+        )
+
+        latent_o, latent_lse = flash_attn_varlen_func(
+            q=q_pe,
+            k=k_pe_cache,
+            v=kv_c_cache,
+            q_v=ql_nope,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_q=prefill.query_start_loc,
+            max_seqlen_k=max_seqlen_k,
+            seqused_k=seq_lens,
+            block_table=prefill.block_table,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=True,
+            fa_version=3,
+            scheduler_metadata=scheduler_metadata,
+            num_splits=0,
+            cp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
+            cp_tot_seqused_k=None,
+            window_size=sliding_window_size,
+        )
+        merged_latent = torch.empty_like(latent_o)
+        merge_attn_states(
+            output=merged_latent,
+            output_lse=None,
+            prefix_output=sink_o,
+            prefix_lse=sink_lse,
+            suffix_output=latent_o,
+            suffix_lse=latent_lse,
+        )
+        output_view = output.view(-1, self.num_heads, self.v_head_dim)
+        output_view.copy_(self._v_up_proj_latent(merged_latent))
+
     def _forward_mha_merge_sink_with_chunked_context(
         self,
         q: torch.Tensor,
@@ -741,15 +903,21 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
         q_attn = q.to(prefill_metadata.q_data_type) if use_fp8_prefill else q
 
-        sink_o, sink_lse = self._compute_sink_prefill_attn(q_attn, attn_metadata)
-
         has_context = prefill_metadata.chunked_context is not None
         use_sliding_window = self.window_size is not None and self.window_size != (
             -1,
             -1,
         )
 
-        if has_context:
+        if use_sliding_window and has_context:
+            self._forward_mha_merge_sink_with_swa_paged_attn(
+                q_attn,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                output,
+            )
+        elif has_context:
+            sink_o, sink_lse = self._compute_sink_prefill_attn(q_attn, attn_metadata)
             self._forward_mha_merge_sink_with_chunked_context(
                 q_attn,
                 kv_c_normed,
@@ -763,6 +931,7 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 use_fp8_prefill,
             )
         elif use_sliding_window:
+            sink_o, sink_lse = self._compute_sink_prefill_attn(q_attn, attn_metadata)
             self._forward_mha_merge_sink_with_sliding_window(
                 q_attn,
                 kv_c_normed,
@@ -774,6 +943,7 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 use_fp8_prefill,
             )
         else:
+            sink_o, sink_lse = self._compute_sink_prefill_attn(q_attn, attn_metadata)
             self._forward_mha_merge_sink_with_new_tokens(
                 q_attn,
                 kv_c_normed,
