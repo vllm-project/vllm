@@ -695,6 +695,59 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3
         )
 
 
+def moe_gptq_gemm_rdna3(
+    a: torch.Tensor,
+    c: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor,
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    top_k: int,
+    block_size_m: int,
+    mul_topk_weight: bool,
+    output_topk: int = 0,
+) -> None:
+    torch.ops._rocm_C.moe_gptq_gemm_rdna3(
+        a,
+        c,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        top_k,
+        block_size_m,
+        mul_topk_weight,
+        output_topk,
+    )
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "moe_gptq_gemm_rdna3"):
+
+    @register_fake("_rocm_C::moe_gptq_gemm_rdna3")
+    def _moe_gptq_gemm_rdna3_fake(
+        a: torch.Tensor,
+        c: torch.Tensor,
+        b_q_weight: torch.Tensor,
+        b_scales: torch.Tensor,
+        b_qzeros: torch.Tensor,
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        top_k: int,
+        block_size_m: int,
+        mul_topk_weight: bool,
+        output_topk: int = 0,
+    ) -> None:
+        return
+
+
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
     @register_fake("_C::allspark_w8a16_gemm")
