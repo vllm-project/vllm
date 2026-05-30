@@ -153,7 +153,7 @@ class OutlinesVocabulary:
 
 def get_outlines_cache_path() -> str:
     """Get the context object that contains previously-computed return values"""
-    outlines_cache_dir = os.getenv("OUTLINES_CACHE_DIR")
+    outlines_cache_dir = envs.OUTLINES_CACHE_DIR
     xdg_cache_home = os.getenv("XDG_CACHE_HOME")
     home_dir = os.path.expanduser("~")
 
