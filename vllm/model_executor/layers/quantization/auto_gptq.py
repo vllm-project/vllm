@@ -483,7 +483,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         weight_key = QuantKey(quant_type, scale)
 
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
-            moe, weight_key, quant_config.weight_bits
+            moe,
+            weight_key,
         )
 
     def create_weights(

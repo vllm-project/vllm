@@ -305,10 +305,6 @@ endif()
 #
 
 set(VLLM_EXT_SRC
-  "csrc/cache_kernels.cu"
-  "csrc/cache_kernels_fused.cu"
-  "csrc/attention/paged_attention_v1.cu"
-  "csrc/attention/paged_attention_v2.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
@@ -647,7 +643,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/attention/merge_attn_states.cu"
     "csrc/libtorch_stable/sampler.cu"
     "csrc/libtorch_stable/topk.cu"
-    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu")
+    "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
+    "csrc/libtorch_stable/attention/paged_attention_v1.cu"
+    "csrc/libtorch_stable/attention/paged_attention_v2.cu"
+    "csrc/libtorch_stable/cache_kernels.cu"
+    "csrc/libtorch_stable/cache_kernels_fused.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -681,6 +681,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
                    "in CUDA target architectures.")
+  endif()
+
+  # FP32 router GEMM (H=3072, E=256, M<=32). Requires SM90+ and CUDA >= 12.0.
+  cuda_archs_sm90plus(FP32_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND FP32_ROUTER_GEMM_ARCHS)
+    set(SRCS
+      "csrc/libtorch_stable/fp32_router_gemm_entry.cu"
+      "csrc/libtorch_stable/fp32_router_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP32_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building fp32_router_gemm for archs: ${FP32_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building fp32_router_gemm as no compatible archs found "
+                   "(requires SM90+ and CUDA >= 12.0).")
   endif()
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
@@ -924,13 +940,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    # nvfp4_kv_cache_kernels uses non-stable torch API and is called directly
-    # from cache_kernels.cu, so it belongs in _C rather than _C_stable.
-    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
@@ -960,11 +974,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set(NVFP4_KV_SRC "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${NVFP4_KV_SRC}"
       CUDA_ARCHS "${FP4_ARCHS}")
-    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    list(APPEND VLLM_STABLE_EXT_SRC "${NVFP4_KV_SRC}")
     target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
@@ -1242,24 +1256,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  # DeepSeek V3 router GEMM kernel - requires SM90+
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
+  # DeepSeek V3 router GEMM kernel requires SM90+ and CUDA >= 12.0.
+  # (fp32_router_gemm has been migrated to _C_stable_libtorch above.)
+  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
     set(DSV3_ROUTER_GEMM_SRC
       "csrc/moe/dsv3_router_gemm_entry.cu"
       "csrc/moe/dsv3_router_gemm_float_out.cu"
       "csrc/moe/dsv3_router_gemm_bf16_out.cu")
     set_gencode_flags_for_srcs(
       SRCS "${DSV3_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
     list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
-    message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+
+    message(STATUS "Building DSV3 router GEMM kernels for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
   else()
-    message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
+    message(STATUS "Not building DSV3 router GEMM kernels as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
@@ -1286,6 +1298,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
+  set(VLLM_ROCM_HAS_GFX1100 OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    set(VLLM_ROCM_HAS_GFX1100 ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna3.cu"
+      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1295,6 +1315,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  if(VLLM_ROCM_HAS_GFX1100)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
