@@ -51,8 +51,7 @@ steps:
     torch_nightly: {}
     amd:
       device: mi300_1
-      timeout_in_minutes: 240
-      parallelism: 4
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
       commands:
@@ -98,7 +97,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 100
       depends_on:
       - image-build-amd

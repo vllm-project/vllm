@@ -16,7 +16,7 @@ steps:
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   # - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-  # - tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
+
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/openai/completion/test_shutdown.py
   # - tests/entrypoints/openai/test_return_token_ids.py
@@ -28,7 +28,7 @@ steps:
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py
   # - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not invalid"
-  # - pytest -v -s entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
+
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   # - pytest -v -s entrypoints/openai/test_return_token_ids.py
