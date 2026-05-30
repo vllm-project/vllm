@@ -310,9 +310,22 @@ class ResponsesRequest(OpenAIBaseModel):
         # chat templates require explicit opt-in (e.g., Gemma4 defaults
         # enable_thinking to false). For templates that don't declare the
         # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        #
+        # When structured output (text.format.json_schema) is requested
+        # and reasoning is NOT configured, disable thinking so the
+        # structured output lands in the grammar-constrained content
+        # channel (issue #44012).
         user_kwargs = self.chat_template_kwargs or {}
         if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
             extra_kwargs["enable_thinking"] = reasoning_effort != "none"
+        elif reasoning_effort is None and "enable_thinking" not in user_kwargs:
+            has_structured = (
+                self.text is not None
+                and self.text.format is not None
+                and self.text.format.type == "json_schema"
+            )
+            if has_structured:
+                extra_kwargs["enable_thinking"] = False
 
         return ChatParams(
             chat_template=default_template,
