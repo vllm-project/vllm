@@ -1349,10 +1349,10 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 12: Reset with pending eager stores releases block refs
+# Test 12: Reset with pending eager stores waits for completion
 # ---------------------------------------------------------------------------
 def test_reset_pending_eager_stores() -> None:
-    """Eager mode: reset() releases GPU/CPU refs from in-flight stores."""
+    """Eager mode: reset() abandons in-flight stores until they complete."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
@@ -1379,11 +1379,18 @@ def test_reset_pending_eager_stores() -> None:
     # Free the request's own block refs (simulates preemption)
     gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
 
-    # Reset should release the remaining touch refs
-    assert sched.reset() is True
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
     assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
     assert len(sched._reqs_to_store) == 0
     assert len(sched._store_event_to_reqs) == 0
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
 
     # All GPU blocks should now be free (ref_cnt == 0) except null block
     num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
@@ -1391,13 +1398,14 @@ def test_reset_pending_eager_stores() -> None:
 
     # GPU prefix cache reset should now succeed
     assert gpu_pool.reset_prefix_cache() is True
+    assert sched.reset() is True
 
 
 # ---------------------------------------------------------------------------
-# Test 13: Reset with pending lazy stores releases block refs
+# Test 13: Reset with pending lazy stores waits for completion
 # ---------------------------------------------------------------------------
 def test_reset_pending_lazy_stores() -> None:
-    """Lazy mode: reset() releases GPU/CPU refs from in-flight stores."""
+    """Lazy mode: reset() abandons in-flight stores until they complete."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=True)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
@@ -1420,10 +1428,15 @@ def test_reset_pending_lazy_stores() -> None:
 
     gpu_pool.free_blocks(fillers)
 
-    # Reset should release all refs and clear CPU cache
-    assert sched.reset() is True
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
     assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
     assert sched._cursor is None
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
+    assert sched.reset() is True
 
     # No CPU cache hits after reset
     req2 = Request(
@@ -1439,10 +1452,10 @@ def test_reset_pending_lazy_stores() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 14: Reset with pending loads releases block refs
+# Test 14: Reset with pending loads waits for completion
 # ---------------------------------------------------------------------------
 def test_reset_pending_loads() -> None:
-    """reset() releases GPU/CPU refs from in-flight loads."""
+    """reset() abandons in-flight loads until they complete."""
     fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
     sched = fix.scheduler
     gpu_pool = fix.gpu_block_pool
@@ -1490,10 +1503,19 @@ def test_reset_pending_loads() -> None:
     gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
     gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids2[0])
 
-    # Reset should release load touch refs
-    assert sched.reset() is True
+    # Reset should keep load touch refs until the worker reports completion.
+    assert sched.reset() is False
     assert len(sched._reqs_to_load) == 0
+    assert len(sched._abandoned_reqs_to_load) == 1
+    assert len(sched._load_event_to_reqs) == 1
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_load_completion(sched, {req2.request_id})
+    assert len(sched._abandoned_reqs_to_load) == 0
     assert len(sched._load_event_to_reqs) == 0
+    assert sched.reset() is True
 
     # All GPU blocks free
     num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()

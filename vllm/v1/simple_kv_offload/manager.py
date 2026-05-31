@@ -149,10 +149,12 @@ class SimpleCPUOffloadScheduler:
         else:
             self._target_free = 0
         self._store_event_to_blocks: dict[int, TransferMeta] = {}
+        self._abandoned_store_event_to_blocks: dict[int, TransferMeta] = {}
         # Eager mode only
         self._reqs_to_store: dict[str, StoreRequestState] = {}
         self._store_event_to_reqs: dict[int, list[str]] = {}
         self._in_flight_store_gpu_blocks: set[int] = set()
+        self._abandoned_reqs_to_load: dict[str, LoadRequestState] = {}
 
         # Event counters
         self._load_event_counter: int = 0
@@ -416,7 +418,10 @@ class SimpleCPUOffloadScheduler:
             load_event=load_event,
             load_gpu_blocks=load_gpu,
             load_cpu_blocks=load_cpu,
-            load_event_to_reqs=self._load_event_to_reqs,
+            load_event_to_reqs={
+                event_idx: list(req_ids)
+                for event_idx, req_ids in self._load_event_to_reqs.items()
+            },
             store_event=store_event,
             store_gpu_blocks=store_gpu,
             store_cpu_blocks=store_cpu,
@@ -667,7 +672,11 @@ class SimpleCPUOffloadScheduler:
         """Process a fully-completed store event."""
         transfer = self._store_event_to_blocks.pop(event_idx, None)
         if transfer is None:
-            return  # guard stale events from before a reset() call
+            transfer = self._abandoned_store_event_to_blocks.pop(event_idx, None)
+            if transfer is None:
+                return  # guard stale events from before a reset() call
+            self._release_transfer_refs(transfer)
+            return
 
         if not self._lazy_mode:
             self._in_flight_store_gpu_blocks.difference_update(transfer.gpu_block_ids)
@@ -714,9 +723,22 @@ class SimpleCPUOffloadScheduler:
             self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
         )
 
+    def _release_transfer_refs(self, transfer: TransferMeta) -> None:
+        """Release transfer refs without making copied data cacheable."""
+        cpu_blocks = [self.cpu_block_pool.blocks[bid] for bid in transfer.cpu_block_ids]
+        for cpu_block in cpu_blocks:
+            cpu_block.reset_hash()
+        self.cpu_block_pool.free_blocks(cpu_blocks)
+        assert self._gpu_block_pool is not None
+        self._gpu_block_pool.free_blocks(
+            self._gpu_block_pool.blocks[bid] for bid in transfer.gpu_block_ids
+        )
+
     def has_pending_stores(self) -> bool:
         """Return True if there are in-flight store transfers."""
-        return bool(self._store_event_to_blocks)
+        return bool(
+            self._store_event_to_blocks or self._abandoned_store_event_to_blocks
+        )
 
     def request_finished(
         self,
@@ -777,6 +799,8 @@ class SimpleCPUOffloadScheduler:
         """
         state = self._reqs_to_load.pop(req_id, None)
         if state is None:
+            state = self._abandoned_reqs_to_load.pop(req_id, None)
+        if state is None:
             return
         # Remove from load event mapping (only this req, not whole event)
         if state.load_event is not None:
@@ -821,30 +845,41 @@ class SimpleCPUOffloadScheduler:
         return self.cpu_block_pool.take_events()
 
     def reset(self) -> bool:
-        """Abort all pending transfers, release block refs, reset CPU cache."""
-        gpu_pool = self._gpu_block_pool
-        assert gpu_pool is not None
+        """Abandon pending transfers and reset the CPU cache when safe.
 
-        # Release GPU/CPU refs held by pending store transfers
-        for transfer in self._store_event_to_blocks.values():
-            gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in transfer.gpu_block_ids)
-            self.cpu_block_pool.free_blocks(
-                self.cpu_block_pool.blocks[bid] for bid in transfer.cpu_block_ids
-            )
+        Worker-side DMA may still be using blocks after reset is requested.
+        Keep those block refs pinned until the existing completion path reports
+        the transfer finished, then release refs without caching abandoned
+        store results.
+        """
+
+        self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         self._store_event_to_blocks.clear()
         self._in_flight_store_gpu_blocks.clear()
 
-        # Release GPU/CPU refs held by pending load transfers
+        # Loads that have not been sent to the worker cannot have running DMA.
+        # In-flight loads stay pinned and are cleaned up on completion.
         for req_id in list(self._reqs_to_load):
-            self._cleanup_load_request(req_id)
+            state = self._reqs_to_load.pop(req_id)
+            if state.load_event is None:
+                self._reqs_to_load[req_id] = state
+                self._cleanup_load_request(req_id)
+            else:
+                self._abandoned_reqs_to_load[req_id] = state
 
-        self._load_event_to_reqs.clear()
         self._reqs_to_store.clear()
         self._store_event_to_reqs.clear()
-        self._store_event_pending_counts.clear()
+        self._store_event_pending_counts = {
+            event_idx: count
+            for event_idx, count in self._store_event_pending_counts.items()
+            if event_idx in self._abandoned_store_event_to_blocks
+        }
         self._cursor = None
         # NOTE: _load_event_counter / _store_event_counter are not
         # reset as they are monotonic and must stay ahead of the workers
         # high-water marks to avoid event index collisions
+
+        if self._abandoned_store_event_to_blocks or self._abandoned_reqs_to_load:
+            return False
 
         return self.cpu_block_pool.reset_prefix_cache()
