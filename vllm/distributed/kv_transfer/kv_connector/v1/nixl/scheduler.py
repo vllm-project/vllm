@@ -661,6 +661,27 @@ class NixlConnectorScheduler:
 
             remote_num_tokens = request.num_computed_tokens
 
+            # Drop trailing blocks allocated beyond num_computed_tokens. With
+            # speculative decoding the scheduler reserves lookahead slots that
+            # spill into an extra block when num_computed_tokens is a multiple
+            # of block_size. Sending it makes remote_block_ids longer than the
+            # decode allocation, so the decode's suffix-trim
+            # (_apply_prefix_caching) keeps the never-written lookahead block
+            # and drops a real one, shifting the mapping -> stale KV reads.
+            # Clip per group (own block_size) for self-attention groups; leave
+            # state groups (Mamba/SSM) and others not indexed by token count.
+            if remote_num_tokens > 0:
+                kv_cache_groups = self.kv_cache_config.kv_cache_groups
+                clipped = list(block_ids)
+                for i, group_spec in enumerate(kv_cache_groups):
+                    spec = group_spec.kv_cache_spec
+                    if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+                        continue
+                    num_written_blocks = cdiv(remote_num_tokens, spec.block_size)
+                    if len(clipped[i]) > num_written_blocks:
+                        clipped[i] = clipped[i][:num_written_blocks]
+                block_ids = tuple(clipped)
+
         return delay_free_blocks, dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
