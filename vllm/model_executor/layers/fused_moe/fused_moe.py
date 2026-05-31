@@ -1158,7 +1158,7 @@ def get_moe_wna16_block_config(
                 return {
                     "BLOCK_SIZE_N": 32,
                     "BLOCK_SIZE_K": 64,
-                    "num_warps": 8,
+                    "num_warps": 4 if block_size_m <= 8 else 8,
                     "num_stages": 2,
                 }
 
@@ -1305,7 +1305,7 @@ def _get_gfx950_int4_wna16_config_overrides(
 
     if M <= 64:
         return {
-            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_M": 8,
             "GROUP_SIZE_M": 1,
             "matrix_instr_nonkdim": 16,
         }
