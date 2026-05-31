@@ -116,6 +116,25 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, False),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_cpu_sim_multi_numa_env(
+    monkeypatch: pytest.MonkeyPatch, env_value: str | None, expected: bool
+) -> None:
+    if env_value is None:
+        monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_CPU_SIM_MULTI_NUMA", env_value)
+
+    assert envs.VLLM_CPU_SIM_MULTI_NUMA is expected
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 
