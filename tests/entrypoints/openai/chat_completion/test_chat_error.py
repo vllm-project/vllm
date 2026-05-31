@@ -444,3 +444,14 @@ def test_json_schema_response_format_missing_schema():
             messages=[{"role": "user", "content": "hello"}],
             response_format={"type": "json_schema"},
         )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_structural_tag_response_format_invalid(format_value):
+    """Malformed structural tags should be rejected during request validation."""
+    with pytest.raises(Exception, match="Invalid response_format structural_tag"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "structural_tag", "format": format_value},
+        )

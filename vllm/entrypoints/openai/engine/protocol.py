@@ -17,6 +17,7 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -156,6 +157,46 @@ class ResponseFormat(OpenAIBaseModel):
 AnyResponseFormat: TypeAlias = (
     ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
 )
+
+
+def validate_structural_tag_response_format(
+    response_format: AnyStructuralTagResponseFormat | dict[str, Any],
+) -> None:
+    """Validate structural tags before they are sent to the engine.
+
+    Engine-side validation reports malformed structural tags as generation
+    failures. OpenAI request parsing should classify them as bad requests.
+    """
+    import json
+
+    from pydantic import TypeAdapter, ValidationError
+
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    if isinstance(response_format, dict):
+        try:
+            response_format = TypeAdapter(
+                AnyStructuralTagResponseFormat
+            ).validate_python(response_format)
+        except ValidationError as exc:
+            raise VLLMValidationError(
+                "Invalid response_format structural_tag specification.",
+                parameter="response_format",
+            ) from exc
+
+    try:
+        payload = json.dumps(response_format.model_dump(by_alias=True))
+        validate_xgrammar_grammar(
+            SamplingParams(
+                structured_outputs=StructuredOutputsParams(structural_tag=payload)
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise VLLMValidationError(
+            "Invalid response_format structural_tag specification.",
+            parameter="response_format",
+        ) from exc
 
 
 class StreamOptions(OpenAIBaseModel):
