@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -74,6 +75,52 @@ def swiglustep_and_mul_triton(
     )
 
 
+def _should_use_tilelang_activation(x: torch.Tensor) -> bool:
+    return (
+        envs.VLLM_USE_TILELANG_ACTIVATION_OPS
+        and current_platform.is_cuda_alike()
+        and x.dtype == torch.bfloat16
+        and x.ndim > 0
+        and x.shape[-1] % 2 == 0
+        and x.is_contiguous()
+    )
+
+
+def _try_run_tilelang_activation_op(
+    op_name: str,
+    out: torch.Tensor,
+    x: torch.Tensor,
+    *args: float,
+) -> bool:
+    if not _should_use_tilelang_activation(x):
+        return False
+
+    try:
+        import vllm.model_executor.kernels.activation.tilelang  # noqa: F401
+
+        op = getattr(torch.ops.vllm, op_name)
+    except (AttributeError, ImportError) as err:
+        logger.warning_once(
+            "TileLang %s is unavailable; falling back to the default "
+            "implementation. Error: %s",
+            op_name,
+            err,
+        )
+        return False
+
+    try:
+        op(out, x, *args)
+    except ImportError as err:
+        logger.warning_once(
+            "TileLang %s is unavailable; falling back to the default "
+            "implementation. Error: %s",
+            op_name,
+            err,
+        )
+        return False
+    return True
+
+
 # --8<-- [start:fatrelu_and_mul]
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
@@ -109,6 +156,15 @@ class FatreluAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op(
+            "fatrelu_and_mul_tilelang",
+            out,
+            x,
+            self.threshold,
+        ):
+            return out
+
         self.op(out, x, self.threshold)
         return out
 
@@ -144,6 +200,10 @@ class SiluAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op("silu_and_mul_tilelang", out, x):
+            return out
+
         self.op(out, x)
         return out
 
@@ -186,6 +246,15 @@ class SiluAndMulWithClamp(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op(
+            "silu_and_mul_with_clamp_tilelang",
+            out,
+            x,
+            self.swiglu_limit,
+        ):
+            return out
+
         self.op(out, x, self.swiglu_limit)
         return out
 
@@ -223,6 +292,10 @@ class MulAndSilu(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op("mul_and_silu_tilelang", out, x):
+            return out
+
         self.op(out, x)
         return out
 
@@ -365,6 +438,15 @@ class GeluAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        op_name = (
+            "gelu_tanh_and_mul_tilelang"
+            if self.approximate == "tanh"
+            else "gelu_and_mul_tilelang"
+        )
+        if _try_run_tilelang_activation_op(op_name, out, x):
+            return out
+
         self.op(out, x)
         return out
 
@@ -400,6 +482,16 @@ class SwigluOAIAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op(
+            "swigluoai_and_mul_tilelang",
+            out,
+            x,
+            self.alpha,
+            self.limit,
+        ):
+            return out
+
         torch.ops._C.swigluoai_and_mul(out, x, self.alpha, self.limit)
         return out
 
@@ -438,6 +530,15 @@ class SwigluStepAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+
+        if _try_run_tilelang_activation_op(
+            "swiglustep_and_mul_tilelang",
+            out,
+            x,
+            self.limit,
+        ):
+            return out
+
         swiglustep_and_mul_triton(out, x, self.limit)
         return out
 
