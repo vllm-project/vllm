@@ -192,7 +192,14 @@ async def test_abort_during_final_step(async_scheduling: bool):
             # processed.
             scheduled = scheduler_output.num_scheduled_tokens or {}
             finished = scheduler_output.finished_req_ids or set()
-            if request_id in scheduled or request_id in finished:
+
+            def is_target_request(req_ids):
+                return any(
+                    rid == request_id or rid.startswith(f"{request_id}-")
+                    for rid in req_ids
+                )
+
+            if is_target_request(scheduled) or is_target_request(finished):
                 # Signal that execute_model has been called by deleting ready_file
                 if ready_file.exists():
                     ready_file.unlink()
