@@ -116,6 +116,44 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
+    def reserve_simultaneous(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> None:
+        """Reserve enough workspace for a future get_simultaneous call."""
+        actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
+        aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
+        required_bytes = sum(aligned_bytes)
+
+        for ubatch_id in range(self._num_ubatches):
+            current_workspace = self._current_workspaces[ubatch_id]
+            current_size = self._workspace_size_bytes(current_workspace)
+            if current_size >= required_bytes:
+                continue
+
+            if self._locked:
+                raise AssertionError(
+                    "Workspace is locked but reservation requires "
+                    f"{required_bytes / _MB:.2f} MB, current size is "
+                    f"{current_size / _MB:.2f} MB. "
+                    "Workspace growth is not allowed after locking."
+                )
+
+            self._current_workspaces[ubatch_id] = None
+            del current_workspace
+            torch.accelerator.empty_cache()
+            self._current_workspaces[ubatch_id] = torch.empty(
+                (required_bytes,), dtype=torch.uint8, device=self._device
+            )
+
+            if envs.VLLM_DEBUG_WORKSPACE:
+                logger.info(
+                    "[WORKSPACE DEBUG] Reserved workspace: %.2f MB -> "
+                    "%.2f MB (ubatch %d)",
+                    current_size / _MB,
+                    required_bytes / _MB,
+                    ubatch_id,
+                )
+
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 

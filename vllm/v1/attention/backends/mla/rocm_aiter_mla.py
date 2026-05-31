@@ -133,6 +133,9 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
+# Keep short prefills on the native path: the FP8 PS kernel is a throughput
+# optimization for long prompts and has shown small GSM8K accuracy drift.
+_FP8_PREFILL_MIN_Q_LEN = 2048
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -317,6 +320,38 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             dtype=reduce_partial_map_dtype,
             device=device,
         )
+
+        max_prefill_tiles = (
+            max_prefill_qlen + _FP8_PREFILL_TILE_Q - 1
+        ) // _FP8_PREFILL_TILE_Q
+        # Chunked prefill may pack two long requests in one batch. Reserve
+        # enough workspace before CUDA graphs lock the workspace manager.
+        max_partial_tiles = 2 * max_prefill_tiles
+        if max_partial_tiles > 0:
+            from vllm.v1.worker.workspace import (
+                current_workspace_manager,
+                is_workspace_manager_initialized,
+            )
+
+            if is_workspace_manager_initialized():
+                current_workspace_manager().reserve_simultaneous(
+                    (
+                        (
+                            max_partial_tiles * _FP8_PREFILL_TILE_Q,
+                            self.num_heads,
+                            self.mla_dims.v_head_dim,
+                        ),
+                        torch.float32,
+                    ),
+                    (
+                        (
+                            max_partial_tiles * _FP8_PREFILL_TILE_Q,
+                            self.num_heads,
+                        ),
+                        torch.float32,
+                    ),
+                    ((max_prefill_qlen, self.num_heads), torch.float32),
+                )
 
         logger.info(
             "FP8 MLA prefill PS buffers allocated "
@@ -542,7 +577,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             attn_metadata.reduce_indptr = self._mla_reduce_indptr
             attn_metadata.reduce_final_map = self._mla_reduce_final_map
             attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
-        if self._fp8_prefill_enabled and attn_metadata.prefill is not None:
+        if (
+            self._fp8_prefill_enabled
+            and attn_metadata.prefill is not None
+            and attn_metadata.prefill.max_query_len >= _FP8_PREFILL_MIN_Q_LEN
+        ):
             self._build_fp8_prefill_ps_metadata(attn_metadata, common_attn_metadata)
         return attn_metadata
 
