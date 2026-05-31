@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
@@ -21,6 +22,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     FlashMLASparseMetadata,
 )
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -32,6 +34,27 @@ if TYPE_CHECKING:
         DeepseekV4MLAAttention,
     )
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+
+def _squeeze_flashmla_lse(lse: torch.Tensor) -> torch.Tensor:
+    if lse.ndim == 3 and lse.shape[1] == 1:
+        return lse.squeeze(1)
+    if lse.ndim == 3 and lse.shape[-1] == 1:
+        return lse.squeeze(-1)
+    assert lse.ndim == 2, f"Unexpected FlashMLA LSE shape: {tuple(lse.shape)}"
+    return lse
+
+
+def _copy_with_attn_sink(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    sink = attn_sink[: out.shape[1]].to(dtype=lse.dtype)
+    denom_lse = torch.logaddexp(lse, sink.unsqueeze(0))
+    scale = torch.exp(lse - denom_lse).to(dtype=out.dtype)
+    output.copy_(out * scale.unsqueeze(-1))
 
 
 class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
@@ -158,9 +181,23 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 // layer.compress_ratio
             )
             M = N + layer.window_size + layer.max_num_batched_tokens
-            current_workspace_manager().get_simultaneous(
-                ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-            )
+            dcp_group = get_dcp_group()
+            if dcp_group.world_size > 1:
+                current_workspace_manager().get_simultaneous(
+                    ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                    (
+                        (
+                            q.shape[0],
+                            q.shape[1] * dcp_group.world_size,
+                            q.shape[2],
+                        ),
+                        q.dtype,
+                    ),
+                )
+            else:
+                current_workspace_manager().get_simultaneous(
+                    ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                )
             output.zero_()
             return
 
@@ -250,6 +287,10 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         # q arrives pre-padded to layer.padded_heads by the outer wrapper.
+        dcp_group = get_dcp_group()
+        use_dcp = dcp_group.world_size > 1
+        if use_dcp:
+            q = dcp_group.all_gather(q.contiguous(), dim=1)
         q = q.unsqueeze(1)
 
         # Prepare SWA cache (num_blocks, swa_block_size, 1, head_bytes)
@@ -283,7 +324,14 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             "allocate one for this layer type."
         )
 
-        out, _ = flash_mla_with_kvcache(
+        out_buffer = output.unsqueeze(1)
+        if use_dcp:
+            (out_buffer,) = current_workspace_manager().get_simultaneous(
+                ((q.shape[0], q.shape[1], q.shape[2], q.shape[3]), q.dtype),
+            )
+            out_buffer.zero_()
+
+        out, lse = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
             block_table=None,
@@ -294,12 +342,20 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             indices=swa_indices,
             topk_length=swa_lens,
             softmax_scale=layer.scale,
-            attn_sink=layer.attn_sink,
+            attn_sink=None if use_dcp else layer.attn_sink,
             extra_k_cache=kv_cache if not swa_only else None,
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
-            out=output.unsqueeze(1),
+            out=out_buffer,
         )
+        if use_dcp:
+            out, lse = cp_lse_ag_out_rs(
+                out.squeeze(1),
+                _squeeze_flashmla_lse(lse),
+                dcp_group,
+                return_lse=True,
+            )
+            _copy_with_attn_sink(out, lse, layer.attn_sink, output)
 
     @classmethod
     def _forward_prefill(
@@ -325,6 +381,10 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
         assert gather_lens is not None
+        dcp_group = get_dcp_group()
+        use_dcp = dcp_group.world_size > 1
+        if use_dcp:
+            q = dcp_group.all_gather(q.contiguous(), dim=1)
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
@@ -359,9 +419,16 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         num_chunks = (num_prefills + chunk_size_const - 1) // chunk_size_const
 
         workspace_manager = current_workspace_manager()
-        kv = workspace_manager.get_simultaneous(
-            ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
-        )[0]
+        if use_dcp:
+            kv, dcp_out = workspace_manager.get_simultaneous(
+                ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
+                ((q.shape[0], q.shape[1], q.shape[2]), q.dtype),
+            )
+        else:
+            (kv,) = workspace_manager.get_simultaneous(
+                ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
+            )
+            dcp_out = None
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * chunk_size_const
             chunk_end = min(chunk_start + chunk_size_const, num_prefills)
@@ -378,6 +445,9 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // layer.compress_ratio,
                     offset=0,
+                    dcp_world_size=dcp_group.world_size,
+                    dcp_rank=dcp_group.rank_in_group,
+                    cp_kv_cache_interleave_size=layer.cp_kv_cache_interleave_size,
                 )
 
             # Gather SWA KV
@@ -390,6 +460,9 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                dcp_world_size=dcp_group.world_size,
+                dcp_rank=dcp_group.rank_in_group,
+                cp_kv_cache_interleave_size=layer.cp_kv_cache_interleave_size,
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
@@ -412,13 +485,34 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 top_k,
                 M,
                 N,
+                dcp_world_size=dcp_group.world_size,
+                dcp_rank=dcp_group.rank_in_group,
+                cp_kv_cache_interleave_size=layer.cp_kv_cache_interleave_size,
             )
-            flash_mla_sparse_fwd(
+            out_buffer = output[query_start:query_end]
+            if use_dcp:
+                assert dcp_out is not None
+                out_buffer = dcp_out[query_start:query_end]
+                out_buffer.zero_()
+            out, _, lse = flash_mla_sparse_fwd(
                 q=q[query_start:query_end],
                 kv=kv.view(-1, 1, q.shape[-1]),
                 indices=combined_indices.unsqueeze(1),
                 sm_scale=layer.scale,
-                attn_sink=layer.attn_sink,
+                attn_sink=None if use_dcp else layer.attn_sink,
                 topk_length=combined_lens,
-                out=output[query_start:query_end],
+                out=out_buffer,
             )
+            if use_dcp:
+                out, lse = cp_lse_ag_out_rs(
+                    out,
+                    _squeeze_flashmla_lse(lse),
+                    dcp_group,
+                    return_lse=True,
+                )
+                _copy_with_attn_sink(
+                    out,
+                    lse,
+                    layer.attn_sink,
+                    output[query_start:query_end],
+                )

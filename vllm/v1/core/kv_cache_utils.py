@@ -596,12 +596,22 @@ def resolve_kv_cache_block_sizes(
         return bs, bs
 
     if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
+        hf_config = vllm_config.model_config.hf_config
+        is_deepseek_v4 = getattr(hf_config, "model_type", None) == "deepseek_v4"
+        is_mla_hybrid = all(
+            isinstance(
+                group.kv_cache_spec,
+                MLAAttentionSpec | SlidingWindowMLASpec,
+            )
+            for group in groups
         )
+        if pcp != 1 or not (is_deepseek_v4 and is_mla_hybrid):
+            raise ValueError(
+                "Hybrid KV cache groups with multiple block sizes do not "
+                "support context parallelism (dcp_world_size/pcp_world_size > 1)."
+            )
 
-    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    group_block_sizes = [g.kv_cache_spec.block_size * dcp * pcp for g in groups]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
