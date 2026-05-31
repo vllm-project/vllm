@@ -800,6 +800,65 @@ def test_running_long_prefill_leaves_budget_for_waiting_short_prefill():
     assert mixed_output.num_scheduled_tokens[short_prefill_req.request_id] == 20
 
 
+def test_running_long_prefill_leaves_budget_for_running_short_prefill():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=512,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    long_prefill_req = create_requests(
+        num_requests=1,
+        num_tokens=300,
+        req_ids=["long_prefill"],
+    )[0]
+    short_prefill_req = create_requests(
+        num_requests=1,
+        num_tokens=80,
+        req_ids=["short_prefill"],
+    )[0]
+
+    scheduler.add_request(long_prefill_req)
+    first_chunk = scheduler.schedule()
+    assert first_chunk.num_scheduled_tokens[long_prefill_req.request_id] == 100
+
+    scheduler.update_from_output(
+        first_chunk,
+        ModelRunnerOutput(
+            req_ids=[long_prefill_req.request_id],
+            req_id_to_index={long_prefill_req.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(short_prefill_req)
+    first_mixed = scheduler.schedule()
+    assert first_mixed.num_scheduled_tokens[long_prefill_req.request_id] == 75
+    assert first_mixed.num_scheduled_tokens[short_prefill_req.request_id] == 25
+
+    scheduler.update_from_output(
+        first_mixed,
+        ModelRunnerOutput(
+            req_ids=[long_prefill_req.request_id, short_prefill_req.request_id],
+            req_id_to_index={
+                long_prefill_req.request_id: 0,
+                short_prefill_req.request_id: 1,
+            },
+            sampled_token_ids=[[], []],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    second_mixed = scheduler.schedule()
+    assert second_mixed.num_scheduled_tokens[long_prefill_req.request_id] == 75
+    assert second_mixed.num_scheduled_tokens[short_prefill_req.request_id] == 25
+
+
 def test_mixed_decode_prefill_caps_mid_long_prefill_more_tightly():
     scheduler = create_scheduler(
         max_num_batched_tokens=100,
