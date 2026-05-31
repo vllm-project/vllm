@@ -11,6 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.entrypoints.ace_req_registry import register as _ace_register_req
 from vllm.entrypoints.attention_capture import get_capture, start_capture, stop_capture
 from vllm.entrypoints.context_compression import apply_ace_eviction, get_tracker
 from vllm.entrypoints.logger import RequestLogger
@@ -171,6 +172,12 @@ class OpenAIServingRender:
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
         request_id = f"chatcmpl-{random_uuid()}"
+
+        # ACE Phase 3: link this request_id to its conversation session so that
+        # model_runner can install attention hooks keyed by request_id.
+        _ace_session_id = getattr(request, "conversation_id", None)
+        if getattr(request, "context_compression", None) == "ace" and _ace_session_id:
+            _ace_register_req(request_id, _ace_session_id)
 
         return GenerateRequest(
             request_id=request_id,

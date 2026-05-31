@@ -466,6 +466,91 @@ def test_apply_ace_eviction_mode3_with_tracker():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: ace_req_registry unit tests
+# ---------------------------------------------------------------------------
+
+def test_ace_req_registry_basic():
+    from vllm.entrypoints import ace_req_registry
+    ace_req_registry.register("reg-req-001", "reg-sess-A")
+    assert ace_req_registry.get("reg-req-001") == "reg-sess-A"
+    assert ace_req_registry.get("reg-req-unknown") is None
+    ace_req_registry.release("reg-req-001")
+    assert ace_req_registry.get("reg-req-001") is None
+
+
+def test_ace_req_registry_release_missing_noop():
+    from vllm.entrypoints import ace_req_registry
+    ace_req_registry.release("reg-does-not-exist")  # must not raise
+
+
+def test_ace_req_registry_multiple_sessions():
+    from vllm.entrypoints import ace_req_registry
+    ace_req_registry.register("reg-req-A", "reg-sess-1")
+    ace_req_registry.register("reg-req-B", "reg-sess-2")
+    assert ace_req_registry.get("reg-req-A") == "reg-sess-1"
+    assert ace_req_registry.get("reg-req-B") == "reg-sess-2"
+    ace_req_registry.release("reg-req-A")
+    assert ace_req_registry.get("reg-req-A") is None
+    assert ace_req_registry.get("reg-req-B") == "reg-sess-2"
+    ace_req_registry.release("reg-req-B")
+
+
+def test_ace_phase3_end_to_end_flow():
+    """
+    Simulate the full Phase 3 flow without a real model:
+
+      1. serving.py registers req_id -> session_id
+      2. Attention capture writes synthetic weights (as model_runner hooks would)
+      3. flush_hook aggregates them into the tracker
+      4. Next turn: apply_ace_eviction finds tracker.has_data == True -> Mode 3
+    """
+    from vllm.entrypoints import ace_req_registry
+    from vllm.entrypoints.ace_model_hook import release_hook
+    from vllm.entrypoints.attention_capture import get_capture, start_capture
+    from vllm.entrypoints.context_compression import get_tracker
+
+    req_id = "chatcmpl-phase3-e2e"
+    session_id = "conv-phase3-e2e"
+
+    # Step 1: serving.py registers req_id -> session_id
+    ace_req_registry.register(req_id, session_id)
+    assert ace_req_registry.get(req_id) == session_id
+
+    # Step 2: start_capture (first-turn setup in serving.py)
+    start_capture(session_id, max_seq_len=128)
+    cap = get_capture(session_id)
+    assert cap is not None
+
+    # Step 3: model forward pass — hooks would call on_layer_output; simulate directly
+    weights = _make_attn_weights(
+        n_layers=1, n_heads=2, n_new_tokens=2, seq_len=30, hot_positions=[5, 6, 7]
+    )
+    cap.on_layer_output(0, weights[0], new_token_start=20)
+    cap.on_layer_output(1, weights[0], new_token_start=20)
+
+    # Step 4: stop capture (aggregates buffers into tracker).
+    # In production this is triggered via flush_hook() after the model forward pass.
+    # In this test we call cap.stop() directly since there is no real model/hook.
+    cap.stop()
+
+    # Tracker now has data for next turn
+    tracker = get_tracker(session_id)
+    assert tracker is not None
+    assert tracker.has_data
+
+    # Next turn: apply_ace_eviction uses Mode 3
+    messages = _make_messages(tool_content_size=1000, n_tools=3)
+    total_before = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    saved = apply_ace_eviction(messages, budget_chars=total_before // 2, tracker=tracker)
+    assert saved > 0
+
+    # Cleanup
+    ace_req_registry.release(req_id)
+    release_hook(session_id)
+    assert get_tracker(session_id) is None
+
+
 def test_fallback_chain_no_tracker_no_query():
     """Without tracker or query, falls back to heuristic (Phase 1)."""
     lines = ["start"] + ["verbose filler"] * 20 + ["Error: crash happened"] + ["end"]
