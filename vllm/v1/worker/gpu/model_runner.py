@@ -723,7 +723,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
-                    req_id, req_index, new_req_data.sampling_params
+                    req_id,
+                    req_index,
+                    new_req_data.sampling_params,
+                    new_req_data.prompt_token_ids,
                 )
 
         if scheduler_output.scheduled_new_reqs:
@@ -1275,8 +1278,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model.compute_logits,
             hidden_states,
             input_batch,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.num_computed_tokens.gpu,
             self.req_states.prompt_len.np,
             self.req_states.prefill_len.np,
             self.req_states.num_computed_prefill_tokens,
