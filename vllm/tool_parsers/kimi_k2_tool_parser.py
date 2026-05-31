@@ -95,7 +95,7 @@ class KimiK2ToolParser(ToolParser):
                 for match in function_call_tuples:
                     function_id, function_args = match
                     # function_id: functions.get_weather:0 or get_weather:0
-                    function_name = function_id.split(":")[0].split(".")[-1]
+                    function_name = function_id.split(":")[0].removeprefix("functions.")
                     tool_calls.append(
                         ToolCall(
                             id=function_id,
@@ -179,7 +179,7 @@ class KimiK2ToolParser(ToolParser):
             return None, None
 
         tool_id = match.group(1).strip()
-        tool_name = tool_id.split(":")[0].split(".")[-1]
+        tool_name = tool_id.split(":")[0].removeprefix("functions.")
         return tool_id, tool_name
 
     def _split_tool_call(self, tool_call: str) -> tuple[str | None, str | None]:
@@ -193,7 +193,7 @@ class KimiK2ToolParser(ToolParser):
         if arg_pos == -1:
             return None, None
         header = tool_call[:arg_pos].strip()
-        tool_args = tool_call[arg_pos + len(self.tool_call_arg_token) :]
+        tool_args = tool_call[arg_pos + len(self.tool_call_arg_token) :].strip()
         return header, tool_args
 
     def _compute_args_diff(self, index: int, tool_args: str | None) -> str | None:
