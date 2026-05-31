@@ -558,6 +558,33 @@ class MambaHybridModelState(DefaultModelState):
             self.mamba_cache_align_info = MambaCacheAlignInfo(
                 self.max_num_reqs, self.device
             )
+        # The copy-free src/dst PRE redirect is only wired for GDN linear-
+        # attention layers (mamba_type == GDN_ATTN). For mamba1 (MambaMixer) /
+        # mamba2 (MambaMixer2) it is NOT implemented, so for those models we must
+        # KEEP the OLD preprocess copy (do not drop it) to stay correct. Detect
+        # once at init: src-supported only if EVERY mamba layer is GDN.
+        self._mamba_align_src_supported = self._detect_align_src_supported(model)
+        if self.cache_config.mamba_cache_mode == "align":
+            logger.info(
+                "[mamba-align] copy-free src supported (all mamba layers GDN) "
+                "= %s",
+                self._mamba_align_src_supported,
+            )
+
+    @staticmethod
+    def _detect_align_src_supported(model: nn.Module) -> bool:
+        found_mamba = False
+        for module in model.modules():
+            try:
+                mamba_type = getattr(module, "mamba_type", None)
+            except Exception:
+                mamba_type = None
+            if mamba_type is None:
+                continue
+            found_mamba = True
+            if getattr(mamba_type, "name", "") != "GDN_ATTN":
+                return False
+        return found_mamba
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -768,7 +795,10 @@ class MambaHybridModelState(DefaultModelState):
         # rather than by a separate copy pass. The temporal POST-copy
         # (aligned-save of the boundary checkpoint) is retained. Conv pre/post
         # copies are unchanged (conv simplification is a later step).
-        if postprocess or _SSM_KEEP_PRECOPY:
+        # For non-GDN models (mamba1/mamba2) the src redirect is not wired, so
+        # keep the OLD pre-copy for them (do not drop).
+        keep_pre_for_non_gdn = not self._mamba_align_src_supported
+        if postprocess or _SSM_KEEP_PRECOPY or keep_pre_for_non_gdn:
             self._copy_mamba_temporal_batched(
                 input_batch,
                 num_computed_tokens,
@@ -782,7 +812,7 @@ class MambaHybridModelState(DefaultModelState):
         # pre-copy pass is needed for any step. Only the conv POST-copy
         # (aligned-save) is retained. (_CONV_KEEP_PRECOPY keeps the pre-copy for
         # A/B diagnostics — must be a no-op vs dropping it.)
-        run_conv_pre = postprocess or _CONV_KEEP_PRECOPY
+        run_conv_pre = postprocess or _CONV_KEEP_PRECOPY or keep_pre_for_non_gdn
         if run_conv_pre:
             self._copy_mamba_conv_sd_batched(
                 input_batch,

@@ -263,6 +263,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     h0,
     ht,
     ssm_state_indices,
+    src_ssm_state_indices,
     scale,
     stride_mixed_qkv_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
@@ -278,6 +279,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    HAS_SRC: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -289,16 +291,24 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
 
-    state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
+    write_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
-    # Skip if state index is invalid (NULL_BLOCK_ID=0)
-    if state_idx <= 0:
+    # Skip if the write (window) index is invalid (NULL_BLOCK_ID=0 -> padding)
+    if write_idx <= 0:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
         return
 
-    p_h0 = h0 + state_idx * stride_init_state_token
+    # Mamba "align" copy-free pre: READ the initial state from the src block
+    # (previous running block) and WRITE the result to the window block. On a
+    # non-migration step src == window (in-place, == old behavior).
+    if HAS_SRC:
+        read_idx = tl.load(src_ssm_state_indices + i_n).to(tl.int64)
+    else:
+        read_idx = write_idx
+
+    p_h0 = h0 + read_idx * stride_init_state_token
     p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
@@ -331,7 +341,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     b_o = tl.sum(b_h * b_q[None, :], 1)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-    p_ht = ht + state_idx * stride_final_state_token
+    p_ht = ht + write_idx * stride_final_state_token
     p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
@@ -346,6 +356,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     initial_state: torch.Tensor,
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
+    src_ssm_state_indices: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if mixed_qkv.ndim != 2:
@@ -457,6 +468,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         h0=initial_state,
         ht=initial_state,
         ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
         scale=scale,
         stride_mixed_qkv_tok=stride_mixed_qkv_tok,
         stride_a_tok=stride_a_tok,
@@ -472,6 +484,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        HAS_SRC=src_ssm_state_indices is not None,
         num_warps=num_warps,
         num_stages=num_stages,
     )

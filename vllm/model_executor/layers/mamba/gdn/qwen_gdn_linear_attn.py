@@ -1654,6 +1654,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         Core attention computation with a packed non-spec decode fast path.
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        # mamba "align" copy-free src (None otherwise): read init conv/SSM from
+        # the prev running block while writing the window block.
+        non_spec_conv_src_state_indices = attn_metadata.non_spec_conv_src_state_indices
+        non_spec_conv_src_offset = attn_metadata.non_spec_conv_src_offset
+        non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1679,6 +1684,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.conv1d.bias,
             self.activation,
             conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            src_conv_state_indices=(
+                non_spec_conv_src_state_indices[:num_actual_tokens]
+                if non_spec_conv_src_state_indices is not None
+                else None
+            ),
+            src_conv_token_offset=(
+                non_spec_conv_src_offset[:num_actual_tokens]
+                if non_spec_conv_src_offset is not None
+                else None
+            ),
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
@@ -1692,6 +1707,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             initial_state=ssm_state,
             out=out_buf,
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            src_ssm_state_indices=(
+                non_spec_src_state_indices[:num_actual_tokens]
+                if non_spec_src_state_indices is not None
+                else None
+            ),
             use_qk_l2norm_in_kernel=True,
         )
         return
