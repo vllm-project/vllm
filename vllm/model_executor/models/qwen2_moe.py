@@ -54,6 +54,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.router_logit_logger import maybe_log_router_logits
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -131,6 +132,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.layer_idx = extract_layer_index(prefix)  # B1: tag router-logit records
 
         if self.tp_size > config.num_experts:
             raise ValueError(
@@ -186,6 +188,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        maybe_log_router_logits(router_logits, self.layer_idx)  # B1 Q6 (no-op if off)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )

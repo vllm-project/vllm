@@ -45,6 +45,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.router_logit_logger import maybe_log_router_logits
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -55,6 +56,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -86,6 +88,7 @@ class OlmoeMoE(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
+        self.layer_idx = extract_layer_index(prefix)  # B1: tag router-logit records
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
@@ -114,6 +117,7 @@ class OlmoeMoE(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        maybe_log_router_logits(router_logits, self.layer_idx)  # B1 Q6 (no-op if off)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
