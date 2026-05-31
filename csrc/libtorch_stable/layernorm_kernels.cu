@@ -78,7 +78,8 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      dst.val[j] = static_cast<scalar_t>(x * s_variance) * src2.val[j];
+      float w = static_cast<float>(src2.val[j]);
+      dst.val[j] = static_cast<scalar_t>(x * s_variance * w);
     }
     v_out[i] = dst;
   }
@@ -142,7 +143,8 @@ fused_add_rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < width; ++j) {
       float x = Converter::convert(res.data[j]);
-      out.data[j] = Converter::convert(x * s_variance) * w.data[j];
+      float wf = Converter::convert(w.data[j]);
+      out.data[j] = Converter::convert(x * s_variance * wf);
     }
     input_v[strided_id] = out;
   }
@@ -181,8 +183,8 @@ fused_add_rms_norm_kernel(
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     float x = (float)residual[blockIdx.x * hidden_size + idx];
-    input[blockIdx.x * input_stride + idx] =
-        (scalar_t)(x * s_variance) * weight[idx];
+    float w = (float)weight[idx];
+    input[blockIdx.x * input_stride + idx] = (scalar_t)(x * s_variance * w);
   }
 }
 
