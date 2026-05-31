@@ -512,11 +512,16 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+            has_unscheduled_running_prefill = any(
+                later_request.num_computed_tokens < later_request.num_prompt_tokens
+                for later_request in self.running[req_index + 1 :]
+            )
             num_new_tokens = self._limit_mixed_decode_prefill_chunk(
                 request,
                 num_new_tokens,
                 scheduled_running_reqs,
-                bool(self.waiting or self.skipped_waiting),
+                bool(self.waiting or self.skipped_waiting)
+                or has_unscheduled_running_prefill,
             )
 
             # Make sure the input position does not exceed the max model len.
