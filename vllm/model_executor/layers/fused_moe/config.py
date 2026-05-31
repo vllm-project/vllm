@@ -665,8 +665,10 @@ def gptq_marlin_moe_quant_config(
 
     w_shape = None if group_size == -1 else GroupShape(row=1, col=group_size)
 
-    # Activations are NOT quantized for GPTQ (fp16/bf16)
-    a_shape = w_shape  # Same as weight shape for alignment
+    # Activations are NOT quantized for GPTQ (fp16/bf16).
+    # Use row=0 to signal "grouped along K only, no activation quantization",
+    # which makes block_shape[0] == 0 — required by the Triton WNA16 kernel.
+    a_shape = None if group_size == -1 else GroupShape(row=0, col=group_size)
 
     # Determine weight dtype
     if weight_bits == 4:

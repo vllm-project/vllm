@@ -33,8 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
+    marlin_moe_permute_zero_points,
     marlin_permute_bias,
-    marlin_zero_points,
     moe_awq_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -91,13 +91,10 @@ def _get_priority_backends(
 
     # Marlin supports ZP and bias
     _AVAILABLE_BACKENDS += [
+        WNA16MoEBackend.TRITON,  # TEMP TESTING
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
-    return _AVAILABLE_BACKENDS
-
-    if not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
 
     return _AVAILABLE_BACKENDS
 
@@ -370,6 +367,87 @@ def _process_weights_flashinfer(
     )
 
 
+def _marlin_moe_process_zero_points(
+    qzeros: torch.Tensor,
+    pack_factor: int,
+    num_bits: int,
+    is_a_8bit: bool,
+) -> torch.Tensor:
+    """Unpack and permute MoE zero points into Marlin format.
+
+    Handles two input conventions:
+
+    * **MoeWNA16** (``dtype == uint8``): shape ``(E, N_out // bit8_pack, K // gs)``
+      where bit8_pack = 8 // num_bits.  The packed dimension (axis 1) contains
+      output features; the group dimension (axis 2) contains input groups.  The
+      nibbles are unpacked and transposed to produce ``(E, K // gs, N_out)``
+      before applying the Marlin permutation.
+
+    * **GPTQ / AutoGPTQ / QuantizationArgs** (other dtypes): shape
+      ``(E, K // gs, N_out // pack32)`` where pack32 = 32 // num_bits.  The
+      group dimension (axis 1) and output features (axis 2) are already in the
+      right order; only int32 unpacking is needed.
+
+    Returns Marlin-formatted zero points with shape
+    ``(E, K // gs, N_out // pack32)`` as int32.
+    """
+    from vllm.model_executor.layers.quantization.utils.quant_utils import unpack_cols
+
+    num_experts = qzeros.shape[0]
+
+    if qzeros.dtype == torch.uint8:
+        # MoeWNA16 format: (E, N_out // bit8_pack, K // gs)
+        # axis 1 = packed output features, axis 2 = input groups
+        packed_out = qzeros.shape[1]  # N_out // bit8_pack
+        num_groups = qzeros.shape[2]  # K // group_size
+        size_n = packed_out * pack_factor  # N_out (output features)
+
+        unpacked = torch.empty(
+            (num_experts, num_groups, size_n),
+            dtype=torch.int32,
+            device=qzeros.device,
+        )
+        for e in range(num_experts):
+            # Transpose so rows = groups, cols = packed outputs
+            zp_t = qzeros[e].T.to(torch.int32)  # (num_groups, packed_out)
+            if num_bits == 4:
+                low = zp_t & 0xF  # (num_groups, packed_out)
+                high = (zp_t >> 4) & 0xF  # (num_groups, packed_out)
+                # Interleave: even channels from low, odd from high
+                unpacked[e] = torch.stack([low, high], dim=2).reshape(
+                    num_groups, size_n
+                )
+            else:  # 8-bit: one zero point per byte, already transposed
+                unpacked[e] = zp_t
+    else:
+        # GPTQ/AutoGPTQ format: (E, K // gs, N_out // pack32)
+        # axis 1 = input groups, axis 2 = packed output features
+        # Note: the parameter may be stored as params_dtype (e.g. bfloat16) even
+        # though it holds packed-integer data.  Use .to(int32) (value conversion)
+        # rather than .view(int32) (bitwise reinterpret) to avoid shape changes
+        # caused by the 2-byte vs 4-byte size difference.
+        num_groups = qzeros.shape[1]  # K // group_size
+        size_n = qzeros.shape[2] * pack_factor  # N_out (output features)
+
+        unpacked = torch.empty(
+            (num_experts, num_groups, size_n),
+            dtype=torch.int32,
+            device=qzeros.device,
+        )
+        for e in range(num_experts):
+            unpacked[e] = unpack_cols(
+                qzeros[e].to(torch.int32), num_bits, num_groups, size_n
+            )
+
+    return marlin_moe_permute_zero_points(
+        zp=unpacked,
+        size_k=num_groups,
+        size_n=size_n,
+        num_bits=num_bits,
+        is_a_8bit=is_a_8bit,
+    )
+
+
 def _process_weights_marlin(
     layer: torch.nn.Module,
     input_dtype: torch.dtype | None,
@@ -528,21 +606,13 @@ def _process_weights_marlin(
         w2_bias_out = marlin_permute_bias(w2_bias)
 
     if w13_qzeros is not None:
-        w13_qzeros_out = marlin_zero_points(
-            w13_qzeros,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=w13_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
+        w13_qzeros_out = _marlin_moe_process_zero_points(
+            w13_qzeros, pack_factor, num_bits, is_a_8bit
         )
 
     if w2_qzeros is not None:
-        w2_qzeros_out = marlin_zero_points(
-            w2_qzeros,
-            size_k=w2_qzeros.shape[1] * group_size_or_pack_factor,
-            size_n=w2_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
+        w2_qzeros_out = _marlin_moe_process_zero_points(
+            w2_qzeros, pack_factor, num_bits, is_a_8bit
         )
 
     return (
@@ -903,11 +973,35 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.TRITON:
-        # Convert from int32 to uint8 format for Triton kernel.
-        # This changes the shape from (E, N, K // 8) to (E, N, K // 2) for int4,
-        # which matches what the Triton kernel expects.
-        w13_uint8 = w13.view(torch.uint8)
-        w2_uint8 = w2.view(torch.uint8)
+        # Three possible input layouts depending on the quantization source:
+        #
+        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
+        #   → just view as uint8 (no-op)
+        #
+        # AutoGPTQ (int32, K-first):    (E, K // pack32, N_out)
+        #   → transpose to N-first, then view as uint8 to get
+        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
+        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
+        #
+        # compressed-tensors (int32, N-first "Flashinfer" layout):
+        #   (E, N_out, K // pack32)  — already N-first
+        #   → just view as uint8; scales are already (E, N_out, K // gs)
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
+
+        if isinstance(quant_config, AutoGPTQConfig):
+            # AutoGPTQ always builds in Marlin (K-first) format even when
+            # the Triton backend is selected.  Transpose to N-first first.
+            w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
+            w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
+        else:
+            # MoeWNA16 and compressed-tensors both use N-first layout when
+            # targeting the Triton backend.
+            w13_uint8 = w13.view(torch.uint8)
+            w2_uint8 = w2.view(torch.uint8)
         return (
             w13_uint8,
             w2_uint8,
