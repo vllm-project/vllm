@@ -33,7 +33,7 @@ class PromptLogprobsWorker:
         self.num_prompt_logprobs[req_idx] = sampling_params.prompt_logprobs or 0
         if uses_prompt_logprobs:
             self.in_progress_prompt_logprobs[req_id] = []
-            self.prompt_token_ids[req_id] = prompt_token_ids
+            self.prompt_token_ids[req_id] = list(prompt_token_ids)
 
     def remove_request(self, req_id: str) -> None:
         self.in_progress_prompt_logprobs.pop(req_id, None)
