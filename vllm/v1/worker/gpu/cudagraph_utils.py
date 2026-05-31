@@ -9,6 +9,10 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -115,6 +119,13 @@ class CudaGraphManager:
             self.decode_query_len, self.tp_size
         )
         self._init_candidates()
+
+        # Breakable CUDA graph (PW CUDA graph without torch.compile)
+        self.use_breakable_cg = (
+            is_breakable_cudagraph_enabled()
+            and self.cudagraph_mode.has_piecewise_cudagraphs()
+        )
+        self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
 
     def _init_candidates(self) -> None:
         """Build priority-ordered candidate lists for each token count."""
@@ -283,6 +294,20 @@ class CudaGraphManager:
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
 
+    def init_breakable_cg_runner(self, model: nn.Module) -> None:
+        if self.breakable_cg_runner is None:
+            self.breakable_cg_runner = BreakableCUDAGraphWrapper(
+                model, self.vllm_config
+            )
+            self.breakable_cg_runner.graph_pool = self.pool
+
+    def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
+        if not self.use_breakable_cg:
+            # Default: Use torch-compiled piecewise cudagraph.
+            return model(**model_inputs)
+        assert self.breakable_cg_runner is not None
+        return self.breakable_cg_runner(**model_inputs)
+
 
 class ModelCudaGraphManager(CudaGraphManager):
     """CudaGraphManager with model-specific capture and hidden state management."""
@@ -316,6 +341,8 @@ class ModelCudaGraphManager(CudaGraphManager):
     ) -> dict[BatchExecutionDescriptor, CapturedAttentionState]:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
+        if self.use_breakable_cg:
+            self.init_breakable_cg_runner(model)
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
@@ -370,11 +397,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
                 ):
-                    model_output = model(**model_inputs)
+                    if cg_mode == CUDAGraphMode.PIECEWISE:
+                        # PIECEWISE graph (compiled PW or breakable, chosen inside
+                        # run_pw_graph).
+                        model_output = self.run_pw_graph(model, model_inputs)
+                    else:
+                        model_output = model(**model_inputs)
 
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    # PW CUDA graph internally handles the model outputs.
-                    # No need to keep track of the hidden states.
+                    # PW CUDA graph (compiled or breakable) internally handles the
+                    # model outputs. No need to keep track of the hidden states.
                     return None
 
                 if self.is_last_pp_rank:
