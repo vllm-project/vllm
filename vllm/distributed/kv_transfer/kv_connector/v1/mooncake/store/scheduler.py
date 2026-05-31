@@ -61,7 +61,6 @@ class MooncakeStoreScheduler:
 
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.original_block_size = vllm_config.cache_config.block_size
         # LCM for multi-group HMA; bs * pcp * dcp for single-group. Matches
         # the engine's own scheduler block size by construction.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
@@ -221,7 +220,6 @@ class MooncakeStoreScheduler:
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
-                original_block_size=self.original_block_size,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -274,7 +272,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        original_block_size=self.original_block_size,
                     )
                 else:
                     # Decode/chunked request
@@ -312,7 +309,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        original_block_size=self.original_block_size,
                     )
 
                 if req_meta is not None:
