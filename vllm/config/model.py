@@ -775,6 +775,16 @@ class ModelConfig:
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
         return tokenizer_mode.lower()
 
+    @field_validator("max_logprobs", mode="after")
+    @classmethod
+    def validate_max_logprobs(cls, max_logprobs: int) -> int:
+        if max_logprobs == -1 or max_logprobs >= 0:
+            return max_logprobs
+        raise ValueError(
+            "max_logprobs must be a non-negative integer or -1 "
+            f"(no cap), got {max_logprobs}."
+        )
+
     @field_validator("quantization", mode="before")
     @classmethod
     def validate_quantization_before(cls, value: Any) -> Any:

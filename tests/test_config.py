@@ -1322,6 +1322,40 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+@pytest.mark.parametrize("max_logprobs", [-1, 0, 20])
+def test_model_config_accepts_valid_max_logprobs(max_logprobs):
+    config = ModelConfig(max_logprobs=max_logprobs)
+
+    assert config.max_logprobs == max_logprobs
+
+
+def test_model_config_rejects_negative_max_logprobs():
+    with pytest.raises(ValidationError, match="max_logprobs"):
+        ModelConfig(max_logprobs=-2)
+
+
+@pytest.mark.parametrize("long_prefill_token_threshold", [0, 1])
+def test_scheduler_config_accepts_valid_long_prefill_token_threshold(
+    long_prefill_token_threshold,
+):
+    config = SchedulerConfig(
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        max_model_len=128,
+        is_encoder_decoder=False,
+    )
+
+    assert config.long_prefill_token_threshold == long_prefill_token_threshold
+
+
+def test_scheduler_config_rejects_negative_long_prefill_token_threshold():
+    with pytest.raises(ValidationError, match="long_prefill_token_threshold"):
+        SchedulerConfig(
+            long_prefill_token_threshold=-1,
+            max_model_len=128,
+            is_encoder_decoder=False,
+        )
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
