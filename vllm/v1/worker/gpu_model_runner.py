@@ -4682,7 +4682,17 @@ class GPUModelRunner(
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_cpu is not None
         self.draft_token_ids_event.synchronize()
-        return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
+        num_reqs = len(req_ids)
+        draft_token_ids = self.draft_token_ids_cpu[:num_reqs].tolist()
+        if self._num_valid_draft_tokens_cpu is not None:
+            assert self._num_valid_draft_tokens_event is not None
+            self._num_valid_draft_tokens_event.synchronize()
+            valid_counts = self._num_valid_draft_tokens_cpu[:num_reqs].tolist()
+            draft_token_ids = [
+                list(row[: max(0, min(int(v), len(row)))])
+                for row, v in zip(draft_token_ids, valid_counts)
+            ]
+        return draft_token_ids, req_ids
 
     def _copy_valid_sampled_token_count(
         self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
