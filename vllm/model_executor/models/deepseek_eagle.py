@@ -142,16 +142,14 @@ class DeepseekV2Model(nn.Module):
                     param_name == "fused_qkv_a_proj"
                 ) and name_mapped not in params_dict:
                     continue
-                else:
-                    name = name_mapped
-
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
+                # Skip loading extra bias for GPTQ models as well as any layer not in params_dict.
+                if name_mapped not in params_dict:
                     continue
 
-                param = params_dict[name]
+                param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                name = name_mapped
                 break
             else:
                 for mapping in expert_params_mapping:
