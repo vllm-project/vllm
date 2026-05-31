@@ -23,6 +23,11 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
+    def supports_routing_replay_capture(self) -> bool:
+        # Only the DeepSeekV3 routing kernel writes routing_replay_out;
+        # see ``FusedMoEExpertsMonolithic.supports_routing_replay_capture``.
+        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -124,7 +129,11 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         import flashinfer
 
-        return flashinfer.fused_moe.trtllm_bf16_moe(
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+        out = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -139,4 +148,9 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
+            routing_replay_out=routing_replay_out,
         )
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return out
