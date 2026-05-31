@@ -108,6 +108,35 @@ def grouped_topk(
             routed_scaling_factor=routed_scaling_factor,
         )
 
+    is_single_group = num_expert_group == 1 and topk_group == 1
+
+    if (
+        is_single_group
+        and current_platform.is_cuda_alike()
+        and not envs.VLLM_BATCH_INVARIANT
+    ):
+        if e_score_correction_bias is not None:
+            return fused_topk_bias(
+                hidden_states=hidden_states,
+                gating_output=gating_output,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                topk=topk,
+                renormalize=renormalize,
+                routed_scaling_factor=routed_scaling_factor,
+            )
+
+        topk_weights, topk_ids, _ = fused_topk(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=renormalize,
+            scoring_func=scoring_func,
+        )
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+        return topk_weights, topk_ids
+
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
     if scoring_func == "softmax":
@@ -119,7 +148,6 @@ def grouped_topk(
 
     num_token = scores.size(0)
     use_sorted = envs.VLLM_BATCH_INVARIANT
-    is_single_group = num_expert_group == 1 and topk_group == 1
 
     if is_single_group:
         if e_score_correction_bias is not None:
