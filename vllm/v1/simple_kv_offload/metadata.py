@@ -40,15 +40,21 @@ class SimpleCPUOffloadMetadata(KVConnectorMetadata):
 
 @dataclass
 class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
-    """Worker -> Scheduler metadata for completed store events.
+    """Worker -> Scheduler metadata for completed store events and readiness.
 
     Each worker reports {event_idx: 1} for newly completed stores.
     ``aggregate()`` sums counts across workers within a step.
     The scheduler-side manager accumulates across steps and processes
     a store completion only when count reaches ``world_size``.
+
+    ``ready_worker_ids`` carries the global rank of a worker whose async
+    cudaHostRegister background thread has completed.  The scheduler
+    accumulates these across steps (the set naturally deduplicates repeated
+    signals) and opens the CPU-offload gate once all expected workers report.
     """
 
     completed_store_events: dict[int, int]
+    ready_worker_ids: frozenset[int] = field(default_factory=frozenset)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -57,4 +63,7 @@ class SimpleCPUOffloadWorkerMetadata(KVConnectorWorkerMetadata):
         merged = dict(self.completed_store_events)
         for k, v in other.completed_store_events.items():
             merged[k] = merged.get(k, 0) + v
-        return SimpleCPUOffloadWorkerMetadata(completed_store_events=merged)
+        return SimpleCPUOffloadWorkerMetadata(
+            completed_store_events=merged,
+            ready_worker_ids=self.ready_worker_ids | other.ready_worker_ids,
+        )
