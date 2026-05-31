@@ -890,18 +890,18 @@ def _causal_conv1d_update_kernel(
             # Pre-reset offset (captured before the per-step num_accepted reset)
             # so the src read starts at the correct sliding-window position even
             # on a block-boundary migration (where num_accepted was reset to 1).
-            conv_state_token_offset = tl.load(
-                src_conv_token_offset_ptr + idx_seq
-            ).to(tl.int64)
+            conv_state_token_offset = tl.load(src_conv_token_offset_ptr + idx_seq).to(
+                tl.int64
+            )
         else:
             conv_state_token_offset = (
                 tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
             )
     else:
         if HAS_SRC_CONV:
-            conv_state_token_offset = tl.load(
-                src_conv_token_offset_ptr + idx_seq
-            ).to(tl.int64)
+            conv_state_token_offset = tl.load(src_conv_token_offset_ptr + idx_seq).to(
+                tl.int64
+            )
         else:
             conv_state_token_offset = 0
 

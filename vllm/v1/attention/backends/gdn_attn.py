@@ -112,7 +112,6 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
-        # Cache the cache-mode flag once; per-step paths just read this.
         self.is_mamba_cache_align: bool = (
             vllm_config.cache_config.mamba_cache_mode == "align"
         )
@@ -185,6 +184,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # each replay step copies the real src in. Only needed in align mode.
         self.spec_src_state_indices_buf: torch.Tensor | None = None
         self.non_spec_src_state_indices_buf: torch.Tensor | None = None
+        self.spec_conv_src_state_indices_buf: torch.Tensor | None = None
+        self.non_spec_conv_src_state_indices_buf: torch.Tensor | None = None
+        self.spec_conv_src_offset_buf: torch.Tensor | None = None
+        self.non_spec_conv_src_offset_buf: torch.Tensor | None = None
         if self.is_mamba_cache_align:
             self.spec_src_state_indices_buf = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -267,9 +270,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 num_reqs_full, device=m.block_table_tensor.device, dtype=torch.int64
             )
             cphys = m.block_table_tensor[crows, ccol_safe].to(torch.int32)
-            align_conv_src_full = torch.where(
-                ccol >= 0, cphys, torch.zeros_like(cphys)
-            )
+            align_conv_src_full = torch.where(ccol >= 0, cphys, torch.zeros_like(cphys))
+            assert align_conv_src_offset is not None
             align_conv_off_full = align_conv_src_offset[:num_reqs_full].to(torch.int32)
 
         spec_sequence_masks_cpu: torch.Tensor | None = None
@@ -380,6 +382,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     spec_src_state_indices = None
                 non_spec_src_state_indices = None
                 if align_conv_src_full is not None:
+                    assert align_conv_off_full is not None
                     spec_conv_src_state_indices = align_conv_src_full[
                         spec_sequence_masks_cpu
                     ].contiguous()
@@ -425,6 +428,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     spec_src_state_indices = None
                     non_spec_src_state_indices = None
                 if align_conv_src_full is not None:
+                    assert align_conv_off_full is not None
                     spec_conv_src_state_indices = align_conv_src_full[
                         spec_sequence_masks_cpu
                     ].contiguous()
@@ -600,6 +604,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_src_state_indices[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
                 # CONV src + offset persistent buffers (same capture/replay rule).
+                assert self.spec_conv_src_state_indices_buf is not None
+                assert self.spec_conv_src_offset_buf is not None
                 if spec_conv_src_state_indices is not None:
                     self.spec_conv_src_state_indices_buf[:num_spec_decodes].copy_(
                         spec_conv_src_state_indices, non_blocking=True
@@ -657,6 +663,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 ]
                 non_spec_src_state_indices[num_decodes:].fill_(NULL_BLOCK_ID)
 
+                assert self.non_spec_conv_src_state_indices_buf is not None
+                assert self.non_spec_conv_src_offset_buf is not None
                 if non_spec_conv_src_state_indices is not None:
                     self.non_spec_conv_src_state_indices_buf[:num_decodes].copy_(
                         non_spec_conv_src_state_indices, non_blocking=True

@@ -21,6 +21,7 @@ from .op import exp
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
         "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        "HAS_SRC_INDICES": lambda args: args["src_ssm_state_indices"] is not None,
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -35,6 +36,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     ht,
     cu_seqlens,
     ssm_state_indices,
+    src_ssm_state_indices,
     num_accepted_tokens,
     scale,
     N: tl.int64,  # num of sequences
@@ -58,6 +60,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    HAS_SRC_INDICES: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -102,14 +105,17 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
-            else:
-                i_t = 0
             # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+            if HAS_SRC_INDICES:
+                state_idx = tl.load(src_ssm_state_indices + i_n).to(tl.int64)
+            else:
+                if IS_SPEC_DECODING:
+                    i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                else:
+                    i_t = 0
+                state_idx = tl.load(
+                    ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -186,6 +192,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -226,6 +233,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -505,6 +513,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         inplace_final_state: bool = True,
         cu_seqlens: torch.Tensor | None = None,
         ssm_state_indices: torch.Tensor | None = None,
+        src_ssm_state_indices: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
@@ -519,6 +528,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             inplace_final_state=inplace_final_state,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices,
+            src_ssm_state_indices=src_ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
@@ -537,6 +547,7 @@ def fused_recurrent_gated_delta_rule(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -626,6 +637,7 @@ def fused_recurrent_gated_delta_rule(
         inplace_final_state,
         cu_seqlens,
         ssm_state_indices,
+        src_ssm_state_indices,
         num_accepted_tokens,
         use_qk_l2norm_in_kernel,
     )
