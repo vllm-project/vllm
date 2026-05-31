@@ -101,3 +101,74 @@ def test_grouped_topk(
             baseline_topk_weights, test_topk_weights, atol=2e-2, rtol=0
         )
         torch.testing.assert_close(baseline_topk_ids, test_topk_ids, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA-like platform.",
+)
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("use_bias", [False, True])
+def test_single_grouped_topk_matches_direct_topk(
+    monkeypatch: pytest.MonkeyPatch,
+    scoring_func: str,
+    use_bias: bool,
+):
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+grouped_topk"])
+    )
+    get_cached_compilation_config.cache_clear()
+
+    set_random_seed(0)
+    n_token, n_hidden, n_expert, topk = 17, 32, 384, 8
+    routed_scaling_factor = 1.1
+    hidden_states = torch.randn((n_token, n_hidden), device="cuda")
+    gating_output = torch.randn((n_token, n_expert), device="cuda")
+    e_score_correction_bias = None
+    if use_bias:
+        e_score_correction_bias = torch.randn((n_expert,), device="cuda")
+
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    else:
+        scores = gating_output.sigmoid()
+
+    expected_scores = scores
+    if e_score_correction_bias is not None:
+        expected_scores = scores + e_score_correction_bias.unsqueeze(0)
+        expected_topk_ids = torch.topk(
+            expected_scores, k=topk, dim=-1, sorted=True
+        )[1]
+        expected_topk_weights = scores.gather(1, expected_topk_ids)
+    else:
+        expected_topk_weights, expected_topk_ids = torch.topk(
+            expected_scores, k=topk, dim=-1, sorted=True
+        )
+    expected_topk_weights = expected_topk_weights / expected_topk_weights.sum(
+        dim=-1, keepdim=True
+    )
+    expected_topk_weights = expected_topk_weights * routed_scaling_factor
+
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "0")
+        m.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+        grouped_topk = GroupedTopk(
+            topk=topk,
+            renormalize=True,
+            num_expert_group=1,
+            topk_group=1,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+        )
+        topk_weights, topk_ids = grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+    torch.testing.assert_close(
+        topk_weights, expected_topk_weights, atol=1e-6, rtol=1e-6
+    )
+    torch.testing.assert_close(
+        topk_ids, expected_topk_ids.to(torch.int32), atol=0, rtol=0
+    )

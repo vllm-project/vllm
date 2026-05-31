@@ -118,6 +118,27 @@ def grouped_topk(
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
     num_token = scores.size(0)
+    use_sorted = envs.VLLM_BATCH_INVARIANT
+    is_single_group = num_expert_group == 1 and topk_group == 1
+
+    if is_single_group:
+        if e_score_correction_bias is not None:
+            original_scores = scores
+            scores = scores + e_score_correction_bias.unsqueeze(0)
+            topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=use_sorted)[1]
+            topk_weights = original_scores.gather(1, topk_ids)
+        else:
+            topk_weights, topk_ids = torch.topk(
+                scores, k=topk, dim=-1, sorted=use_sorted
+            )
+
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+        if routed_scaling_factor != 1.0:
+            topk_weights = topk_weights * routed_scaling_factor
+        return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
     if e_score_correction_bias is not None:
         # Store original scores before applying correction bias. We use biased
         # scores for expert selection but original scores for routing weights
@@ -132,7 +153,6 @@ def grouped_topk(
         )  # [n, n_group]
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = envs.VLLM_BATCH_INVARIANT
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
         1
     ]  # [n, top_k_group]
