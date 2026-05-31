@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
@@ -1832,6 +1833,14 @@ def fused_experts_impl(
     if expert_map is not None:
         intermediate_cache3.zero_()
 
+    use_gfx950_fused_mul_sum = (
+        use_int4_w4a16
+        and _is_rocm_gfx950()
+        and top_k_num == 8
+        and not apply_router_weight_on_input
+        and w2_bias is None
+    )
+
     dispatch_fused_moe_kernel(
         qintermediate_cache2,
         w2,
@@ -1843,7 +1852,7 @@ def fused_experts_impl(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        not apply_router_weight_on_input,
+        not apply_router_weight_on_input and not use_gfx950_fused_mul_sum,
         1,
         config,
         compute_type=compute_type,
@@ -1856,9 +1865,18 @@ def fused_experts_impl(
         B_bias=w2_bias,
     )
 
-    ops.moe_sum(
-        intermediate_cache3.view(*intermediate_cache3.size()),
-        out_hidden_states,
-    )
+    if use_gfx950_fused_mul_sum:
+        moe_fused_mul_sum(
+            intermediate_cache3.view(*intermediate_cache3.size()),
+            topk_weights,
+            outputs=out_hidden_states,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+    else:
+        ops.moe_sum(
+            intermediate_cache3.view(*intermediate_cache3.size()),
+            out_hidden_states,
+        )
 
     return out_hidden_states
