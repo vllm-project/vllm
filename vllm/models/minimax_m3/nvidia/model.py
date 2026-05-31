@@ -56,14 +56,13 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
-from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.minimax_m3_sparse import (
+from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3IndexerCache,
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -418,7 +417,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # Attention-backend wiring.
         vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
-        self.attn_type = AttentionType.DECODER
         self.kv_cache_dtype = (
             cache_config.cache_dtype if cache_config is not None else "auto"
         )
@@ -435,7 +433,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.scaling,
             self.num_kv_heads,
             kv_cache_dtype=self.kv_cache_dtype,
-            attn_type=self.attn_type,
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
             init_blocks=sparse_cfg.get("sparse_init_block", 0),

@@ -178,7 +178,6 @@ Priority is **1 = highest** (tried first).
 | `FLASH_ATTN_DIFFKV` | | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | ✅ | Decoder | Any |
 | `FLEX_ATTENTION` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16` | %16 | Any | ❌ | ✅ | ✅ | ❌ | Decoder, Encoder Only | Any |
 | `ROCM_AITER_FA` | | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | 16, 32 | 64, 128, 256 | ✅ | ✅ | ❌ | ❌ | Decoder | N/A |
-| `MINIMAX_M3_SPARSE` | | bf16, fp16 | `auto` | Any | 128 | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
 | `ROCM_AITER_UNIFIED_ATTN` | | fp16, bf16 | `auto` | %16 | Any | ✅ | ❌ | ✅ | ❌ | All | N/A |
 | `ROCM_ATTN` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | 32, 64, 80, 96, 128, 160, 192, 224, 256 | ❌ | ✅ | ✅ | ❌ | Decoder, Encoder, Encoder Only | N/A |
 | `TRITON_ATTN` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2`, `int8_per_token_head`, `fp8_per_token_head` | %16 | Any | ✅ | ❌ | ✅ | ❌ | All | Any |
@@ -187,6 +186,18 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which supports sinks. Disable via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
+
+## MiniMax M3 Sparse Attention Backends
+
+Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")
+layers. It is wired in directly by the model and is not part of the
+automatic priority lists above. A lightning indexer scores KV blocks, the
+top-k blocks (plus fixed init/local blocks) are selected, and attention
+attends only to those blocks; index keys live in a separate side cache.
+
+| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes | Sink | Non-Causal | MM Prefix | DCP | Attention Types | Compute Cap. |
+| ------- | ------ | --------- | ----------- | ---------- | ---- | ---------- | --------- | --- | --------------- | ------------ |
+| `MINIMAX_M3_SPARSE` | bf16, fp16 | `bfloat16` | 128 | 128 | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
 
 ## MLA (Multi-head Latent Attention) Backends
 

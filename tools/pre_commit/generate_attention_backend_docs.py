@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
+    "vllm/models/minimax_m3/common/sparse_attention.py",
     "vllm/model_executor/layers/attention/mla_attention.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
@@ -1615,6 +1616,24 @@ def generate_mla_section(
     return "\n".join(lines)
 
 
+def generate_minimax_section(backends: list[dict[str, Any]]) -> str:
+    """Generate the MiniMax M3 sparse attention section."""
+    lines = [
+        "## MiniMax M3 Sparse Attention Backends",
+        "",
+        'Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")',
+        "layers. It is wired in directly by the model and is not part of the",
+        "automatic priority lists above. A lightning indexer scores KV blocks, the",
+        "top-k blocks (plus fixed init/local blocks) are selected, and attention",
+        "attends only to those blocks; index keys live in a separate side cache.",
+        "",
+    ]
+    columns = _build_columns(is_mla=False, has_versions=False)
+    lines.extend(_render_table(columns, backends))
+    lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -1651,9 +1670,16 @@ def generate_docs() -> str:
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # Split into MLA and non-MLA
+    # Split into MLA, MiniMax M3 sparse, and standard (MHA/MQA/GQA) backends.
     mla_backends = [b for b in all_backends if b["is_mla"]]
-    non_mla_backends = [b for b in all_backends if not b["is_mla"]]
+    minimax_backends = [
+        b for b in all_backends if not b["is_mla"] and b["name"].startswith("MINIMAX")
+    ]
+    non_mla_backends = [
+        b
+        for b in all_backends
+        if not b["is_mla"] and not b["name"].startswith("MINIMAX")
+    ]
 
     # Generate documentation
     script_path = "tools/pre_commit/generate_attention_backend_docs.py"
@@ -1701,6 +1727,10 @@ def generate_docs() -> str:
         )
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
+
+    # Add MiniMax M3 sparse section (separate category after standard GQA)
+    if minimax_backends:
+        doc_lines.append(generate_minimax_section(minimax_backends))
 
     # Add MLA section with prefill and decode backends
     doc_lines.append(generate_mla_section(mla_prefill_backends, mla_backends))

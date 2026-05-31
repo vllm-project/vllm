@@ -15,10 +15,20 @@ from typing import ClassVar
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.models.minimax_m3.common.ops.index_topk import (
+    minimax_m3_index_topk,
+    minimax_m3_index_topk_decode,
+)
+from vllm.models.minimax_m3.common.ops.sparse_attn import (
+    minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -26,17 +36,10 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionMetadata,
     AttentionMetadataBuilder,
-    AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.minimax_m3_sparse_ops import (
-    minimax_m3_index_topk,
-    minimax_m3_index_topk_decode,
-    minimax_m3_sparse_attn,
-    minimax_m3_sparse_attn_decode,
-)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
@@ -50,6 +53,8 @@ class MiniMaxM3SparseBackend(AttentionBackend):
     """Block-sparse GQA backend for MiniMax M3 sparse attention layers."""
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16, torch.float16]
+    # Sparse kernels operate on a bf16 KV cache only.
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["bfloat16"]
 
     @staticmethod
     def get_name() -> str:
@@ -70,7 +75,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         # Page size must equal the sparse block size so one sparse block maps
-        # to one KV page (see minimax_m3_sparse_ops).
+        # to one KV page (see common.ops.sparse_attn).
         return [128]
 
     @classmethod
@@ -160,13 +165,13 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
 class MiniMaxM3SparsePrefillMetadata:
     """Per-prefill state for index scoring + block-sparse attention.
 
-    ``cu_seqlens_q``/``prefix_lens`` are precomputed in the builder so the
+    ``cu_seqlens_q``/``context_lens`` are precomputed in the builder so the
     forward path stays free of host syncs and per-step tensor allocations.
     """
 
     cu_seqlens_q: torch.Tensor  # [num_prefills + 1] int32, rebased to 0
     seq_lens: torch.Tensor  # [num_prefills] int32
-    prefix_lens: torch.Tensor  # [num_prefills] int32 (cached/context tokens)
+    context_lens: torch.Tensor  # [num_prefills] int32 (cached/context tokens)
     block_table: torch.Tensor
     max_query_len: int
     max_seq_len: int
@@ -174,13 +179,10 @@ class MiniMaxM3SparsePrefillMetadata:
 
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
-    """Per-decode state; all kernel args precomputed (cudagraph-safe)."""
+    """Per-decode state (cudagraph-safe); split-K kernels key only on seq_lens."""
 
-    cu_seqlens_q: torch.Tensor  # [num_decodes + 1] int32
     seq_lens: torch.Tensor  # [num_decodes] int32
-    prefix_lens: torch.Tensor  # [num_decodes] int32 (cached/context tokens)
     block_table: torch.Tensor
-    max_query_len: int
 
 
 @dataclass
@@ -200,24 +202,14 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
     num_prefills: int
     num_prefill_tokens: int
 
-    # Sparse selection parameters.
-    topk_blocks: int
-    block_size: int
-    init_blocks: int
-    local_blocks: int
-    score_type: str
-
     prefill: MiniMaxM3SparsePrefillMetadata | None = None
     decode: MiniMaxM3SparseDecodeMetadata | None = None
 
 
 class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
-    # Full cudagraphs for pure single-token decode batches; mixed/prefill
-    # batches fall back to piecewise/eager.
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-    # Decode == a single query token; reorder pulls decodes to the front.
+    # Full cudagraphs for uniform-query-length decode (spec decode -> >1 token).
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Reorder pulls decodes to the front; widened by spec tokens in __init__.
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -228,28 +220,21 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        hf_config = vllm_config.model_config.hf_config.get_text_config()
-        sparse_cfg = hf_config.sparse_attention_config
-        self.topk_blocks: int = sparse_cfg["sparse_topk_blocks"]
-        self.block_size: int = sparse_cfg["sparse_block_size"]
-        self.init_blocks: int = sparse_cfg.get("sparse_init_block", 0)
-        self.local_blocks: int = sparse_cfg.get("sparse_local_block", 0)
-        self.score_type: str = sparse_cfg.get("sparse_score_type", "max")
 
-        # Persistent buffer for the derived decode prefix lengths, so full
-        # decode cudagraphs read from a stable address across replays.
-        compilation_config = vllm_config.compilation_config
-        self.use_full_cuda_graph = (
-            compilation_config.cudagraph_mode.has_full_cudagraphs()
+        speculative_config = vllm_config.speculative_config
+        self.num_speculative_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
         )
-        self.decode_cudagraph_max_bs = vllm_config.scheduler_config.max_num_seqs
-        if compilation_config.max_cudagraph_capture_size is not None:
-            self.decode_cudagraph_max_bs = min(
-                self.decode_cudagraph_max_bs,
-                compilation_config.max_cudagraph_capture_size,
-            )
-        self._decode_prefix_lens = torch.empty(
-            self.decode_cudagraph_max_bs, dtype=torch.int32, device=device
+        self.reorder_batch_threshold += self.num_speculative_tokens
+
+        # Stable per-request context-length buffer for decode cudagraph replays.
+        # Sized to max_num_batched_tokens (>= num_reqs).
+        self.context_len_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
         )
 
     def build(
@@ -261,7 +246,6 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         block_table = common_attn_metadata.block_table_tensor
 
@@ -274,10 +258,13 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
-        # Cached/context tokens per request (seq_len - query_len), on device.
-        num_computed = common_attn_metadata.compute_num_computed_tokens()
+        # Per-request context tokens (seq_len - query_len) into the stable
+        # buffer; batch is decode-first ([:num_decodes] decode, rest prefill).
+        context_lens = self.context_len_buffer[:num_reqs]
+        context_lens.copy_(
+            common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
+        )
 
-        # Batch is reordered decode-first, then prefill.
         prefill_metadata: MiniMaxM3SparsePrefillMetadata | None = None
         if num_prefills > 0:
             prefill_metadata = MiniMaxM3SparsePrefillMetadata(
@@ -285,7 +272,7 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
                     torch.int32
                 ),
                 seq_lens=seq_lens[num_decodes:],
-                prefix_lens=num_computed[num_decodes:].to(torch.int32),
+                context_lens=context_lens[num_decodes:],
                 block_table=block_table[num_decodes:],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
@@ -293,46 +280,20 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
         if num_decodes > 0:
-            # Decode query lengths from the CPU mirror (no device->host sync).
-            q_cpu = query_start_loc_cpu
-            decode_max_query_len = int(
-                (q_cpu[1 : num_decodes + 1] - q_cpu[:num_decodes]).max()
-            )
-            # cu_seqlens_q aliases the runner's persistent query_start_loc.
-            decode_prefix = num_computed[:num_decodes].to(torch.int32)
-            if (
-                self.use_full_cuda_graph
-                and num_prefills == 0
-                and num_decodes <= self.decode_cudagraph_max_bs
-            ):
-                # Persist derived prefix lens; the captured graph reads a
-                # stable buffer address across replays.
-                self._decode_prefix_lens[:num_decodes].copy_(
-                    decode_prefix, non_blocking=True
-                )
-                decode_prefix = self._decode_prefix_lens[:num_decodes]
             decode_metadata = MiniMaxM3SparseDecodeMetadata(
-                cu_seqlens_q=query_start_loc[: num_decodes + 1],
                 seq_lens=seq_lens[:num_decodes],
-                prefix_lens=decode_prefix,
                 block_table=block_table[:num_decodes],
-                max_query_len=decode_max_query_len,
             )
 
         return MiniMaxM3SparseMetadata(
             seq_lens=seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
-            num_actual_tokens=num_decode_tokens + num_prefill_tokens,
+            num_actual_tokens=num_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
-            topk_blocks=self.topk_blocks,
-            block_size=self.block_size,
-            init_blocks=self.init_blocks,
-            local_blocks=self.local_blocks,
-            score_type=self.score_type,
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
@@ -353,24 +314,29 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         scale: float,
         num_kv_heads: int | None = None,
         kv_cache_dtype: str = "auto",
-        attn_type: str = AttentionType.DECODER,
-        **kwargs,
+        *,
+        topk_blocks: int,
+        sparse_block_size: int,
+        num_index_heads: int,
+        index_head_dim: int,
+        init_blocks: int = 0,
+        local_blocks: int = 0,
+        score_type: str = "max",
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.kv_cache_dtype = kv_cache_dtype
-        self.attn_type = attn_type
 
         # Sparse selection parameters and index-branch dims.
-        self.topk_blocks: int | None = kwargs.get("topk_blocks")
-        self.block_size: int | None = kwargs.get("sparse_block_size")
-        self.init_blocks: int = kwargs.get("init_blocks", 0)
-        self.local_blocks: int = kwargs.get("local_blocks", 0)
-        self.score_type: str = kwargs.get("score_type", "max")
-        self.num_index_heads: int | None = kwargs.get("num_index_heads")
-        self.index_head_dim: int | None = kwargs.get("index_head_dim")
+        self.topk_blocks = topk_blocks
+        self.block_size = sparse_block_size
+        self.init_blocks = init_blocks
+        self.local_blocks = local_blocks
+        self.score_type = score_type
+        self.num_index_heads = num_index_heads
+        self.index_head_dim = index_head_dim
 
     def _run_prefill(
         self,
@@ -379,7 +345,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         out: torch.Tensor,  # [tot, num_heads, head_dim]
         cu_seqlens_q: torch.Tensor,
         seq_lens: torch.Tensor,
-        prefix_lens: torch.Tensor,
+        context_lens: torch.Tensor,
         main_block_table: torch.Tensor,
         index_block_table: torch.Tensor,
         max_query_len: int,
@@ -392,7 +358,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
             index_block_table,
             cu_seqlens_q,
             seq_lens,
-            prefix_lens,
+            context_lens,
             max_query_len,
             max_seq_len,
             self.topk_blocks,
@@ -409,7 +375,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
             main_block_table,
             cu_seqlens_q,
             seq_lens,
-            prefix_lens,
+            context_lens,
             max_query_len,
             self.num_kv_heads,
             self.scale,
@@ -421,23 +387,18 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         q: torch.Tensor,  # [batch, num_heads, head_dim]
         iq: torch.Tensor,  # [batch, num_idx_heads, head_dim]
         out: torch.Tensor,  # [batch, num_heads, head_dim]
-        cu_seqlens_q: torch.Tensor,
         seq_lens: torch.Tensor,
-        prefix_lens: torch.Tensor,
         main_block_table: torch.Tensor,
         index_block_table: torch.Tensor,
         max_seq_len: int,
     ) -> None:
-        # Dedicated split-K decode kernels: parallelize over the KV dimension
-        # (one query token per request leaves the prefill kernels idle).
-        # 1. Index block-score (split-K over seq blocks) + top-k.
+        # Split-K decode kernels (parallelize over KV; one query token/request).
+        # 1. Index block-score + top-k.
         topk_idx = minimax_m3_index_topk_decode(
             iq,
             self._index_kv_cache,
             index_block_table,
-            cu_seqlens_q,
             seq_lens,
-            prefix_lens,
             max_seq_len,
             self.topk_blocks,
             self.init_blocks,
@@ -457,6 +418,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
             out,
         )
 
+    @eager_break_during_capture
     def forward(
         self,
         layer: AttentionLayer,
@@ -498,9 +460,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
                 q[:nd],
                 iq[:nd],
                 out[:nd],
-                d.cu_seqlens_q,
                 d.seq_lens,
-                d.prefix_lens,
                 d.block_table,
                 idx_d.block_table,
                 main_md.max_seq_len,
@@ -516,7 +476,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
                 out[nd:],
                 p.cu_seqlens_q,
                 p.seq_lens,
-                p.prefix_lens,
+                p.context_lens,
                 p.block_table,
                 idx_p.block_table,
                 p.max_query_len,
