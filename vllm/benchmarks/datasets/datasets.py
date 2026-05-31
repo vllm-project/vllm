@@ -31,7 +31,6 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -46,6 +45,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -3334,7 +3334,10 @@ class MMVUDataset(HuggingFaceDataset):
         self._remote_path_root = (
             f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
         )
-        self._local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
+        self._local_path_root = hf_api().snapshot_download(
+            self.hf_name,
+            repo_type="dataset",
+        )
 
     def sample(
         self,

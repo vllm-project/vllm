@@ -13,14 +13,17 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kInt4Static32,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
-class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
+class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     """
-    BF16 unquantized TRTLLM-Gen MoE kernels. Supports monolithic interface.
+    FlashInfer TRT-LLM MxInt4 MoE kernel. Monolithic interface
+    (fused router + experts).
+
+    Wraps flashinfer_trtllm_mxint4_moe().
     """
 
     def __init__(
@@ -29,32 +32,29 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
         )
-        self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
-        self.ep_rank = moe_config.moe_parallel_config.ep_rank
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
+        self.ep_rank = moe_config.ep_rank
+        self.routing_method = moe_config.routing_method
 
     @staticmethod
     def _supports_current_device() -> bool:
-        """Supports only Blackwell-family GPUs."""
+        from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
+            is_flashinfer_mxint4_moe_available,
+        )
+
         p = current_platform
         return (
             p.is_cuda()
             and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
+            and is_flashinfer_mxint4_moe_available()
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        """BF16 kernels do not support non-gated MoE"""
         return False
 
     @staticmethod
@@ -62,12 +62,21 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """Supports only unquantized inputs."""
-        return weight_key is None and activation_key is None
+        return (weight_key, activation_key) == (kInt4Static32, None)
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU]
+        # FlashInfer MxInt4 uses a fused SwiGLU activation.
+        return activation == MoEActivation.SWIGLUOAI
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_routing_method(
@@ -76,31 +85,37 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         activation_key: QuantKey | None,
     ) -> bool:
         return routing_method in [
-            RoutingMethodType.DeepSeekV3,
-            RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Llama4,
+            RoutingMethodType.Simulated,
         ]
-
-    @staticmethod
-    def _supports_parallel_config(
-        moe_parallel_config: FusedMoEParallelConfig,
-    ) -> bool:
-        """Monolithic kernel so only use with naive DP/EP and TP."""
-        return (
-            not moe_parallel_config.use_all2all_kernels
-            or moe_parallel_config.use_ag_rs_all2all_kernels
-        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_router_logits_dtype(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
+        if router_logits_dtype == torch.float32:
+            # DeepSeekV3 routing handles float32 logits internally.
+            # Simulated routing generates synthetic decisions.
+            return routing_method in (
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Simulated,
+            )
         return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    def supports_expert_map(self) -> bool:
+        return False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
+        # The kernel handles quantization internally.
         return True
 
     def apply(
@@ -119,21 +134,26 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        import flashinfer
+        from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
+            flashinfer_trtllm_mxint4_moe,
+        )
 
-        return flashinfer.fused_moe.trtllm_bf16_moe(
-            routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
-            hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
-            num_experts=global_num_experts,
+        assert self.w1_scale is not None
+        assert self.w2_scale is not None
+        return flashinfer_trtllm_mxint4_moe(
+            x=hidden_states,
+            router_logits=router_logits,
+            w13_weight_packed=w1,
+            w13_weight_scale=self.w1_scale,
+            w2_weight_packed=w2,
+            w2_weight_scale=self.w2_scale,
+            global_num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=num_expert_group,
-            topk_group=topk_group,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
+            intermediate_size_per_partition=self.intermediate_size_per_partition,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
+            ep_rank=self.ep_rank,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            e_score_correction_bias=e_score_correction_bias,
+            routing_method_type=self.routing_method,
         )
