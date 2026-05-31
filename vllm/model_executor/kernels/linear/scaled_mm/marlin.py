@@ -77,15 +77,9 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
             w_q, *_ = self._get_layer_params(layer)
-            # Weights are always stored as (N, K) = (out_features, in_features)
-            # by create_fp8_weight_parameter. Marlin requires (K, N), so we
-            # must always transpose.
-            #
-            # NOTE: The old shape-based check `w_q.shape != (K, N)` is
-            # incorrect for square matrices (N == K) because (N,K) and (K,N)
-            # are indistinguishable by shape alone — the check evaluates False
-            # and silently skips the transpose, producing garbage outputs for
-            # any projection where N == K (e.g. q_proj, o_proj on GQA models).
+            # Weights are stored as (N, K) by all callers; Marlin needs (K, N).
+            # Always transpose unconditionally — a shape-based check is unsafe
+            # for square layers (N == K) where (N,K) and (K,N) are identical.
             replace_parameter(
                 layer,
                 "weight",
