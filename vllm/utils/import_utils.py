@@ -397,7 +397,10 @@ def _has_module(module_name: str) -> bool:
     The result is cached so that subsequent queries for the same module incur
     no additional overhead.
     """
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def has_deep_ep() -> bool:
