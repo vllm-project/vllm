@@ -147,4 +147,12 @@ std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
     torch::Tensor const& norm_weight_k, torch::Tensor workspace,
     int64_t const q_size, int64_t const kv_size, int64_t const rank,
     int64_t const nranks, double const eps);
+
+void run_minimax_m3_build_k2q_csr_with_schedule(
+    torch::Tensor q2k, torch::Tensor cu_q, torch::Tensor cu_k,
+    torch::Tensor row_ptr, torch::Tensor q_idx,
+    torch::Tensor scheduler_metadata, torch::Tensor work_count,
+    torch::Tensor qsplit_idx, torch::Tensor split_counts, int64_t topk,
+    int64_t blk_kv, int64_t total_rows, int64_t max_kv_blocks,
+    int64_t target_q_per_cta, int64_t work_capacity, int64_t max_seqlen_q);
 #endif

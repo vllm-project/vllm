@@ -187,6 +187,27 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float eps) -> (Tensor, Tensor)");
   ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
 
+  ops.def(
+      "minimax_m3_build_k2q_csr_with_schedule("
+      "Tensor q2k,"
+      "Tensor cu_q,"
+      "Tensor cu_k,"
+      "Tensor! row_ptr,"
+      "Tensor! q_idx,"
+      "Tensor! scheduler_metadata,"
+      "Tensor! work_count,"
+      "Tensor! qsplit_idx,"
+      "Tensor! split_counts,"
+      "int topk,"
+      "int blk_kv,"
+      "int total_rows,"
+      "int max_kv_blocks,"
+      "int target_q_per_cta,"
+      "int work_capacity,"
+      "int max_seqlen_q) -> ()");
+  ops.impl("minimax_m3_build_k2q_csr_with_schedule", torch::kCUDA,
+           &run_minimax_m3_build_k2q_csr_with_schedule);
+
   //  conditionally compiled so impl in source file
 #endif
 }
