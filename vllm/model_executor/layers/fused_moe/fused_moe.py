@@ -1151,6 +1151,24 @@ def get_moe_wna16_block_config(
         and group_size == 32
         and _is_rocm_gfx950()
     ):
+        tokens_per_rank = num_valid_tokens // real_top_k
+        if size_n <= 512 and size_k % 64 == 0:
+            if tokens_per_rank >= 2048:
+                return {
+                    "BLOCK_SIZE_N": 128,
+                    "BLOCK_SIZE_K": 64,
+                    "num_warps": 8,
+                    "num_stages": 2,
+                }
+
+            if tokens_per_rank >= 512:
+                return {
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 64,
+                    "num_warps": 8,
+                    "num_stages": 2,
+                }
+
         if size_n <= 512 and size_k % 128 == 0:
             return {
                 "BLOCK_SIZE_N": 32,
@@ -1161,8 +1179,9 @@ def get_moe_wna16_block_config(
 
         if (
             size_n >= 2048
+            and size_k >= 1024
             and size_k % 64 == 0
-            and num_valid_tokens // real_top_k <= 32
+            and tokens_per_rank <= 32
         ):
             return {
                 "BLOCK_SIZE_N": 32,
@@ -1248,6 +1267,31 @@ def should_moe_wna16_use_cuda(
         and group_size in [32, 64, 128]
         and num_valid_tokens / num_experts <= 6
     )
+
+
+def _get_gfx950_int4_wna16_config_overrides(
+    M: int, dtype: str | None, block_shape: list[int] | None
+) -> dict[str, int]:
+    if (
+        dtype != "int4_w4a16"
+        or block_shape is None
+        or block_shape[1] != 32
+        or not _is_rocm_gfx950()
+    ):
+        return {}
+
+    if M < 512:
+        return {
+            "BLOCK_SIZE_M": 64,
+            "GROUP_SIZE_M": 1,
+            "matrix_instr_nonkdim": 16,
+        }
+
+    return {
+        "BLOCK_SIZE_M": 256,
+        "GROUP_SIZE_M": 2,
+        "matrix_instr_nonkdim": 32,
+    }
 
 
 def get_default_config(
@@ -1379,6 +1423,8 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+    config = config.copy()
+    config.update(_get_gfx950_int4_wna16_config_overrides(M, dtype, block_shape))
     return config
 
 
