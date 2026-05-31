@@ -144,14 +144,14 @@ endif()
 # Set up GPU language and check the torch version and warn if it isn't
 # what is expected.
 #
-if (NOT HIP_FOUND AND CUDA_FOUND)
+if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
   if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
-elseif(HIP_FOUND)
+elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   set(VLLM_GPU_LANG "HIP")
 
   # Importing torch recognizes and sets up some HIP/ROCm configuration but does
