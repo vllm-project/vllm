@@ -337,6 +337,12 @@ class ECCPUScheduler:
                 return
             self._region.pin(block_indices)
 
+        logger.debug(
+            "ec: transfer requested mm_hash=%s consumer=%s n_blocks=%d",
+            req.mm_hash,
+            req.consumer_agent_name,
+            len(block_indices),
+        )
         try:
             peer = self._ensure_remote_peer(req)
             handle = self._post_nixl_write(peer, block_indices, req.dst_block_indices)
@@ -453,6 +459,7 @@ class ECCPUScheduler:
             if state == "DONE":
                 outcomes[xfer_id] = True
                 self._release_xfer_handle(handle)
+                logger.debug("ec: transfer complete xfer_id=%s", xfer_id)
             elif state == "PROC":
                 continue
             else:
@@ -571,6 +578,7 @@ class ECCPUScheduler:
                 return
         size_bytes = feature.mm_position.length * self._hidden_dim * self._element_size
         self._pending_new_encodings[mm_hash] = size_bytes
+        logger.debug("ec: save scheduled mm_hash=%s size_bytes=%d", mm_hash, size_bytes)
 
     # ==========================================================================
     # Consumer role
@@ -676,6 +684,13 @@ class ECCPUScheduler:
         except Exception:
             self._region.free(indices)
             raise
+        logger.debug(
+            "ec: load requested mm_hash=%s n_blocks=%d peer=%s:%d",
+            mm_hash,
+            n_blocks,
+            info["peer_host"],
+            int(info["peer_port"]),
+        )
         # Only record in-flight after the XferReq has left the socket —
         # an entry in `_remote_encodings` commits us to waiting for an ack.
         host = info["peer_host"]
@@ -723,6 +738,7 @@ class ECCPUScheduler:
                 indices, _ = entry
                 if ack.ok:
                     self._ready.add(ack.mm_hash)
+                    logger.debug("ec: load arrived mm_hash=%s", ack.mm_hash)
                 else:
                     # NACK: free the consumer-side blocks and leave a
                     # tombstone for `ensure_cache_available` to consume on
@@ -905,6 +921,12 @@ class ECCPUScheduler:
                 indices = self._producer_fifo_alloc(n_blocks)
                 self._pending_save[mm_hash] = indices
                 meta.saves[mm_hash] = indices
+                logger.debug(
+                    "ec: save allocated mm_hash=%s n_blocks=%d blocks=%s",
+                    mm_hash,
+                    n_blocks,
+                    indices,
+                )
 
         if self._is_consumer:
             # (a) Drain any fresh ack arrivals.
@@ -922,6 +944,7 @@ class ECCPUScheduler:
                 indices, _ = entry
                 meta.loads[mm_hash] = indices
                 self._loaded[mm_hash] = indices
+                logger.debug("ec: load issued mm_hash=%s blocks=%s", mm_hash, indices)
             self._ready.clear()
 
             # (c) Re-serve cached entries requested this step via a local
@@ -931,6 +954,9 @@ class ECCPUScheduler:
                     blocks = self._loaded.get(mm_hash)
                     if blocks is not None:
                         meta.loads[mm_hash] = blocks
+                        logger.debug(
+                            "ec: cache hit mm_hash=%s blocks=%s", mm_hash, blocks
+                        )
             self._pending_reload = set()
 
         return meta
