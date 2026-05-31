@@ -75,7 +75,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         self,
         token_ids: list[int],
         logprobs: list[float],
-        ranks: itertools.chain[int],
+        ranks: Iterable[int],
         decoded_tokens: Iterable[str | None],
     ) -> None:
         """
@@ -177,17 +177,20 @@ def append_logprobs_for_next_position(
     token_ids: list[int],
     logprobs: list[float],
     decoded_tokens: Iterable[str | None],
-    rank: int,
+    rank: int | list[int],
     num_logprobs: int,
 ) -> None:
     """Appends logprobs for the next position"""
     if num_logprobs == -1:
-        num_logprobs = len(logprobs)
-    # We do not need a special case for the sampled token
-    # being in the topk, since inserting duplicated data
-    # into a dictionary twice is the same as doing it once.
-    topk_ranks = range(1, num_logprobs + 1)
-    ranks = itertools.chain((rank,), topk_ranks)
+        num_logprobs = len(logprobs) - 1
+    if isinstance(rank, list):
+        ranks = rank[: num_logprobs + 1]
+    else:
+        # We do not need a special case for the sampled token
+        # being in the topk, since inserting duplicated data
+        # into a dictionary twice is the same as doing it once.
+        topk_ranks = range(1, num_logprobs + 1)
+        ranks = itertools.chain((rank,), topk_ranks)
 
     if isinstance(request_logprobs, FlatLogprobs):
         request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
