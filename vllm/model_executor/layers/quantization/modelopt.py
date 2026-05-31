@@ -516,7 +516,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             max_w_scale, weight = requantize_with_max_scale(
                 layer.weight, layer.weight_scale, layer.logical_widths
             )
-        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight = Parameter(weight, requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
@@ -598,7 +598,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
+        layer.weight = Parameter(layer.weight.data, requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 

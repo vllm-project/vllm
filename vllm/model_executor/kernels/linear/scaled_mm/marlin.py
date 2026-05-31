@@ -77,23 +77,20 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
             w_q, *_ = self._get_layer_params(layer)
-            # Compressed tensors transposes the weight to (K, N)
-            # for channel and tensor quant strategies.
-            # So we can skip the transpose if the layout is
-            # already (K, N).
-            # TODO: Remove this check once the layouts have been
-            # canonicalized to a standard (N, K) dimension. See issue
-            # #33314 for more details.
-            if w_q.shape != (
-                layer.input_size_per_partition,
-                layer.output_size_per_partition,
-            ):
-                # transpose the weights to (K,N)
-                replace_parameter(
-                    layer,
-                    "weight",
-                    w_q.t(),
-                )
+            # Weights are always stored as (N, K) = (out_features, in_features)
+            # by create_fp8_weight_parameter. Marlin requires (K, N), so we
+            # must always transpose.
+            #
+            # NOTE: The old shape-based check `w_q.shape != (K, N)` is
+            # incorrect for square matrices (N == K) because (N,K) and (K,N)
+            # are indistinguishable by shape alone — the check evaluates False
+            # and silently skips the transpose, producing garbage outputs for
+            # any projection where N == K (e.g. q_proj, o_proj on GQA models).
+            replace_parameter(
+                layer,
+                "weight",
+                w_q.t(),
+            )
 
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
