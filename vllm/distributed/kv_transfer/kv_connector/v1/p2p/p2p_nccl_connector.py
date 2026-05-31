@@ -92,12 +92,19 @@ class P2pNcclConnector(KVConnectorBase_V1):
             get_world_group().local_rank if role == KVConnectorRole.WORKER else 0
         )
 
+        # In manual multi-process deployments (e.g. disaggregated_prefill.py),
+        # each process has its own world group where rank=0.
+        # Use the explicitly-configured kv_rank as port_offset so prefill and
+        # decode instances bind different ZMQ ports.
+        kv_rank = self._kv_transfer_config.kv_rank
+        port_offset = kv_rank if kv_rank is not None else self._rank
+
         self.p2p_nccl_engine = (
             P2pNcclEngine(
                 local_rank=self._local_rank,
                 config=self._kv_transfer_config,
                 hostname="",
-                port_offset=self._rank,
+                port_offset=port_offset,
             )
             if role == KVConnectorRole.WORKER
             else None
