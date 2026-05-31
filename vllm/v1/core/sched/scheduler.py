@@ -1395,6 +1395,7 @@ class Scheduler(SchedulerInterface):
                     num_accepted_tokens=num_accepted,
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
+                    ngram_invalid_spec_tokens=model_runner_output.ngram_invalid_spec_tokens,
                 )
 
             # Free encoder inputs only after the step has actually executed.
@@ -2024,13 +2025,20 @@ class Scheduler(SchedulerInterface):
         num_accepted_tokens: int,
         num_invalid_spec_tokens: dict[str, int] | None,
         request_id: str,
+        ngram_invalid_spec_tokens: dict[str, int] | None = None,
     ) -> SpecDecodingStats | None:
-        if not self.log_stats or not num_draft_tokens:
+        if not self.log_stats:
             return None
-        if spec_decoding_stats is None:
-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
+        if not num_draft_tokens:
+            return spec_decoding_stats
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
+        if ngram_invalid_spec_tokens:
+            num_draft_tokens -= ngram_invalid_spec_tokens.get(request_id, 0)
+        if num_draft_tokens <= 0:
+            return spec_decoding_stats
+        if spec_decoding_stats is None:
+            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
