@@ -35,6 +35,18 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+def _is_rocm_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+
+    capability = current_platform.get_device_capability()
+    return (
+        capability is not None
+        and capability.major == 9
+        and capability.minor == 5
+    )
+
+
 @triton.jit
 def write_zeros_to_output(
     c_ptr,
@@ -588,6 +600,7 @@ def invoke_fused_moe_wna16_cuda_kernel(
             size_n=B.size(1),
             num_experts=B.size(1),
             group_size=block_shape[1],
+            bit=bit,
             real_top_k=top_k,
             block_size_m=config["BLOCK_SIZE_M"],
         )
@@ -659,6 +672,7 @@ def invoke_fused_moe_wna16_triton_kernel(
             size_n=B.size(1),
             num_experts=B.size(1),
             group_size=block_shape[1],
+            bit=4 if use_int4_w4a16 else 8,
             real_top_k=top_k,
             block_size_m=config["BLOCK_SIZE_M"],
         )
@@ -1126,9 +1140,45 @@ def get_moe_wna16_block_config(
     size_n: int,
     num_experts: int,
     group_size: int,
+    bit: int,
     real_top_k: int,
     block_size_m: int,
 ):
+    # gfx950 Triton 3.6 codegen regresses on the existing INT4 tiles.
+    if (
+        not use_moe_wna16_cuda
+        and bit == 4
+        and group_size == 32
+        and _is_rocm_gfx950()
+    ):
+        if size_n <= 512 and size_k % 128 == 0:
+            return {
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 128,
+                "num_warps": 8,
+                "num_stages": 2,
+            }
+
+        if (
+            size_n >= 2048
+            and size_k % 64 == 0
+            and num_valid_tokens // real_top_k <= 32
+        ):
+            return {
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 64,
+                "num_warps": 8,
+                "num_stages": 2,
+            }
+
+        if size_n >= 2048:
+            return {
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "num_warps": 4,
+                "num_stages": 2,
+            }
+
     if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
         # optimal block config is set
         return {}
