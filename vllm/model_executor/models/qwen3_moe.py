@@ -88,38 +88,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _build_expert_mapping(
-    model: nn.Module,
-    num_experts: int,
-    num_redundant_experts: int,
-) -> list[tuple[str, str, int, str]]:
-    """Return the expert weight mapping consumed by FusedMoE.load_weights.
-
-    Combines the per-expert mapping (experts.<i>.{gate_proj,up_proj,down_proj})
-    with three aliases for HF's fused-MoE checkpoint layout (transformers
-    >= v5, and any v4 checkpoint re-saved with save_original_format=False):
-    experts.gate_up_proj of shape (E, 2*I, H) and experts.down_proj of
-    shape (E, H, I). For the fused aliases expert_id is repurposed as
-    shard_idx (0=gate, 1=up) by FusedMoE.load_weights' dim()==3 branch.
-    See vllm/model_executor/models/transformers/moe.py for the same
-    pattern.
-    """
-    per_expert_mapping = fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=num_experts,
-        num_redundant_experts=num_redundant_experts,
-    )
-    fused_mapping = [
-        ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-        ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-        ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-    ]
-    return per_expert_mapping + fused_mapping
-
-
 class Qwen3MoeMLP(nn.Module):
     def __init__(
         self,
@@ -252,8 +220,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            expert_mapping=_build_expert_mapping(
-                self, self.n_routed_experts, self.n_redundant_experts
+            expert_mapping=fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.n_routed_experts,
+                num_redundant_experts=self.n_redundant_experts,
             ),
         )
 
@@ -551,9 +524,17 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # (param_name, weight_name, expert_id, shard_id)
-        return _build_expert_mapping(
-            self, self.config.num_experts, self.num_redundant_experts
+        # (param_name, weight_name, expert_id, shard_id). Covers both the
+        # per-expert checkpoint layout and HF's fused-MoE layout
+        # (experts.gate_up_proj / experts.down_proj); the fused aliases are
+        # emitted by make_expert_params_mapping itself.
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
