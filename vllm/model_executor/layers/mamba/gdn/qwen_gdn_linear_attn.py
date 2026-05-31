@@ -1708,28 +1708,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b_bhv, a_bhv: ``[B, HV]`` (the non-spec slice).
             ssm_state: ``[pool_size, HV, V, K]``, dtype matches the
                 Mamba SSM cache dtype (bf16 or fp32 in supported cases).
-            state_indices: ``[B]`` int32/int64 pool indices. vLLM uses
-                NULL_BLOCK_ID=0 to mark CUDAGraph-padded entries; we
-                remap those to -1 because that is FI's documented
-                "skip / null" sentinel for the pretranspose kernel
-                (Triton uses ``state_idx <= 0`` -> skip, FI uses
-                ``pool_idx < 0`` -> skip; pool slot 0 is a real slot
-                for FI). Without this remap, padded entries write
-                garbage state into pool slot 0 -> downstream illegal
-                memory access in subsequent steps.
+            state_indices: ``[B]`` int32/int64 pool indices, passed
+                straight to FlashInfer. CUDAGraph-padded entries
+                (NULL_BLOCK_ID=0) are handled correctly by the kernel,
+                so no remap is needed.
             out_bthv: pre-allocated ``[B, 1, HV, V]`` view of
                 ``core_attn_out`` to be written in place.
         """
         a = a_bhv.unsqueeze(1)
         b = b_bhv.unsqueeze(1)
-
-        # TODO: remove it when FI supports NULL_BLOCK_ID=0.
-        # Remap NULL_BLOCK_ID (=0) padding -> FI's -1 skip sentinel.
-        state_indices_fi = torch.where(
-            state_indices > 0,
-            state_indices,
-            torch.full_like(state_indices, -1),
-        )
 
         # NOTE: omit `output_state_indices` -- older flashinfer
         # releases (e.g. 0.6.8.post1) reject the kwarg, and the
@@ -1753,7 +1740,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             output=out_bthv,
             use_qk_l2norm=True,
             initial_state=ssm_state,
-            initial_state_indices=state_indices_fi,
+            initial_state_indices=state_indices,
         )
 
     def _forward_core_decode_non_spec(
