@@ -86,6 +86,9 @@ class DeviceCapability(NamedTuple):
             return NotImplemented
         return (self.major, self.minor) > (other.major, other.minor)
 
+    def __hash__(self) -> int:
+        return hash((self.major, self.minor))
+
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 
@@ -168,6 +171,10 @@ class Platform:
 
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
+
+    def uses_host_device_handling(self) -> bool:
+        """Whether vLLM should leave DeviceConfig.device unset."""
+        return self.is_tpu()
 
     def is_zen_cpu(self) -> bool:
         return False
@@ -375,6 +382,19 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Return a mapping of device index to PCI bus ID string.
+
+        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Subclasses should override with platform-specific discovery
+        (e.g. pynvml for CUDA).
+        """
+        raise NotImplementedError(
+            "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "
+            f"current platform ({cls.device_name})"
+        )
+
+    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -389,6 +409,11 @@ class Platform:
         """
         Set the device for the current platform.
         """
+        raise NotImplementedError
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
         raise NotImplementedError
 
     @classmethod
@@ -537,6 +562,42 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
+        elif cache_config.cache_dtype.startswith("turboquant_"):
+            # TQ has a packed K|V layout; the standard FullAttentionSpec
+            # formula over-sizes it and trips unify_kv_cache_spec_page_size
+            # when all attention layers are TQ. With mixed skip+TQ the skip
+            # layers still use the standard layout — take max so mamba
+            # padding covers the largest actual page.
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            tq_cfg = TurboQuantConfig.from_cache_dtype(
+                cache_config.cache_dtype, model_config.get_head_size()
+            )
+            tq_page = TQFullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                head_size_v=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                tq_slot_size=tq_cfg.slot_size_aligned,
+            ).page_size_bytes
+            if cache_config.kv_cache_dtype_skip_layers:
+                skip_page = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=model_config.dtype,
+                ).page_size_bytes
+                # lcm, not max: skip_page is often not a multiple of
+                # tq_page, so max would leave per-layer page sizes
+                # un-unifiable downstream.
+                attn_page_size_1_token = lcm(tq_page, skip_page)
+            else:
+                attn_page_size_1_token = tq_page
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
@@ -728,6 +789,18 @@ class Platform:
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """
+        Returns whether the GPU is an integrated (UMA) device that shares
+        system memory with the CPU.
+
+        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        cudaMemGetInfo may underreport free memory because it does not
+        account for reclaimable OS memory (page cache, buffers).
+        """
+        return False
 
     @classmethod
     def supports_mx(cls) -> bool:
@@ -955,6 +1028,13 @@ class Platform:
 
         # Native always used by default. Platforms can override this behavior.
         return IrOpPriorityConfig.with_default(["native"])
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        """
+        Does the current platform support PDL (Programmatic Dependent Launch)?
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):

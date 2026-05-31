@@ -114,12 +114,15 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         """
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
+        single_requests = [
+            request.to_chat_completion_request(messages)
+            for messages in request.messages
+        ]
 
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
-            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                request.chat_template_kwargs,
-                self.default_chat_template_kwargs,
+            chat_template_kwargs = self._effective_chat_template_kwargs(
+                single_requests[0]
             )
             reasoning_parser = self.reasoning_parser_cls(
                 tokenizer,
@@ -155,7 +158,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
-            single_request = request.to_chat_completion_request(request.messages[i])
+            single_request = single_requests[i]
             sampling_params = single_request.to_sampling_params(
                 max_tokens, self.default_sampling_params
             )
@@ -215,8 +218,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         ``check_batch_mode`` validator, so neither needs to be handled here.
         """
         created_time = int(time.time())
-        role = self.get_chat_request_role(request)  # type: ignore[arg-type]
-
         final_results: dict[int, RequestOutput] = {}
         try:
             async for prompt_idx, res in merge_async_iterators(*generators):
@@ -272,6 +273,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     reasoning = None
                     content = output.text
 
+                role = (
+                    self.response_role
+                    if request.add_generation_prompt
+                    else request.messages[prompt_idx][-1]["role"]
+                )
+
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
                 if request.echo:
@@ -314,4 +321,5 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
         )

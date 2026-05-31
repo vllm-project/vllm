@@ -85,6 +85,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_null_value(self):
+        # Bare `null` must parse as None (Python), not the string "null".
+        # Without this, tool_choice=auto would emit `{"param": "null"}`
+        # instead of `{"param": null}` for nullable tool parameters.
+        result = _parse_gemma4_args("param:null")
+        assert result == {"param": None}
+        assert json.dumps(result) == '{"param": null}'
+
     def test_mixed_types(self):
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
@@ -114,6 +122,44 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("key:")
         assert result == {"key": ""}
 
+    def test_empty_value_partial_withheld(self):
+        """Key with no value is withheld in partial mode to avoid premature emission."""
+        result = _parse_gemma4_args("key:", partial=True)
+        assert result == {}
+        # also with a space after the colon
+        result = _parse_gemma4_args("key: ", partial=True)
+        assert result == {}
+
+    def test_empty_value_after_other_keys_partial_withheld(self):
+        """Trailing key with no value is withheld; earlier keys are kept."""
+        result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
+        assert result == {"name": "test"}
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Bare float ending with '.' is withheld in partial mode.
+
+        Regression test for #42047: float("108.") → 108.0 causes
+        streaming diff corruption (108.0 → 108.2 becomes 108.02).
+        """
+        # Single key with trailing dot — withheld entirely
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=True)
+        assert result == {}
+
+        # Stable key before trailing-dot key — stable key is kept
+        result = _parse_gemma4_args(
+            'name:<|"|>test<|"|>,score:3.,count:1', partial=True
+        )
+        assert result == {"name": "test"}
+
+        # Non-partial mode parses trailing dot normally
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
+        assert result == {"left": 108.0, "right": 22.8}
+
+    @pytest.mark.timeout(5)
+    def test_malformed_partial_array(self):
+        result = _parse_gemma4_args(":[t:[]")
+        assert isinstance(result, dict)
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -127,6 +173,25 @@ class TestParseGemma4Array:
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
+
+    @pytest.mark.timeout(5)
+    def test_string_element_with_closing_bracket(self):
+        result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
+        assert result == [["a]b", "c"], "tail"]
+
+    @pytest.mark.timeout(5)
+    def test_stray_closing_bracket(self):
+        result = _parse_gemma4_array("42,]trailing")
+        assert result == [42]
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Array elements with trailing dot withheld in partial mode."""
+        result = _parse_gemma4_array("108.,22.8", partial=True)
+        assert result == []
+
+        # Stable elements before trailing-dot element are kept
+        result = _parse_gemma4_array("42,108.,3", partial=True)
+        assert result == [42]
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +556,51 @@ class TestStreamingExtraction:
             assert parsed_args["count"] == 42
             assert parsed_args["active"] is True
 
+    def test_streaming_boolean_split_across_chunks(self, parser, mock_request):
+        """Boolean value split across token boundaries must not corrupt JSON."""
+        chunks = [
+            "<|tool_call>",
+            "call:search{input:{all:" + "true"[:3],
+            "e}}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["input"]["all"] is True
+
+    def test_streaming_false_split_across_chunks(self, parser, mock_request):
+        """Boolean false split across chunks."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{flag:" + "false"[:4],
+            "e}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["flag"] is False
+
+    def test_streaming_number_split_across_chunks(self, parser, mock_request):
+        """Number split across chunks must not change type."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{count:4",
+            "2}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["count"] == 42
+
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""
         chunks = [
@@ -531,3 +641,90 @@ class TestStreamingExtraction:
         assert "<|" not in args_text, (
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
+
+    def test_streaming_does_not_duplicate_plain_text_after_tool_call(
+        self, parser, mock_request, monkeypatch
+    ):
+        """Buffered plain text after a tool call must not corrupt current_text."""
+        captured_current_texts: list[str] = []
+        original_extract_streaming = parser._extract_streaming
+
+        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+            captured_current_texts.append(current_text)
+            return original_extract_streaming(previous_text, current_text, delta_text)
+
+        monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
+
+        chunks = [
+            "<|tool_call>",
+            "call:get_weather{",
+            'location:<|"|>Paris<|"|>}',
+            "<tool_call|><",
+            "div>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        content_parts = [
+            delta.content for delta, _ in results if delta is not None and delta.content
+        ]
+        assert "".join(content_parts) == "<div>"
+        assert captured_current_texts[-1].endswith("<tool_call|><div>")
+        assert not captured_current_texts[-1].endswith("<tool_call|><<div>")
+
+    def test_streaming_html_argument_does_not_duplicate_tag_prefixes(
+        self, parser, mock_request
+    ):
+        """HTML content inside tool arguments must not be duplicated."""
+        chunks = [
+            "<|tool_call>",
+            "call:write_file{",
+            'path:<|"|>index.html<|"|>,',
+            'content:<|"|><!DOCTYPE html>\n<',
+            'html lang="zh-CN">\n<',
+            "head>\n    <",
+            'meta charset="UTF-8">\n    <',
+            'meta name="viewport" content="width=device-width">\n',
+            '<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text
+
+        parsed_args = json.loads(args_text)
+        assert parsed_args["path"] == "index.html"
+        assert (
+            parsed_args["content"] == "<!DOCTYPE html>\n"
+            '<html lang="zh-CN">\n'
+            "<head>\n"
+            '    <meta charset="UTF-8">\n'
+            '    <meta name="viewport" content="width=device-width">\n'
+        )
+
+    def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
+        """Trailing bare boolean must not be streamed twice."""
+        chunks = [
+            "<|tool_call>",
+            "call:Edit{",
+            'file_path:<|"|>src/env.py<|"|>,',
+            'old_string:<|"|>old_val<|"|>,',
+            'new_string:<|"|>new_val<|"|>,',
+            "replace_all:",
+            "false}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {
+            "file_path": "src/env.py",
+            "old_string": "old_val",
+            "new_string": "new_val",
+            "replace_all": False,
+        }
+
+        assert args_text.count("replace_all") == 1
