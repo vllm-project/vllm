@@ -29,6 +29,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -200,11 +201,12 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    thinking_token_budget: int | None = Field(
+    thinking_token_budget: ThinkingTokenBudget = Field(
         default=None,
         description=(
             "Maximum number of tokens allowed for thinking operations "
-            "(reasoning models). -1 = unlimited."
+            "(reasoning models). Non-negative integer sets the limit; "
+            "-1 means unlimited (treated as unset)."
         ),
     )
 

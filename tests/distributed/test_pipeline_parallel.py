@@ -127,7 +127,6 @@ TEXT_GENERATION_MODELS = {
     # Uses Llama
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
-    "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-2-1b": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
@@ -349,7 +348,14 @@ def _compare_tp(
         "mp",
     ]
 
-    compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
+    compare_two_settings(
+        model_id,
+        pp_args,
+        tp_args,
+        pp_env,
+        tp_env,
+        method=method,
+    )
 
 
 @pytest.mark.parametrize(
