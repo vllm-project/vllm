@@ -242,6 +242,70 @@ def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(120), reason="SM120 only"
 )
+def test_sm120_mqa_direct_topk_uses_triton_chunks_when_logits_do_not_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    torch.manual_seed(13)
+    num_q, num_heads, head_dim = 9, 4, 64
+    seq_len_kv, topk_tokens = 23, 6
+    logits_bytes = num_q * seq_len_kv * torch.float32.itemsize
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_TOPK_MAX_LOGITS_BYTES",
+        logits_bytes - 1,
+    )
+    monkeypatch.setattr(
+        sm12x_deep_gemm_fallbacks,
+        "_SM120_MQA_TRITON_CHUNKED_TOPK_CHUNK_SIZE",
+        7,
+    )
+
+    q = torch.randn(num_q, num_heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    q_fp8 = q.to(torch.float8_e4m3fn).contiguous()
+    kv = torch.randn(seq_len_kv, head_dim, device="cuda", dtype=torch.bfloat16)
+    kv_scale = kv.abs().float().amax(dim=-1).clamp(1e-4) / 448.0
+    kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
+    weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
+    cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 4
+    cu_seqlen_ke = torch.full(
+        (num_q,), seq_len_kv, device="cuda", dtype=torch.int32
+    )
+    out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
+
+    original_triton = sm12x_mqa.fp8_mqa_logits_triton
+    calls = 0
+
+    def wrapped_triton(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_triton(*args, **kwargs)
+
+    monkeypatch.setattr(sm12x_mqa, "fp8_mqa_logits_triton", wrapped_triton)
+
+    assert deep_gemm_utils.fp8_fp4_mqa_topk_indices(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        out,
+    )
+    assert calls == cdiv(seq_len_kv, 7)
+
+    reference_logits = sm12x_deep_gemm_fallbacks._fp8_mqa_logits_torch(
+        (q_fp8, None),
+        (kv_fp8, kv_scale),
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        clean_logits=True,
+    )
+    _assert_topk_indices_match_values(reference_logits, out, topk_tokens)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(120), reason="SM120 only"
+)
 def test_sm120_paged_mqa_direct_topk_matches_truncated_decode_width(
     monkeypatch: pytest.MonkeyPatch,
 ):
