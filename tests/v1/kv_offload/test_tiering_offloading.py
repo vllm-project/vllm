@@ -19,7 +19,9 @@ import torch
 
 from vllm.v1.kv_offload.base import (
     OffloadKey,
+    OffloadPolicy,
     ReqContext,
+    RequestOffloadingContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
@@ -29,7 +31,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 _CTX = ReqContext(req_id="test")
-_MOCK_VLLM_CONFIG = MagicMock()
+_MOCK_OFFLOADING_SPEC = MagicMock()
 
 
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
@@ -68,7 +70,7 @@ class TestExampleSecondaryTierManager:
         """Test basic store and lookup operations."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
             custom_param=67,
@@ -105,12 +107,12 @@ class TestTieringOffloadingManager:
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
         )
         self.secondary_tier2 = ExampleSecondaryTierManager(
-            vllm_config=_MOCK_VLLM_CONFIG,
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
         )
@@ -184,7 +186,7 @@ class TestTieringOffloadingManager:
 
         # End of step 1: _maybe_process_finished_jobs() was already called by
         # prepare_store() above (setting the per-step flag), so take_events()
-        # does NOT poll get_finished() again — cascade completions remain
+        # does NOT poll get_finished_jobs() again — cascade completions remain
         # unprocessed until the next step.
         list(self.manager.take_events())
 
@@ -411,6 +413,78 @@ class TestTieringOffloadingManager:
         assert self.secondary_tier1.submit_store.call_count == 1
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
+
+    def test_on_new_request_lifecycle(self, manager_setup):
+        """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
+        and is cleaned up on on_request_finished."""
+        # Default: all tiers return BLOCK_LEVEL
+        ctx = ReqContext(req_id="req_policy_lifecycle")
+        result = self.manager.on_new_request(ctx)
+        assert result.policy == OffloadPolicy.BLOCK_LEVEL
+        self.manager.on_request_finished(ctx)
+
+        # Escalate: tier1 requests REQUEST_LEVEL
+        self.secondary_tier1.on_new_request = (
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
+            )
+        )
+
+        ctx = ReqContext(req_id="req_policy_lifecycle_2")
+        result = self.manager.on_new_request(ctx)
+        assert result.policy == OffloadPolicy.REQUEST_LEVEL
+        assert ctx.req_id in self.manager._request_level_tiers
+
+        # Cleanup
+        self.manager.on_request_finished(ctx)
+        assert ctx.req_id not in self.manager._request_level_tiers
+
+    def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(
+        self, manager_setup
+    ):
+        """prepare_store cascades hit blocks to request-level tiers only."""
+        # Store some blocks to primary first
+        existing_blocks = to_keys(range(3))
+        result = self.manager.prepare_store(existing_blocks, _CTX)
+        assert result is not None
+        self.manager.complete_store(existing_blocks, _CTX, success=True)
+        # Drain cascade completions
+        list(self.manager.take_events())
+        list(self.manager.take_events())
+
+        # Make tier1 request-level, tier2 stays block-level
+        self.secondary_tier1.on_new_request = (
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
+            )
+        )
+
+        ctx = ReqContext(req_id="req_cascade")
+        self.manager.on_new_request(ctx)
+
+        # Spy on submit_store
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
+        # Call prepare_store with existing + new blocks
+        new_blocks = to_keys(range(3, 5))
+        all_blocks = existing_blocks + new_blocks
+        result = self.manager.prepare_store(all_blocks, ctx)
+        assert result is not None
+        assert set(result.keys_to_store) == set(new_blocks)
+
+        # Only tier1 (request-level) should get existing blocks cascaded now.
+        # New blocks are cascaded to ALL tiers later via complete_store().
+        self.secondary_tier1.submit_store.assert_called_once()
+        job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
+        assert set(job_metadata.keys) == set(existing_blocks)
+
+        # tier2 (block-level) does not get existing blocks here.
+        self.secondary_tier2.submit_store.assert_not_called()
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:
