@@ -8,6 +8,14 @@ from vllm.utils.func_utils import run_once
 
 logger = init_logger(__name__)
 
+try:
+    from opentelemetry import trace
+
+    _IS_OTEL_AVAILABLE = True
+except ImportError:
+    trace = None  # type: ignore
+    _IS_OTEL_AVAILABLE = False
+
 # Standard W3C headers used for context propagation
 TRACE_HEADERS = ["traceparent", "tracestate"]
 
@@ -61,9 +69,26 @@ def contains_trace_headers(headers: Mapping[str, str]) -> bool:
 
 def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     """
-    Extract only trace-related headers from a larger header dictionary.
-    Useful for logging or passing context to a non-OTel client.
+    Build trace headers for downstream propagation.
+
+    Prefer the active in-process span so downstream spans become children of
+    the current ASGI/FastAPI span. Fall back to any inbound trace headers when
+    there is no active span.
     """
+    if _IS_OTEL_AVAILABLE:
+        current_span = trace.get_current_span()
+        span_context = current_span.get_span_context()
+        if span_context.is_valid:
+            trace_headers = {
+                "traceparent": (
+                    f"00-{span_context.trace_id:032x}-"
+                    f"{span_context.span_id:016x}-"
+                    f"{int(span_context.trace_flags):02x}"
+                ),
+            }
+            if "tracestate" in headers:
+                trace_headers["tracestate"] = headers["tracestate"]
+            return trace_headers
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 
 
