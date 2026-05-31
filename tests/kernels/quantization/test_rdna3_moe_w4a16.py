@@ -60,7 +60,7 @@ MODEL_CONFIGS = [
 ]
 
 # Token counts: decode (1), small batch (4), medium (16), prefill (64)
-NUM_TOKENS = [1, 4, 16, 64]
+NUM_TOKENS = [1, 4, 16, 64, 256, 512]
 
 
 def _make_packed_weights(E, K, N):
