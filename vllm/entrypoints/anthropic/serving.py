@@ -28,7 +28,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicStreamEvent,
     AnthropicUsage,
 )
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption, UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -74,7 +74,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
         enable_prompt_tokens_details: bool = False,
-        enable_force_include_usage: bool = False,
+        usage_policy: UsagePolicy | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         super().__init__(
@@ -90,7 +90,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_auto_tools=enable_auto_tools,
             tool_parser=tool_parser,
             enable_prompt_tokens_details=enable_prompt_tokens_details,
-            enable_force_include_usage=enable_force_include_usage,
+            usage_policy=usage_policy,
             default_chat_template_kwargs=default_chat_template_kwargs,
         )
         self.stop_reason_map = {
@@ -862,3 +862,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         )
 
         return response
+
+    def should_include_usage(
+        self,
+        *,
+        is_streaming: bool,
+        include_usage: bool | None = None,
+        continuous_usage: bool | None = None,
+    ) -> tuple[bool, bool]:
+        """Anthropic always includes usage in every response/chunk."""
+        return (True, True)

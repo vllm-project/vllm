@@ -9,6 +9,7 @@ from typing import Literal, cast
 import numpy as np
 
 from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.entrypoints.chat_utils import UsagePolicy
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -33,11 +34,13 @@ class OpenAIServingRealtime(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        usage_policy: UsagePolicy | None = None,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
+            usage_policy=usage_policy,
         )
 
         self.task_type: Literal["realtime"] = "realtime"

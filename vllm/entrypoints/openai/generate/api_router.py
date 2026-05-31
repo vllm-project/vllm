@@ -50,7 +50,10 @@ async def init_generate_state(
     supported_tasks: tuple["SupportedTask", ...],
 ):
     from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
-    from vllm.entrypoints.chat_utils import load_chat_template
+    from vllm.entrypoints.chat_utils import (
+        UsagePolicy,
+        load_chat_template,
+    )
     from vllm.entrypoints.mcp.tool_server import (
         DemoToolServer,
         MCPToolServer,
@@ -83,6 +86,25 @@ async def init_generate_state(
         tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
 
+    # Build UsagePolicy from CLI args
+    usage_policy = UsagePolicy(
+        include_usage=args.include_usage_policy,
+        continuous_usage=args.continuous_usage_policy,
+    )
+
+    # Deprecated --enable-force-include-usage → UsagePolicy conversion.
+    # Once the flag is removed this helper and its use below can be deleted.
+    # Category 1, converted_usage_policy, flag forced both include_usage
+    # and continuous_usage:
+    #   Chat, Completion, Anthropic
+    # Category 3, unchanged_usage_policy, flag had no effect:
+    #   Responses, Disagg (ServingTokens)
+    converted_usage_policy = (
+        UsagePolicy(include_usage="always", continuous_usage="always")
+        if args.enable_force_include_usage
+        else usage_policy
+    )
+
     # Render endpoints are always backed by OpenAIServingRender so that
     # /v1/chat/completions/render and /v1/completions/render work on both
     # generate-mode and render-only servers. Created in init_app_state.
@@ -101,7 +123,7 @@ async def init_generate_state(
             tool_server=tool_server,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=usage_policy,
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
@@ -124,7 +146,7 @@ async def init_generate_state(
         tool_parser=args.tool_call_parser,
         reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        enable_force_include_usage=args.enable_force_include_usage,
+        usage_policy=converted_usage_policy,
         enable_log_outputs=args.enable_log_outputs,
         enable_log_deltas=args.enable_log_deltas,
     )
@@ -146,7 +168,7 @@ async def init_generate_state(
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=converted_usage_policy,
         )
         if "generate" in supported_tasks
         else None
@@ -165,7 +187,7 @@ async def init_generate_state(
             tool_parser=args.tool_call_parser,
             reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
+            usage_policy=converted_usage_policy,
             default_chat_template_kwargs=args.default_chat_template_kwargs,
         )
         if "generate" in supported_tasks
@@ -181,6 +203,7 @@ async def init_generate_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_log_outputs=args.enable_log_outputs,
             force_no_detokenize=args.tokens_only,
+            usage_policy=usage_policy,
         )
         if "generate" in supported_tasks
         else None

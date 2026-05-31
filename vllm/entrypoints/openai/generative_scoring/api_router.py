@@ -76,12 +76,19 @@ async def init_generative_scoring_state(
     args: "Namespace",
     request_logger: "RequestLogger | None",
 ):
+    from vllm.entrypoints.chat_utils import UsagePolicy
     from vllm.entrypoints.openai.generative_scoring.serving import (
         OpenAIServingGenerativeScoring,
+    )
+
+    usage_policy = UsagePolicy(
+        include_usage=args.include_usage_policy,
+        continuous_usage=args.continuous_usage_policy,
     )
 
     state.serving_generative_scoring = OpenAIServingGenerativeScoring(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
+        usage_policy=usage_policy,
     )

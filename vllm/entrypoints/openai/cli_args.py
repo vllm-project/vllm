@@ -136,8 +136,34 @@ class BaseFrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
+    include_usage_policy: str | None = None
+    """
+    Policy for usage statistics return behavior.
+    Possible values:
+        - "always": Always include usage in responses.
+        - None: No effect, keep the entrypoint's default behavior.
+    """
+    continuous_usage_policy: str | None = None
+    """
+    Policy for continuous usage statistics during streaming.
+    Possible values:
+        - "always": Send usage on every chunk (only valid if
+          include_usage is enabled).
+        - None: No effect, keep the entrypoint's default behavior.
+    """
     enable_force_include_usage: bool = False
-    """If set to True, including usage on every request."""
+    """
+    [Deprecated] Use `--include-usage-policy` and
+    `--continuous-usage-policy` instead.
+
+    If set to True, force-include usage in streaming responses.
+    Internally converted to ``--include-usage-policy=always``
+    (plus ``--continuous-usage-policy=always`` for Chat / Completion
+    endpoints).
+
+    Must NOT be combined with ``--include-usage-policy`` or
+    ``--continuous-usage-policy``.
+    """
     enable_tokenizer_info_endpoint: bool = False
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
@@ -397,6 +423,42 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    valid_usage_policies = (None, "always")
+    if args.include_usage_policy not in valid_usage_policies:
+        raise TypeError(
+            f"Error: --include-usage-policy must be "
+            f"{list(valid_usage_policies)}, "
+            f"but got '{args.include_usage_policy}'"
+        )
+
+    valid_continuous_usage_policies = (None, "always")
+    if args.continuous_usage_policy not in valid_continuous_usage_policies:
+        raise TypeError(
+            f"Error: --continuous-usage-policy must be "
+            f"{list(valid_continuous_usage_policies)}, "
+            f"but got '{args.continuous_usage_policy}'"
+        )
+
+    # Handle deprecated enable_force_include_usage
+    if args.enable_force_include_usage and (
+        args.include_usage_policy is not None
+        or args.continuous_usage_policy is not None
+    ):
+        raise TypeError(
+            "--enable-force-include-usage cannot be used together with "
+            "--include-usage-policy or --continuous-usage-policy. "
+            "Use --include-usage-policy=always "
+            "[--continuous-usage-policy=always] instead."
+        )
+
+    if args.continuous_usage_policy == "always" and args.include_usage_policy is None:
+        logger.warning_once(
+            "--continuous-usage-policy=always requires "
+            "--include-usage-policy to be set. "
+            "Automatically setting --include-usage-policy=always."
+        )
+        args.include_usage_policy = "always"
 
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.dp_supervisor import (
