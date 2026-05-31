@@ -173,7 +173,7 @@ class EagleSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups, _, _ = init_attn_backend(
+        self.attn_groups, _, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
@@ -215,12 +215,22 @@ class EagleSpeculator:
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
-            ret_hidden_states = self.model(
+            model_inputs = dict(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+                # Draft prefill with PIECEWISE cudagraph (compiled PW or breakable),
+                # chosen inside run_pw_graph.
+                assert self.prefill_cudagraph_manager is not None
+                ret_hidden_states = self.prefill_cudagraph_manager.run_pw_graph(
+                    self.model, model_inputs
+                )
+            else:
+                # Eager (NONE): call the raw model directly.
+                ret_hidden_states = self.model(**model_inputs)
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
             hidden_states = ret_hidden_states
@@ -431,6 +441,8 @@ class EagleSpeculator:
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
         assert self.prefill_cudagraph_manager is not None
+        if self.prefill_cudagraph_manager.use_breakable_cg:
+            self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self.prefill,
             attn_states,
