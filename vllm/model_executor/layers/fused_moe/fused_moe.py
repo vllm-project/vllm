@@ -1153,6 +1153,14 @@ def get_moe_wna16_block_config(
     ):
         tokens_per_rank = num_valid_tokens // real_top_k
         if size_n <= 512 and size_k % 64 == 0:
+            if tokens_per_rank <= 64:
+                return {
+                    "BLOCK_SIZE_N": 32,
+                    "BLOCK_SIZE_K": 64,
+                    "num_warps": 8,
+                    "num_stages": 2,
+                }
+
             if tokens_per_rank >= 2048:
                 return {
                     "BLOCK_SIZE_N": 128,
@@ -1174,6 +1182,19 @@ def get_moe_wna16_block_config(
                 "BLOCK_SIZE_N": 32,
                 "BLOCK_SIZE_K": 128,
                 "num_warps": 8,
+                "num_stages": 2,
+            }
+
+        if (
+            size_n >= 2048
+            and size_k <= 512
+            and size_k % 32 == 0
+            and tokens_per_rank <= 512
+        ):
+            return {
+                "BLOCK_SIZE_N": 128,
+                "BLOCK_SIZE_K": 32,
+                "num_warps": 4,
                 "num_stages": 2,
             }
 
@@ -1279,6 +1300,13 @@ def _get_gfx950_int4_wna16_config_overrides(
         or not _is_rocm_gfx950()
     ):
         return {}
+
+    if M <= 64:
+        return {
+            "BLOCK_SIZE_M": 16,
+            "GROUP_SIZE_M": 1,
+            "matrix_instr_nonkdim": 16,
+        }
 
     if M < 512:
         return {
