@@ -1392,6 +1392,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
+                src_conv_state_indices=non_spec_conv_src_state_indices,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
             ).transpose(0, 1)

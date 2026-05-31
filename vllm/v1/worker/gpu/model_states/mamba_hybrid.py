@@ -776,18 +776,13 @@ class MambaHybridModelState(DefaultModelState):
                 postprocess=postprocess,
             )
 
-        # CONV PRE-copy: skip on PURE-DECODE steps — the decode conv kernel reads
-        # its init from the src block (src_conv_*), so no copy is needed. Keep it
-        # whenever any req is prefilling (the prefill conv path still reads the
-        # window block, not src) and always for POST (aligned-save). In a mixed
-        # prefill+decode step the decode reqs are copied redundantly (harmless:
-        # their kernel reads src). This drops the conv copy from the latency-
-        # critical pure-decode path.
-        run_conv_pre = (
-            postprocess
-            or _CONV_KEEP_PRECOPY
-            or bool(input_batch.is_prefilling_np[:num_reqs].any())
-        )
+        # CONV PRE-copy is fully eliminated: BOTH the decode conv kernel
+        # (causal_conv1d_update) and the prefill conv kernel (causal_conv1d_fn)
+        # now read their init conv state from the src block (src_conv_*), so no
+        # pre-copy pass is needed for any step. Only the conv POST-copy
+        # (aligned-save) is retained. (_CONV_KEEP_PRECOPY keeps the pre-copy for
+        # A/B diagnostics — must be a no-op vs dropping it.)
+        run_conv_pre = postprocess or _CONV_KEEP_PRECOPY
         if run_conv_pre:
             self._copy_mamba_conv_sd_batched(
                 input_batch,

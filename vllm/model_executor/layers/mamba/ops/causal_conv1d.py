@@ -29,6 +29,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     block_idx_first_scheduled_token,  # (batch,)
     block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
+    src_conv_state_indices_ptr,  # (batch,) phys block to READ init conv from
     num_computed_tokens,  # (batch,)
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
@@ -55,6 +56,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     KERNEL_WIDTH: tl.constexpr,
     SILU_ACTIVATION: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
+    HAS_SRC_CONV: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     BLOCK_M: tl.constexpr,
@@ -142,7 +144,24 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         conv_states_ptr
         + (conv_states_input_coord * stride_conv_state_seq)
         + (idx_feats * stride_conv_state_dim)
-    )  # [BLOCK_N,]
+    )  # [BLOCK_N,]  WRITE base = window block (col0); also the null/padding check.
+
+    # Mamba "align" copy-free pre: READ the init conv state from a per-seq src
+    # physical block (the previous running / cached-prefix block) while WRITES
+    # stay on the window block (conv_states_base). On a non-migration step
+    # src == window block, so this is a no-op; on migration it reads the prev
+    # block directly, eliminating the conv pre-copy for prefill too.
+    if HAS_SRC_CONV:
+        conv_states_read_coord = tl.load(src_conv_state_indices_ptr + idx_seq).to(
+            tl.int64
+        )
+    else:
+        conv_states_read_coord = conv_states_input_coord
+    conv_states_read_base = (
+        conv_states_ptr
+        + (conv_states_read_coord * stride_conv_state_seq)
+        + (idx_feats * stride_conv_state_dim)
+    )  # [BLOCK_N,]  READ base = src block.
 
     w_base = w_ptr + (idx_feats * stride_w_dim)  # [BLOCK_N,]
 
@@ -153,8 +172,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         # read from conv_states
         load_init_state = tl.load(has_initial_states_ptr + idx_seq).to(tl.int1)
         if load_init_state:
-            # load from conv_states
-            prior_tokens = conv_states_base + (state_len - 1) * stride_conv_state_tok
+            # load from conv_states (READ from the src block, not the window)
+            prior_tokens = (
+                conv_states_read_base + (state_len - 1) * stride_conv_state_tok
+            )
             mask_w = idx_feats < dim
             if KERNEL_WIDTH == 2:
                 conv_states_ptrs = prior_tokens  # [BLOCK_N]
@@ -242,12 +263,12 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
                 conv_states_ptrs_source = (
                     conv_states_ptr
-                    + (conv_states_input_coord * stride_conv_state_seq)
+                    + (conv_states_read_coord * stride_conv_state_seq)
                     + (idx_feats * stride_conv_state_dim)[None, :]
                     + ((idx_tokens_conv + seqlen) * stride_conv_state_tok)[:, None]
                 )  # [BLOCK_M, BLOCK_N]
                 mask = (
-                    (conv_states_input_coord < num_cache_lines)
+                    (conv_states_read_coord < num_cache_lines)
                     & ((idx_tokens_conv + seqlen) < state_len)[:, None]
                     & (idx_feats < dim)[None, :]
                 )
@@ -480,6 +501,7 @@ def causal_conv1d_fn(
     block_idx_first_scheduled_token: torch.Tensor | None = None,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    src_conv_state_indices: torch.Tensor | None = None,
     num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align=0,
     metadata=None,
@@ -711,6 +733,7 @@ def causal_conv1d_fn(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        src_conv_state_indices,
         num_computed_tokens,
         out,
         # Matrix dimensions
@@ -737,6 +760,7 @@ def causal_conv1d_fn(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
+        HAS_SRC_CONV=src_conv_state_indices is not None,
         HAS_NULL_BLOCK=null_block_id is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
