@@ -73,6 +73,20 @@ def _heuristic_config(
     is_sm90_plus = current_platform.has_device_capability(90)
     is_sm80_before = not current_platform.has_device_capability(80)
 
+    if (
+        current_platform.is_rocm()
+        and top_k == 8
+        and size == 7168
+        and element_size == 2
+    ):
+        capability = current_platform.get_device_capability()
+        if (
+            capability is not None
+            and capability.major == 9
+            and capability.minor == 5
+        ):
+            return 16, 512, 4, 3
+
     if current_platform.has_device_capability(90):
         # SM90/SM100+: prefer small tiles + many CTAs.
         if is_fp32:
