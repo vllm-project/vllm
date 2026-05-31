@@ -24,6 +24,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
+from vllm.v1.attention.backends.cp_mapping import cp_local_to_global_indices
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
@@ -36,23 +37,6 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
-
-
-def _dcp_local_to_global_indices(
-    local_indices: torch.Tensor,
-    dcp_world_size: int,
-    dcp_rank: int,
-    cp_kv_cache_interleave_size: int,
-) -> torch.Tensor:
-    safe_indices = torch.clamp(local_indices, min=0)
-    interleave_blocks = safe_indices // cp_kv_cache_interleave_size
-    interleave_offsets = safe_indices % cp_kv_cache_interleave_size
-    global_indices = (
-        interleave_blocks * cp_kv_cache_interleave_size * dcp_world_size
-        + dcp_rank * cp_kv_cache_interleave_size
-        + interleave_offsets
-    )
-    return torch.where(local_indices >= 0, global_indices, -1)
 
 
 def _topk_per_row_prefill_dcp(
@@ -101,7 +85,7 @@ def _topk_per_row_prefill_dcp(
             local_values,
         )
 
-    global_indices = _dcp_local_to_global_indices(
+    global_indices = cp_local_to_global_indices(
         local_indices,
         dcp_world_size,
         dcp_rank,

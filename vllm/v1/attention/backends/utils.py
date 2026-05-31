@@ -36,6 +36,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
+from vllm.v1.attention.backends.cp_mapping import get_cp_local_seq_lens
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
@@ -864,34 +865,12 @@ def get_dcp_local_seq_lens(
     use this function to calculate split decode seq_lens of each dcp rank.
     Only consider dcp now, we can extend the case of cp based on this.
     """
-    num_requests = seq_lens.size(0)
-    if dcp_rank is None:
-        rank_offsets = (
-            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
-            .unsqueeze(0)
-            .repeat(num_requests, 1)
-        )
-    else:
-        rank_offsets = torch.tensor(
-            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
-        )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
-    base = (
-        seq_lens_tiled
-        // cp_kv_cache_interleave_size
-        // dcp_size
-        * cp_kv_cache_interleave_size
-    )
-    remainder = seq_lens_tiled - base * dcp_size
-    remainder = torch.clip(
-        remainder - rank_offsets * cp_kv_cache_interleave_size,
-        0,
+    return get_cp_local_seq_lens(
+        seq_lens,
+        dcp_size,
+        dcp_rank,
         cp_kv_cache_interleave_size,
     )
-    dcp_local_seq_lens = base + remainder
-    return dcp_local_seq_lens.squeeze(1)
 
 
 def mamba_get_block_table_tensor(

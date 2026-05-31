@@ -18,6 +18,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+from vllm.v1.attention.backends.cp_mapping import (
+    cp_global_to_local_pos,
+    cp_is_local_pos,
+)
 
 
 @triton.jit
@@ -233,21 +237,12 @@ def _dequantize_and_gather_k_kernel(
     start_pos = seq_len - gather_len
     local_start_pos = start_pos
     if DCP_WORLD_SIZE > 1:
-        start_base = (
-            start_pos
-            // CP_KV_CACHE_INTERLEAVE_SIZE
-            // DCP_WORLD_SIZE
-            * CP_KV_CACHE_INTERLEAVE_SIZE
-        )
-        start_remainder = start_pos - start_base * DCP_WORLD_SIZE
-        start_extra = tl.minimum(
-            tl.maximum(
-                start_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                0,
-            ),
+        local_start_pos = cp_global_to_local_pos(
+            start_pos,
+            DCP_WORLD_SIZE,
+            DCP_RANK,
             CP_KV_CACHE_INTERLEAVE_SIZE,
         )
-        local_start_pos = start_base + start_extra
 
     for i in range(worker_id, gather_len, num_workers):
         # Calculate the actual token index in the sequence
@@ -255,33 +250,21 @@ def _dequantize_and_gather_k_kernel(
 
         # Calculate which block and position within block
         if DCP_WORLD_SIZE > 1:
-            virtual_block_size = cache_block_size * DCP_WORLD_SIZE
-            block_in_seq = pos // virtual_block_size
-            virtual_block_offset = pos - block_in_seq * virtual_block_size
-            is_local = (
-                virtual_block_offset // CP_KV_CACHE_INTERLEAVE_SIZE
-            ) % DCP_WORLD_SIZE == DCP_RANK
-            pos_in_block = (
-                virtual_block_offset // (DCP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-            ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-                virtual_block_offset % CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-
-            pos_base = (
-                pos
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            pos_remainder = pos - pos_base * DCP_WORLD_SIZE
-            pos_extra = tl.minimum(
-                tl.maximum(
-                    pos_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            local_pos = cp_global_to_local_pos(
+                pos,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            local_i = pos_base + pos_extra - local_start_pos
+            block_in_seq = local_pos // cache_block_size
+            pos_in_block = local_pos % cache_block_size
+            is_local = cp_is_local_pos(
+                pos,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            local_i = local_pos - local_start_pos
         else:
             block_in_seq = pos // cache_block_size
             pos_in_block = pos % cache_block_size
@@ -652,21 +635,12 @@ def _combine_topk_swa_indices_kernel(
     gather_start = seq_len - gather_len
     local_gather_start = gather_start
     if DCP_WORLD_SIZE > 1:
-        gather_start_base = (
-            gather_start
-            // CP_KV_CACHE_INTERLEAVE_SIZE
-            // DCP_WORLD_SIZE
-            * CP_KV_CACHE_INTERLEAVE_SIZE
-        )
-        gather_start_remainder = gather_start - gather_start_base * DCP_WORLD_SIZE
-        gather_start_extra = tl.minimum(
-            tl.maximum(
-                gather_start_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                0,
-            ),
+        local_gather_start = cp_global_to_local_pos(
+            gather_start,
+            DCP_WORLD_SIZE,
+            DCP_RANK,
             CP_KV_CACHE_INTERLEAVE_SIZE,
         )
-        local_gather_start = gather_start_base + gather_start_extra
 
     for token_idx in range(query_start + worker_id, query_end, num_workers):
         # topk_len is fully determined by the query token's absolute position:
@@ -687,26 +661,20 @@ def _combine_topk_swa_indices_kernel(
                 other=-1,
             )
             safe_topk_indices = tl.maximum(global_topk_indices, 0)
-            is_local_topk = (
-                safe_topk_indices // CP_KV_CACHE_INTERLEAVE_SIZE
-            ) % DCP_WORLD_SIZE == DCP_RANK
-            valid_topk = mask & (global_topk_indices >= 0) & is_local_topk
-
-            topk_base = (
-                safe_topk_indices
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            topk_remainder = safe_topk_indices - topk_base * DCP_WORLD_SIZE
-            topk_extra = tl.minimum(
-                tl.maximum(
-                    topk_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            is_local_topk = cp_is_local_pos(
+                safe_topk_indices,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            local_topk_indices = topk_base + topk_extra
+            valid_topk = mask & (global_topk_indices >= 0) & is_local_topk
+
+            local_topk_indices = cp_global_to_local_pos(
+                safe_topk_indices,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
             local_topk_offsets = tl.cumsum(valid_topk.to(tl.int32), 0) - 1
             tl.store(
                 combined_indices_ptr
@@ -719,61 +687,38 @@ def _combine_topk_swa_indices_kernel(
 
             swa_start = pos - swa_len + 1
             swa_end = pos + 1
-            swa_start_base = (
-                swa_start
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            swa_start_remainder = swa_start - swa_start_base * DCP_WORLD_SIZE
-            swa_start_extra = tl.minimum(
-                tl.maximum(
-                    swa_start_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            local_swa_start = cp_global_to_local_pos(
+                swa_start,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            local_swa_start = swa_start_base + swa_start_extra
 
-            swa_end_base = (
-                swa_end
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            swa_end_remainder = swa_end - swa_end_base * DCP_WORLD_SIZE
-            swa_end_extra = tl.minimum(
-                tl.maximum(
-                    swa_end_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            local_swa_end = cp_global_to_local_pos(
+                swa_end,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            local_swa_end = swa_end_base + swa_end_extra
             local_swa_len = local_swa_end - local_swa_start
 
             offset = tl.arange(0, WINDOW_SIZE)
             swa_pos = swa_start + offset
             safe_swa_pos = tl.maximum(swa_pos, 0)
-            is_local_swa = (
-                safe_swa_pos // CP_KV_CACHE_INTERLEAVE_SIZE
-            ) % DCP_WORLD_SIZE == DCP_RANK
-            swa_pos_base = (
-                safe_swa_pos
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            swa_pos_remainder = safe_swa_pos - swa_pos_base * DCP_WORLD_SIZE
-            swa_pos_extra = tl.minimum(
-                tl.maximum(
-                    swa_pos_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            is_local_swa = cp_is_local_pos(
+                safe_swa_pos,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            local_swa_offsets = swa_pos_base + swa_pos_extra - local_swa_start
-            local_swa_indices = N + swa_pos_base + swa_pos_extra - local_gather_start
+            local_swa_pos = cp_global_to_local_pos(
+                safe_swa_pos,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            local_swa_offsets = local_swa_pos - local_swa_start
+            local_swa_indices = N + local_swa_pos - local_gather_start
             tl.store(
                 combined_indices_ptr
                 + token_idx * combined_indices_stride

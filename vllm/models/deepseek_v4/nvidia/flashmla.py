@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
@@ -55,6 +55,32 @@ def _copy_with_attn_sink(
     denom_lse = torch.logaddexp(lse, sink.unsqueeze(0))
     scale = torch.exp(lse - denom_lse).to(dtype=out.dtype)
     output.copy_(out * scale.unsqueeze(-1))
+
+
+def _maybe_gather_dcp_q(q: torch.Tensor) -> tuple[torch.Tensor, GroupCoordinator, bool]:
+    dcp_group = get_dcp_group()
+    use_dcp = dcp_group.world_size > 1
+    if use_dcp:
+        q = dcp_group.all_gather(q.contiguous(), dim=1)
+    return q, dcp_group, use_dcp
+
+
+def _merge_dcp_flashmla_output(
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    dcp_group: GroupCoordinator,
+    attn_sink: torch.Tensor,
+    output: torch.Tensor,
+) -> None:
+    if out.ndim == 3 and out.shape[1] == 1:
+        out = out.squeeze(1)
+    out, lse = cp_lse_ag_out_rs(
+        out,
+        _squeeze_flashmla_lse(lse),
+        dcp_group,
+        return_lse=True,
+    )
+    _copy_with_attn_sink(out, lse, attn_sink, output)
 
 
 class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
@@ -287,10 +313,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         # q arrives pre-padded to layer.padded_heads by the outer wrapper.
-        dcp_group = get_dcp_group()
-        use_dcp = dcp_group.world_size > 1
-        if use_dcp:
-            q = dcp_group.all_gather(q.contiguous(), dim=1)
+        q, dcp_group, use_dcp = _maybe_gather_dcp_q(q)
         q = q.unsqueeze(1)
 
         # Prepare SWA cache (num_blocks, swa_block_size, 1, head_bytes)
@@ -349,13 +372,13 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
             out=out_buffer,
         )
         if use_dcp:
-            out, lse = cp_lse_ag_out_rs(
-                out.squeeze(1),
-                _squeeze_flashmla_lse(lse),
+            _merge_dcp_flashmla_output(
+                out,
+                lse,
                 dcp_group,
-                return_lse=True,
+                layer.attn_sink,
+                output,
             )
-            _copy_with_attn_sink(out, lse, layer.attn_sink, output)
 
     @classmethod
     def _forward_prefill(
@@ -381,10 +404,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
         assert gather_lens is not None
-        dcp_group = get_dcp_group()
-        use_dcp = dcp_group.world_size > 1
-        if use_dcp:
-            q = dcp_group.all_gather(q.contiguous(), dim=1)
+        q, dcp_group, use_dcp = _maybe_gather_dcp_q(q)
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
@@ -504,15 +524,10 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 out=out_buffer,
             )
             if use_dcp:
-                out, lse = cp_lse_ag_out_rs(
-                    out,
-                    _squeeze_flashmla_lse(lse),
-                    dcp_group,
-                    return_lse=True,
-                )
-                _copy_with_attn_sink(
+                _merge_dcp_flashmla_output(
                     out,
                     lse,
+                    dcp_group,
                     layer.attn_sink,
                     output[query_start:query_end],
                 )

@@ -22,9 +22,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.cp_mapping import (
+    cp_global_to_local_pos,
+    get_cp_local_seq_lens,
+)
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
-    get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -232,28 +235,6 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
     return max_model_len * 40
-
-
-def _get_dcp_local_seq_lens_cpu(
-    seq_lens: torch.Tensor,
-    dcp_size: int,
-    dcp_rank: int,
-    cp_kv_cache_interleave_size: int,
-) -> torch.Tensor:
-    seq_lens = seq_lens.to(torch.int64)
-    base = (
-        seq_lens
-        // cp_kv_cache_interleave_size
-        // dcp_size
-        * cp_kv_cache_interleave_size
-    )
-    remainder = seq_lens - base * dcp_size
-    extra = torch.clamp(
-        remainder - dcp_rank * cp_kv_cache_interleave_size,
-        0,
-        cp_kv_cache_interleave_size,
-    )
-    return base + extra
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
@@ -635,7 +616,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     not use_native and max_decode_len > 1
                 )
                 if self.dcp_world_size > 1:
-                    compressed_decode_seq_lens = get_dcp_local_seq_lens(
+                    compressed_decode_seq_lens = get_cp_local_seq_lens(
                         seq_lens.reshape(-1) // self.compress_ratio,
                         self.dcp_world_size,
                         self.dcp_rank,
@@ -715,7 +696,7 @@ def build_prefill_chunk_metadata(
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     compressed_seq_lens_cpu_chunk = compressed_seq_lens_cpu[start_idx:end_idx]
     if dcp_world_size > 1:
-        compressed_seq_lens_cpu_chunk = _get_dcp_local_seq_lens_cpu(
+        compressed_seq_lens_cpu_chunk = get_cp_local_seq_lens(
             compressed_seq_lens_cpu_chunk,
             dcp_world_size,
             dcp_rank,
@@ -737,7 +718,7 @@ def build_prefill_chunk_metadata(
     cu_seq_lens[:1] = 0
     compressed_seq_lens_chunk = compressed_seq_lens[start_idx:end_idx]
     if dcp_world_size > 1:
-        compressed_seq_lens_chunk = get_dcp_local_seq_lens(
+        compressed_seq_lens_chunk = get_cp_local_seq_lens(
             compressed_seq_lens_chunk,
             dcp_world_size,
             dcp_rank,
@@ -849,21 +830,12 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ke
         seq_len_per_token = (start_pos + 1 + offset) // COMPRESS_RATIO
         if DCP_WORLD_SIZE > 1:
-            seq_len_base = (
-                seq_len_per_token
-                // CP_KV_CACHE_INTERLEAVE_SIZE
-                // DCP_WORLD_SIZE
-                * CP_KV_CACHE_INTERLEAVE_SIZE
-            )
-            seq_len_remainder = seq_len_per_token - seq_len_base * DCP_WORLD_SIZE
-            seq_len_extra = tl.minimum(
-                tl.maximum(
-                    seq_len_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                    0,
-                ),
+            seq_len_per_token = cp_global_to_local_pos(
+                seq_len_per_token,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
                 CP_KV_CACHE_INTERLEAVE_SIZE,
             )
-            seq_len_per_token = seq_len_base + seq_len_extra
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,
