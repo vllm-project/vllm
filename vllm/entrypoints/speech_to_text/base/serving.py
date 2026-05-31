@@ -598,7 +598,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 )
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
-                start_time = chunk_start_offsets[idx]
+                start_time = int(chunk_start_offsets[idx])
                 if request.response_format == "verbose_json":
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
