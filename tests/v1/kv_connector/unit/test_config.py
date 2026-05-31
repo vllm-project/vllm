@@ -6,8 +6,31 @@
 import pytest
 
 from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
+
+
+class _StubLMCacheMPConnector:
+    """Stand-in for LMCacheMPConnector used in config-translation tests.
+
+    The real connector module hard-imports the optional ``lmcache`` package
+    at module load time, which is not installed in the cpu_test image. This
+    test only asserts on the connector *name* and the ``extra_config`` dict
+    produced by ``VllmConfig``, never instantiates the connector, so a bare
+    placeholder class is sufficient. Not subclassing ``SupportsHMA`` mirrors
+    the real connector's HMA support (it does not support HMA either)."""
+
+
+@pytest.fixture
+def stub_lmcache_mp_connector(monkeypatch):
+    """Replace the lazy loader so VllmConfig.__post_init__ does not import
+    ``lmcache_mp_connector`` (and thus ``lmcache``) during config tests."""
+    monkeypatch.setitem(
+        KVConnectorFactory._registry,
+        "LMCacheMPConnector",
+        lambda: _StubLMCacheMPConnector,
+    )
 
 
 @pytest.mark.parametrize(
@@ -26,7 +49,13 @@ pytestmark = pytest.mark.cpu_test
     ],
 )
 def test_kv_connector(
-    kv_offloading_backend, kv_offloading_size, tp, pp, expected_backend, expected_bytes
+    stub_lmcache_mp_connector,
+    kv_offloading_backend,
+    kv_offloading_size,
+    tp,
+    pp,
+    expected_backend,
+    expected_bytes,
 ):
     kv_transfer_config = (
         KVTransferConfig(kv_connector_extra_config={"existing_key": "existing_value"})
