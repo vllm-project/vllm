@@ -77,14 +77,23 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
             w_q, *_ = self._get_layer_params(layer)
-            # Weights are stored as (N, K) by all callers; Marlin needs (K, N).
-            # Always transpose unconditionally — a shape-based check is unsafe
-            # for square layers (N == K) where (N,K) and (K,N) are identical.
-            replace_parameter(
-                layer,
-                "weight",
-                w_q.t(),
-            )
+            # Weights arrive in one of two layouts depending on the caller:
+            #   (N, K) contiguous  -- callers that pass checkpoint layout
+            #                        directly (e.g. CompressedTensorsW8A16Fp8,
+            #                        Fp8LinearMethod use_marlin branch)
+            #   (K, N) non-contiguous -- callers that pre-transpose with .t()
+            #                           (e.g. ModelOptFp8LinearMethod)
+            # Shape-based comparison is unsafe for square layers (N == K)
+            # where (N, K) and (K, N) have identical shapes -- the old check
+            # silently skipped the transpose for square checkpoint weights.
+            # Contiguity is a reliable discriminator: .t() always returns a
+            # non-contiguous view; checkpoint-loaded weights are always
+            # contiguous.  Marlin needs (K, N) before prepare_fp8_layer_for_
+            # marlin is called.
+            if w_q.is_contiguous():
+                # (N, K) from checkpoint -- transpose to (K, N)
+                replace_parameter(layer, "weight", w_q.t())
+            # else: already (K, N) from caller's pre-transpose -- no-op
 
         layer.input_scale = None
         prepare_fp8_layer_for_marlin(
