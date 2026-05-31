@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionImplBase,
     AttentionLayer,
     AttentionMetadata,
@@ -32,7 +33,9 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.minimax_m3_sparse_ops import (
     minimax_m3_index_topk,
+    minimax_m3_index_topk_decode,
     minimax_m3_sparse_attn,
+    minimax_m3_sparse_attn_decode,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -155,10 +158,15 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
 
 @dataclass
 class MiniMaxM3SparsePrefillMetadata:
-    """Per-prefill state for index scoring + block-sparse attention."""
+    """Per-prefill state for index scoring + block-sparse attention.
 
-    query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
+    ``cu_seqlens_q``/``prefix_lens`` are precomputed in the builder so the
+    forward path stays free of host syncs and per-step tensor allocations.
+    """
+
+    cu_seqlens_q: torch.Tensor  # [num_prefills + 1] int32, rebased to 0
+    seq_lens: torch.Tensor  # [num_prefills] int32
+    prefix_lens: torch.Tensor  # [num_prefills] int32 (cached/context tokens)
     block_table: torch.Tensor
     max_query_len: int
     max_seq_len: int
@@ -166,13 +174,13 @@ class MiniMaxM3SparsePrefillMetadata:
 
 @dataclass
 class MiniMaxM3SparseDecodeMetadata:
-    """Per-decode state; top-k block indices are reused across decode steps."""
+    """Per-decode state; all kernel args precomputed (cudagraph-safe)."""
 
-    seq_lens: torch.Tensor
+    cu_seqlens_q: torch.Tensor  # [num_decodes + 1] int32
+    seq_lens: torch.Tensor  # [num_decodes] int32
+    prefix_lens: torch.Tensor  # [num_decodes] int32 (cached/context tokens)
     block_table: torch.Tensor
-    decode_lens: torch.Tensor
-    # Top-k block indices, reused across decode steps.
-    topk_block_indices: torch.Tensor | None = None
+    max_query_len: int
 
 
 @dataclass
@@ -182,6 +190,9 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
     seq_lens: torch.Tensor
     max_seq_len: int
     slot_mapping: torch.Tensor
+
+    # Total query tokens in the (decode-first) batch.
+    num_actual_tokens: int
 
     # Split counts (batch is reordered decode-first).
     num_decodes: int
@@ -201,6 +212,11 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
 
 
 class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
+    # Full cudagraphs for pure single-token decode batches; mixed/prefill
+    # batches fall back to piecewise/eager.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
     # Decode == a single query token; reorder pulls decodes to the front.
     reorder_batch_threshold: int = 1
 
@@ -220,6 +236,22 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         self.local_blocks: int = sparse_cfg.get("sparse_local_block", 0)
         self.score_type: str = sparse_cfg.get("sparse_score_type", "max")
 
+        # Persistent buffer for the derived decode prefix lengths, so full
+        # decode cudagraphs read from a stable address across replays.
+        compilation_config = vllm_config.compilation_config
+        self.use_full_cuda_graph = (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+        )
+        self.decode_cudagraph_max_bs = vllm_config.scheduler_config.max_num_seqs
+        if compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                compilation_config.max_cudagraph_capture_size,
+            )
+        self._decode_prefix_lens = torch.empty(
+            self.decode_cudagraph_max_bs, dtype=torch.int32, device=device
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -229,6 +261,7 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         block_table = common_attn_metadata.block_table_tensor
 
@@ -241,32 +274,56 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
+        # Cached/context tokens per request (seq_len - query_len), on device.
+        num_computed = common_attn_metadata.compute_num_computed_tokens()
+
         # Batch is reordered decode-first, then prefill.
         prefill_metadata: MiniMaxM3SparsePrefillMetadata | None = None
         if num_prefills > 0:
             prefill_metadata = MiniMaxM3SparsePrefillMetadata(
-                query_start_loc=query_start_loc[num_decodes:] - num_decode_tokens,
+                cu_seqlens_q=(query_start_loc[num_decodes:] - num_decode_tokens).to(
+                    torch.int32
+                ),
                 seq_lens=seq_lens[num_decodes:],
+                prefix_lens=num_computed[num_decodes:].to(torch.int32),
                 block_table=block_table[num_decodes:],
                 max_query_len=common_attn_metadata.max_query_len,
                 max_seq_len=common_attn_metadata.max_seq_len,
             )
-            # TODO: index top-k workspace / chunking prep for prefill scoring.
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
         if num_decodes > 0:
-            decode_lens = torch.diff(query_start_loc[: num_decodes + 1])
-            decode_metadata = MiniMaxM3SparseDecodeMetadata(
-                seq_lens=seq_lens[:num_decodes],
-                block_table=block_table[:num_decodes],
-                decode_lens=decode_lens,
+            # Decode query lengths from the CPU mirror (no device->host sync).
+            q_cpu = query_start_loc_cpu
+            decode_max_query_len = int(
+                (q_cpu[1 : num_decodes + 1] - q_cpu[:num_decodes]).max()
             )
-            # TODO: top-k schedule metadata / cached block-index buffer prep.
+            # cu_seqlens_q aliases the runner's persistent query_start_loc.
+            decode_prefix = num_computed[:num_decodes].to(torch.int32)
+            if (
+                self.use_full_cuda_graph
+                and num_prefills == 0
+                and num_decodes <= self.decode_cudagraph_max_bs
+            ):
+                # Persist derived prefix lens; the captured graph reads a
+                # stable buffer address across replays.
+                self._decode_prefix_lens[:num_decodes].copy_(
+                    decode_prefix, non_blocking=True
+                )
+                decode_prefix = self._decode_prefix_lens[:num_decodes]
+            decode_metadata = MiniMaxM3SparseDecodeMetadata(
+                cu_seqlens_q=query_start_loc[: num_decodes + 1],
+                seq_lens=seq_lens[:num_decodes],
+                prefix_lens=decode_prefix,
+                block_table=block_table[:num_decodes],
+                max_query_len=decode_max_query_len,
+            )
 
         return MiniMaxM3SparseMetadata(
             seq_lens=seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=common_attn_metadata.slot_mapping,
+            num_actual_tokens=num_decode_tokens + num_prefill_tokens,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
@@ -315,7 +372,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         self.num_index_heads: int | None = kwargs.get("num_index_heads")
         self.index_head_dim: int | None = kwargs.get("index_head_dim")
 
-    def _run_phase(
+    def _run_prefill(
         self,
         q: torch.Tensor,  # [tot, num_heads, head_dim]
         iq: torch.Tensor,  # [tot, num_idx_heads, head_dim]
@@ -359,6 +416,47 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
             out,
         )
 
+    def _run_decode(
+        self,
+        q: torch.Tensor,  # [batch, num_heads, head_dim]
+        iq: torch.Tensor,  # [batch, num_idx_heads, head_dim]
+        out: torch.Tensor,  # [batch, num_heads, head_dim]
+        cu_seqlens_q: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefix_lens: torch.Tensor,
+        main_block_table: torch.Tensor,
+        index_block_table: torch.Tensor,
+        max_seq_len: int,
+    ) -> None:
+        # Dedicated split-K decode kernels: parallelize over the KV dimension
+        # (one query token per request leaves the prefill kernels idle).
+        # 1. Index block-score (split-K over seq blocks) + top-k.
+        topk_idx = minimax_m3_index_topk_decode(
+            iq,
+            self._index_kv_cache,
+            index_block_table,
+            cu_seqlens_q,
+            seq_lens,
+            prefix_lens,
+            max_seq_len,
+            self.topk_blocks,
+            self.init_blocks,
+            self.local_blocks,
+            self.num_kv_heads,
+            self.scale,
+        )
+        # 2. GQA block-sparse attention (split-K over the selected blocks).
+        minimax_m3_sparse_attn_decode(
+            q,
+            self._kv_cache,
+            topk_idx,
+            main_block_table,
+            seq_lens,
+            self.num_kv_heads,
+            self.scale,
+            out,
+        )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -380,7 +478,7 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         assert isinstance(index_md, MiniMaxM3SparseMetadata)
 
         nd = main_md.num_decode_tokens
-        num_tokens = nd + main_md.num_prefill_tokens
+        num_tokens = main_md.num_actual_tokens
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         iq = index_query[:num_tokens].view(
@@ -392,42 +490,33 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         self._index_kv_cache = index_kv_cache
 
         # Decode slice [:nd]: each token is a 1-token "prefill" at seq_len-1.
+        # All kernel args are precomputed in the builder (cudagraph-safe).
         if main_md.num_decodes > 0:
             d, idx_d = main_md.decode, index_md.decode
             assert d is not None and idx_d is not None
-            decode_lens = d.decode_lens
-            cu = torch.zeros(
-                decode_lens.shape[0] + 1, dtype=torch.int32, device=q.device
-            )
-            torch.cumsum(decode_lens, dim=0, out=cu[1:])
-            prefix = (d.seq_lens - decode_lens).to(torch.int32)
-            max_q = int(decode_lens.max().item())
-            self._run_phase(
+            self._run_decode(
                 q[:nd],
                 iq[:nd],
                 out[:nd],
-                cu,
+                d.cu_seqlens_q,
                 d.seq_lens,
-                prefix,
+                d.prefix_lens,
                 d.block_table,
                 idx_d.block_table,
-                max_q,
                 main_md.max_seq_len,
             )
 
-        # Prefill slice [nd:]: query_start_loc already rebased to 0.
+        # Prefill slice [nd:]: cu_seqlens_q already rebased to 0.
         if main_md.num_prefills > 0:
             p, idx_p = main_md.prefill, index_md.prefill
             assert p is not None and idx_p is not None
-            q_lens = torch.diff(p.query_start_loc)
-            prefix = (p.seq_lens - q_lens).to(torch.int32)
-            self._run_phase(
+            self._run_prefill(
                 q[nd:],
                 iq[nd:],
                 out[nd:],
-                p.query_start_loc.to(torch.int32),
+                p.cu_seqlens_q,
                 p.seq_lens,
-                prefix,
+                p.prefix_lens,
                 p.block_table,
                 idx_p.block_table,
                 p.max_query_len,
