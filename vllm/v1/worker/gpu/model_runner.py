@@ -704,7 +704,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
-            outputs = self.pp_handler.get_prev_step_sampled_outputs()
+            outputs = self.pp_handler.get_prev_sampled_outputs()
             if outputs is not None:
                 self.postprocess_sampled(**outputs)
 
@@ -1191,17 +1191,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
             n = input_batch.num_tokens_after_padding
-            if dummy_run:
-                # PP + DP case.
-                tensors = {
-                    k: v[:n] for k, v in self.intermediate_tensors.tensors.items()
-                }
-            else:
-                tensors = {
-                    k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
-                    for k, v in self.intermediate_tensors.tensors.items()
-                }
-            model_inputs["intermediate_tensors"] = IntermediateTensors(tensors)
+            new_tensors = {
+                k: v[:n]
+                if dummy_run
+                else v[:n].copy_(intermediate_tensors.tensors[k][:n])
+                for k, v in self.intermediate_tensors.tensors.items()
+            }
+            model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
         # Run model.
@@ -1291,10 +1287,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if not all_decode_next:
                 # Might contain non-final prefill chunks, which will be scheduled
                 # in the immediate next step (rather than in pp_size steps).
-                # TODO(nick) this is just for mamba, see if we can simplify
-                self.model_state.postprocess_state(
-                    input_batch.idx_mapping, torch.zeros_like(input_batch.idx_mapping)
-                )
+                self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
             # Post-step KV connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)

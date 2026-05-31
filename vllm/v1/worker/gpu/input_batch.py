@@ -451,6 +451,9 @@ def _post_update_kernel(
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    if req_state_idx < 0:
+        # Filter rows with negative index entries.
+        return
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -492,7 +495,7 @@ def _post_update_kernel(
 
 
 def post_update(
-    # [num_reqs]
+    # [num_reqs] batch_idx -> req_state_idx; negative index means skip.
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
     num_computed_tokens: torch.Tensor,

@@ -24,6 +24,8 @@ class PendingRecv:
     num_rejected: torch.Tensor  # [num_reqs]
     idx_mapping: torch.Tensor  # [num_reqs]
     idx_mapping_np: np.ndarray  # [num_reqs]
+    # Records which rows need a deferred postprocess (bool).
+    need_sampled_mask: np.ndarray  # [num_reqs]
     # Snapshot of slot generation counters at receive time, used to
     # detect requests aborted since then.
     gen_at_receive_np: np.ndarray  # [num_reqs]
@@ -49,7 +51,7 @@ def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
 class PPHandler:
     """Runs the PP sampled-token broadcast/recv on a side stream so the
     default stream isn't gated by the matching peer call. Step T's recv is
-    consumed at step T+pp_size via `get_prev_step_sampled_outputs`.
+    consumed at step T+pp_size via `get_prev_sampled_outputs`.
 
     Uses a dedicated NCCL communicator (sibling of the PP `device_group`)
     for the broadcast so it does not serialize on the wire with the
@@ -87,7 +89,7 @@ class PPHandler:
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
 
-    def get_prev_step_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
+    def get_prev_sampled_outputs(self) -> dict[str, torch.Tensor] | None:
         """Consume the entry from pp_size steps ago and wait for its recv event,
         then filter out entries whose request was freed since `receive`.
         """
@@ -100,53 +102,38 @@ class PPHandler:
             return None
         self.main_stream.wait_event(slot.event)
 
-        # Skip indices whose request has been freed (and possibly reassigned)
-        # since this `PendingRecv` was created.
-        alive_mask = self.req_idx_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
-        if alive_mask.all():
-            return dict(
-                sampled_tokens=slot.sampled_tokens,
-                num_sampled=slot.num_sampled,
-                num_rejected=slot.num_rejected,
-                idx_mapping=slot.idx_mapping,
-            )
-        if not alive_mask.any():
-            return None
+        # Skip requests which did not need sampled output and/or those already
+        # finished. The post_update kernel skips the -1 entries.
+        freed = self.req_idx_gen_np[slot.idx_mapping_np] != slot.gen_at_receive_np
+        exclude_mask = freed | ~slot.need_sampled_mask
+        if exclude_mask.any():
+            if exclude_mask.all():
+                # No states require update anymore.
+                return None
+            # Filter excluded request indices.
+            idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
+            slot.idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
-        alive_indices_np = np.flatnonzero(alive_mask)
-        alive_indices = async_copy_to_gpu(alive_indices_np, device=self.device)
         return dict(
-            sampled_tokens=slot.sampled_tokens[alive_indices],
-            num_sampled=slot.num_sampled[alive_indices],
-            num_rejected=slot.num_rejected[alive_indices],
-            idx_mapping=slot.idx_mapping[alive_indices],
+            sampled_tokens=slot.sampled_tokens,
+            num_sampled=slot.num_sampled,
+            num_rejected=slot.num_rejected,
+            idx_mapping=slot.idx_mapping,
         )
 
     def receive(self, input_batch: InputBatch) -> bool:
+        """Returns True iff sampled tokens need to be gathered from *all*
+        requests in the batch."""
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:
             # Leave this step's reserved slot as None.
             return False
 
-        # All requests decode next iff every request in the batch needs its
-        # sampled output (i.e. no non-final prefill chunks or finishing reqs).
-        all_decode_next = bool(need_sampled_mask.all())
-        if all_decode_next:
-            idx_mapping = input_batch.idx_mapping
-            idx_mapping_np = input_batch.idx_mapping_np
-        else:
-            idx_mapping_np = input_batch.idx_mapping_np[need_sampled_mask]
-            idx_mapping = torch.from_numpy(idx_mapping_np).to(
-                self.device, non_blocking=True
-            )
+        # Snapshot the per-slot generation counter so a later free of any of
+        # these RequestStates request indices is detectable at consume time.
+        gen_at_receive_np = self.req_idx_gen_np[input_batch.idx_mapping_np]
 
-        # Snapshot the per-slot generation counter so a later free of any
-        # of these RequestStates request indices is detectable at consume time.
-        gen_at_receive_np = self.req_idx_gen_np[idx_mapping_np]
-
-        # The sender always broadcasts the full batch; receive into full-size
-        # buffers and slice down to the subset that needs a deferred postprocess.
         num_reqs = input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
@@ -160,11 +147,6 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
-            if not all_decode_next:
-                subset_np = np.flatnonzero(need_sampled_mask)
-                subset = async_copy_to_gpu(subset_np, device=self.device)
-                sampled_tokens = sampled_tokens[subset]
-                combined = combined[:, subset]
             num_sampled, num_rejected = combined.unbind(dim=0)
             # Must record_stream since these were allocated on broadcast stream but
             # later used on the main stream.
@@ -176,11 +158,12 @@ class PPHandler:
             sampled_tokens,
             num_sampled,
             num_rejected,
-            idx_mapping,
-            idx_mapping_np,
+            input_batch.idx_mapping,
+            input_batch.idx_mapping_np,
+            need_sampled_mask,
             gen_at_receive_np,
         )
-        return all_decode_next
+        return bool(need_sampled_mask.all())
 
     def broadcast(
         self,
