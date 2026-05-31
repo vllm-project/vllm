@@ -455,8 +455,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        self.kv_block_zeroer = KVBlockZeroer(self.device, is_pin_memory_available())
-        self.kv_block_zeroer.init_meta(
+        self.kv_block_zeroer = KVBlockZeroer(
+            self.device,
+            is_pin_memory_available(),
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,

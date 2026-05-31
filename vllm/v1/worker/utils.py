@@ -80,30 +80,23 @@ def _zero_kv_blocks_kernel(
 class KVBlockZeroer:
     """Manages efficient zeroing of KV cache blocks via a Triton kernel.
 
-    Call :meth:`init_meta` once after KV caches are allocated to precompute
-    segment addresses, then call :meth:`zero_block_ids` each step to zero
+    Construct once after KV caches are allocated to precompute segment
+    addresses, then call :meth:`zero_block_ids` each step to zero
     newly-allocated blocks.
     """
 
-    def __init__(self, device: torch.device, pin_memory: bool):
-        self.device = device
-        self.pin_memory = pin_memory
-        self._meta: tuple[torch.Tensor, int, int, int] | None = None
-        self._id_cap: int = 0
-        self._ids_pinned: torch.Tensor | None = None
-        self._ids_gpu: torch.Tensor | None = None
-
-    def init_meta(
+    def __init__(
         self,
+        device: torch.device,
+        pin_memory: bool,
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         cache_dtype: str,
         static_forward_context: dict[str, Any],
         runner_only_attn_layers: set[str] | None = None,
     ) -> None:
-        """One-time precomputation for zero_block_ids.
+        """Precompute the absolute-address table for the Triton zeroing kernel.
 
-        Builds absolute-address table for the Triton zeroing kernel.
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
@@ -114,6 +107,13 @@ class KVBlockZeroer:
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
+        self.device = device
+        self.pin_memory = pin_memory
+        self._meta: tuple[torch.Tensor, int, int, int] | None = None
+        self._id_cap: int = 0
+        self._ids_pinned: torch.Tensor | None = None
+        self._ids_gpu: torch.Tensor | None = None
+
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
