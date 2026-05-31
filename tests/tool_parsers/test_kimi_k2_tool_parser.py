@@ -9,6 +9,7 @@ import pytest
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
+    run_tool_extraction_nonstreaming,
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -174,6 +175,37 @@ class TestExtractToolCalls:
         content, tool_calls = run_tool_extraction(parser, model_output, streaming=False)
         assert len(tool_calls) == 1
         assert tool_calls[0].function.name == "valid"
+
+    def test_tool_call_token_in_arg_value_surfaces_raw_output(self, parser):
+        """Regression: a section that parses no calls surfaces raw output.
+
+        The non-streaming regex bounds an argument value with a tempered
+        lookahead ``(?!<|tool_call_begin|>)``. If the argument *value* contains
+        the literal ``<|tool_call_begin|>`` text, the lookahead trips and
+        ``findall`` returns zero matches even though the section marker is
+        present. The section starts at index 0, so the sliced content is empty.
+        The parser must return ``tools_called=False`` with the raw output as
+        content rather than an empty assistant message (tools_called=True with
+        no calls and content=None).
+        """
+        model_output = _wrap(
+            _tool("functions.run_code:0", '{"code": "print(\'<|tool_call_begin|>\')"}')
+        )
+        extracted = run_tool_extraction_nonstreaming(parser, model_output)
+        assert extracted.tools_called is False
+        assert extracted.tool_calls == []
+        assert extracted.content == model_output
+
+    def test_well_formed_call_still_parses(self, parser):
+        """Guard: the raw-output fallback must not over-fire on valid calls."""
+        model_output = "Sure. " + _wrap(
+            _tool("functions.get_weather:0", '{"city": "Beijing"}')
+        )
+        extracted = run_tool_extraction_nonstreaming(parser, model_output)
+        assert extracted.tools_called is True
+        assert len(extracted.tool_calls) == 1
+        assert extracted.tool_calls[0].function.name == "get_weather"
+        assert extracted.content == "Sure. "
 
     def test_native_id_extracted(self, parser):
         """Regression: parser extracts native ID onto ToolCall (PR #32768)."""
