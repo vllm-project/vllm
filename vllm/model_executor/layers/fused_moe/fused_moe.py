@@ -1218,6 +1218,7 @@ def get_moe_wna16_block_config(
                 "BLOCK_SIZE_K": 32,
                 "num_warps": 4,
                 "num_stages": 2,
+                "waves_per_eu": 3,
             }
 
     if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
