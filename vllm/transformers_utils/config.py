@@ -431,8 +431,11 @@ def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
         if "rope_type" not in rope_parameters and "type" in rope_parameters:
             rope_parameters["rope_type"] = rope_parameters["type"]
             logger.info("Replacing legacy 'type' key with 'rope_type'")
-        # Case 3: No rope_type field present - nothing to patch
+        # Case 3: No rope_type field present - default to standard RoPE.
+        # Models that set rope_parameters without rope_type (e.g. only
+        # rope_theta) should behave identically to rope_type="default".
         if "rope_type" not in rope_parameters:
+            rope_parameters["rope_type"] = "default"
             return
         # Patch legacy rope_type values with warning
         if rope_parameters["rope_type"] == "su":
