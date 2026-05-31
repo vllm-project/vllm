@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-EAGLE3 Acceptance Length Regression Tests.
+EAGLE3 and MTP Acceptance Length Regression Tests.
 
-These tests verify that acceptance lengths for EAGLE3 speculative decoding
-do not regress across vLLM commits. Each test runs inference on the MT-Bench
-dataset and asserts that the mean acceptance length is within tolerance of
-the expected baseline.
+These tests verify that acceptance lengths for EAGLE3 and MTP speculative
+decoding do not regress across vLLM commits. Each test runs inference on
+the MT-Bench dataset and asserts that the mean acceptance length is within
+tolerance of the expected baseline.
+
+MTP coverage added to guard against regressions of the class demonstrated
+by vllm#33771 (MTP acceptance fix revert).
 """
 
 from dataclasses import dataclass, field
@@ -167,6 +170,7 @@ def get_mt_bench_prompts(
         disable_shuffle=False,
         skip_chat_template=False,
         trust_remote_code=False,
+        enable_multimodal_chat=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [
@@ -312,3 +316,118 @@ def test_eagle3_acceptance_length(
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:
                 print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
+
+
+# ============================================================
+# MTP Acceptance Length Regression Tests
+# ============================================================
+
+
+@dataclass
+class MtpModelConfig:
+    """Configuration for an MTP acceptance-length regression test."""
+
+    model: str
+    num_speculative_tokens: int
+    expected_acceptance_length: float
+    id: str = ""
+    tp_size: int = 1
+    extra_kwargs: dict = field(default_factory=dict)
+    marks: list = field(default_factory=list)
+    rtol: float = 0.10
+
+
+# Baselines measured with:
+#   examples/offline_inference/spec_decode.py --method mtp
+#   --num_spec_tokens 1 --num-prompts 80 --temp 0
+#   --dataset-name hf --dataset-path philschmid/mt-bench
+#   --tp 4 --max-model-len 16384 --quantization fp8
+#   on 4x GB200 (189 GB each)
+#
+# NOTE: expected_acceptance_length must be updated after the first real run.
+MTP_MODEL_CONFIGS = [
+    MtpModelConfig(
+        model="deepseek-ai/DeepSeek-V3",
+        num_speculative_tokens=1,
+        expected_acceptance_length=1.60,  # placeholder — calibrate after first run
+        id="deepseek-v3-mtp-fp8-tp4",
+        tp_size=4,
+        extra_kwargs={"quantization": "fp8"},
+        marks=[pytest.mark.slow_test],
+        rtol=0.10,
+    ),
+]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
+)
+@large_gpu_mark(min_gb=150)
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in MTP_MODEL_CONFIGS
+    ],
+)
+def test_mtp_acceptance_length(
+    model_config: MtpModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
+    if num_gpus < model_config.tp_size:
+        pytest.skip(f"Need {model_config.tp_size} GPUs, only {num_gpus} available")
+
+    num_spec_tokens = model_config.num_speculative_tokens
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+        with VllmRunner(
+            model_name=model_config.model,
+            speculative_config={
+                "method": "mtp",
+                "num_speculative_tokens": num_spec_tokens,
+            },
+            tensor_parallel_size=model_config.tp_size,
+            gpu_memory_utilization=0.7,
+            disable_log_stats=False,
+            max_model_len=DEFAULT_MAX_MODEL_LEN,
+            trust_remote_code=True,
+            **model_config.extra_kwargs,
+        ) as vllm_runner:
+            tokenizer = vllm_runner.llm.get_tokenizer()
+            prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
+
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=DEFAULT_OUTPUT_LEN,
+            )
+            vllm_runner.llm.generate(
+                [TokensPrompt(prompt_token_ids=ids) for ids in prompt_ids],
+                sampling_params=sampling_params,
+            )
+
+            metrics = vllm_runner.llm.get_metrics()
+            results = extract_acceptance_metrics(metrics, num_spec_tokens)
+
+            actual = results["acceptance_length"]
+            expected = model_config.expected_acceptance_length
+            rel_error = abs(actual - expected) / expected
+
+            assert rel_error <= model_config.rtol, (
+                f"MTP acceptance length regression for {model_config.id}!\n"
+                f"  Expected: {expected:.3f}\n"
+                f"  Actual:   {actual:.3f}\n"
+                f"  Relative error: {rel_error:.2%} "
+                f"(tolerance: {model_config.rtol:.2%})\n"
+                f"  Drafts: {results['num_drafts']}, "
+                f"Accepted tokens: {results['num_accepted_tokens']}"
+            )
+
+            print(
+                f"\n{model_config.id} [tp={model_config.tp_size}]: "
+                f"acceptance_length={actual:.3f}"
+                f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
+            )

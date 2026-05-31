@@ -111,3 +111,17 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "qwen3_5-hybrid"
+
+- label: MTP Acceptance Length - DeepSeek-V3 FP8 (4xB200)
+  key: mtp-acceptance-length-deepseek-v3-b200
+  timeout_in_minutes: 120
+  device: b200
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/model_executor/models/deepseek_mtp.py
+    - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -k mtp_acceptance_length
