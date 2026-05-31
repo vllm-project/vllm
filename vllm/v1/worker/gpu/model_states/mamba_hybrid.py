@@ -41,6 +41,10 @@ _SSM_SRC_DBG = bool(os.environ.get("VLLM_MAMBA_DBG"))
 # the new block), so keep-copy and drop-copy MUST produce identical results.
 # Any divergence pinpoints a bug in the src computation/threading.
 _SSM_KEEP_PRECOPY = bool(os.environ.get("VLLM_MAMBA_KEEP_SSM_PRECOPY"))
+# When set, KEEP the conv PRE-copy on pure-decode steps too (diagnostic; the
+# decode conv kernel reads src so the copy is redundant — keep == drop must give
+# identical results).
+_CONV_KEEP_PRECOPY = bool(os.environ.get("VLLM_MAMBA_KEEP_CONV_PRECOPY"))
 _DBG_STEP = [0]
 
 
@@ -399,6 +403,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     # initial state from the previous running block (src), eliminating the SSM
     # temporal pre-copy.
     align_src_state_indices: torch.Tensor | None = None
+    # Per-request CONV src COLUMN (= state_idx, pre-advance; -1 == fresh) and the
+    # pre-reset intra-block token offset (num_accepted-1). gdn_attn resolves the
+    # column against the full block table so the conv kernel reads its init conv
+    # window from the previous running block at that offset (copy-free conv).
+    align_conv_src_state_indices: torch.Tensor | None = None
+    align_conv_src_offset: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -427,6 +437,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "align_src_state_indices": None
             if self.align_src_state_indices is None
             else self.align_src_state_indices[:num_reqs],
+            "align_conv_src_state_indices": None
+            if self.align_conv_src_state_indices is None
+            else self.align_conv_src_state_indices[:num_reqs],
+            "align_conv_src_offset": None
+            if self.align_conv_src_offset is None
+            else self.align_conv_src_offset[:num_reqs],
         }
 
 
@@ -492,6 +508,16 @@ class MambaCacheAlignInfo:
         # replacing the SSM (temporal) pre-copy.
         self.src_ssm_col_gpu = torch.full(
             (max_num_reqs,), -1, dtype=torch.int32, device=device
+        )
+        # CONV src: column = state_idx_gpu (pre-advance; conv lives on the MAIN
+        # block, no +num_accepted-1 unlike SSM) and offset = num_accepted-1
+        # (pre-reset). Captured alongside src_ssm_col so the conv kernel can read
+        # its init conv window from the previous running block at that offset.
+        self.conv_src_col_gpu = torch.full(
+            (max_num_reqs,), -1, dtype=torch.int32, device=device
+        )
+        self.conv_src_off_gpu = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
         )
         self.current_step_block_tables: tuple[torch.Tensor, ...] | None = None
         self.current_step_kv_cache_config: KVCacheConfig | None = None
@@ -749,39 +775,53 @@ class MambaHybridModelState(DefaultModelState):
                 mamba_spec,
                 postprocess=postprocess,
             )
-        self._copy_mamba_conv_sd_batched(
-            input_batch,
-            num_computed_tokens,
-            mamba_spec,
-            postprocess=postprocess,
-        )
 
-        for state, block_table in info.conv_dim_first_info:
-            dim = state.shape[1]
-            state_len = state.shape[2]
-            block_dim = 128
-            block_state_len = 1 << (state_len - 1).bit_length()
-            grid = (num_reqs, triton.cdiv(dim, block_dim))
-            _copy_mamba_conv_state_kernel[grid](
-                state,
-                input_batch.idx_mapping,
-                block_table,
-                info.state_idx_gpu,
+        # CONV PRE-copy: skip on PURE-DECODE steps — the decode conv kernel reads
+        # its init from the src block (src_conv_*), so no copy is needed. Keep it
+        # whenever any req is prefilling (the prefill conv path still reads the
+        # window block, not src) and always for POST (aligned-save). In a mixed
+        # prefill+decode step the decode reqs are copied redundantly (harmless:
+        # their kernel reads src). This drops the conv copy from the latency-
+        # critical pure-decode path.
+        run_conv_pre = (
+            postprocess
+            or _CONV_KEEP_PRECOPY
+            or bool(input_batch.is_prefilling_np[:num_reqs].any())
+        )
+        if run_conv_pre:
+            self._copy_mamba_conv_sd_batched(
+                input_batch,
                 num_computed_tokens,
-                input_batch.query_start_loc,
-                self.num_accepted_tokens_gpu,
-                num_reqs,
-                block_table.stride(0),
-                state.stride(0),
-                state.stride(1),
-                state.stride(2),
-                dim,
-                state_len,
-                mamba_spec.block_size,
-                postprocess,
-                BLOCK_STATE_LEN=block_state_len,
-                BLOCK_DIM=block_dim,
+                mamba_spec,
+                postprocess=postprocess,
             )
+
+            for state, block_table in info.conv_dim_first_info:
+                dim = state.shape[1]
+                state_len = state.shape[2]
+                block_dim = 128
+                block_state_len = 1 << (state_len - 1).bit_length()
+                grid = (num_reqs, triton.cdiv(dim, block_dim))
+                _copy_mamba_conv_state_kernel[grid](
+                    state,
+                    input_batch.idx_mapping,
+                    block_table,
+                    info.state_idx_gpu,
+                    num_computed_tokens,
+                    input_batch.query_start_loc,
+                    self.num_accepted_tokens_gpu,
+                    num_reqs,
+                    block_table.stride(0),
+                    state.stride(0),
+                    state.stride(1),
+                    state.stride(2),
+                    dim,
+                    state_len,
+                    mamba_spec.block_size,
+                    postprocess,
+                    BLOCK_STATE_LEN=block_state_len,
+                    BLOCK_DIM=block_dim,
+                )
 
     def _reset_preprocess_accepted_tokens(
         self,
@@ -858,6 +898,11 @@ class MambaHybridModelState(DefaultModelState):
             torch.full_like(state_col, -1),
         )
         info.src_ssm_col_gpu.copy_(src_col)
+        # CONV src: column = state_idx (MAIN block; conv state lives only there,
+        # so NO +num_accepted-1 unlike SSM) carrying the -1 fresh sentinel; the
+        # read uses a pre-reset intra-block token offset (num_accepted-1).
+        info.conv_src_col_gpu.copy_(state_col)
+        info.conv_src_off_gpu.copy_(torch.clamp(num_accepted - 1, min=0))
 
         if _SSM_SRC_DBG:
             _DBG_STEP[0] += 1
@@ -1007,18 +1052,28 @@ class MambaHybridModelState(DefaultModelState):
         # threading as num_accepted_tokens). gdn_attn resolves them against the
         # full block table. Padding rows stay -1 (== fresh / NULL → kernel skip).
         align_src_state_indices = None
+        align_conv_src_state_indices = None
+        align_conv_src_offset = None
         if not for_capture and self.cache_config.mamba_cache_mode == "align":
             info = self.mamba_cache_align_info
+            idx = input_batch.idx_mapping
+            n = input_batch.num_reqs
             align_src_state_indices = info.src_ssm_col_gpu.new_full((num_reqs,), -1)
-            align_src_state_indices[: input_batch.num_reqs] = info.src_ssm_col_gpu[
-                input_batch.idx_mapping
-            ]
+            align_src_state_indices[:n] = info.src_ssm_col_gpu[idx]
+            align_conv_src_state_indices = info.conv_src_col_gpu.new_full(
+                (num_reqs,), -1
+            )
+            align_conv_src_state_indices[:n] = info.conv_src_col_gpu[idx]
+            align_conv_src_offset = info.conv_src_off_gpu.new_zeros(num_reqs)
+            align_conv_src_offset[:n] = info.conv_src_off_gpu[idx]
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
             align_src_state_indices=align_src_state_indices,
+            align_conv_src_state_indices=align_conv_src_state_indices,
+            align_conv_src_offset=align_conv_src_offset,
         )
         return build_attn_metadata(
             attn_groups=attn_groups,

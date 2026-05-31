@@ -1312,6 +1312,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # replacing the SSM temporal pre-copy.
         spec_src_state_indices = attn_metadata.spec_src_state_indices
         non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
+        # Read-side CONV src (prev running block) + pre-reset intra-block offset.
+        spec_conv_src_state_indices = attn_metadata.spec_conv_src_state_indices
+        non_spec_conv_src_state_indices = attn_metadata.non_spec_conv_src_state_indices
+        spec_conv_src_offset = attn_metadata.spec_conv_src_offset
+        non_spec_conv_src_offset = attn_metadata.non_spec_conv_src_offset
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1358,6 +1363,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
                 ],
                 num_accepted_tokens=num_accepted_tokens,
+                src_conv_state_indices=(
+                    spec_conv_src_state_indices[: attn_metadata.num_spec_decodes]
+                    if spec_conv_src_state_indices is not None
+                    else None
+                ),
+                src_conv_token_offset=(
+                    spec_conv_src_offset[: attn_metadata.num_spec_decodes]
+                    if spec_conv_src_offset is not None
+                    else None
+                ),
                 query_start_loc=spec_query_start_loc,
                 max_query_len=spec_state_indices_tensor.size(-1),
                 validate_data=False,
@@ -1391,6 +1406,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
                     : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
                 ],
+                src_conv_state_indices=(
+                    non_spec_conv_src_state_indices[: attn_metadata.num_actual_tokens]
+                    if non_spec_conv_src_state_indices is not None
+                    else None
+                ),
+                src_conv_token_offset=(
+                    non_spec_conv_src_offset[: attn_metadata.num_actual_tokens]
+                    if non_spec_conv_src_offset is not None
+                    else None
+                ),
                 validate_data=True,
             )
         else:

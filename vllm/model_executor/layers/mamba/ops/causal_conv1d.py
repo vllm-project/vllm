@@ -759,6 +759,8 @@ def _causal_conv1d_update_kernel(
     query_start_loc_ptr,  # (batch + 1)
     block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
+    src_conv_state_indices_ptr,  # (batch,) phys block id to READ init conv from
+    src_conv_token_offset_ptr,  # (batch,) intra-block token offset for the read
     o_ptr,  # (batch, dim, seqlen)
     # Matrix dimensions
     batch: int,
@@ -788,6 +790,7 @@ def _causal_conv1d_update_kernel(
     IS_VARLEN: tl.constexpr,
     IS_APC_ENABLED: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    HAS_SRC_CONV: tl.constexpr,
     NP2_STATELEN: tl.constexpr,
     HAS_NULL_BLOCK: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -809,9 +812,19 @@ def _causal_conv1d_update_kernel(
         current_last_index = 0
 
     # cache_idx
-    conv_states_input_coord = tl.load(
-        conv_state_indices_ptr + idx_seq * stride_state_indices + conv_state_init
-    ).to(tl.int64)
+    if HAS_SRC_CONV:
+        # Mamba "align" copy-free pre: read the initial conv state directly from
+        # the per-seq src physical block (the previous running block) instead of
+        # a window column. The write side (current_last_index) is unchanged, so
+        # the forward reads src and writes the new running block in one pass,
+        # eliminating the conv pre-copy.
+        conv_states_input_coord = tl.load(src_conv_state_indices_ptr + idx_seq).to(
+            tl.int64
+        )
+    else:
+        conv_states_input_coord = tl.load(
+            conv_state_indices_ptr + idx_seq * stride_state_indices + conv_state_init
+        ).to(tl.int64)
 
     if HAS_NULL_BLOCK:  # noqa
         if conv_states_input_coord == null_block_id:
@@ -849,11 +862,24 @@ def _causal_conv1d_update_kernel(
         # - accept 1 tokens: [history2, ..., historyM, draft1]
         # - accept 2 tokens: [history3, ..., historyM, draft1, draft2]
         # - and so on.
-        conv_state_token_offset = (
-            tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
-        )
+        if HAS_SRC_CONV:
+            # Pre-reset offset (captured before the per-step num_accepted reset)
+            # so the src read starts at the correct sliding-window position even
+            # on a block-boundary migration (where num_accepted was reset to 1).
+            conv_state_token_offset = tl.load(
+                src_conv_token_offset_ptr + idx_seq
+            ).to(tl.int64)
+        else:
+            conv_state_token_offset = (
+                tl.load(num_accepted_tokens_ptr + idx_seq).to(tl.int64) - 1
+            )
     else:
-        conv_state_token_offset = 0
+        if HAS_SRC_CONV:
+            conv_state_token_offset = tl.load(
+                src_conv_token_offset_ptr + idx_seq
+            ).to(tl.int64)
+        else:
+            conv_state_token_offset = 0
 
     # STEP 1: READ init_state data
     conv_states_base = (
@@ -1081,6 +1107,8 @@ def causal_conv1d_update(
     null_block_id: int = NULL_BLOCK_ID,
     block_idx_last_scheduled_token: torch.Tensor | None = None,
     initial_state_idx: torch.Tensor | None = None,
+    src_conv_state_indices: torch.Tensor | None = None,
+    src_conv_token_offset: torch.Tensor | None = None,
     validate_data=False,
 ):
     """
@@ -1203,6 +1231,8 @@ def causal_conv1d_update(
         query_start_loc,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        src_conv_state_indices,
+        src_conv_token_offset,
         out,
         # Matrix dimensions
         batch,
@@ -1232,6 +1262,7 @@ def causal_conv1d_update(
         IS_VARLEN=query_start_loc is not None,
         IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
+        HAS_SRC_CONV=src_conv_state_indices is not None,
         NP2_STATELEN=np2_statelen,
         HAS_NULL_BLOCK=null_block_id is not None,
         BLOCK_N=256,
