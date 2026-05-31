@@ -145,10 +145,10 @@ def _maybe_force_spawn():
     if "--numa-bind" in sys.argv:
         reasons.append("NUMA binding requires spawn method")
 
-    if cuda_is_initialized():
-        reasons.append("CUDA is initialized")
-    elif xpu_is_initialized():
-        reasons.append("XPU is initialized")
+    if cuda_is_initialized() or current_platform.is_cuda_alike():
+        reasons.append("CUDA platform detected or CUDA is initialized")
+    elif xpu_is_initialized() or current_platform.is_xpu():
+        reasons.append("XPU platform detected or XPU is initialized")
 
     if in_wsl():
         reasons.append("WSL is detected and NVML is not compatible with fork")

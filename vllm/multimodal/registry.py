@@ -245,7 +245,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
 
         if processor is None:
-            processor = self.create_processor(model_config, cache=cache)
+            processor = self.create_processor(model_config, cache=None)
 
         mm_config = model_config.get_multimodal_config()
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(

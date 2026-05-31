@@ -197,12 +197,15 @@ class CachedHfTokenizer(TokenizerLike):
                 )
                 raise RuntimeError(err_msg) from e
             elif "convert a slow tokenizer to a fast one" in str(e):
-                # Dynamic fallback for upstream transformers v5 slow-to-fast BPE converter bugs
-                # (e.g. AttributeError: 'Qwen2Tokenizer' object has no attribute 'encoder')
+                # Dynamic fallback for upstream transformers v5
+                # slow-to-fast BPE converter bugs (e.g. AttributeError:
+                # 'Qwen2Tokenizer' object has no attribute 'encoder')
                 try:
-                    from transformers.models.auto.tokenization_auto import get_tokenizer_config
                     import transformers
-                    
+                    from transformers.models.auto.tokenization_auto import (
+                        get_tokenizer_config,
+                    )
+
                     config = get_tokenizer_config(
                         path_or_repo_id,
                         revision=revision,
@@ -227,7 +230,7 @@ class CachedHfTokenizer(TokenizerLike):
                     else:
                         raise e
                 except Exception:
-                    raise e
+                    raise e from None
             else:
                 raise e
 
