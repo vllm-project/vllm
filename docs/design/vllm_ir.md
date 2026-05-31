@@ -49,9 +49,9 @@ def rms_norm(x: Tensor, weight: Tensor | None, epsilon: float, variance_size: in
     x_var = x if variance_size is None else x[..., :variance_size]
     variance = x_var.pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + epsilon)
-    x = x.to(orig_dtype)
     if weight is not None:
-        x = x * weight
+        x = x * weight.to(torch.float32)
+    x = x.to(orig_dtype)
     return x
 ```
 

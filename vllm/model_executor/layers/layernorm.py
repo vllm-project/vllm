@@ -133,9 +133,7 @@ class RMSNorm(CustomOp):
 class GemmaRMSNorm(CustomOp):
     """RMS normalization for Gemma.
 
-    Two differences from the above RMSNorm:
-        1. x * (1 + w) instead of x * w.
-        2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
+    One difference from the above RMSNorm: x * (1 + w) instead of x * w.
     """
 
     # --8<-- [end:gemma_rms_norm]
