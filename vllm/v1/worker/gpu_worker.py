@@ -212,6 +212,9 @@ class Worker(WorkerBase):
         ):
             return nullcontext()
 
+        if current_platform.is_cpu():
+            return nullcontext()
+
         allocator = get_mem_allocator_instance()
         if tag == "weights":
             assert allocator.get_current_usage() == 0, (
