@@ -1306,6 +1306,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        # Read-side SSM block ids for mamba "align" cache mode (None otherwise).
+        # When set, the SSM recurrent kernels read their initial state from these
+        # blocks (the previous running block) instead of the write-side window,
+        # replacing the SSM temporal pre-copy.
+        spec_src_state_indices = attn_metadata.spec_src_state_indices
+        non_spec_src_state_indices = attn_metadata.non_spec_src_state_indices
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
@@ -1453,6 +1459,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ],
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
+                    src_ssm_state_indices=(
+                        spec_src_state_indices[: attn_metadata.num_spec_decodes]
+                        if spec_src_state_indices is not None
+                        else None
+                    ),
                     use_qk_l2norm_in_kernel=True,
                 )
             )
@@ -1462,7 +1473,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
             assert non_spec_state_indices_tensor is not None
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
+            # With the SSM temporal pre-copy removed, the running state has not
+            # been migrated into the (new) running block yet, so read the
+            # initial state from the src block (previous running block). Falls
+            # back to the window block when src is unavailable (non-align mode
+            # or cudagraph capture). The write-back below still targets the
+            # window block (non_spec_state_indices_tensor).
+            prefill_init_indices = (
+                non_spec_src_state_indices
+                if non_spec_src_state_indices is not None
+                else non_spec_state_indices_tensor
+            )
+            initial_state = ssm_state[prefill_init_indices].contiguous()  # type: ignore[index]
             assert has_initial_state is not None
             initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
             (
@@ -1502,6 +1524,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         + 1  # type: ignore[attr-defined]
                     ],
                     ssm_state_indices=non_spec_state_indices_tensor,
+                    src_ssm_state_indices=(
+                        non_spec_src_state_indices[: attn_metadata.num_decodes]
+                        if non_spec_src_state_indices is not None
+                        else None
+                    ),
                     use_qk_l2norm_in_kernel=True,
                 )
             )

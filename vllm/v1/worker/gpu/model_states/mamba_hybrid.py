@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +27,21 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import AttentionGroup
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+# === Mamba "align" SSM src/dst (copy-free pre) diagnostics & toggles ===
+# When set, log per-step SSM src column / resolved info (single-request debug).
+_SSM_SRC_DBG = bool(os.environ.get("VLLM_MAMBA_DBG"))
+# When set, KEEP the SSM temporal pre-copy in addition to the src redirect.
+# This is a diagnostic: with the src redirect wired, the pre-copy is redundant
+# (src reads the old running block, which the copy would have duplicated into
+# the new block), so keep-copy and drop-copy MUST produce identical results.
+# Any divergence pinpoints a bug in the src computation/threading.
+_SSM_KEEP_PRECOPY = bool(os.environ.get("VLLM_MAMBA_KEEP_SSM_PRECOPY"))
+_DBG_STEP = [0]
 
 
 @triton.jit
@@ -377,6 +393,12 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # Per-request SSM src COLUMN (batch order; -1 == fresh) into the mamba block
+    # table, captured at preprocess before the per-step advance. gdn_attn
+    # resolves it against the full block table so the SSM kernel reads its
+    # initial state from the previous running block (src), eliminating the SSM
+    # temporal pre-copy.
+    align_src_state_indices: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -402,6 +424,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "num_decode_draft_tokens_cpu": None
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
+            "align_src_state_indices": None
+            if self.align_src_state_indices is None
+            else self.align_src_state_indices[:num_reqs],
         }
 
 
@@ -456,6 +481,18 @@ class MambaCacheBatchedCopyInfo:
 class MambaCacheAlignInfo:
     def __init__(self, max_num_reqs: int, device: torch.device) -> None:
         self.state_idx_gpu = torch.empty(max_num_reqs, dtype=torch.int32, device=device)
+        # Per-request COLUMN into the mamba block table (indexed by request
+        # slot; value -1 == fresh / no source) identifying the block that holds
+        # the request's CURRENT running SSM state to continue from. Captured at
+        # preprocess time BEFORE the per-step state-index advance / num_accepted
+        # reset, as exactly OLD's PRE temporal src lookup:
+        #     src_col = state_idx_gpu + (num_accepted_tokens - 1)
+        # gdn_attn resolves this column against the FULL block table so the SSM
+        # kernel reads its initial state from that block (src) directly,
+        # replacing the SSM (temporal) pre-copy.
+        self.src_ssm_col_gpu = torch.full(
+            (max_num_reqs,), -1, dtype=torch.int32, device=device
+        )
         self.current_step_block_tables: tuple[torch.Tensor, ...] | None = None
         self.current_step_kv_cache_config: KVCacheConfig | None = None
         self.group_kv_cache_config: KVCacheConfig | None = None
@@ -699,12 +736,19 @@ class MambaHybridModelState(DefaultModelState):
         info = self.mamba_cache_align_info
         num_reqs = input_batch.num_reqs
 
-        self._copy_mamba_temporal_batched(
-            input_batch,
-            num_computed_tokens,
-            mamba_spec,
-            postprocess=postprocess,
-        )
+        # SSM temporal PRE-copy is eliminated: the SSM kernel reads its initial
+        # state directly from the src block (`src_ssm_col_gpu`, resolved in
+        # gdn_attn), so the running state is migrated old->new inside the forward
+        # rather than by a separate copy pass. The temporal POST-copy
+        # (aligned-save of the boundary checkpoint) is retained. Conv pre/post
+        # copies are unchanged (conv simplification is a later step).
+        if postprocess or _SSM_KEEP_PRECOPY:
+            self._copy_mamba_temporal_batched(
+                input_batch,
+                num_computed_tokens,
+                mamba_spec,
+                postprocess=postprocess,
+            )
         self._copy_mamba_conv_sd_batched(
             input_batch,
             num_computed_tokens,
@@ -780,6 +824,69 @@ class MambaHybridModelState(DefaultModelState):
             MAMBA_BLOCK_SIZE=mamba_spec.block_size,
         )
 
+    def _compute_src_ssm_col(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        mamba_group_ids: list[int],
+    ) -> None:
+        """Capture each request's SSM src COLUMN into the mamba block table,
+        evaluated BEFORE the per-step state-index advance / num_accepted reset.
+
+        This is exactly OLD's PRE temporal source lookup
+        (``_get_mamba_batched_copy_indices``, POSTPROCESS=False, TEMPORAL=True):
+
+            src_col = state_idx_gpu[req] + (num_accepted_tokens[req] - 1)
+
+        Stored per request slot in ``src_ssm_col_gpu`` (so ``prepare_attn`` can
+        gather it into batch order). gdn_attn resolves the column to a physical
+        block id against the FULL block table, because on a block-boundary
+        crossing the old running block lies OUTSIDE the forward window. -1 marks
+        "no source / fresh" (kernel starts from a zero state).
+        """
+        info = self.mamba_cache_align_info
+        num_reqs = input_batch.num_reqs
+        if num_reqs == 0:
+            return
+        # Both buffers are request-slot indexed; pre-advance state_idx_gpu and
+        # pre-reset num_accepted_tokens_gpu are still last step's values here.
+        state_col = info.state_idx_gpu
+        num_accepted = self.num_accepted_tokens_gpu
+        src_col = torch.where(
+            state_col >= 0,
+            state_col + num_accepted - 1,
+            torch.full_like(state_col, -1),
+        )
+        info.src_ssm_col_gpu.copy_(src_col)
+
+        if _SSM_SRC_DBG:
+            _DBG_STEP[0] += 1
+            if _DBG_STEP[0] <= 8 or _DBG_STEP[0] % 25 == 0:
+                idx = input_batch.idx_mapping
+                block_table = block_tables[mamba_group_ids[0]]
+                max_col = block_table.size(1) - 1
+                rows = torch.arange(
+                    num_reqs, device=block_table.device, dtype=torch.int64
+                )
+                sc = src_col[idx].to(torch.int64)
+                sc_safe = sc.clamp(min=0, max=max_col)
+                src_phys = block_table[rows, sc_safe].to(torch.int32)
+                seq_lens = input_batch.seq_lens[:num_reqs].to(torch.int64)
+                bs = self.cache_config.block_size
+                win_start = torch.clamp(seq_lens - 1, min=0) // bs
+                logger.info(
+                    "[SSMSRC step=%d nreq=%d] state_col=%s nacc=%s src_col=%s "
+                    "src_phys=%s | win_start=%s bt0[:6]=%s",
+                    _DBG_STEP[0],
+                    num_reqs,
+                    state_col[idx][:6].tolist(),
+                    num_accepted[idx][:6].tolist(),
+                    sc[:6].tolist(),
+                    src_phys[:6].tolist(),
+                    win_start[:6].tolist(),
+                    block_table[0, :6].tolist(),
+                )
+
     def _preprocess_mamba_cache_align(
         self,
         input_batch: InputBatch,
@@ -793,6 +900,9 @@ class MambaHybridModelState(DefaultModelState):
         info.current_step_block_tables = block_tables
         info.current_step_kv_cache_config = kv_cache_config
         self._create_mamba_copy_info(block_tables, mamba_group_ids)
+        # Capture the SSM src column BEFORE _copy_mamba_state / the state-index
+        # advance, so it reflects last step's running-state position.
+        self._compute_src_ssm_col(input_batch, block_tables, mamba_group_ids)
         self._copy_mamba_state(
             input_batch,
             num_computed_tokens,
@@ -893,10 +1003,22 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        # Gather the preprocess-captured SSM src COLUMNS into batch order (same
+        # threading as num_accepted_tokens). gdn_attn resolves them against the
+        # full block table. Padding rows stay -1 (== fresh / NULL → kernel skip).
+        align_src_state_indices = None
+        if not for_capture and self.cache_config.mamba_cache_mode == "align":
+            info = self.mamba_cache_align_info
+            align_src_state_indices = info.src_ssm_col_gpu.new_full((num_reqs,), -1)
+            align_src_state_indices[: input_batch.num_reqs] = info.src_ssm_col_gpu[
+                input_batch.idx_mapping
+            ]
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            align_src_state_indices=align_src_state_indices,
         )
         return build_attn_metadata(
             attn_groups=attn_groups,
