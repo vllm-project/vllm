@@ -323,7 +323,7 @@ def get_kimi_k2_structural_tag(
                     end=section_end,
                 )
             ],
-            excludes=think_exclude_tokens,
+            excludes=[*think_exclude_tokens, tool_call_begin],
         )
 
     elif tool_choice == "forced":

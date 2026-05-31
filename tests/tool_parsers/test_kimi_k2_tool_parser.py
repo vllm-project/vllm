@@ -565,6 +565,10 @@ class TestAdjustRequest:
         structural_tag_json = result.structured_outputs.structural_tag
         assert SECTION_BEGIN in structural_tag_json
         assert "functions.calculate" in structural_tag_json
+        # Auto free-form text must exclude <|tool_call_begin|> so the model
+        # cannot emit a bare tool-call marker outside the section.
+        auto_format = json.loads(structural_tag_json)["format"]
+        assert TOOL_BEGIN in auto_format["excludes"]
 
     @pytest.mark.parametrize(
         "enable_in_reasoning,thinking,expected_reasoning_prefix",
