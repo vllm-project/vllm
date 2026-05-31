@@ -131,9 +131,23 @@ class ToolParser:
                             structural_tag=json.dumps(structure_tag.model_dump()),
                         )
                     else:
-                        request.structured_outputs.structural_tag = json.dumps(
-                            structure_tag.model_dump()
+                        # Rebuild instead of mutating .structural_tag in place:
+                        # the mutually-exclusive constraints (json/regex/choice/
+                        # grammar/json_object) must be dropped, else constraint
+                        # precedence keeps e.g. .json and the structural tag is
+                        # silently ignored. Preserve the whitespace knobs.
+                        prev = request.structured_outputs
+                        request.structured_outputs = StructuredOutputsParams(
+                            structural_tag=json.dumps(structure_tag.model_dump()),
+                            disable_any_whitespace=prev.disable_any_whitespace,
+                            disable_additional_properties=(
+                                prev.disable_additional_properties
+                            ),
+                            whitespace_pattern=prev.whitespace_pattern,
                         )
+                    # Null response_format so a later to_sampling_params() does
+                    # not re-introduce a JSON schema (mutual-exclusivity).
+                    request.response_format = None
                     return request
 
         # Step 2: set structured output params when tool constraints are
