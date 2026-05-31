@@ -83,13 +83,6 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             #                        Fp8LinearMethod use_marlin branch)
             #   (K, N) non-contiguous -- callers that pre-transpose with .t()
             #                           (e.g. ModelOptFp8LinearMethod)
-            # Shape-based comparison is unsafe for square layers (N == K)
-            # where (N, K) and (K, N) have identical shapes -- the old check
-            # silently skipped the transpose for square checkpoint weights.
-            # Contiguity is a reliable discriminator: .t() always returns a
-            # non-contiguous view; checkpoint-loaded weights are always
-            # contiguous.  Marlin needs (K, N) before prepare_fp8_layer_for_
-            # marlin is called.
             if w_q.is_contiguous():
                 # (N, K) from checkpoint -- transpose to (K, N)
                 replace_parameter(layer, "weight", w_q.t())
