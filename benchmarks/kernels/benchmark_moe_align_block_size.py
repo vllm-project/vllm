@@ -30,6 +30,12 @@ configs = list(
     itertools.product(num_tokens_range, num_experts_range, topk_range, ep_size_range)
 )
 
+# Decode-like many-expert shapes. Includes M=129 as a fallback boundary for
+# E=256, topk=8 because the fast path is guarded by numel <= 1024.
+small_batch_many_expert_configs = list(
+    itertools.product([1, 16, 64, 128, 129], [256], [8], [16, 64])
+)
+
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
@@ -68,8 +74,41 @@ def benchmark(num_tokens, num_experts, topk, ep_size, provider):
     return 1000 * ms, 1000 * max_ms, 1000 * min_ms
 
 
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["num_tokens", "num_experts", "topk", "block_size"],
+        x_vals=small_batch_many_expert_configs,
+        line_arg="provider",
+        line_vals=["vllm"],
+        line_names=["vLLM"],
+        plot_name="moe-align-block-size-small-batch-many-expert",
+        args={},
+    )
+)
+def benchmark_small_batch_many_expert(
+    num_tokens, num_experts, topk, block_size, provider
+):
+    set_random_seed(0)
+    topk_ids = get_topk_ids(num_tokens, num_experts, topk)
+
+    quantiles = [0.5, 0.2, 0.8]
+
+    if provider == "vllm":
+        ms, min_ms, max_ms = triton.testing.do_bench(
+            lambda: moe_align_block_size(topk_ids, block_size, num_experts),
+            quantiles=quantiles,
+        )
+
+    return 1000 * ms, 1000 * max_ms, 1000 * min_ms
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--small-batch-many-expert",
+        action="store_true",
+        help="Benchmark decode-like many-expert shapes.",
+    )
     parser.add_argument(
         "--num_experts",
         type=int,
@@ -85,4 +124,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    benchmark.run(print_data=True, show_plots=True)
+    if args.small_batch_many_expert:
+        benchmark_small_batch_many_expert.run(print_data=True, show_plots=True)
+    else:
+        benchmark.run(print_data=True, show_plots=True)
