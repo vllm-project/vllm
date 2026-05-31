@@ -313,6 +313,8 @@ fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Val
         JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
         JsonParamType::Number => try_convert_number(value),
         JsonParamType::Boolean => try_convert_boolean(value),
+        JsonParamType::Object { .. } if value.is_empty() => Some(Value::Object(Map::new())),
+        JsonParamType::Array { .. } if value.is_empty() => Some(Value::Array(Vec::new())),
         JsonParamType::Object { .. } | JsonParamType::Array { .. } => {
             // For composite types with string input, simply interpret the string as JSON.
             serde_json::from_str(value).ok()
