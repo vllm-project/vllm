@@ -717,6 +717,48 @@ class OpenAIServingChat(OpenAIServing):
                                 else None
                             ),
                         )
+                        if self._should_split_terminal_tool_call_chunk(
+                            delta_message, finish_reason_
+                        ):
+                            arg_choice_data = ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=delta_message,
+                                logprobs=logprobs,
+                                finish_reason=None,
+                                token_ids=(
+                                    as_list(output.token_ids)
+                                    if request.return_token_ids
+                                    else None
+                                ),
+                            )
+                            arg_choice_data = maybe_filter_parallel_tool_calls(
+                                arg_choice_data, request
+                            )
+                            arg_chunk = ChatCompletionStreamResponse(
+                                id=request_id,
+                                object=chunk_object_type,
+                                created=created_time,
+                                choices=[arg_choice_data],
+                                model=model_name,
+                            )
+                            if include_continuous_usage:
+                                completion_tokens = previous_num_tokens[i]
+                                arg_chunk.usage = UsageInfo(
+                                    prompt_tokens=num_prompt_tokens,
+                                    completion_tokens=completion_tokens,
+                                    total_tokens=(
+                                        num_prompt_tokens + completion_tokens
+                                    ),
+                                )
+                            arg_data = arg_chunk.model_dump_json(exclude_unset=True)
+                            yield f"data: {arg_data}\n\n"
+
+                            choice_data = ChatCompletionResponseStreamChoice(
+                                index=i,
+                                delta=DeltaMessage(),
+                                finish_reason=finish_reason_,
+                                stop_reason=output.stop_reason,
+                            )
 
                         finish_reason_sent[i] = True
 
@@ -1195,3 +1237,28 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    @staticmethod
+    def _get_delta_function_arguments(
+        function: Any | None,
+    ) -> str | None:
+        if isinstance(function, dict):
+            arguments = function.get("arguments")
+            return arguments if isinstance(arguments, str) else None
+        arguments = getattr(function, "arguments", None)
+        return arguments if isinstance(arguments, str) else None
+
+    @staticmethod
+    def _should_split_terminal_tool_call_chunk(
+        delta_message: DeltaMessage,
+        finish_reason: str | None,
+    ) -> bool:
+        if finish_reason != "tool_calls":
+            return False
+        for tool_call in delta_message.tool_calls:
+            arguments = OpenAIServingChat._get_delta_function_arguments(
+                tool_call.function
+            )
+            if arguments:
+                return True
+        return False

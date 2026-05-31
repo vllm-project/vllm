@@ -2126,3 +2126,39 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.skip_global_cleanup
+class TestTerminalToolCallFinishSplit:
+    def test_terminal_argument_chunk_requires_finish_split(self):
+        """A final argument fragment should be sent before the finish chunk."""
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        delta_message = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    function=DeltaFunctionCall(arguments='"}'),
+                )
+            ]
+        )
+
+        assert OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            delta_message, "tool_calls"
+        )
+        assert not OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            delta_message, None
+        )
+
+    def test_empty_finish_chunk_does_not_require_split(self):
+        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+        from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+
+        assert not OpenAIServingChat._should_split_terminal_tool_call_chunk(
+            DeltaMessage(), "tool_calls"
+        )
