@@ -98,8 +98,8 @@ class KVBlockZeroer:
         attn_groups_iter: Iterable["AttentionGroup"],
         kernel_block_sizes: list[int],
         cache_dtype: str,
-        runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],
+        runner_only_attn_layers: set[str] | None = None,
     ) -> None:
         """One-time precomputation for zero_block_ids.
 
@@ -114,6 +114,8 @@ class KVBlockZeroer:
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
+        if runner_only_attn_layers is None:
+            runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
         page_size_el: int | None = None

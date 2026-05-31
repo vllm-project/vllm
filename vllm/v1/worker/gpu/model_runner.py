@@ -131,6 +131,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.cache_config.cache_dtype
             ]
 
+        # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
+        # zeroing (e.g. hybrid models with fp8 KV cache).
+        self.kv_block_zeroer: KVBlockZeroer | None = None
+
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
@@ -395,7 +399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
-        self.attn_groups, attn_cg_support, kernel_block_sizes = init_attn_backend(
+        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
         self.block_tables = BlockTables(
@@ -404,7 +408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            kernel_block_sizes=kernel_block_sizes,
+            kernel_block_sizes=self.kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -444,26 +448,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups,
             self.device,
             self.cache_config.cache_dtype,
-            kernel_block_sizes,
+            self.kernel_block_sizes,
             self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
-        self._kernel_block_sizes = kernel_block_sizes
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        self._kv_block_zeroer = KVBlockZeroer(self.device, is_pin_memory_available())
-        self._kv_block_zeroer.init_meta(
+        self.kv_block_zeroer = KVBlockZeroer(self.device, is_pin_memory_available())
+        self.kv_block_zeroer.init_meta(
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
-            kernel_block_sizes=self._kernel_block_sizes,
+            kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
-            runner_only_attn_layers=set(),
             static_forward_context=self.compilation_config.static_forward_context,
         )
-
-    def _zero_block_ids(self, block_ids: list[int]) -> None:
-        if hasattr(self, "_kv_block_zeroer"):
-            self._kv_block_zeroer.zero_block_ids(block_ids)
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
@@ -771,6 +769,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             out=self.req_states.num_computed_prefill_tokens,
         )
 
+        # Zero GPU memory for freshly allocated cache blocks to prevent
+        # stale NaN/data from corrupting attention or SSM computation.
+        if scheduler_output.new_block_ids_to_zero:
+            assert self.kv_block_zeroer is not None
+            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
+
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
@@ -1038,9 +1042,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
-            # Zero freshly allocated blocks to avoid stale NaN/data in attention.
-            if scheduler_output.new_block_ids_to_zero:
-                self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
