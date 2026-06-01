@@ -9,10 +9,9 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-# Called once per process.
 _cutedsl_available: bool | None = None
 
-
+# Called once per process.
 def is_available() -> bool:
     global _cutedsl_available
     if _cutedsl_available is not None:
