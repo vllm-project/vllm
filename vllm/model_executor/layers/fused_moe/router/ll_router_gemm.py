@@ -43,6 +43,10 @@ def _cute():
     _cute_ctx = (cute, from_dlpack, CUstream, current_stream)
     return _cute_ctx
 
+def _stream():
+    _, _, CUstream, current_stream = _cute()
+    return CUstream(current_stream().cuda_stream)
+
 # Takes flattened 1D tensors. The dot-product kernel uses raw pointer 
 # arithmetic, not cute's tiled layout system.
 def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
@@ -70,8 +74,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
         c_flat, assumed_align=32, enable_tvm_ffi=True
     ).mark_layout_dynamic()
 
-    K_eff = K
-    stream = CUstream(current_stream().cuda_stream)
+    stream = _stream()
 
     compiled = cute.compile(
         host_fn,
@@ -79,7 +82,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
         b_c,
         c_c,
         M,
-        K_eff,
+        K,
         N,
         stream,
         options="--enable-tvm-ffi --ptxas-options -maxrregcount=64", # caps register usage. Found empirically.
@@ -88,24 +91,24 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
     logger.debug("Compiled ll_router_gemm: M=%d, K=%d", M, K)
     return compiled
 
-
-def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int = 0):
+# Takes full 2D tensors (not flattened) as opposed to _get_compiled_dotprod.
+def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     cute, from_dlpack, CUstream, current_stream = _cute()
     from ._ll_router_splitk_kernels import LLRouterSplitK
 
-    K = a.shape[1]
-    tiles = K // 256
-    ns = num_stages if num_stages > 0 else min(12, tiles // split_k)
-    cache_key = (split_k, ns)
+    # fully shape-dynamic - one binary (same split_k and num_stages) works for all shapes.
+    cache_key = (split_k, num_stages)
     if cache_key in _splitk_cache:
         return _splitk_cache[cache_key]
 
     div = 8
-
     mA = (
         from_dlpack(a, assumed_align=16, enable_tvm_ffi=True)
-        .mark_layout_dynamic(leading_dim=1)
-        .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
+        .mark_layout_dynamic(leading_dim=1) # dimension 1 (K) has a dynamic stride
+        .mark_compact_shape_dynamic(mode=1, # mode 1 (K) is dynamic but guaranteed divisible by div=8
+                                    stride_order=(0, 1), # row-major
+                                    divisibility=div) 
+        #This lets the compiler generate more efficient address math knowing K alignment.
     )
     mB = (
         from_dlpack(b, assumed_align=16, enable_tvm_ffi=True)
@@ -118,31 +121,31 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int = 0):
         .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
     )
 
+    # TODO (roberto): add tile_n, tile_k and num_dma_warps to the tuning space.
     gemm = LLRouterSplitK(
-        tile_n=16, tile_k=256, num_stages=ns, num_dma_warps=4, split_k=split_k
+        tile_n=16, tile_k=256, num_stages=num_stages, num_dma_warps=4, split_k=split_k
     )
-    stream = CUstream(current_stream().cuda_stream)
     compiled = cute.compile(
-        gemm.call_splitk, mA, mB, mC, stream, options="--enable-tvm-ffi"
-    )
+        gemm.call_splitk, mA, mB, mC, _stream(), options="--enable-tvm-ffi"
+    )    
     _splitk_cache[cache_key] = compiled
-    logger.debug("Compiled ll_router_splitk: sk=%d ns=%d", split_k, ns)
+    logger.debug("Compiled ll_router_splitk: sk=%d ns=%d", split_k, num_stages)
     return compiled
 
 
 def ll_router_gemm(
-    hidden_states: torch.Tensor,
-    router_weight: torch.Tensor,
+    hidden_states: torch.Tensor, # [M, K] bf16
+    router_weight: torch.Tensor, # [N, K] bf16
     output_dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    _, _, CUstream, current_stream = _cute()
-
+) -> torch.Tensor:               # [M, N] fp32
     M, K = hidden_states.shape
     N = router_weight.shape[0]
-    stream = CUstream(current_stream().cuda_stream)
+    stream = _stream()
     output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
 
+    # see https://github.com/vllm-project/vllm/pull/42562 for more details.
     if M > 4 and K >= 2048:
+        # TODO (roberto): increase search space - autotuning system
         compiled = _get_compiled_splitk(
             hidden_states,
             router_weight,
@@ -152,6 +155,7 @@ def ll_router_gemm(
         )
         compiled(hidden_states, router_weight, output, stream, 1.0)
     else:
+        # Dot-product path: flattened to 1D, N passed as runtime argument.
         a_flat = hidden_states.reshape(-1)
         b_flat = router_weight.reshape(-1)
         c_flat = output.reshape(-1)
