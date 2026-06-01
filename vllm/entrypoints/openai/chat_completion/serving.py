@@ -81,6 +81,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _is_request_stop(output: CompletionOutput) -> bool:
+    return output.finish_reason == "stop" and isinstance(output.stop_reason, str)
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -439,6 +443,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
+        content_streamed_lens = [0] * num_choices
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -755,7 +760,19 @@ class OpenAIServingChat(OpenAIServing):
                             and not request.return_token_ids
                         ):
                             continue
-                        delta_message = DeltaMessage()
+                        if (
+                            tool_choice_auto
+                            and _is_request_stop(output)
+                            and not tools_streamed[i]
+                        ):
+                            delta_message = DeltaMessage(
+                                content=current_text[content_streamed_lens[i] :]
+                            )
+                        else:
+                            delta_message = DeltaMessage()
+
+                    if tool_choice_auto and delta_message.content:
+                        content_streamed_lens[i] += len(delta_message.content)
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -811,6 +828,7 @@ class OpenAIServingChat(OpenAIServing):
                         # only happens if we are NOT using structured outputs
                         index = 0
                         auto_tools_called = False
+                        stopped_by_request_stop = _is_request_stop(output)
                         if tool_parser:
                             auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
                             index = (
@@ -877,7 +895,7 @@ class OpenAIServingChat(OpenAIServing):
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
                         if (
-                            auto_tools_called
+                            (auto_tools_called and not stopped_by_request_stop)
                             or (tools_streamed[i] and not tool_choice_function_name)
                             or (self.use_harmony and harmony_tools_streamed[i])
                         ):
