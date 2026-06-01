@@ -30,6 +30,21 @@ else:
     torch = LazyLoader("torch", globals(), "torch")
 
 
+def _is_npu_vision_backend() -> bool:
+    """Check if NPU vision backend is active (requires per-request processing).
+
+    NPU backends like FlexMLRT have fixed input size requirements and cannot
+    batch vision inputs from multiple requests together. This function detects
+    when NPU backend is being used so we can apply special handling.
+    """
+    import vllm.envs as envs
+
+    backend = (
+        envs.VLLM_VISION_NPU_BACKEND.lower() if envs.VLLM_VISION_NPU_BACKEND else ""
+    )
+    return backend == "flexmlrt"
+
+
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: int,
@@ -225,6 +240,10 @@ def group_and_batch_mm_kwargs(
     To simplify the implementation of `embed_multimodal`, we add another
     restriction that the items in a batch must belong to the same modality.
 
+    Special handling for NPU backends: vision inputs are NOT batched across
+    requests to support hardware with fixed input sizes (e.g., FlexMLRT NPU).
+    Standard GPU backends use normal batching behavior (unchanged).
+
     Args:
         mm_kwargs: List of `(modality, item)`.
         device: The device to place the grouped tensors on.
@@ -236,15 +255,84 @@ def group_and_batch_mm_kwargs(
         - `kwargs` is a dictionary of keyword arguments to pass to the model;
         - `num_items` is the corresponding number of items.
     """
+    import logging
+    import threading
+    from datetime import datetime
+
+    import vllm.envs as envs
+
+    logger = logging.getLogger(__name__)
+
+    # Auto-detect NPU backend for special handling
+    using_npu = _is_npu_vision_backend()
+
+    if using_npu and envs.VLLM_NPU_TIMING:
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        thread_id = threading.get_ident()
+        num_items_total = len(mm_kwargs)
+        logger.debug(
+            "[MM Batching] %s Thread-%s: Processing %s items (NPU mode)",
+            timestamp,
+            thread_id,
+            num_items_total,
+        )
+
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
 
-        for num_items, mm_kwargs_batch in group_and_batch_mm_items(
-            items_lst,
-            device=device,
-            pin_memory=pin_memory,
-        ):
-            yield modality, num_items, mm_kwargs_batch
+        # NPU path: process each request separately (no cross-request batching)
+        is_vision_on_npu = using_npu and modality in ("image", "video")
+
+        if is_vision_on_npu:
+            # Debug: Log that we're using NPU single-item batching
+            if envs.VLLM_NPU_TIMING:
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                logger.debug(
+                    "[MM Batching] %s Thread-%s: NPU path - "
+                    "yielding %s single-item batches for %s",
+                    timestamp,
+                    threading.get_ident(),
+                    len(items_lst),
+                    modality,
+                )
+
+            # Yield single-item batches to maintain fixed input size
+            for idx, item in enumerate(items_lst):
+                mm_kwargs_batch = _batch_mm_items(
+                    [item],
+                    device=device,
+                    pin_memory=pin_memory,
+                )
+
+                if envs.VLLM_NPU_TIMING:
+                    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                    logger.debug(
+                        "[MM Batching] %s Thread-%s: Yielding item %s/%s",
+                        timestamp,
+                        threading.get_ident(),
+                        idx + 1,
+                        len(items_lst),
+                    )
+
+                yield modality, 1, mm_kwargs_batch
+        else:
+            # Standard GPU path: original batching logic (unchanged)
+            if envs.VLLM_NPU_TIMING:
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                logger.debug(
+                    "[MM Batching] %s Thread-%s: GPU path - "
+                    "using standard batching for %s",
+                    timestamp,
+                    threading.get_ident(),
+                    modality,
+                )
+
+            for num_items, mm_kwargs_batch in group_and_batch_mm_items(
+                items_lst,
+                device=device,
+                pin_memory=pin_memory,
+            ):
+                yield modality, num_items, mm_kwargs_batch
 
 
 @deprecated(
