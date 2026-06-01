@@ -21,11 +21,11 @@ The negative (non-gfx1100) tests verify at three layers:
 Run `pytest tests/kernels/quantization/test_rdna3_compile_guards.py`.
 """
 
-import re
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import regex as re
 import torch
 
 from vllm.platforms import current_platform
@@ -175,6 +175,7 @@ class TestCMakeGuards:
 
     @staticmethod
     def _read_cmake():
+        assert REPO_ROOT is not None  # guaranteed by @needs_source
         return (REPO_ROOT / "CMakeLists.txt").read_text()
 
     def test_rdna3_cu_files_inside_gfx1100_conditional(self):
@@ -223,6 +224,7 @@ class TestTorchBindingsGuards:
 
     @staticmethod
     def _read_bindings():
+        assert REPO_ROOT is not None  # guaranteed by @needs_source
         return (REPO_ROOT / "csrc" / "rocm" / "torch_bindings.cpp").read_text()
 
     def test_all_rdna3_ops_inside_ifdef(self):
@@ -279,6 +281,7 @@ class TestCustomOpsGuards:
 
     @staticmethod
     def _read_custom_ops():
+        assert REPO_ROOT is not None  # guaranteed by @needs_source
         return (REPO_ROOT / "vllm" / "_custom_ops.py").read_text()
 
     def test_register_fake_guarded_by_hasattr(self):
@@ -443,6 +446,7 @@ class TestCompressedTensorsMoEDispatchGuard:
 
     def test_rocm_guard_in_dispatch_source(self):
         """The rocm_moe import and call must be inside an is_rocm() check."""
+        assert REPO_ROOT is not None  # guaranteed by @needs_source
         src_path = (
             REPO_ROOT
             / "vllm"
