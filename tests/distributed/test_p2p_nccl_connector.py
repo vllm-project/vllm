@@ -52,7 +52,9 @@ def _sched_out(
     out.scheduled_new_reqs = new_reqs
     out.scheduled_cached_reqs = CachedRequestData.make_empty()
     if num_scheduled_tokens is None:
-        num_scheduled_tokens = {r.req_id: len(r.prompt_token_ids or []) for r in new_reqs}
+        num_scheduled_tokens = {
+            r.req_id: len(r.prompt_token_ids or []) for r in new_reqs
+        }
     out.num_scheduled_tokens = num_scheduled_tokens
     return out
 
@@ -126,7 +128,9 @@ def test_chunked_prefill_final_chunk_uses_stable_id():
     prompt = list(range(20))
 
     step1 = MagicMock()
-    step1.scheduled_new_reqs = [_new_req(req_id, external_req_id, prompt_token_ids=prompt)]
+    step1.scheduled_new_reqs = [
+        _new_req(req_id, external_req_id, prompt_token_ids=prompt)
+    ]
     step1.scheduled_cached_reqs = CachedRequestData.make_empty()
     step1.num_scheduled_tokens = {req_id: 8}  # 8 < 20 → partial
 
