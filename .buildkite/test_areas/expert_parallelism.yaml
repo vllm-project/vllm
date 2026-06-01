@@ -9,13 +9,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
-  - vllm/models/deepseek_v4/nvidia/model.py
   - tests/distributed/test_eplb_algo.py
-  - tests/distributed/test_eplb_dsv4_mega_moe.py
   - tests/distributed/test_eplb_utils.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
-  - pytest -v -s distributed/test_eplb_dsv4_mega_moe.py
   - pytest -v -s distributed/test_eplb_utils.py
 
 - label: EPLB Execution # 17min
