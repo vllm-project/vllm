@@ -377,11 +377,13 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     @classmethod
     def is_supported(cls, compute_capability=None):
-        if (
-            rocm_aiter_ops.is_linear_enabled()
-            or rocm_aiter_ops.is_triton_linear_enabled()
-        ):
-            return True, None
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_rdna4
+
+            if rocm_aiter_ops.is_linear_enabled() or (
+                rocm_aiter_ops.is_enabled() and on_rdna4()
+            ):
+                return True, None
         return (
             False,
             "Only supported on ROCm platform with aiter package installed.",
@@ -404,9 +406,10 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # On arches without an aiter CK build (gfx12 today), the only
         # backend that works is the aiter Triton path, which requires a
         # per-(N,K) tune.
-        if (
-            not rocm_aiter_ops.is_linear_enabled()
-            and rocm_aiter_ops.is_triton_linear_enabled()
+        from vllm.platforms.rocm import on_rdna4
+
+        if not rocm_aiter_ops.is_linear_enabled() and (
+            rocm_aiter_ops.is_enabled() and on_rdna4()
         ):
             n, k = config.weight_shape
             if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
