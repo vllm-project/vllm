@@ -875,6 +875,8 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        self.manager.on_schedule_end()
+
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
             if req_status is None or not req_status.transfer_jobs:
