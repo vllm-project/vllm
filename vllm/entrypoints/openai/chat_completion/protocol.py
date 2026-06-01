@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
     validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -758,6 +759,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "You can only either use constraints for structured outputs "
                 "or tools, not both."
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
@@ -974,6 +976,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Batch chat completions do not support beam search. "
                 "Please set `use_beam_search` to False."
             )
+        response_format = data.get("response_format")
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+        if (structured_outputs := data.get("structured_outputs")) is not None:
+            validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)
         if n is not None and n != 1:
             raise ValueError(

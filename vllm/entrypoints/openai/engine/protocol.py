@@ -171,9 +171,6 @@ def validate_structural_tag_response_format(
 
     from pydantic import TypeAdapter, ValidationError
 
-    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
-    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
-
     if isinstance(response_format, dict):
         try:
             response_format = TypeAdapter(
@@ -187,6 +184,25 @@ def validate_structural_tag_response_format(
 
     try:
         payload = json.dumps(response_format.model_dump(by_alias=True))
+        validate_structural_tag_payload(payload, parameter="response_format")
+    except (TypeError, ValueError) as exc:
+        raise VLLMValidationError(
+            "Invalid response_format structural_tag specification.",
+            parameter="response_format",
+        ) from exc
+
+
+def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+    from vllm.v1.structured_output.backend_xgrammar import validate_xgrammar_grammar
+
+    if isinstance(payload, str) and not payload:
+        raise VLLMValidationError(
+            f"Invalid {parameter} structural_tag specification.",
+            parameter=parameter,
+        )
+
+    try:
         validate_xgrammar_grammar(
             SamplingParams(
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
@@ -194,9 +210,27 @@ def validate_structural_tag_response_format(
         )
     except (TypeError, ValueError) as exc:
         raise VLLMValidationError(
-            "Invalid response_format structural_tag specification.",
-            parameter="response_format",
+            f"Invalid {parameter} structural_tag specification.",
+            parameter=parameter,
         ) from exc
+
+
+def validate_structured_outputs_structural_tag(
+    structured_outputs: Any,
+) -> None:
+    from vllm.sampling_params import StructuredOutputsParams
+
+    if isinstance(structured_outputs, StructuredOutputsParams):
+        structural_tag = structured_outputs.structural_tag
+    elif isinstance(structured_outputs, dict):
+        structural_tag = structured_outputs.get("structural_tag")
+    else:
+        return
+    if structural_tag is not None:
+        validate_structural_tag_payload(
+            structural_tag,
+            parameter="structured_outputs",
+        )
 
 
 class StreamOptions(OpenAIBaseModel):
