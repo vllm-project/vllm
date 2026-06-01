@@ -10,6 +10,7 @@ import torch
 
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
+    as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -80,7 +81,8 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         Manual fusion uses this to decide whether to hoist activation quant
         out of ``apply_weights`` into a fused [some operations] + quant kernel.
         Return ``None`` when the kernel needs in-kernel quantization (custom
-        padding/swizzling, dynamic scales, etc.).
+        padding/swizzling, dynamic scales, etc.). A non-``None`` key requires
+        ``apply_weights`` to consume the activation via ``as_quantized_activation``.
         """
         return None
 
@@ -140,12 +142,13 @@ class FP8ScaledMMLinearKernel(
         maybe_out_dtype = self.config.out_dtype
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
 
-        if isinstance(x, QuantizedActivation):
-            assert x.quant_key == self.input_quant_key()
-            x_data, x_s = x.data, x.scale
-            orig_shape, orig_dtype = x.orig_shape, x.orig_dtype
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_data, x_s = qa.data, qa.scale
+            orig_shape, orig_dtype = qa.orig_shape, qa.orig_dtype
             assert x_data.dtype == fp8_dtype
         else:
+            assert isinstance(x, torch.Tensor)
             x_data = x
             orig_shape, orig_dtype = x.shape, x.dtype
 

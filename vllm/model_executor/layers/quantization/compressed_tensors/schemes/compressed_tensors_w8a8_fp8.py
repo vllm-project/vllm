@@ -15,6 +15,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
+    expose_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -146,8 +147,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
-        if (key := self.fp8_linear.input_quant_key()) is not None:
-            layer.input_quant_key = key
+        expose_input_quant_key(layer, self.fp8_linear)
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:

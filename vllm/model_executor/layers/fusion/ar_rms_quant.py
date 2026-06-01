@@ -248,9 +248,9 @@ def fused_ar_rms_norm_quant(
     activation quantization folded in when a fused kernel makes that worthwhile.
 
     Returns a ``QuantizedActivation`` only when a fused kernel actually
-    produced the pre-quantized output and the linear kernel supports it.
-    Otherwise, returns a plain tensor and the downstream linear quantizes
-    its own input.
+    produced the pre-quantized output and the linear kernel supports it (its
+    ``input_quant_key`` was set by ``expose_input_quant_key``). Otherwise,
+    returns a plain tensor and the downstream linear quantizes its own input.
     """
     assert type(norm) is RMSNorm, (
         f"fused_ar_rms_norm_quant requires a plain RMSNorm, got {type(norm).__name__}"

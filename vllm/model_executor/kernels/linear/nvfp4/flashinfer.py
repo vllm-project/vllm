@@ -4,7 +4,10 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
@@ -71,13 +74,14 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
-        if isinstance(x, QuantizedActivation):
-            assert x.quant_key == self.input_quant_key()
-            x_fp4, x_blockscale = x.data, x.scale
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp4, x_blockscale = qa.data, qa.scale
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
-            output_dtype = x.orig_dtype
-            output_shape = [*x.orig_shape[:-1], output_size]
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
         else:
+            assert isinstance(x, torch.Tensor)
             output_dtype = x.dtype
             output_shape = [*x.shape[:-1], output_size]
             x_fp4, x_blockscale = scaled_fp4_quant(

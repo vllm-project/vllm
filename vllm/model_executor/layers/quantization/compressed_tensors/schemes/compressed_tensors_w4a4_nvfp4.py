@@ -7,6 +7,9 @@ from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -85,8 +88,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         )
         layer.register_parameter("input_global_scale", input_global_scale)
 
-        if (key := self.kernel.input_quant_key()) is not None:
-            layer.input_quant_key = key
+        expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename CT checkpoint names to standardized names
