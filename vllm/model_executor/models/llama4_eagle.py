@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
 
-from .interfaces import LocalArgmaxMixin, SupportsMultiModal
+from .interfaces import SupportsMultiModal
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
@@ -163,7 +163,7 @@ class LlamaModel(nn.Module):
             }
 
 
-class EagleLlama4ForCausalLM(LocalArgmaxMixin, Llama4ForCausalLM):
+class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
