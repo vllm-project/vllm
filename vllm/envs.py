@@ -936,6 +936,22 @@ class DistributedSettings(BaseSettings):
             "efficient way when using the mp backend."
         ),
     )
+    gpu_nic_pcie_mapping: str = Field(
+        default="",
+        description=(
+            "Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection. "
+            "Must be set together with VLLM_NIC_SELECTION_VARS."
+        ),
+    )
+    nic_selection_vars: str = Field(
+        default="",
+        description=(
+            "Comma-separated list of env vars to set from the GPU-NIC "
+            "mapping. Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix "
+            "appended to RDMA device name). Must be set together with "
+            "VLLM_GPU_NIC_PCIE_MAPPING."
+        ),
+    )
 
     @model_validator(mode="after")
     def _default_dp_rank_local_to_dp_rank(self) -> "DistributedSettings":
@@ -1323,6 +1339,19 @@ class RocmSettings(BaseSettings):
     rocm_use_aiter_moe: bool = Field(
         default=True,
         description="Whether to use aiter moe ops. By default is enabled.",
+    )
+    rocm_aiter_moe_dispatch_policy: int = Field(
+        default=0,
+        description=(
+            "MoE sorting dispatch policy for AITER fused MoE kernels. "
+            "0 = auto (default): single-pass for small batches, "
+            "multi-pass for large batches. "
+            "1 = always single-pass: one kernel launch, no workspace, "
+            "may be preferred for low-concurrency decode workloads. "
+            "2 = always multi-pass: can be faster for MoE-heavy models "
+            "(e.g., +2-5% on Qwen3-Next, +1.5% on DeepSeek-V3 at TP4, "
+            "see PR #39177 for benchmarks)."
+        ),
     )
     rocm_use_aiter_rmsnorm: bool = Field(
         default=True,
