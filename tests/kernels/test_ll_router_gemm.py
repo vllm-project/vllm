@@ -6,9 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA required"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -18,6 +16,7 @@ def _require_sm90_and_cutedsl():
     from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
         is_available,
     )
+
     if not is_available():
         pytest.skip("cuteDSL (CUTLASS Python) not installed")
 
@@ -45,6 +44,7 @@ def _gemm(a, b):
     from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
         ll_router_gemm,
     )
+
     return ll_router_gemm(a, b)
 
 
@@ -102,9 +102,7 @@ def test_dotprod_K_sweep(K):
 
 
 @pytest.mark.parametrize("M", [5, 6, 8, 12, 16])
-@pytest.mark.parametrize(
-    "N,K,desc", SHAPES_SPLITK, ids=[s[2] for s in SHAPES_SPLITK]
-)
+@pytest.mark.parametrize("N,K,desc", SHAPES_SPLITK, ids=[s[2] for s in SHAPES_SPLITK])
 def test_splitk(M, N, K, desc):
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -188,9 +186,7 @@ def test_single_token(N, K):
 # =================================================================
 
 
-@pytest.mark.parametrize(
-    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
-)
+@pytest.mark.parametrize("M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"])
 def test_large_values(M, K):
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 100
@@ -226,9 +222,7 @@ def test_ones():
 # =================================================================
 
 
-@pytest.mark.parametrize(
-    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
-)
+@pytest.mark.parametrize("M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"])
 def test_output_fp32(M, K):
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -263,8 +257,10 @@ def test_dotprod_vs_splitk(K):
     a = torch.randn(5, K, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
     _assert_close(
-        _gemm(a, b)[:4], _gemm(a[:4], b),
-        min_cos_sim=0.999, context=f"cross-kernel K={K}",
+        _gemm(a, b)[:4],
+        _gemm(a[:4], b),
+        min_cos_sim=0.999,
+        context=f"cross-kernel K={K}",
     )
 
 
@@ -273,9 +269,7 @@ def test_dotprod_vs_splitk(K):
 # =================================================================
 
 
-@pytest.mark.parametrize(
-    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
-)
+@pytest.mark.parametrize("M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"])
 def test_cudagraph(M, K):
     torch.manual_seed(42)
     a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
@@ -308,8 +302,9 @@ def test_cudagraph_20x_replay():
         torch.cuda.synchronize()
         results.append(out.clone())
     for i in range(1, len(results)):
-        torch.testing.assert_close(results[0], results[i], atol=0, rtol=0,
-                                   msg=f"Replay {i} differs")
+        torch.testing.assert_close(
+            results[0], results[i], atol=0, rtol=0, msg=f"Replay {i} differs"
+        )
 
 
 def test_cudagraph_input_update():
