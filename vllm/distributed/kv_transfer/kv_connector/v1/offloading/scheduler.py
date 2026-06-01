@@ -94,6 +94,7 @@ class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     block_size_factor: int
     num_workers: int
+    offload_prompt_only: bool
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
@@ -156,6 +157,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
             block_size_factor=spec.block_size_factor,
+            offload_prompt_only=spec.offload_prompt_only,
         )
 
 
@@ -709,6 +711,15 @@ class OffloadingConnectorScheduler:
             max_offload_tokens = req_status.max_offload_tokens
             if max_offload_tokens is not None:
                 num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
+
+            # Skip decode-phase blocks: clamp to the prompt length so only
+            # prefill (prompt) blocks become eligible for store. next_stored_idx
+            # never advances past this boundary, so decode blocks are never
+            # queued in this or any later step.
+            if self.config.offload_prompt_only:
+                num_offloadable_tokens = min(
+                    num_offloadable_tokens, req.num_prompt_tokens
+                )
 
             # Filter out blocks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
