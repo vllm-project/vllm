@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contract tests for the ``QuantizedActivation`` manual-fusion integration.
-
-Pure-Python introspection over the linear-kernel registry -- no model load, no
-device -- pinning which backends consume a pre-quantized activation and how the
-bridge / consumer enforce the key. Tracks the AR+RMS+Quant bullet under
-https://github.com/vllm-project/vllm/issues/43224.
-"""
+"""Contract tests for the QuantizedActivation linear-kernel integration."""
 
 import pytest
 import torch
@@ -47,8 +41,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-# The only backends that consume a pre-quantized activation. Anything else must
-# quantize its own input, so the bridge must not mark its layer.
+# The only backends that consume a pre-quantized activation.
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,

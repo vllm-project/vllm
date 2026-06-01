@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``QuantizedActivation`` contract for manual fusion.
-
-A ``QuantizedActivation`` is a pre-quantized activation produced by a fused
-(all-reduce +) RMSNorm + quant kernel and consumed directly by a linear, so the
-linear skips its own input quantization. A linear advertises the key its kernel
-can consume via ``expose_input_quant_key``; the kernel validates and reads the
-activation via ``as_quantized_activation``.
+"""
+A ``QuantizedActivation`` is a pre-quantized activation produced by a fused kernel
+and consumed directly by a linear, so the module skips its own input quantization.
+A linear advertises the key its kernel can consume via ``expose_input_quant_key``;
+the kernel validates and reads the activation via ``as_quantized_activation``.
 """
 
 from dataclasses import dataclass
