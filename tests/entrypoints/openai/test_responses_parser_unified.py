@@ -286,9 +286,7 @@ def test_process_extracts_tool_calls():
             }
         ],
     )
-    parser = _make_parser(
-        _ToolCallingParser, request=request, enable_auto_tools=True
-    )
+    parser = _make_parser(_ToolCallingParser, request=request, enable_auto_tools=True)
     parser.process(_make_output(text="calling tool"))
 
     types = [m.type for m in parser.response_messages]
