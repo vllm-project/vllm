@@ -334,14 +334,10 @@ class Eagle3LlamaForCausalLM(LocalArgmaxMixin, LlamaForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.draft_vocab_size, scale=logit_scale
         )
-        target_vocab_size = vllm_config.model_config.get_vocab_size()
-        if self.config.draft_vocab_size != target_vocab_size:
-            self.draft_id_to_target_id = nn.Parameter(
-                torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
-                requires_grad=False,
-            )
-        else:
-            self.draft_id_to_target_id = None
+        self.draft_id_to_target_id = nn.Parameter(
+            torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
+            requires_grad=False,
+        )
 
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
@@ -424,10 +420,6 @@ class Eagle3LlamaForCausalLM(LocalArgmaxMixin, LlamaForCausalLM):
             if "t2d" in name:
                 continue
             if "d2t" in name:
-                # When draft_vocab_size == target vocab_size, the parameter
-                # is set to None (no remapping needed), so skip loading d2t.
-                if self.draft_id_to_target_id is None:
-                    continue
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
             elif "mask_hidden" in name:
