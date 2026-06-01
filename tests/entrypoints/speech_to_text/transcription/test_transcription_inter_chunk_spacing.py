@@ -11,7 +11,7 @@ Integration-style tests exercise ``OpenAIServingTranscription`` streaming and
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -32,7 +32,10 @@ from vllm.entrypoints.speech_to_text.transcription.protocol import Transcription
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
-from vllm.model_executor.models.interfaces import SupportsTranscription
+from vllm.model_executor.models.interfaces import (
+    StreamingTranscriptionPostProcessor,
+    SupportsTranscription,
+)
 from vllm.model_executor.models.qwen3_asr import Qwen3ASRForConditionalGeneration
 from vllm.outputs import CompletionOutput, RequestOutput
 
@@ -60,18 +63,60 @@ def test_asr_inter_chunk_separator_matches_protocol(language, expected_sep):
 
 
 def test_qwen3_asr_stream_processor_passes_plain_text_without_prefix():
-    post_process_delta = Qwen3ASRForConditionalGeneration.get_streaming_post_processor()
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
 
-    assert post_process_delta("Hello", False) == "Hello"
-    assert post_process_delta(" world", True) == " world"
+    assert post_processor.process_delta("Hello", False) == "Hello"
+    assert post_processor.process_delta(" world", True) == " world"
 
 
 def test_qwen3_asr_stream_processor_buffers_prefix_with_leading_space():
-    post_process_delta = Qwen3ASRForConditionalGeneration.get_streaming_post_processor()
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
 
-    assert post_process_delta(" language Eng", False) == ""
-    assert post_process_delta("lish<asr", False) == ""
-    assert post_process_delta("_text>Hello", True) == "Hello"
+    assert post_processor.process_delta(" language Eng", False) == ""
+    assert post_processor.process_delta("lish<asr", False) == ""
+    assert post_processor.process_delta("_text>Hello", True) == "Hello"
+
+
+def test_qwen3_asr_stream_processor_keeps_independent_state():
+    processor_cls = Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
+    first_processor = processor_cls()
+    second_processor = processor_cls()
+
+    assert first_processor.process_delta(" language Eng", False) == ""
+    assert second_processor.process_delta("plain text", True) == "plain text"
+    assert first_processor.process_delta("lish<asr_text>Hello", True) == "Hello"
+
+
+def test_qwen3_asr_stream_processor_emits_finished_incomplete_prefix():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+
+    assert (
+        post_processor.process_delta(" language English", True) == " language English"
+    )
+
+
+def test_qwen3_asr_stream_processor_stops_buffering_long_plain_prefix():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+    text = " language " + ("x" * 50)
+
+    assert post_processor.process_delta(text, False) == text
+
+
+def test_qwen3_asr_stream_processor_stops_buffering_prefix_with_newline():
+    post_processor = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()()
+    )
+    text = " language English\nhello"
+
+    assert post_processor.process_delta(text, False) == text
 
 
 def test_joined_chunks_english_has_space_between():
@@ -107,8 +152,10 @@ class _StubTranscriptionModel:
         return text
 
     @classmethod
-    def get_streaming_post_processor(cls) -> Callable[[str, bool], str]:
-        return lambda text_delta, finished: text_delta
+    def get_streaming_post_processor_cls(
+        cls,
+    ) -> type[StreamingTranscriptionPostProcessor]:
+        return StreamingTranscriptionPostProcessor
 
 
 def _request_output(text: str, finish_reason: str | None = "stop") -> RequestOutput:
@@ -161,6 +208,9 @@ async def test_transcription_stream_generator_english_inserts_space_between_chun
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
     serving.model_cls = _StubTranscriptionModel
+    serving.streaming_post_processor_cls = (
+        _StubTranscriptionModel.get_streaming_post_processor_cls()
+    )
     serving.task_type = "transcribe"
     request = SimpleNamespace(
         model="stub-model",
@@ -198,6 +248,9 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
     serving.model_cls = _StubTranscriptionModel
+    serving.streaming_post_processor_cls = (
+        _StubTranscriptionModel.get_streaming_post_processor_cls()
+    )
     serving.task_type = "transcribe"
     request = SimpleNamespace(
         model="stub-model",
@@ -232,11 +285,15 @@ async def test_transcription_stream_generator_strips_qwen3_asr_prefix_per_chunk(
         yield _request_output("")
 
     async def gen_world() -> AsyncGenerator[RequestOutput, None]:
-        yield _request_output("language English<asr_text>world")
+        yield _request_output(" language Eng", finish_reason=None)
+        yield _request_output("lish<asr_text>world")
 
     serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
     serving.enable_force_include_usage = False
     serving.model_cls = Qwen3ASRForConditionalGeneration
+    serving.streaming_post_processor_cls = (
+        Qwen3ASRForConditionalGeneration.get_streaming_post_processor_cls()
+    )
     serving.task_type = "transcribe"
     request = SimpleNamespace(
         model="stub-qwen3-asr",
