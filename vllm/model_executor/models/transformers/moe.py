@@ -28,7 +28,6 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
-    fused_moe_make_hf_fused_expert_params_mapping,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
@@ -166,10 +165,12 @@ class MoEMixin(MixtureOfExperts):
         # - After Transformers v5
         # - Before Transformers v5, but re-saved with save_original_format=False
         # In the fused experts case, we repurpose the expert_id as shard_idx for
-        # deconcatenating w1 and w3 in FusedMoE.load_weights. These aliases are
-        # the same regardless of the ckpt naming style below, so they are added
-        # once up front rather than per style.
-        expert_mapping = fused_moe_make_hf_fused_expert_params_mapping()
+        # deconcatenating w1 and w3 in FusedMoE.load_weights.
+        expert_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
         # Models saved with ModuleList experts
         ckpt_names = [
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
