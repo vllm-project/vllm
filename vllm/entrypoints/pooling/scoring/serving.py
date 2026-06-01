@@ -109,9 +109,7 @@ class ServingScores(PoolingServing):
         num_prompt_tokens = 0
         score_batch = ScoringRequestOutput.from_base_batch(final_res_batch)
 
-        for idx, (score_res, final_res) in enumerate(
-            zip(score_batch, final_res_batch)
-        ):
+        for idx, (score_res, final_res) in enumerate(zip(score_batch, final_res_batch)):
             item = ScoreResponseData(
                 index=idx,
                 score=score_res.outputs.score,
@@ -150,9 +148,7 @@ class ServingScores(PoolingServing):
         results: list[RerankResult] = []
         num_prompt_tokens = 0
         score_batch = ScoringRequestOutput.from_base_batch(final_res_batch)
-        for idx, (score_res, final_res) in enumerate(
-            zip(score_batch, final_res_batch)
-        ):
+        for idx, (score_res, final_res) in enumerate(zip(score_batch, final_res_batch)):
             document = documents[idx]
             if isinstance(document, str):
                 rerank_document = RerankDocument(text=document)
