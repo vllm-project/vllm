@@ -48,6 +48,10 @@ class KVCacheCoordinator(ABC):
         self.enable_caching = enable_caching
         # The scheduling granularity (LCM of all group block sizes), must be a multiple
         # of the hash_block_size and the block size of each group.
+        assert scheduler_block_size % hash_block_size == 0 and all(
+            scheduler_block_size % g.kv_cache_spec.block_size == 0
+            for g in kv_cache_config.kv_cache_groups
+        )
         self.scheduler_block_size = scheduler_block_size
 
         self.block_pool = BlockPool(
