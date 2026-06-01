@@ -213,7 +213,6 @@ def make_int8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=not moe_config.disable_inplace,
     )
 
     return kernel
