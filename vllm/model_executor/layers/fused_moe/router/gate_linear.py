@@ -76,14 +76,11 @@ class GateLinear(ReplicatedLinear):
         # cuteDSL ll_router_gemm eligibility (SM90+, any dims)
         self.allow_ll_router_gemm = False
         if can_use_specialized_kernels:
-            try:
-                from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
-                    is_available,
-                )
+            from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
+                is_available,
+            )
 
-                self.allow_ll_router_gemm = is_available()
-            except ImportError:
-                pass
+            self.allow_ll_router_gemm = is_available()
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
