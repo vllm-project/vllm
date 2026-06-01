@@ -117,12 +117,14 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
+#if CUDA_VERSION >= 12020
   CUresult fab_result = cuDeviceGetAttribute(
       &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
   if (fab_result == CUDA_SUCCESS &&
       fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
+#endif
 #endif
 
 #ifndef USE_ROCM
