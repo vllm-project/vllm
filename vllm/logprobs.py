@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from collections.abc import Iterable, Iterator, MutableSequence
+from collections.abc import Iterable, Iterator, MutableSequence, Sized
 from dataclasses import dataclass, field
 from typing import overload
 
@@ -73,8 +73,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
 
     def append_fast(
         self,
-        token_ids: list[int],
-        logprobs: list[float],
+        token_ids: Iterable[int],
+        logprobs: Iterable[float],
         ranks: itertools.chain[int],
         decoded_tokens: Iterable[str | None],
     ) -> None:
@@ -86,9 +86,9 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         for token_id, logprob, rank, decoded_token in zip(
             token_ids, logprobs, ranks, decoded_tokens
         ):
-            self.token_ids.append(token_id)
-            self.logprobs.append(logprob)
-            self.ranks.append(rank)
+            self.token_ids.append(int(token_id))
+            self.logprobs.append(float(logprob))
+            self.ranks.append(None if rank is None else int(rank))
             self.decoded_tokens.append(decoded_token)
         self.end_indices.append(len(self.logprobs))
 
@@ -174,14 +174,15 @@ def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
 
 def append_logprobs_for_next_position(
     request_logprobs: PromptLogprobs | SampleLogprobs,
-    token_ids: list[int],
-    logprobs: list[float],
+    token_ids: Iterable[int],
+    logprobs: Iterable[float],
     decoded_tokens: Iterable[str | None],
     rank: int,
     num_logprobs: int,
 ) -> None:
     """Appends logprobs for the next position"""
     if num_logprobs == -1:
+        assert isinstance(logprobs, Sized)
         num_logprobs = len(logprobs)
     # We do not need a special case for the sampled token
     # being in the topk, since inserting duplicated data
@@ -194,9 +195,9 @@ def append_logprobs_for_next_position(
     else:
         request_logprobs.append(
             {
-                token_id: Logprob(
-                    logprob=logprob,
-                    rank=rank,
+                int(token_id): Logprob(
+                    logprob=float(logprob),
+                    rank=None if rank is None else int(rank),
                     decoded_token=token,
                 )
                 for token_id, logprob, rank, token in zip(
