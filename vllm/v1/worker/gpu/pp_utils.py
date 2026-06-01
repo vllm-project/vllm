@@ -100,25 +100,26 @@ class PPHandler:
         self.queue.append(None)
         if slot is None:
             return None
-        self.main_stream.wait_event(slot.event)
 
         # Skip requests which did not need sampled output and/or those already
         # finished. The post_update kernel skips the -1 entries.
         freed = self.req_idx_gen_np[slot.idx_mapping_np] != slot.gen_at_receive_np
         exclude_mask = freed | ~slot.need_sampled_mask
+        idx_mapping = slot.idx_mapping
         if exclude_mask.any():
             if exclude_mask.all():
                 # No states require update anymore.
                 return None
             # Filter excluded request indices.
             idx_mapping_np = np.where(exclude_mask, -1, slot.idx_mapping_np)
-            slot.idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+            idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
+        self.main_stream.wait_event(slot.event)
         return dict(
             sampled_tokens=slot.sampled_tokens,
             num_sampled=slot.num_sampled,
             num_rejected=slot.num_rejected,
-            idx_mapping=slot.idx_mapping,
+            idx_mapping=idx_mapping,
         )
 
     def receive(self, input_batch: InputBatch) -> bool:
@@ -147,12 +148,12 @@ class PPHandler:
             torch.distributed.broadcast(
                 combined, src=self.last_rank, group=self.broadcast_group
             )
+            event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
             # Must record_stream since these were allocated on broadcast stream but
             # later used on the main stream.
             sampled_tokens.record_stream(self.main_stream)
             combined.record_stream(self.main_stream)
-            event = self.broadcast_stream.record_event()
         self.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
