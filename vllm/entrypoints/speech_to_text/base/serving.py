@@ -114,6 +114,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         self.asr_config = self.model_cls.get_speech_to_text_config(
             self.model_config, task_type
         )
+        self.streaming_post_processor_cls = (
+            self.model_cls.get_streaming_post_processor_cls()
+        )
 
         self.enable_force_include_usage = enable_force_include_usage
 
@@ -692,7 +695,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         try:
             for result_generator in list_result_generator:
                 beginning_of_chunk = True
-                post_process_delta = self.model_cls.get_streaming_post_processor()
+                post_processor = self.streaming_post_processor_cls()
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -710,7 +713,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
 
-                    output_text = post_process_delta(
+                    output_text = post_processor.process_delta(
                         output.text, output.finish_reason is not None
                     )
 
