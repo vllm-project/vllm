@@ -978,8 +978,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
+        # Remove all nixl-cu* variants then install only the one matching this
+        # image's CUDA (nixl>=1.1.0 installs both)
+        uv pip uninstall --system nixl-cu12 nixl-cu13 2>/dev/null || true; \
+        uv pip install --system --no-deps nixl-cu${CUDA_MAJOR}; \
     fi
 
 # Optional override: install mooncake-transfer-engine from a URL instead of the
