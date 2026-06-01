@@ -38,10 +38,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
-    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-
 logger = init_logger(__name__)
 
 
@@ -526,7 +522,9 @@ def _process_weights_marlin(
 
 def _process_awq_weights_marlin(
     layer: torch.nn.Module,
-    quant_config: "AutoAWQConfig",
+    weight_bits: int,
+    pack_factor: int,
+    group_size: int,
     input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
@@ -818,9 +816,8 @@ def convert_to_wna16_moe_kernel_format(
             actorder = quant_config.actorder
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig or "
-                "AutoAWQConfig, got "
-                f"{type(quant_config).__name__}."
+                "Marlin WNA16 MoE backend requires AutoAWQConfig, AutoGPTQConfig or "
+                f"QuantizationArgs, got {type(quant_config).__name__}."
             )
         if w13_g_idx is None or w2_g_idx is None:
             raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
