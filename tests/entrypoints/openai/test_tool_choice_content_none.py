@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -34,6 +37,20 @@ class _DummyDelegatingParser(DelegatingParser):
 
     def extract_tool_calls(self, model_output: str, request):
         return None
+
+
+class _ExplodingToolParser(ToolParser):
+    def extract_tool_calls_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+    ):
+        raise AssertionError("tool parser should not be called")
 
 
 def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
@@ -92,3 +109,30 @@ def test_responses_parser_allows_named_tool_choice_with_none_content():
 
     assert content is None
     assert tool_calls == []
+
+
+def test_streaming_tool_choice_none_skips_tool_parser():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "test"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+            "tool_choice": "none",
+        }
+    )
+    parser = _DummyDelegatingParser(tokenizer=None)
+    parser.tool_parser = _ExplodingToolParser(tokenizer=None)
+
+    delta = parser.parse_delta("plain text", [1], request, prompt_token_ids=[1])
+
+    assert delta is not None
+    assert delta.content == "plain text"
+    assert delta.tool_calls is None
