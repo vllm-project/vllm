@@ -28,6 +28,8 @@ steps:
   - tests/fusion
   - vllm/model_executor/layers/fusion
   - vllm/model_executor/kernels/linear
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
   commands:
     - pytest -v -s fusion/
 
