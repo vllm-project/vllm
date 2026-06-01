@@ -106,38 +106,11 @@ def test_p2add_rmsnorm_add_quant_dynamic_M():
     _compile_and_check(fn, x, y, r, w)
 
 
-def test_p3_fused_rms_gated_dynamic_M():
-    op = rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_with_zero_init_op()
-
-    def fn(x, y, w, z):
-        res = auto_functionalized(
-            op,
-            x=x,
-            gemm_out_zero_init=y,
-            weight=w,
-            bias=None,
-            z=z,
-            eps=1e-6,
-            norm_before_gate=True,
-            activation="silu",
-            group_size=128,
-        )
-        return res[0]
-
-    x = torch.randn(8, 128, dtype=torch.bfloat16, device="cuda")
-    y = torch.empty(8, 256, dtype=torch.bfloat16, device="cuda")
-    w = torch.randn(128, dtype=torch.bfloat16, device="cuda")
-    z = torch.randn(8, 128, dtype=torch.bfloat16, device="cuda")
-    _compile_and_check(fn, x, y, w, z)
-
-
 def test_p4_act_mul_dynamic_M():
     op = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_with_zero_init_op()
 
     def fn(x, y):
-        res = auto_functionalized(
-            op, x=x, gemm_out_zero_init=y, group_size=128
-        )
+        res = auto_functionalized(op, x=x, gemm_out_zero_init=y, group_size=128)
         return res[0]
 
     x = torch.randn(8, 256, dtype=torch.bfloat16, device="cuda")
@@ -147,9 +120,9 @@ def test_p4_act_mul_dynamic_M():
 
 def test_full_pass_register_then_compile_dyn_model():
     """End-to-end smoke: instantiate `BlockScaleSplitKZeroInitFusionPass`
-    (which registers all 16 patterns), then compile a tiny model whose
-    only op is `rocm_aiter_rmsnorm_fp8_group_quant` with dynamic M, then
-    invoke it. Guards against pattern registration introducing a global
+    (which registers all producer/GEMM patterns), then compile a tiny model
+    whose only op is `rocm_aiter_rmsnorm_fp8_group_quant` with dynamic M,
+    then invoke it. Guards against pattern registration introducing a global
     shape specialization that would surface as a ConstraintViolationError
     under dynamic batch sizes.
     """
@@ -169,8 +142,8 @@ def test_full_pass_register_then_compile_dyn_model():
         model_config=model_config,
         compilation_config=compilation_config,
     )
-    # Constructing the pass registers the 16 producer/GEMM patterns
-    # globally on the inductor pattern matcher table.
+    # Constructing the pass registers the producer/GEMM patterns globally
+    # on the inductor pattern matcher table.
     BlockScaleSplitKZeroInitFusionPass(vllm_config, output_dtype=torch.bfloat16)
 
     # Now compile a model that DOESN'T match any of the producers but is

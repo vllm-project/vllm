@@ -80,17 +80,14 @@ class GemmSpec:
     """Describes one blockscale GEMM backend.
 
     ``op`` is the functional GEMM as it appears in the pre-fusion FX graph;
-    ``splitk_op`` is the mutating twin that takes a preallocated output and
-    a SplitK value. ``pick_split_k`` is invoked at FX-rewrite time (via the
-    pattern-matcher's ``extra_check``) with concrete M/N/K/dtype and must
-    return either 0 (skip fusion) or the SplitK value to bake into the
-    rewritten graph.
+    ``splitk_op`` is the mutating twin that takes a preallocated output and a
+    SplitK value. The fusion bakes ``split_k=0`` (a "consult CSV" sentinel) and
+    AITER's tuned CSV picks the actual SplitK count at kernel launch.
     """
 
     name: str
     op: torch._ops.OpOverload
     splitk_op: torch._ops.OpOverload
-    pick_split_k: Callable[[int, int, int, torch.dtype], int]
     # Kwarg names on the splitk op for the new (output, split_k, y_is_zeroed)
     # trio. Defaults match the names we registered in vllm/_aiter_ops.py.
     out_kwarg: str = "output"
@@ -103,30 +100,7 @@ class GemmSpec:
 # ---------------------------------------------------------------------------
 
 
-def _default_pick_split_k(M: int, N: int, K: int, dtype: torch.dtype) -> int:
-    """Default heuristic deciding whether SplitK pays off for a shape.
-
-    The fusion pass uses this only as a yes/no gate: it returns a positive
-    value when the GEMM is K-reduction bound (small M, large K) and 0
-    otherwise. The actual SplitK count used at kernel launch comes from
-    AITER's tuned CSV at runtime (the fusion passes ``split_k=0`` as a
-    "consult CSV" sentinel). Production deployments can install a stricter
-    CSV-driven picker on ``GemmSpec.pick_split_k``.
-    """
-    if M <= 0 or K < 4096:
-        return 0
-    # Small-M / large-K GEMMs are K-reduction bound: a single M-tile leaves
-    # most compute units idle, so splitting the K reduction across them
-    # improves occupancy. This only gates whether SplitK is attempted; the
-    # actual SplitK count is chosen by AITER's tuned CSV at kernel launch.
-    if M <= 128:
-        return 1
-    return 0
-
-
-def build_default_registries() -> (
-    tuple[list[ProducerSpec], list[GemmSpec]]
-):
+def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
     """Construct the default producer and GEMM registries.
 
     Imports are kept local so this module is safe to import on platforms
@@ -142,32 +116,14 @@ def build_default_registries() -> (
     except ImportError:
         return producers, gemms
 
-    # The op-overload accessors raise AttributeError on non-ROCm builds
-    # where the ops were never registered. Guard with a single try so we
-    # degrade gracefully rather than poisoning import of the pass module.
-    try:
-        per_token_with_zero_init = (
-            rocm_aiter_ops.get_per_token_quant_with_zero_init_op()
-        )
-        per_token_functional = rocm_aiter_ops.get_per_token_quant_op()
-        producers.append(
-            ProducerSpec(
-                name="aiter_per_token_quant",
-                op=per_token_functional,
-                with_zero_init_op=per_token_with_zero_init,
-                fp8_output_index=0,
-                scales_output_index=1,
-            )
-        )
-    except AttributeError:
-        pass
+    # Each accessor below raises AttributeError on non-ROCm builds where the
+    # ops were never registered; we guard every producer in its own try so a
+    # missing op degrades gracefully instead of poisoning module import.
 
     # aiter HIP per-1x128 group FP8 quant.
     try:
         group_quant_functional = rocm_aiter_ops.get_group_quant_op()
-        group_quant_with_zero_init = (
-            rocm_aiter_ops.get_group_quant_with_zero_init_op()
-        )
+        group_quant_with_zero_init = rocm_aiter_ops.get_group_quant_with_zero_init_op()
         producers.append(
             ProducerSpec(
                 name="aiter_group_fp8_quant",
@@ -183,9 +139,7 @@ def build_default_registries() -> (
 
     # aiter Triton-fused RMSNorm + per-1x128 group FP8 quant.
     try:
-        rmsnorm_quant_functional = (
-            rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
-        )
+        rmsnorm_quant_functional = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
         rmsnorm_quant_with_zero_init = (
             rocm_aiter_ops.get_rmsnorm_fp8_group_quant_with_zero_init_op()
         )
@@ -204,9 +158,7 @@ def build_default_registries() -> (
 
     # residual-add + RMSNorm + group quant. Returns 3 outputs.
     try:
-        rmsnorm_add_functional = (
-            rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
-        )
+        rmsnorm_add_functional = rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op()
         rmsnorm_add_with_zero_init = (
             rocm_aiter_ops.get_rmsnorm_with_add_fp8_group_quant_with_zero_init_op()
         )
@@ -228,9 +180,7 @@ def build_default_registries() -> (
     # produces (M, 2K), this op applies silu * mul + quant to give (M, K)
     # FP8 feeding down_proj).
     try:
-        act_mul_quant_functional = (
-            rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
-        )
+        act_mul_quant_functional = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()
         act_mul_quant_with_zero_init = (
             rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_with_zero_init_op()
         )
@@ -242,31 +192,6 @@ def build_default_registries() -> (
                 fp8_output_index=0,
                 scales_output_index=1,
                 static_kwargs={"group_size": 128},
-            )
-        )
-    except AttributeError:
-        pass
-
-    # fused gated-RMSNorm + group quant (GDN linear attn).
-    try:
-        gated_fused_functional = (
-            rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_op()
-        )
-        gated_fused_with_zero_init = (
-            rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_with_zero_init_op()
-        )
-        producers.append(
-            ProducerSpec(
-                name="aiter_fused_rms_gated_fp8_group_quant",
-                op=gated_fused_functional,
-                with_zero_init_op=gated_fused_with_zero_init,
-                fp8_output_index=0,
-                scales_output_index=1,
-                static_kwargs={
-                    "group_size": 128,
-                    "norm_before_gate": True,
-                    "activation": "silu",
-                },
             )
         )
     except AttributeError:
@@ -314,26 +239,12 @@ def build_default_registries() -> (
     # lets the fusion cover those producers if a model starts using them.
 
     try:
+        splitk_op = rocm_aiter_ops.get_gemm_a8w8_blockscale_splitk_op()
         gemms.append(
             GemmSpec(
                 name="aiter_gemm_a8w8_blockscale",
                 op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale.default,
-                splitk_op=rocm_aiter_ops.get_gemm_a8w8_blockscale_splitk_op(),
-                pick_split_k=_default_pick_split_k,
-            )
-        )
-    except AttributeError:
-        pass
-
-    try:
-        gemms.append(
-            GemmSpec(
-                name="aiter_triton_gemm_a8w8_blockscale",
-                op=torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale.default,
-                splitk_op=(
-                    rocm_aiter_ops.get_triton_gemm_a8w8_blockscale_splitk_op()
-                ),
-                pick_split_k=_default_pick_split_k,
+                splitk_op=splitk_op,
             )
         )
     except AttributeError:
@@ -428,28 +339,22 @@ def _concrete_int(dim: object) -> int | None:
         return None
 
 
-def _make_extra_check(
-    producer: ProducerSpec,
-    gemm: GemmSpec,
-    output_dtype: torch.dtype,
-) -> Callable[[pm.Match], bool]:
+def _make_extra_check(gemm: GemmSpec) -> Callable[[pm.Match], bool]:
     """Build the per-match shape-driven gate.
 
-    Returns True iff fusing this producer/GEMM pair pays off for the matched
-    shape, according to ``gemm.pick_split_k``. Returns True (i.e. defer the
-    SplitK decision to AITER's runtime CSV) when M is symbolic so we never
-    create a specialization guard on the dynamic batch dim.
+    Returns True iff the GEMM's K is large enough for SplitK to be worth
+    attempting. The actual SplitK count is deferred to AITER's runtime CSV
+    (the fusion bakes ``split_k=0``), so the gate reads only the statically
+    known K from the weight tensor and never touches the symbolic batch dim
+    M -- reading M would force a specialization guard on the dynamic shape.
     """
 
     def extra_check(match: pm.Match) -> bool:
-        prod_node = None
         gemm_node = None
         for node in match.nodes:
-            if node.target == producer.op:
-                prod_node = node
-            elif node.target == gemm.op:
+            if node.target == gemm.op:
                 gemm_node = node
-        if prod_node is None or gemm_node is None:
+        if gemm_node is None:
             return False
         b_node = gemm_node.args[1]
         b_shape = _shape_meta(b_node) if isinstance(b_node, fx.Node) else None
@@ -462,38 +367,17 @@ def _make_extra_check(
         # a head-aware (M, H*D) view where H*D == K. B.shape[1] is always
         # the GEMM's true K and is concrete at FX rewrite time.
         K = _concrete_int(b_shape[1])
-        N = _concrete_int(b_shape[0])
-        if K is None or N is None:
+        if K is None:
             # Weight shapes are static in vLLM, so this would be very
             # surprising. Fall back to "allow" so we don't accidentally
             # disable the fusion on an edge case we didn't anticipate.
             return True
-        # The batch dim M is symbolic in vLLM's compile mode (one FX graph
-        # for the whole dynamic shape range). When that's the case we
-        # CANNOT call ``pick_split_k(M, N, K)`` because that would force
-        # the matcher to read the SymInt as a Python int and specialize
-        # it. Instead we apply only the static K-bound gate and let
-        # AITER's runtime CSV lookup pick SplitK at kernel launch.
-        # ``y_is_zeroed=True`` semantics are safe regardless: when AITER
-        # ends up not using SplitK at a given M, the GEMM simply
-        # overwrites a buffer the producer pre-zeroed, costing at most one
-        # extra M*N*sizeof(out) write per GEMM. Small-K GEMMs never benefit
-        # from SplitK, so the K bound is the most useful static filter.
-        if K < 2048:
-            return False
-        # Only run pick_split_k when M is statically known (e.g. captured
-        # in a one-off torch.compile call with concrete shapes). Otherwise
-        # err on the side of fusing.
-        x_node = prod_node.args[0] if prod_node.args else None
-        if not isinstance(x_node, fx.Node):
-            return True
-        x_shape = _shape_meta(x_node)
-        if x_shape is None or len(x_shape) == 0:
-            return True
-        M_val = _concrete_int(x_shape[0])
-        if M_val is None:
-            return True
-        return gemm.pick_split_k(M_val, N, K, output_dtype) > 0
+        # Small-K GEMMs never benefit from SplitK, so the static K bound is
+        # the only filter we apply. ``y_is_zeroed=True`` stays safe even when
+        # AITER doesn't use SplitK at a given M: the GEMM just overwrites a
+        # buffer the producer pre-zeroed (at most one extra M*N*sizeof(out)
+        # write).
+        return K >= 2048
 
     return extra_check
 
@@ -516,8 +400,7 @@ def _make_2_input_producer_pattern(
     producer that takes exactly two tensor inputs (x, weight) plus
     optional static kwargs (e.g. group_size=128).
 
-    Covers the RMSNorm + group-quant producers; the per-token-quant
-    producer uses a slightly different builder below.
+    Covers the RMSNorm + group-quant producers (incl. Gemma RMSNorm).
     """
 
     static_kwargs = dict(producer.static_kwargs)
@@ -532,7 +415,9 @@ def _make_2_input_producer_pattern(
         # group_size=...). The pattern must use the same call shape so the
         # FX node structure matches; mixing positional + kwarg would
         # produce a node with different arg layout and never match.
-        prod_out = producer.op(x=x, weight=weight, variance_epsilon=eps, **static_kwargs)
+        prod_out = producer.op(
+            x=x, weight=weight, variance_epsilon=eps, **static_kwargs
+        )
         A = prod_out[fp8_idx]
         As = prod_out[scales_idx]
         Y = gemm.op(A, B, As, Bs, output_dtype)
@@ -582,7 +467,7 @@ def _make_2_input_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
+        _make_extra_check(gemm),
     )
 
 
@@ -669,7 +554,7 @@ def _make_2_input_with_residual_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
+        _make_extra_check(gemm),
     )
 
 
@@ -728,14 +613,14 @@ def _make_act_mul_group_quant_producer_pattern(
     example_inputs = [
         _example_bf16(8, 256),  # x (M, 2*K); silu+mul halves last dim
         _example_fp8(64, 128),  # B (N, K)
-        _example_fp32(64, 1),   # Bs (N, K/group)
+        _example_fp32(64, 1),  # Bs (N, K/group)
     ]
 
     return (
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
+        _make_extra_check(gemm),
     )
 
 
@@ -792,169 +677,6 @@ def _make_group_quant_producer_pattern(
     example_inputs = [
         _example_bf16(8, 128),  # x (M, K)
         _example_fp8(64, 128),  # B (N, K)
-        _example_fp32(64, 1),   # Bs (N, K/group)
-    ]
-
-    return (
-        pattern,
-        replacement,
-        example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
-    )
-
-
-def _make_per_token_producer_pattern(
-    producer: ProducerSpec,
-    gemm: GemmSpec,
-    output_dtype: torch.dtype,
-) -> tuple[object, object, list[torch.Tensor], object]:
-    """Builder for per-token-quant producers: `per_token_quant(x, quant_dtype)`.
-
-    The functional op signature is `(x, quant_dtype, scale=None) -> (out, scale)`.
-    We pass scale=None explicitly so the pattern matches the standalone
-    invocation (no upstream scale).
-    """
-
-    fp8_dtype = current_platform.fp8_dtype()
-    fp8_idx = producer.fp8_output_index
-    scales_idx = producer.scales_output_index
-
-    def pattern(x, B, Bs):
-        prod_out = producer.op(x, fp8_dtype, None)
-        A = prod_out[fp8_idx]
-        As = prod_out[scales_idx]
-        Y = gemm.op(A, B, As, Bs, output_dtype)
-        return Y
-
-    def replacement(x, B, Bs):
-        M = x.shape[0]
-        N = B.shape[0]
-        Y = torch.empty(M, N, dtype=output_dtype, device=B.device)
-        prod_results = auto_functionalized(
-            producer.with_zero_init_op,
-            x=x,
-            gemm_out_zero_init=Y,
-            quant_dtype=fp8_dtype,
-            scale=None,
-        )
-        A = prod_results[fp8_idx]
-        As = prod_results[scales_idx]
-        Y_zeroed = prod_results[-1]
-        gemm_results = auto_functionalized(
-            gemm.splitk_op,
-            A=A,
-            B=B,
-            As=As,
-            Bs=Bs,
-            output=Y_zeroed,
-            output_dtype=output_dtype,
-            split_k=_SPLIT_K_SENTINEL,
-            y_is_zeroed=True,
-        )
-        return gemm_results[-1]
-
-    example_inputs = [
-        _example_bf16(8, 128),  # x
-        _example_fp8(64, 128),  # B
-        _example_fp32(64, 1),  # Bs
-    ]
-
-    return (
-        pattern,
-        replacement,
-        example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
-    )
-
-
-def _make_fused_rms_gated_producer_pattern(
-    producer: ProducerSpec,
-    gemm: GemmSpec,
-    output_dtype: torch.dtype,
-) -> tuple[object, object, list[torch.Tensor], object]:
-    """Builder for the fused gated-RMSNorm producer.
-
-    The functional op signature is:
-
-        rocm_aiter_fused_rms_gated_fp8_group_quant(
-            x, weight, bias, z, eps, norm_before_gate, activation, group_size
-        ) -> (fp8, scales)
-
-    Qwen3-Next's GDN linear-attention path lands here without a bias and with
-    norm_before_gate=True, activation="silu". The pattern matches only that
-    config since `bias=None` cannot be a graph input (matcher needs concrete
-    tensors).
-    """
-
-    static_kwargs = dict(producer.static_kwargs)
-    eps = 1e-6
-    norm_before_gate = bool(static_kwargs.pop("norm_before_gate", True))
-    activation = str(static_kwargs.pop("activation", "silu"))
-    group_size = int(static_kwargs.get("group_size", 128))
-    fp8_idx = producer.fp8_output_index
-    scales_idx = producer.scales_output_index
-
-    def pattern(x, weight, z, B, Bs):
-        # Upstream AiterRMSNormGatedFp8GroupQuantPattern emits this op with
-        # all kwargs and a `bias=None` literal. Mirror that here. Note that
-        # upstream also inserts a `.reshape(-1, hidden_dim)` between the
-        # producer and any downstream GEMM consumer, so this pattern as-is
-        # only matches the (rare) producer-direct-to-gemm case; Qwen3-Next
-        # actually goes through reshape and won't match. This producer is
-        # kept in the registry as future-proofing for models that don't
-        # reshape.
-        prod_out = producer.op(
-            x=x,
-            weight=weight,
-            bias=None,
-            z=z,
-            eps=eps,
-            norm_before_gate=norm_before_gate,
-            activation=activation,
-            group_size=group_size,
-        )
-        A = prod_out[fp8_idx]
-        As = prod_out[scales_idx]
-        Y = gemm.op(A, B, As, Bs, output_dtype)
-        return Y
-
-    def replacement(x, weight, z, B, Bs):
-        M = x.shape[0]
-        N = B.shape[0]
-        Y = torch.empty(M, N, dtype=output_dtype, device=B.device)
-        prod_results = auto_functionalized(
-            producer.with_zero_init_op,
-            x=x,
-            gemm_out_zero_init=Y,
-            weight=weight,
-            bias=None,
-            z=z,
-            eps=eps,
-            norm_before_gate=norm_before_gate,
-            activation=activation,
-            group_size=group_size,
-        )
-        A = prod_results[fp8_idx]
-        As = prod_results[scales_idx]
-        Y_zeroed = prod_results[-1]
-        gemm_results = auto_functionalized(
-            gemm.splitk_op,
-            A=A,
-            B=B,
-            As=As,
-            Bs=Bs,
-            output=Y_zeroed,
-            output_dtype=output_dtype,
-            split_k=_SPLIT_K_SENTINEL,
-            y_is_zeroed=True,
-        )
-        return gemm_results[-1]
-
-    example_inputs = [
-        _example_bf16(8, 128),  # x (M, K)
-        _example_bf16(128),  # weight (K,)
-        _example_bf16(8, 128),  # z (M, K)
-        _example_fp8(64, 128),  # B (N, K)
         _example_fp32(64, 1),  # Bs (N, K/group)
     ]
 
@@ -962,7 +684,7 @@ def _make_fused_rms_gated_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
+        _make_extra_check(gemm),
     )
 
 
@@ -1030,7 +752,7 @@ def _make_gated_producer_pattern(
         pattern,
         replacement,
         example_inputs,
-        _make_extra_check(producer, gemm, output_dtype),
+        _make_extra_check(gemm),
     )
 
 
@@ -1038,11 +760,11 @@ def _make_gated_producer_pattern(
 # differences between producers (number of inputs, which kwargs the FX node
 # carries) so the fusion pass body stays uniform.
 _BUILDERS: dict[str, Callable] = {
-    "aiter_per_token_quant": _make_per_token_producer_pattern,
     "aiter_group_fp8_quant": _make_group_quant_producer_pattern,
     "aiter_rmsnorm_fp8_group_quant": _make_2_input_producer_pattern,
-    "aiter_rmsnorm_with_add_fp8_group_quant": _make_2_input_with_residual_producer_pattern,
-    "aiter_fused_rms_gated_fp8_group_quant": _make_fused_rms_gated_producer_pattern,
+    "aiter_rmsnorm_with_add_fp8_group_quant": (
+        _make_2_input_with_residual_producer_pattern
+    ),
     "aiter_act_mul_and_fp8_group_quant": _make_act_mul_group_quant_producer_pattern,
     "aiter_gemma_rmsnorm_fp8_group_quant": _make_2_input_producer_pattern,
     "aiter_gated_rmsnorm_fp8_group_quant": _make_gated_producer_pattern,
@@ -1150,9 +872,9 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
         third output (``getitem(node, 2)``) is the zero-inited Y buffer,
         which is then consumed by an ``auto_functionalized(gemm.splitk_op,
         output=Y, ...)``. We pair them by walking the SSA edge so we can
-        distinguish e.g. ``group_fp8_quant x ck_gemm`` from
-        ``group_fp8_quant x triton_gemm`` (both fused share the same
-        ``producer.with_zero_init_op`` but different gemm targets).
+        distinguish different ``producer x gemm`` pairs that fuse through
+        the same ``producer.with_zero_init_op`` overload but target
+        different gemm ops.
         """
         if not self._pair_specs:
             return {}
@@ -1219,9 +941,7 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
                 # Producer fused but no downstream splitk gemm consumer -
                 # surface as a synthetic counter row so we can tell this
                 # apart from a regular match in the log.
-                counts.setdefault(
-                    f"{producer_name}__x__<no-gemm-consumer>", 0
-                )
+                counts.setdefault(f"{producer_name}__x__<no-gemm-consumer>", 0)
                 counts[f"{producer_name}__x__<no-gemm-consumer>"] += 1
                 continue
             pair_key = f"{producer_name}__x__{gemm_name}"
@@ -1333,8 +1053,6 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             _make_2_input_with_residual_producer_pattern,
             _make_act_mul_group_quant_producer_pattern,
             _make_group_quant_producer_pattern,
-            _make_per_token_producer_pattern,
-            _make_fused_rms_gated_producer_pattern,
             _make_gated_producer_pattern,
             build_default_registries,
         )
