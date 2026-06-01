@@ -132,6 +132,7 @@ if flashinfer_comm is not None:
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
+        weight_bias: float = 0.0,
     ) -> None:
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
@@ -208,6 +209,7 @@ if flashinfer_comm is not None:
             layout_code=layout_code,
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
+            weight_bias=weight_bias,
             trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
@@ -225,6 +227,7 @@ if flashinfer_comm is not None:
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
+        weight_bias: float = 0.0,
     ) -> None:
         pass
 
@@ -417,12 +420,8 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 
 class AllReduceGemmaRMSNormPattern(BasePattern):
-    """Gemma-style variant of AllReduceRMSNormPattern.
-
-    Matches `tensor_model_parallel_all_reduce -> ir.ops.rms_norm(weight + 1)`
-    (no residual) produced by GemmaRMSNorm.forward_native, and replaces it
-    with the flashinfer fused op. The +1 weight shift is applied in the
-    replacement before being passed to flashinfer as `rms_gamma`.
+    """Gemma-style variant of AllReduceRMSNormPattern (no residual): matches the
+    `weight + 1` shift and passes `rms_gamma = weight + 1` to flashinfer.
     """
 
     def __init__(
@@ -473,16 +472,12 @@ class AllReduceGemmaRMSNormPattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
         )
 
 
 class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
-    """Gemma-style variant of AllReduceFusedAddRMSNormPattern.
-
-    Matches `tensor_model_parallel_all_reduce -> ir.ops.fused_add_rms_norm(
-    x, residual, weight + 1, eps)` and emits the flashinfer fused op with
-    `rms_gamma = weight + 1` applied in the replacement.
+    """Gemma-style variant of AllReduceFusedAddRMSNormPattern (with residual):
+    matches the `weight + 1` shift and passes `rms_gamma = weight + 1`.
     """
 
     def __init__(

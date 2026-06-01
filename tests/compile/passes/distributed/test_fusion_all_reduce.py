@@ -33,7 +33,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -88,6 +88,49 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
     def ops_in_model_after(self):
         if self.use_aiter:
             return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()]
+        return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
+
+
+class TestAllReduceGemmaRMSNormModel(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size=16,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.float16,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = [GemmaRMSNorm(hidden_size, eps) for _ in range(4)]
+        # Non-trivial weight (~Gemma range) so (1 + w) exercises the scale path.
+        for n in self.norm:
+            n.weight.data.normal_(mean=0.0, std=0.1)
+        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+
+    def forward(self, x):
+        # avoid having graph input be an arg to a pattern directly
+        z = torch.relu(x)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+
+        z2 = torch.mm(y, self.w[0])
+        x2 = tensor_model_parallel_all_reduce(z2)
+        y2, resid = self.norm[1](x2, resid)
+
+        z3 = torch.mm(y2, self.w[1])
+        x3 = tensor_model_parallel_all_reduce(z3)
+        y3, resid = self.norm[2](x3, resid)
+
+        z4 = torch.mm(y3, self.w[2])
+        x4 = tensor_model_parallel_all_reduce(z4)
+        y4, resid = self.norm[3](x4, resid)
+        return y4
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_reduce.default]
+
+    def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
@@ -209,6 +252,15 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     "test_model, enable_quant_fp8_custom_op, use_aiter",
     [
         (TestAllReduceRMSNormModel, False, IS_AITER_FOUND),
+        pytest.param(
+            TestAllReduceGemmaRMSNormModel,
+            False,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
         pytest.param(
             TestAllReduceRMSNormStaticQuantFP8Model,
             True,
