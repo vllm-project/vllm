@@ -20,8 +20,8 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionStatePair,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
@@ -425,7 +425,7 @@ class EagleSpeculator:
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
         logger.info("Capturing model for Eagle speculator...")
         # Reset indices to zeros to prevent stale values from prior
