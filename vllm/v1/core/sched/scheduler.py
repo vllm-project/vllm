@@ -387,8 +387,13 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
-            num_new_tokens = (
+            budget_target_tokens = (
                 request.num_tokens_with_spec
+                if request.allow_async_spec_reuse
+                else request.num_tokens
+            )
+            num_new_tokens = (
+                budget_target_tokens
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
@@ -401,7 +406,6 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
-
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
             external_load_encoder_input: list[int] = []
@@ -504,7 +508,11 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
-            if request.spec_token_ids:
+            if (
+                request.spec_token_ids
+                and not request.is_prefill_chunk
+                and request.allow_async_spec_reuse
+            ):
                 num_scheduled_spec_tokens = (
                     num_new_tokens
                     + request.num_computed_tokens
@@ -1027,6 +1035,9 @@ class Scheduler(SchedulerInterface):
 
         session._all_token_ids.extend(update.prompt_token_ids or ())
         session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        session.spec_token_ids = []
+        session.num_output_placeholders = 0
+        session.allow_async_spec_reuse = False
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
@@ -1715,6 +1726,7 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
+            request.allow_async_spec_reuse = True
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
