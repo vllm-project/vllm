@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -89,19 +88,36 @@ def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
     return moe_layer_freq[layer_id] != 0
 
 
-def _fi_gemma_rmsnorm(
-    norm: GemmaRMSNorm,
-    x: torch.Tensor,
-    residual: torch.Tensor | None = None,
-):
-    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+class MiniMAXGemmaRMSNorm(nn.Module):
+    """Gemma-style RMS normalization backed by FlashInfer kernels.
 
-    # TODO: enable PDL for rmsnorm.
-    if residual is None:
-        return gemma_rmsnorm(x, norm.weight, norm.variance_epsilon)
+    When ``residual`` is given, the fused add + norm runs in place and the
+    updated ``(x, residual)`` pair is returned.
+    """
 
-    gemma_fused_add_rmsnorm(x, residual, norm.weight, norm.variance_epsilon)
-    return x, residual
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+        # TODO: enable PDL for rmsnorm.
+        if residual is None:
+            return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
+
+        # gemma_fused_add_rmsnorm mutates x and residual in place.
+        gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
+        return x, residual
 
 
 class MiniMaxM3MLP(nn.Module):
@@ -290,8 +306,8 @@ class MiniMaxM3Attention(nn.Module):
         )
 
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm == True).
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor.
         self.rotary_emb = get_rope(
@@ -322,9 +338,9 @@ class MiniMaxM3Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
         q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        q = _fi_gemma_rmsnorm(self.q_norm, q_by_head).view(q.shape)
+        q = self.q_norm(q_by_head).view(q.shape)
         k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        k = _fi_gemma_rmsnorm(self.k_norm, k_by_head).view(k.shape)
+        k = self.k_norm(k_by_head).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -390,8 +406,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
 
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm == True).
-        self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = MiniMAXGemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Partial RoPE: rotary_dim == head_dim * partial_rotary_factor.
         self.rotary_emb = get_rope(
@@ -425,8 +441,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             prefix=f"{prefix}.index_k_proj",
         )
 
-        self.index_q_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
-        self.index_k_norm = GemmaRMSNorm(self.idx_head_dim, eps=config.rms_norm_eps)
+        self.index_q_norm = MiniMAXGemmaRMSNorm(
+            self.idx_head_dim, eps=config.rms_norm_eps
+        )
+        self.index_k_norm = MiniMAXGemmaRMSNorm(
+            self.idx_head_dim, eps=config.rms_norm_eps
+        )
         self.index_rotary_emb = self.rotary_emb
 
         # Attention-backend wiring.
@@ -529,24 +549,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
-        q = _fi_gemma_rmsnorm(
-            self.q_norm, q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        ).view(q.shape)
-        k = _fi_gemma_rmsnorm(
-            self.k_norm, k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        ).view(k.shape)
+        q = self.q_norm(q.view(*q.shape[:-1], self.num_heads, self.head_dim)).view(
+            q.shape
+        )
+        k = self.k_norm(k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)).view(
+            k.shape
+        )
         q, k = self.rotary_emb(positions, q, k)
 
         # Lightning-indexer branch: project, per-head norm, RoPE.
         index_q, _ = self.index_q_proj(hidden_states)
         index_k, _ = self.index_k_proj(hidden_states)
-        index_q = _fi_gemma_rmsnorm(
-            self.index_q_norm,
-            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim),
+        index_q = self.index_q_norm(
+            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim)
         ).view(index_q.shape)
-        index_k = _fi_gemma_rmsnorm(
-            self.index_k_norm, index_k
-        )  # single shared index head
+        index_k = self.index_k_norm(index_k)  # single shared index head
         index_q, index_k = self.index_rotary_emb(positions, index_q, index_k)
 
         # Pre-insert K/V and index-K; the sparse attention reads them from cache.
@@ -618,8 +635,10 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
 
         # config.use_gemma_norm is True for M3 -> Gemma-style RMSNorm.
-        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = GemmaRMSNorm(
+        self.input_layernorm = MiniMAXGemmaRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_attention_layernorm = MiniMAXGemmaRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -632,20 +651,16 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = _fi_gemma_rmsnorm(self.input_layernorm, hidden_states)
+            hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = _fi_gemma_rmsnorm(
-                self.input_layernorm, hidden_states, residual
-            )
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected (dense MLP or MoE)
-        hidden_states, residual = _fi_gemma_rmsnorm(
-            self.post_attention_layernorm, hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
@@ -682,7 +697,7 @@ class MiniMaxM3Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = MiniMAXGemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -702,7 +717,7 @@ class MiniMaxM3Model(nn.Module):
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states, residual)
 
-        hidden_states, _ = _fi_gemma_rmsnorm(self.norm, hidden_states, residual)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
