@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -4511,10 +4512,11 @@ class GPUModelRunner(
 
         eplb_metrics: EplbMetrics | None = None
         if self.eplb_state is not None:
-            balancedness_per_model = self.eplb_state.get_latest_balancedness()
-            if balancedness_per_model:
+            tokens_per_layer_per_model = self.eplb_state.get_latest_tokens_per_layer()
+            if tokens_per_layer_per_model:
                 eplb_metrics = EplbMetrics(
-                    balancedness_per_model=balancedness_per_model
+                    ep_rank=get_ep_group().device_group.rank(),
+                    tokens_per_layer_per_model=tokens_per_layer_per_model,
                 )
 
         # self.kv_connector_output may be modified during drafting

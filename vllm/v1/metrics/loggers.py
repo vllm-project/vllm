@@ -526,15 +526,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        self.gauge_eplb_balancedness = self._gauge_cls(
-            name="vllm:eplb_balancedness",
+        # Per-(model, layer, rank) routed-token counts.
+        # Only populated when EPLBConfig.log_balancedness=True.
+        self.gauge_eplb_tokens_per_rank = self._gauge_cls(
+            name="vllm:eplb_tokens_per_rank",
             documentation=(
-                "EPLB balancedness ratio: avg tokens-per-rank / max "
-                "tokens-per-rank across EP ranks. 1.0 indicates a perfectly balanced "
-                "expert load. Only populated when EPLBConfig.log_balancedness=True."
+                "Routed tokens per (model, layer, rank) from the most recent "
+                "EPLB sample. Only populated when EPLBConfig.log_balancedness=True."
             ),
             multiprocess_mode="mostrecent",
-            labelnames=labelnames + ["model"],
+            labelnames=labelnames + ["model", "layer", "rank"],
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1121,15 +1122,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.eplb_metrics is not None:
                 model_name, engine = self.per_engine_labelvalues[engine_idx]
+                rank = str(scheduler_stats.eplb_metrics.ep_rank)
                 for (
                     model,
-                    balancedness,
-                ) in scheduler_stats.eplb_metrics.balancedness_per_model.items():
-                    self.gauge_eplb_balancedness.labels(
-                        model_name=model_name,
-                        engine=engine,
-                        model=model,
-                    ).set(balancedness)
+                    tokens_per_layer,
+                ) in scheduler_stats.eplb_metrics.tokens_per_layer_per_model.items():
+                    for layer_idx, tokens in enumerate(tokens_per_layer):
+                        self.gauge_eplb_tokens_per_rank.labels(
+                            model_name=model_name,
+                            engine=engine,
+                            model=model,
+                            layer=str(layer_idx),
+                            rank=rank,
+                        ).set(tokens)
 
             if (
                 self.kv_cache_metrics_enabled

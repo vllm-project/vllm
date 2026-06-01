@@ -206,11 +206,11 @@ class EplbModelState:
     the async worker.
     """
 
-    latest_balancedness: float | None = None
+    latest_tokens_per_layer: list[float] | None = None
     """
-    Most recent balancedness ratio (avg_tokens / max_tokens), updated every
-    ``log_balancedness_interval`` steps. None until the first sample is taken.
-    Read by the worker each step to populate ModelRunnerOutput.
+    Most recent per-layer token counts for this rank,
+    one float per MoE layer, updated every log_balancedness_interval
+    steps. None until the first sample is taken.
     """
 
 
@@ -518,37 +518,42 @@ class EplbState:
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
         ):
-            # Sync the expert load pass for each model (main and drafter).
-            # expert_load_pass: (num_moe_layers, num_physical_experts)
-            expert_load_pass_list = self._sync_load_pass()
-            ep_group = get_ep_group().device_group
-            for expert_load_pass, eplb_model_state in zip(
-                expert_load_pass_list, self.model_states.values()
-            ):
-                # num_tokens_per_rank: (num_moe_layers, num_ranks)
-                num_tokens_per_rank = (
-                    expert_load_pass.reshape(
-                        expert_load_pass.shape[0], ep_group.size(), -1
-                    )
+            ep_size = ep_group.size()
+            rank = ep_group.rank()
+
+            # Snapshot this rank's expert_load_pass statistics into a CPU tensor
+            for eplb_model_state in self.model_states.values():
+                expert_load_pass = eplb_model_state.expert_load_pass
+
+                # Slice out this rank's tokens_per_layer
+                tokens_per_layer = (
+                    expert_load_pass.reshape(expert_load_pass.shape[0], ep_size, -1)[
+                        :, rank, :
+                    ]
                     .sum(dim=-1)
                     .float()
                 )
+                # Transfer the tokens_per_layer tensor from GPU to CPU
+                eplb_model_state.latest_tokens_per_layer = tokens_per_layer.tolist()
 
-                # Compute balancedness ratio:
-                # for each layer:
-                #   (mean load across ranks) / (max load across ranks)
+            expert_load_pass_list = self._sync_load_pass()
+            for expert_load_pass, eplb_model_state in zip(
+                expert_load_pass_list, self.model_states.values()
+            ):
+                num_tokens_per_rank = (
+                    expert_load_pass.reshape(expert_load_pass.shape[0], ep_size, -1)
+                    .sum(dim=-1)
+                    .float()
+                )
                 avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
                 max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
-
-                # Just to make type checker happy
                 tokens_tensors: list[float] = torch.stack(
                     [avg_tokens_tensor, max_tokens_tensor]
                 ).tolist()
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-                eplb_model_state.latest_balancedness = balancedness
 
-                if ep_group.rank() == 0:
+                if rank == 0:
                     logger.info(
                         "EPLB step: %d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f, "
@@ -641,12 +646,14 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def get_latest_balancedness(self) -> dict[str, float]:
-        """Return the latest balancedness ratio per model."""
+    def get_latest_tokens_per_layer(self) -> dict[str, list[float]]:
+        """Return the latest per-layer token counts for this rank only,
+        keyed by model name.
+        """
         return {
-            state.model_name: state.latest_balancedness
+            state.model_name: state.latest_tokens_per_layer
             for state in self.model_states.values()
-            if state.latest_balancedness is not None
+            if state.latest_tokens_per_layer is not None
         }
 
     def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
