@@ -85,6 +85,48 @@ def test_rms_norm(
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_weightless(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    layer = RMSNorm(hidden_size, has_weight=False).to(dtype=dtype)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    residual = torch.randn_like(x) if add_residual else None
+
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    if residual is not None:
+        opcheck(
+            torch.ops._C.fused_add_rms_norm_weightless,
+            (x, residual, layer.variance_epsilon),
+        )
+    else:
+        opcheck(
+            torch.ops._C.rms_norm_weightless,
+            (out, x, layer.variance_epsilon),
+        )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_scale", [0.01, 1.0, 10.0])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
