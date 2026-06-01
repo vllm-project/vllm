@@ -99,9 +99,6 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     ) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

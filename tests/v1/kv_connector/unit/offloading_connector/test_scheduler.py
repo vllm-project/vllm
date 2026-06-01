@@ -24,7 +24,9 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingManager,
+    OffloadPolicy,
     ReqContext,
+    RequestOffloadingContext,
     get_offload_block_hash,
 )
 from vllm.v1.request import RequestStatus
@@ -748,12 +750,8 @@ class TestSlidingWindowLookup:
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bool):
-    """With do_remote_decode=True, after loading prefix blocks from CPU,
-    all blocks must be re-stored — not just the newly computed ones.
-
-    This supports P/D disaggregation where the prefill instance offloads the
-    complete KV cache so a remote decode node can consume it."""
+def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling: bool):
+    """With REQUEST_LEVEL policy, all blocks are stored — including prefix hits."""
     gpu_block_size = 4
     block_size_factor = 3
     offloaded_block_size = gpu_block_size * block_size_factor
@@ -780,12 +778,13 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
     # Reset GPU prefix cache so the next request must load from CPU.
     runner.scheduler.reset_prefix_cache()
 
-    # New request with do_remote_decode=True and 2 offloaded blocks.
-    # The first offloaded block matches what we stored in CPU.
-    runner.new_request(
-        token_ids=[0] * offloaded_block_size * 2,
-        kv_transfer_params={"do_remote_decode": True},
+    # Manager returns REQUEST_LEVEL for the next request.
+    runner.manager.on_new_request.return_value = RequestOffloadingContext(
+        policy=OffloadPolicy.REQUEST_LEVEL
     )
+
+    # New request with 2 offloaded blocks; first matches what's in CPU.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
@@ -957,9 +956,10 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
         )
 
     def setup(r, max_offload_tokens):
-        r.new_request(token_ids=[0] * offloaded_block_size * 3)
-        req = r.scheduler.requests[str(r.req_id)]
-        req.kv_transfer_params = {"max_offload_tokens": max_offload_tokens}
+        r.new_request(
+            token_ids=[0] * offloaded_block_size * 3,
+            kv_transfer_params={"max_offload_tokens": max_offload_tokens},
+        )
         r.manager.prepare_store.side_effect = (
             lambda keys, req_context: generate_store_output(keys)
         )
@@ -1027,6 +1027,56 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
         expected_stored=(0, 1, 2, 3, 4, 5),
         expected_flushed=flushed_two,
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_offload_prompt_only(request_runner, async_scheduling: bool):
+    """offload_prompt_only=True offloads prompt blocks but never decode blocks.
+
+    Setup: a 2-offloaded-block prompt followed by enough decode tokens to fill
+    4 more offloaded blocks. The flag clamps the offloadable token count to the
+    prompt length, so only the prompt's blocks (GPU offsets 0-5) are ever
+    eligible for store; the decode blocks (offsets >= 6) are skipped.
+
+    The request is intentionally not terminated (no EOS): a store is only
+    flushed when a request finishes (or is preempted), so without a finish
+    there is nothing to flush and the assertion stays free of flush-timing
+    subtleties. The decode steps are still enough for the prompt store to
+    complete and show up in expected_stored.
+    """
+    gpu_block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = gpu_block_size * block_size_factor  # 12
+    num_prompt_blocks = 2
+    num_decode_blocks = 4
+    prompt_offsets = (0, 1, 2, 3, 4, 5)
+
+    runner = request_runner(
+        block_size=gpu_block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+        extra_config_overrides={"offload_prompt_only": True},
+    )
+
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=[0] * offloaded_block_size * num_prompt_blocks)
+    runner.run(
+        decoded_tokens=[0] * (offloaded_block_size * num_decode_blocks),
+        expected_stored=prompt_offsets,
+    )
+
+    # Timing-independent guard: only the prompt's blocks were ever offered for
+    # store. If decode blocks leaked through, more keys would appear here.
+    offered_keys = {
+        key
+        for call in runner.manager.prepare_store.call_args_list
+        for key in call.args[0]
+    }
+    assert len(offered_keys) == num_prompt_blocks
 
 
 def test_flush_all_jobs_when_no_requests_remain(request_runner):

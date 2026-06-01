@@ -25,7 +25,6 @@ from vllm.models.deepseek_v4.common.ops import (
     fused_q_kv_rmsnorm,
 )
 from vllm.utils.deep_gemm import fp8_einsum
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
@@ -292,8 +291,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             device=hidden_states.device,
         )
 
-        # Attention (inside custom op for torch.compile boundary)
-        torch.ops.vllm.deepseek_v4_attention(
+        # @eager_break_during_capture: this is where the breakable
+        # cudagraph capture breaks (the attention op runs eagerly between
+        # captured graph segments).
+        deepseek_v4_attention(
             hidden_states,
             positions,
             o_padded,
@@ -334,14 +335,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             device=o.device,
             dtype=torch.bfloat16,
         )
-        torch.ops.vllm.deepseek_v4_fp8_einsum(
-            o_fp8,
-            o_scale,
-            wo_a_fp8,
-            wo_a_scale,
-            z,
+        fp8_einsum(
             "bhr,hdr->bhd",
-            list(self._einsum_recipe),
+            (o_fp8, o_scale),
+            (wo_a_fp8, wo_a_scale),
+            z,
+            recipe=self._einsum_recipe,
         )
 
         return self.wo_b(z.flatten(1))
@@ -552,55 +551,6 @@ def deepseek_v4_attention(
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.attention_impl(hidden_states, positions, out)
-
-
-def deepseek_v4_attention_fake(
-    hidden_states: torch.Tensor,
-    positions: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_attention",
-    op_func=deepseek_v4_attention,
-    mutates_args=["out"],
-    fake_impl=deepseek_v4_attention_fake,
-)
-
-
-def deepseek_v4_fp8_einsum(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
-
-
-def deepseek_v4_fp8_einsum_fake(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: list[int],
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_fp8_einsum",
-    op_func=deepseek_v4_fp8_einsum,
-    mutates_args=["out"],
-    fake_impl=deepseek_v4_fp8_einsum_fake,
-)
 
 
 class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
