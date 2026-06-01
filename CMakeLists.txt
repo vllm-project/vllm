@@ -379,11 +379,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
+  # - sm89 FP8 MMA (mma.sync.aligned.m16n8k16.row.col.f32.e4m3.e4m3.f32) requires
+  #   ptxas >= 12.3 (PTX ISA 8.3)
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-  else()
+  elseif(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
     cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
@@ -1159,8 +1163,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # moe marlin arches for fp8 input
   # - sm80 doesn't support fp8 computation
   # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
+  # - sm89 FP8 MMA (mma.sync.aligned.m16n8k16.row.col.f32.e4m3.e4m3.f32) requires
+  #   ptxas >= 12.3 (PTX ISA 8.3)
   # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3)
+    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0;12.1" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "12.0;12.1" "${CUDA_ARCHS}")
+  endif()
   # moe marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)
