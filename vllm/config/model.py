@@ -2115,6 +2115,85 @@ def _get_head_dtype(
         raise ValueError(f"Unknown dtype: {head_dtype}")
 
 
+_LONG_MAX_MODEL_LEN_DEFAULT_ROPE_ATTRS = (
+    "rope_theta",
+    "rotary_emb_base",
+    "rotary_dim",
+    "rotary_pct",
+    "rotary_emb_fraction",
+    "partial_rotary_factor",
+)
+
+
+def _uses_unscaled_rope_position_embeddings(
+    hf_config: PretrainedConfig, rope_parameters: dict[str, dict[str, Any]] | None
+) -> bool:
+    position_embedding_type = getattr(hf_config, "position_embedding_type", None)
+    if position_embedding_type in ("rope", "rotary"):
+        return _is_unscaled_rope_parameters(hf_config, rope_parameters)
+
+    if getattr(hf_config, "rotary", True) is False:
+        return False
+
+    if rope_parameters is not None:
+        return _is_unscaled_rope_parameters(hf_config, rope_parameters)
+
+    if getattr(hf_config, "rope_scaling", None) is not None:
+        return False
+
+    return any(
+        getattr(hf_config, attr, None) is not None
+        for attr in _LONG_MAX_MODEL_LEN_DEFAULT_ROPE_ATTRS
+    )
+
+
+def _is_unscaled_rope_parameters(
+    hf_config: PretrainedConfig,
+    rope_parameters: dict[str, dict[str, Any]] | None,
+) -> bool:
+    if rope_parameters is None:
+        return getattr(hf_config, "rope_scaling", None) is None
+
+    complex_rope_keys = (
+        "factor",
+        "mrope_section",
+        "original_max_position_embeddings",
+        "use_fope",
+    )
+    for rp in rope_parameters.values():
+        if rp.get("rope_type") != "default":
+            return False
+        if any(key in rp for key in complex_rope_keys):
+            return False
+    return True
+
+
+def _maybe_update_config_for_long_max_model_len(
+    hf_config: PretrainedConfig,
+    max_model_len: int,
+    rope_parameters: dict[str, dict[str, Any]] | None,
+) -> None:
+    if getattr(hf_config, "position_embedding_type", None) == "absolute":
+        raise ValueError(
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN cannot extend models with learned "
+            "absolute position embeddings. Use a model/config with a larger "
+            "trained context length or configure an explicit long-context "
+            "method instead."
+        )
+
+    if not _uses_unscaled_rope_position_embeddings(hf_config, rope_parameters):
+        raise ValueError(
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN can only extend unscaled RoPE "
+            "models. Use a model/config with a larger context length, or "
+            "configure an explicit long-context method such as RoPE scaling "
+            "or hf_overrides."
+        )
+
+    max_position_embeddings = getattr(hf_config, "max_position_embeddings", None)
+    if max_position_embeddings is None or max_position_embeddings < max_model_len:
+        hf_config.max_position_embeddings = max_model_len
+
+
 def _get_and_verify_max_len(
     hf_config: PretrainedConfig,
     model_arch_config: ModelArchitectureConfig,
@@ -2246,6 +2325,11 @@ def _get_and_verify_max_len(
                 "error."
             )
             if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
+                _maybe_update_config_for_long_max_model_len(
+                    hf_config,
+                    max_model_len,
+                    rope_parameters,
+                )
                 logger.warning_once("%s %s", msg, warning)
             else:
                 raise ValueError(
