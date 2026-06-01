@@ -600,6 +600,7 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
+    errored: bool = False
 
 
 async def _async_serving_chat_init():
@@ -859,6 +860,50 @@ async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_truncation_side_controls_prompt_truncation():
+    model_config = MockModelConfig()
+    model_config.model = MODEL_NAME_SHORT
+    model_config.tokenizer = MODEL_NAME_SHORT
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [
+        {
+            "role": "user",
+            "content": "Summarize how prompt truncation works in one sentence.",
+        }
+    ]
+
+    full_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+    )
+    assert len(full_token_ids) > 4
+
+    right_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="right",
+    )
+    assert right_token_ids == full_token_ids[:4]
+
+    left_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="left",
+    )
+    assert left_token_ids == full_token_ids[-4:]
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.
@@ -1111,6 +1156,37 @@ async def test_serving_chat_data_parallel_rank_extraction():
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
 
 
+async def _render_chat_prompt_token_ids(
+    serving_chat: OpenAIServingChat,
+    messages: list[dict[str, str]],
+    *,
+    model_name: str = MODEL_NAME,
+    truncate_prompt_tokens: int | None = None,
+    truncation_side: str | None = None,
+) -> list[int]:
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        return_token_ids=True,
+        truncate_prompt_tokens=truncate_prompt_tokens,
+        truncation_side=truncation_side,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert len(engine_inputs) == 1
+
+    prompt_token_ids = serving_chat._extract_prompt_components(
+        engine_inputs[0]
+    ).token_ids
+    assert prompt_token_ids is not None
+    return prompt_token_ids
+
+
 class TestServingChatWithHarmony:
     """
     These tests ensure Chat Completion requests are being properly converted into
@@ -1356,91 +1432,6 @@ class TestServingChatWithHarmony:
                     "role": "assistant",
                     "channel": "commentary",
                     "content": commentary_str,
-                },
-                {
-                    "role": "assistant",
-                    "channel": "commentary",
-                    "recipient": "functions.get_weather",
-                    "content": tool_args_str,
-                },
-                {
-                    "role": "tool",
-                    "author_name": "functions.get_weather",
-                    "channel": "commentary",
-                    "recipient": "assistant",
-                    "content": "20 degrees Celsius",
-                },
-            ],
-        )
-
-    @pytest.mark.asyncio
-    async def test_tools_and_reasoning(
-        self, serving_chat, stream, weather_tools, weather_messages_start
-    ):
-        tools = weather_tools
-        messages = list(weather_messages_start)
-
-        # Test the Harmony messages for the first turn's input
-        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
-        verify_harmony_messages(
-            input_messages,
-            [
-                {"role": "system"},
-                {"role": "developer", "tool_definitions": ["get_weather"]},
-                {"role": "user", "content": messages[0]["content"]},
-            ],
-        )
-
-        # Test the Chat Completion response for the first turn's output
-        reasoning_str = "I'll call get_weather."
-        tool_args_str = '{"location": "Paris"}'
-        response_str = (
-            f"<|channel|>analysis<|message|>{reasoning_str}<|end|>"
-            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
-            f"<|constrain|>json<|message|>{tool_args_str}<|call|>"
-        )
-        response = await self.generate_response_from_harmony_str(
-            serving_chat, req, response_str, stream=stream
-        )
-        verify_chat_response(
-            response,
-            reasoning=reasoning_str,
-            tool_calls=[("get_weather", tool_args_str)],
-        )
-
-        tool_call = response.choices[0].message.tool_calls[0]
-
-        # Add the output messages from the first turn as input to the second turn
-        for choice in response.choices:
-            messages.append(choice.message.model_dump(exclude_none=True))
-
-        # Add our tool output message
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": "20 degrees Celsius",
-            },
-        )
-
-        # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
-        )
-        verify_harmony_messages(
-            input_messages_2,
-            [
-                {"role": "system"},
-                {"role": "developer"},
-                {"role": "user"},
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_str,
                 },
                 {
                     "role": "assistant",

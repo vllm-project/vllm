@@ -223,13 +223,6 @@ echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
 
 check_and_skip_if_image_exists
 
-# The rust frontend lives in a git submodule under rust/. Buildkite's default
-# checkout does not recurse submodules, and the Dockerfile only sees what's in
-# the build context, so initialize the submodule here before invoking bake.
-echo "--- :git: Initializing git submodules"
-git submodule sync --recursive
-git submodule update --init --recursive
-
 echo "--- :docker: Setting up Docker buildx bake"
 echo "Target: ${TARGET}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"

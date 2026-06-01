@@ -46,7 +46,6 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
-    get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
@@ -85,6 +84,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
+    split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
@@ -220,13 +220,6 @@ class OpenAIServingResponses(OpenAIServing):
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
-            )
-            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
-            # We need to add them to the stop token ids.
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
             )
 
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
@@ -1040,7 +1033,10 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer, request.tools)
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            parser = self.parser(
+                tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
+            )
             return parser.extract_response_outputs(
                 model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
@@ -1377,7 +1373,15 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = self.parser(tokenizer, request.tools) if self.parser else None
+        parser = (
+            self.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            if self.parser
+            else None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1414,18 +1418,19 @@ class OpenAIServingResponses(OpenAIServing):
             if not delta_message:
                 continue
 
-            target_state, tool_call = processor.resolve_target_state(delta_message)
-            if target_state == _StateType.NONE:
-                continue
+            for dm in split_delta(delta_message):
+                target_state, tool_call = processor.resolve_target_state(dm)
+                if target_state == _StateType.NONE:
+                    continue
 
-            if processor.needs_transition(target_state, tool_call):
-                for event in processor.close_current():
-                    yield _increment_sequence_number_and_return(event)
-                for event in processor.open(target_state, tool_call):
-                    yield _increment_sequence_number_and_return(event)
+                if processor.needs_transition(target_state, tool_call):
+                    for event in processor.close_current():
+                        yield _increment_sequence_number_and_return(event)
+                    for event in processor.open(target_state, tool_call):
+                        yield _increment_sequence_number_and_return(event)
 
-            for event in processor.emit_delta(delta_message, output, _get_logprobs):
-                yield _increment_sequence_number_and_return(event)
+                for event in processor.emit_delta(dm, output, _get_logprobs):
+                    yield _increment_sequence_number_and_return(event)
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
