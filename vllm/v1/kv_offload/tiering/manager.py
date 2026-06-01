@@ -151,7 +151,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._transfer_jobs: dict[JobId, JobMetadata] = {}
 
         # Pending promotion requests accumulated during lookup() calls; flushed
-        # as one batched submit_load() per (tier, request) in take_events().
+        # as one batched submit_load() per (tier, request) in on_schedule_end().
         # Outer key: tier. Inner key: req_context.req_id — the same ReqContext
         # object is reused for all block lookups of a given request per engine step.
         self._pending_load_submissions: dict[
@@ -159,7 +159,7 @@ class TieringOffloadingManager(OffloadingManager):
         ] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
-        # Reset at the end of each step in take_events().
+        # Reset at the end of each step in on_schedule_end().
         self._processed_jobs_this_step: bool = False
 
         # Per-request set of secondary tiers that requested REQUEST_LEVEL
@@ -181,7 +181,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         Guarded by _processed_jobs_this_step: the first call in an engine step
         does the actual polling; subsequent calls are no-ops. The flag is reset
-        in take_events() at the end of each step.
+        in on_schedule_end() at the end of each step.
         """
         if self._processed_jobs_this_step:
             return
