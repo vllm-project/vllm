@@ -842,6 +842,33 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         return prompt_updates
 
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        """Tokenize text without multimodal data, bypassing the HF
+        processor's multimodal expansion pipeline.
+
+        Recent versions of ``transformers`` refactored
+        ``ProcessorMixin.__call__`` to enforce 1:1 matching between
+        multimodal placeholder tokens (``<|image|>``, ``<|video|>``,
+        ``<|audio|>``) and replacement data.  During KV cache profiling,
+        vLLM tokenizes the dummy prompt (containing placeholders) without
+        any multimodal data, which triggers a ``StopIteration`` / ``ValueError``
+        in ``get_text_with_replacements``.
+
+        Override ``_apply_hf_processor_text_only`` to call the tokenizer
+        directly so that placeholder tokens are preserved in ``prompt_ids``
+        and expanded by downstream ``_apply_prompt_updates``.
+        """
+        tokenizer = self.info.get_tokenizer()
+        # tokenizer.encode always returns a list of ints;
+        # strip return_tensors which is only meaningful for the processor.
+        safe_kwargs = dict(tokenization_kwargs)
+        safe_kwargs.pop("return_tensors", None)
+        return tokenizer.encode(prompt_text, **safe_kwargs)
+
     # NOTE: Gemma3/Gemma3n override _apply_token_matches and
     # _find_mm_placeholders to merge adjacent newline tokens that arise
     # when full_image_sequence contains "\n\n" wrappers.  Gemma4's
