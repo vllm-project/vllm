@@ -662,22 +662,13 @@ class DeepStreamVideoBackend(VideoLoader):
     def _probe_video_metadata(
         filepath: str,
     ) -> tuple[int, float, float, int, int]:
-        """``(frame_count, fps, duration_sec, width, height)`` via pymediainfo.
-        Any unknown value is returned as ``0``."""
-        from pymediainfo import MediaInfo
+        """``(frame_count, fps, duration_sec, width, height)``.
 
-        for track in MediaInfo.parse(filepath).tracks:
-            if track.track_type != "Video":
-                continue
-            frame_count = int(track.frame_count or 0)
-            fps_val = float(track.frame_rate or 0)
-            duration_sec = float(track.duration or 0) / 1000.0
-            width = int(track.width or 0)
-            height = int(track.height or 0)
-            if frame_count == 0 and fps_val > 0 and duration_sec > 0:
-                frame_count = round(fps_val * duration_sec)
-            return frame_count, fps_val, duration_sec, width, height
-        return 0, 0.0, 0.0, 0, 0
+        Delegates to the ``deepstream_decode`` wheel, which carries the
+        pymediainfo dependency. Returns ``(0, 0.0, 0.0, 0, 0)`` if the
+        file can't be parsed."""
+        from deepstream_decode import probe_metadata
+        return probe_metadata(filepath)
 
     # ----------------------------------------------------------------
     # Pool lifecycle (lazy)
