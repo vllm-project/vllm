@@ -548,18 +548,14 @@ class RFMConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
         hf_config = model_config.hf_config
-        text_config = getattr(hf_config, "text_config", hf_config)
 
         if model_config.tokenizer == model_config.model:
             model_config.tokenizer = ROBOMETER_TOKENIZER
         if pooler_config.tok_pooling_type is None:
             pooler_config.tok_pooling_type = "STEP"
         if pooler_config.step_tag_id is None:
+            text_config = getattr(hf_config, "text_config", hf_config)
             pooler_config.step_tag_id = text_config.vocab_size - 1
-
-        if getattr(text_config, "rope_parameters", None) is None:
-            text_config.rope_parameters = {}
-        text_config.rope_parameters["force_native_interleaved_mrope"] = True
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
 

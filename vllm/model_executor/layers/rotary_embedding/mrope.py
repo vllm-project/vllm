@@ -219,7 +219,6 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         beta_fast: int = 32,
         beta_slow: int = 1,
         truncate: bool = True,
-        force_native_interleaved_mrope: bool = False,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -227,7 +226,6 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
-        self.force_native_interleaved_mrope = force_native_interleaved_mrope
         if self.scaling_factor is not None:
             # Get n-d magnitude scaling corrected for interpolation
             self.mscale = float(yarn_get_mscale(self.scaling_factor) * attn_factor)
@@ -330,19 +328,6 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if (
-            positions.ndim == 2
-            and self.mrope_interleaved
-            and self.force_native_interleaved_mrope
-        ):
-            query_native, key_native = self.forward_native(
-                positions, query, key, offsets
-            )
-            query.copy_(query_native)
-            if key is not None and key_native is not None:
-                key.copy_(key_native)
-            return query, key
-
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
