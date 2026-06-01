@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -1185,6 +1188,8 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         layer.register_parameter("weight_scale", weight_scale)
+
+        expose_input_quant_key(layer, self.kernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if (
