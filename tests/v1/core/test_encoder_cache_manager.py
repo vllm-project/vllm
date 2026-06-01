@@ -312,6 +312,24 @@ def test_reset_allows_fresh_allocations():
     assert "req1" not in manager.request_cached_ids
 
 
+def test_free_request_with_duplicate_mm_hashes():
+    """Freeing a request whose two inputs share the same mm_hash must fully
+    clean up request_cached_ids. After the first free_encoder_input call,
+    cached[mm_hash] becomes empty; the second call must still remove the
+    remaining input_id from request_cached_ids."""
+    manager = EncoderCacheManager(cache_size=20)
+
+    req = MockRequest("r1", ["imgA", "imgA"], [4, 4])
+
+    manager.allocate(req, 0)
+    # input 1 has the same hash, so it's already cached.
+    assert manager.check_and_update_cache(req, 1)
+    assert manager.request_cached_ids["r1"] == {0, 1}
+
+    manager.free(req)
+    assert "r1" not in manager.request_cached_ids
+
+
 def test_encoder_decoder_cache_manager_reset():
     manager = EncoderDecoderCacheManager(cache_size=20)
 

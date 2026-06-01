@@ -225,13 +225,16 @@ class EncoderCacheManager:
         """
         req_id = request.request_id
         mm_hash = request.mm_features[input_id].identifier
+        # Always clean up request_cached_ids, even if the mm_hash was
+        # already evicted from cache (e.g. by can_allocate).
+        if req_id in self.request_cached_ids:
+            self.request_cached_ids[req_id].discard(input_id)
+            if not self.request_cached_ids[req_id]:
+                del self.request_cached_ids[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
         self.cached[mm_hash].discard(req_id)
-        self.request_cached_ids[req_id].discard(input_id)
-        if not self.request_cached_ids[req_id]:
-            del self.request_cached_ids[req_id]
         if not self.cached[mm_hash]:
             num_encoder_embeds = request.get_num_encoder_embeds(input_id)
             self.freeable[mm_hash] = num_encoder_embeds
