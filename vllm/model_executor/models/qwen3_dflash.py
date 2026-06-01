@@ -35,6 +35,7 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
+from .interfaces import LocalArgmaxMixin
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
 from .utils import (
@@ -500,7 +501,7 @@ class DFlashQwen3Model(nn.Module):
         return loaded_params
 
 
-class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+class DFlashQwen3ForCausalLM(LocalArgmaxMixin, Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -565,20 +566,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Vocab-parallel argmax without all-gathering full logits.
-
-        Falls back to full logits when draft_id_to_target_id remapping is
-        active, since the draft model predicts over draft_vocab_size while
-        speculative decoding expects target vocab ids.
-        """
-        if self.draft_id_to_target_id is not None:
-            return self.compute_logits(hidden_states).argmax(dim=-1)
-        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def precompute_and_store_context_kv(
         self,

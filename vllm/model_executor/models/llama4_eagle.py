@@ -36,7 +36,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
 
-from .interfaces import SupportsMultiModal
+from .interfaces import LocalArgmaxMixin, SupportsMultiModal
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
@@ -163,7 +163,7 @@ class LlamaModel(nn.Module):
             }
 
 
-class EagleLlama4ForCausalLM(Llama4ForCausalLM):
+class EagleLlama4ForCausalLM(LocalArgmaxMixin, Llama4ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -207,23 +207,6 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Vocab-parallel argmax without all-gathering full logits.
-
-        Falls back to full logits when draft_id_to_target_id remapping is
-        active, since the shared lm_head covers the full target vocab but
-        the draft model only predicts over a subset (draft_vocab_size).
-        """
-        if (
-            hasattr(self, "draft_id_to_target_id")
-            and self.draft_id_to_target_id is not None
-        ):
-            return self.compute_logits(hidden_states).argmax(dim=-1)
-        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         def transform(inputs):

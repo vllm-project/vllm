@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
+from .interfaces import LocalArgmaxMixin
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -301,7 +302,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class Eagle3LlamaForCausalLM(LlamaForCausalLM):
+class Eagle3LlamaForCausalLM(LocalArgmaxMixin, LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -391,20 +392,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         )
         logits_new[:, targets] = logits
         return logits_new
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        """Vocab-parallel argmax without all-gathering full logits.
-
-        Falls back to full logits when draft_id_to_target_id remapping is
-        active, since the draft model predicts over draft_vocab_size while
-        speculative decoding expects target vocab ids.
-        """
-        if self.draft_id_to_target_id is not None:
-            return self.compute_logits(hidden_states).argmax(dim=-1)
-        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
 
     def combine_hidden_states(
         self,
