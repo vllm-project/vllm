@@ -290,25 +290,28 @@ def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
     prompt_ids: list[int] | None = []
     results: list[DeltaMessage | None] = []
     for i, tid in enumerate(token_ids):
-        is_last = i == len(token_ids) - 1
+        prev = results[-1] if results else None
+        prev_had_args = (
+            prev
+            and prev.tool_calls
+            and any(tc.function and tc.function.arguments for tc in prev.tool_calls)
+        )
 
-        # Before the final token, extend parsed args beyond what was
-        # streamed so get_remaining_unstreamed_args() returns the gap.
-        if is_last and parser._tool_parser.prev_tool_call_arr:
-            streamed = parser._tool_parser.streamed_args_for_tool[0]
-            parser._tool_parser.prev_tool_call_arr[-1]["arguments"] = (
-                streamed + remainder
-            )
+        if prev_had_args:
+            parser._tool_parser.get_remaining_unstreamed_args = lambda: remainder
 
         result = parser.parse_delta(
             tokenizer.decode([tid]),
             [tid],
             request_obj,
             prompt_token_ids=prompt_ids,
-            finished=is_last,
+            finished=prev_had_args,
         )
         prompt_ids = None
         results.append(result)
+
+        if prev_had_args:
+            break
 
     _, _, tool_calls = collect_fields(results)
     tool_args = "".join(
