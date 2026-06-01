@@ -213,6 +213,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
+    @property
+    def _monolithic_writes_routing_replay(self) -> bool:
+        return True
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -312,6 +316,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
@@ -360,6 +365,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            routing_replay_out=routing_replay_out,
         )
 
     def _apply_per_tensor(
@@ -378,6 +384,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Delay import for non-CUDA.
         import flashinfer
@@ -418,6 +425,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
             activation_type=activation_type,
+            routing_replay_out=routing_replay_out,
         )
         return out
 
@@ -437,6 +445,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
             return self._apply_block_scale(
@@ -453,6 +462,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 e_score_correction_bias=e_score_correction_bias,
                 routed_scaling_factor=routed_scaling_factor,
                 topk_group=topk_group,
+                routing_replay_out=routing_replay_out,
             )
         elif self.quant_config.is_per_tensor:
             return self._apply_per_tensor(
@@ -468,6 +478,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 num_expert_group=num_expert_group,
                 e_score_correction_bias=e_score_correction_bias,
                 routed_scaling_factor=routed_scaling_factor,
+                routing_replay_out=routing_replay_out,
             )
         else:
             raise NotImplementedError(

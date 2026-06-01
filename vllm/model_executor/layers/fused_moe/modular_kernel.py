@@ -981,6 +981,10 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
+    @property
+    def _monolithic_writes_routing_replay(self) -> bool:
+        return False
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -997,6 +1001,8 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        # routing replay support
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Same as apply(), except uses router_logits as opposed
@@ -1451,6 +1457,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Same as forward(), except uses router_logits as opposed
@@ -1475,11 +1482,11 @@ class FusedMoEKernelMonolithicImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             a1q_scale=a1q_scale,
-            # grouped topk + fused topk bias parameters
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_replay_out=routing_replay_out,
         )
 
         output = self.prepare_finalize.finalize(fused_out)
@@ -1582,6 +1589,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1597,6 +1605,7 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            routing_replay_out=routing_replay_out,
         )
 
     def apply(
