@@ -269,6 +269,14 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
+# Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
+# CI image currently raises downloads to 60s. AMD model-test jobs routinely
+# start from a cold or partially-populated shared cache, and the 60s read cap
+# has still timed out before pytest reached the vLLM behavior under test.
+# Keep the CI default explicit and overridable from the Buildkite environment.
+: "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+: "${HF_HUB_ETAG_TIMEOUT:=60}"
+
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
 # Fall back to $* for backward compatibility, but warn that inner
@@ -392,6 +400,8 @@ else
     --group-add "$render_gid" \
     --rm \
     -e HF_TOKEN \
+    -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
+    -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
