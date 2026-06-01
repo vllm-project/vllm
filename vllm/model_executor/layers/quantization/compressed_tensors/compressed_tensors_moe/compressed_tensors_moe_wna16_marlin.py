@@ -86,11 +86,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 "CompressedTensorsWNA16MarlinMoEMethod only supports int4 and int8 now."
             )
 
-        weight_key = QuantKey(
-            self.quant_type, 
-            scale,
-            symmetric=self.symmetric
-        )
+        weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
         # Select WNA16 MoE backend via oracle.
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
