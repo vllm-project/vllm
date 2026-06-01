@@ -65,6 +65,12 @@ class GroupOffloadConfig(NamedTuple):
     hash_block_size_factor: int
     # None below means full attention
     sliding_window_size_in_blocks: int | None
+    # Number of this group's offloaded blocks per full-attention alignment
+    # segment. Used to skip storing SWA blocks that can never serve a load
+    # hit (e.g. DeepSeek V4 where SWA groups have much smaller block sizes
+    # than the MLA full-attention group).
+    # None for full-attention groups or when the optimization doesn't apply.
+    alignment_block_count: int | None = None
 
 
 def get_sliding_window_size_in_blocks(
@@ -89,6 +95,41 @@ class SchedulerOffloadConfig(NamedTuple):
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
+        # Determine the alignment token count from the full-attention group(s).
+        # This is the offloaded_block_size of the full-attention group; load
+        # hits are always aligned to this boundary, so SWA blocks earlier in
+        # each segment can never serve a load hit. Relevant for hybrid
+        # architectures like DeepSeek V4 (MLA + SWA groups).
+        full_attn_offloaded_block_sizes: set[int] = set()
+        for idx, gpu_block_size in enumerate(spec.gpu_block_size):
+            kv_spec = spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+            sw = get_sliding_window_size_in_blocks(
+                kv_spec, gpu_block_size * spec.block_size_factor
+            )
+            if sw is None:
+                full_attn_offloaded_block_sizes.add(
+                    gpu_block_size * spec.block_size_factor
+                )
+
+        # Only apply the optimization if there's a single consistent
+        # full-attention alignment size.
+        alignment_tokens: int | None = None
+        if len(full_attn_offloaded_block_sizes) == 1:
+            alignment_tokens = full_attn_offloaded_block_sizes.pop()
+
+        def _alignment_block_count(
+            offloaded_block_size: int,
+            sliding_window_size_in_blocks: int | None,
+        ) -> int | None:
+            if alignment_tokens is None or sliding_window_size_in_blocks is None:
+                return None
+            if alignment_tokens <= offloaded_block_size:
+                return None
+            per_segment = alignment_tokens // offloaded_block_size
+            if sliding_window_size_in_blocks >= per_segment:
+                return None
+            return per_segment
+
         return cls(
             num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
@@ -100,9 +141,14 @@ class SchedulerOffloadConfig(NamedTuple):
                         (gpu_block_size * spec.block_size_factor)
                         // spec.hash_block_size
                     ),
-                    sliding_window_size_in_blocks=get_sliding_window_size_in_blocks(
-                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
-                        gpu_block_size * spec.block_size_factor,
+                    sliding_window_size_in_blocks=(
+                        sw := get_sliding_window_size_in_blocks(
+                            spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                            gpu_block_size * spec.block_size_factor,
+                        )
+                    ),
+                    alignment_block_count=_alignment_block_count(
+                        gpu_block_size * spec.block_size_factor, sw
                     ),
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
@@ -223,6 +269,9 @@ class OffloadingConnectorScheduler:
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
+        # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
+        # active jobs.
+        self._stale_job_threshold: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -636,6 +685,7 @@ class OffloadingConnectorScheduler:
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
 
             # Filter out blocks skipped due to sliding window attention / SSM
+            # or unreachable by the load path's alignment constraints.
             new_offload_keys: list[OffloadKey] = []
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
@@ -660,9 +710,26 @@ class OffloadingConnectorScheduler:
                 ]
                 assert len(offload_keys) == len(offload_block_ids)
 
-                for offload_key, block_id in zip(offload_keys, offload_block_ids):
-                    if block_id != 0:
-                        new_offload_keys.append(offload_key)
+                alignment_block_count = group_config.alignment_block_count
+                tail = group_config.sliding_window_size_in_blocks
+
+                for key_idx, (offload_key, block_id) in enumerate(
+                    zip(offload_keys, offload_block_ids)
+                ):
+                    if block_id == 0:
+                        continue
+                    # Skip SWA blocks that can never serve a load hit:
+                    # within each full-attention alignment segment, only the
+                    # trailing `tail` blocks are reachable by
+                    # _sliding_window_lookup. For DeepSeek V4 with 100K
+                    # tokens this reduces SWA stores by ~78%.
+                    if alignment_block_count is not None:
+                        assert tail is not None
+                        abs_block_idx = start_block_idx + key_idx
+                        pos_in_segment = abs_block_idx % alignment_block_count
+                        if pos_in_segment < alignment_block_count - tail:
+                            continue
+                    new_offload_keys.append(offload_key)
 
             if not new_offload_keys:
                 req_status.advance_stored_idx(num_offloadable_tokens)
@@ -707,7 +774,6 @@ class OffloadingConnectorScheduler:
 
                     offloaded_block_idx = start_block_idx + idx
                     gpu_block_idx = offloaded_block_idx * block_size_factor
-                    num_group_blocks += block_size_factor
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
                         if block_id == 0:
@@ -717,6 +783,7 @@ class OffloadingConnectorScheduler:
                         elif start_gpu_block_idx is None:
                             start_gpu_block_idx = gpu_block_idx + i
                         src_block_ids.append(block_id)
+                        num_group_blocks += 1
                         if is_sliding_window:
                             sliding_window_block_ids.append(block_id)
                         else:
@@ -779,6 +846,14 @@ class OffloadingConnectorScheduler:
             assert self._jobs[any_jid].is_store
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
+        # If all tracked requests are finished, flush all pending jobs
+        # (both store and load) - there might not be a future scheduler
+        # step to trigger their completion.
+        if self._req_status and all(
+            rs.req.is_finished() for rs in self._req_status.values()
+        ):
+            self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=self._build_store_jobs(scheduler_output),
@@ -802,6 +877,13 @@ class OffloadingConnectorScheduler:
             meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
+            if job_id < self._stale_job_threshold:
+                logger.debug(
+                    "Skipping stale completed job %d (pre-reset counter: %d)",
+                    job_id,
+                    self._stale_job_threshold,
+                )
+                continue
             job_status = self._jobs[job_id]
             job_status.pending_count -= count
             if job_status.pending_count > 0:
@@ -881,6 +963,34 @@ class OffloadingConnectorScheduler:
                     medium=event.medium,
                     lora_name=None,
                 )
+
+    def reset_cache(self) -> None:
+        """Reset the offloading manager cache, evicting all stored blocks."""
+
+        # reset_cache cannot be called in the middle of a schedule step
+        assert not self._current_batch_load_jobs
+        assert not self._current_batch_jobs_to_flush
+
+        # Flush all in-flight jobs
+        self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
+        # Reset offloading manager cache
+        self.manager.reset_cache()
+
+        # Reset store progress so active requests re-offload from block 0
+        for status in self._req_status.values():
+            for group_state in status.group_states:
+                group_state.next_stored_block_idx = 0
+
+        # Discard jobs and save job_counter to be able to discard worker responses
+        self._stale_job_threshold = self._job_counter
+        self._jobs.clear()
+        self._block_id_to_pending_jobs.clear()
+
+        # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
+        # The load flush IDs collected above must be delivered to workers.
+        if self._blocks_being_loaded is not None:
+            self._blocks_being_loaded.clear()
 
     def shutdown(self) -> None:
         self.manager.shutdown()

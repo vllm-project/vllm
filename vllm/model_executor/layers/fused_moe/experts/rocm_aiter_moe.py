@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
 )
 
@@ -245,6 +246,7 @@ def rocm_aiter_fused_experts(
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -356,10 +358,11 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=hidden_pad,
-            intermediate_pad=intermediate_pad,
+            hidden_pad=hidden_pad // 128 * 128,
+            intermediate_pad=intermediate_pad // 64 * 64 * 2,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
+            moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
         )
 
 
@@ -376,6 +379,21 @@ class AiterExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
+            reason = (
+                f"{reason}. AITER MoE is not enabled — "
+                "set VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 "
+                "to enable it"
+            )
+        return is_supported, reason
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -397,6 +415,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
@@ -487,6 +506,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
         # avoid redundant copy when output is a view of the result
         if (

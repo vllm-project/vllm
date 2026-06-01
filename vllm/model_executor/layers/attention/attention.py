@@ -228,9 +228,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        # llm-compressor models declare an FP8 KV-cache scheme in their
+        # checkpoint config. Honor it only when the user did not explicitly
+        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
+        # The "auto" case is normally resolved upstream in
+        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
+        # case anything bypassed that path.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
+        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
@@ -340,6 +345,29 @@ class Attention(nn.Module, AttentionLayerBase):
                 f"Chunked attention with lookback requires the Triton backend, "
                 f"but got {self.attn_backend.get_name()}."
             )
+
+        if self.attn_backend.get_name() == "FLEX_ATTENTION":
+            block_m = vllm_config.attention_config.flex_attn_block_m
+            block_n = vllm_config.attention_config.flex_attn_block_n
+
+            if envs.VLLM_BATCH_INVARIANT and cache_config is not None:
+                if block_m is not None and block_m > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_m ({block_m}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+                if block_n is not None and block_n > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_n ({block_n}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+
+            if block_m is not None:
+                extra_impl_args.setdefault("block_m", block_m)
+            if block_n is not None:
+                extra_impl_args.setdefault("block_n", block_n)
 
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass

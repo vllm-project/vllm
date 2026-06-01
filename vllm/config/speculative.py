@@ -67,7 +67,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
-DraftSampleMethod = Literal["greedy", "gumbel"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config(config=ConfigDict(populate_by_name=True))
@@ -271,10 +271,10 @@ class SpeculativeConfig:
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
-    draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
 
     def compute_hash(self) -> str:
         """
@@ -476,6 +476,17 @@ class SpeculativeConfig:
             is_moe = hf_config.model_type == "qwen3_5_moe"
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
+        if hf_config.model_type == "intern_s2_preview":
+            text_config = getattr(hf_config, "text_config", None)
+            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
             hf_config.update(
                 {
                     "n_predict": n_predict,
@@ -1027,35 +1038,6 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        aux_hidden_states_supported = [
-            "llama",
-            "qwen",
-            "minicpm",
-            "gpt_oss",
-            "hunyuan_vl",
-            "hunyuan_v1_dense",
-            "afmoe",
-            "nemotron_h",
-            "deepseek_v2",
-            "deepseek_v3",
-            "kimi_k2",
-            "kimi_k25",
-            "minimax_m2",
-            "gemma4",
-            "laguna",
-        ]
-        if (
-            self.method in ("eagle3", "extract_hidden_states", "dflash")
-            and self.target_model_config
-            and not any(
-                supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in aux_hidden_states_supported
-            )
-        ):
-            raise ValueError(
-                f"{self.method} is only supported for {aux_hidden_states_supported}"
-                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
-            )
         self.verify_equal_vocab_size_if_draft_model()
         return self
 

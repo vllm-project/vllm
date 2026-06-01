@@ -92,6 +92,7 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         whisper_config = HFWhisperConfig.from_pretrained(
             model_path,
             subfolder=KIMIA_WHISPER_SUBFOLDER,
+            revision=vllm_config.model_config.revision,
         )
 
         super().__init__(
@@ -426,7 +427,7 @@ class KimiAudioForConditionalGeneration(
             DefaultModelLoader.Source(
                 model_or_path=vllm_config.model_config.model,
                 subfolder="whisper-large-v3",
-                revision=None,
+                revision=vllm_config.model_config.revision,
             )
         ]
 

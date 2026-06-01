@@ -38,6 +38,7 @@ steps:
       - image-build-amd
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
+  device: h200_35gb
   key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -54,6 +55,7 @@ steps:
       - image-build-amd
 
 - label: "Multi-Modal Models (Standard) 4: other + whisper"
+  device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 45
   source_file_dependencies:
@@ -92,6 +94,7 @@ steps:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
+  device: h200_35gb
   key: multi-modal-accuracy-eval-small-models
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -120,6 +123,7 @@ steps:
       - image-build-amd
 
 - label: Multi-Modal Models (Extended Generation 2)
+  device: h200_35gb
   key: multi-modal-models-extended-generation-2
   optional: true
   source_file_dependencies:
@@ -130,6 +134,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 - label: Multi-Modal Models (Extended Generation 3)
+  device: h200_35gb
   key: multi-modal-models-extended-generation-3
   optional: true
   source_file_dependencies:
