@@ -22,8 +22,3 @@ def register_instrumentator_api_routers(app: FastAPI):
     from .offline_docs import attach_router as offline_docs_attach_router
 
     offline_docs_attach_router(app)
-
-    if envs.VLLM_SERVER_DEV_MODE:
-        from .server_info import router as server_info_router
-
-        app.include_router(server_info_router)
