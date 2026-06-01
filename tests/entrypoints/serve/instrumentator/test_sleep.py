@@ -4,11 +4,12 @@
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
 
+@create_new_process_for_each_test()
 def test_sleep_mode():
     # dtype, max-len etc set so that this can run in CI
     args = [
