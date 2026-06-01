@@ -104,6 +104,9 @@ def get_rope(
                 dtype,
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
+                force_native_interleaved_mrope=rope_parameters.get(
+                    "force_native_interleaved_mrope", False
+                ),
             )
         elif "use_fope" in rope_parameters and rope_parameters["use_fope"]:
             extra_kwargs = {
@@ -259,6 +262,9 @@ def get_rope(
                 mrope_section=rope_parameters["mrope_section"],
                 mrope_interleaved=rope_parameters.get("mrope_interleaved", False),
                 scaling_factor=scaling_factor,
+                force_native_interleaved_mrope=rope_parameters.get(
+                    "force_native_interleaved_mrope", False
+                ),
                 **extra_kwargs,
             )
         else:
