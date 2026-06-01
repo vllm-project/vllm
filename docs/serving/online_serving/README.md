@@ -102,7 +102,7 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 
 ## Server in development mode
 
-When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints. 
+When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
 
 **SECURITY WARNING: These endpoints should NOT be used in production!**
 
