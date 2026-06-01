@@ -22,7 +22,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -47,14 +47,9 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import (
-    _KernelT,
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -65,6 +60,9 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.model_executor.kernels.linear import _KernelT
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -198,6 +196,10 @@ class RemoteVLLMServer:
             engine_args = AsyncEngineArgs.from_cli_args(args)
             model_config = engine_args.create_model_config()
             load_config = engine_args.create_load_config()
+
+            # Keep model-loader imports lazy: tests.utils is imported during
+            # pytest collection before some CUDA tests fork child processes.
+            from vllm.model_executor.model_loader import get_model_loader
 
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
@@ -2094,7 +2096,7 @@ class TestFP8Layer(torch.nn.Module):
         out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: type[_KernelT] | None = None,
+        force_kernel: type["_KernelT"] | None = None,
     ):
         super().__init__()
         act_scale_desc = activation_quant_key.scale
@@ -2131,6 +2133,10 @@ class TestFP8Layer(torch.nn.Module):
             self.input_scale_ub = None
 
         out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+
+        # Keep FP8 kernel imports lazy so importing tests.utils does not
+        # initialize CUDA before helpers fork child processes.
+        from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,

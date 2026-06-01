@@ -35,6 +35,13 @@ def test_platform_import_does_not_init_cuda():
         pytest.fail(f"Platform import initialized CUDA:\n{result.stderr}")
 
 
+def test_tests_utils_import_does_not_init_cuda():
+    """Test that importing tests.utils does not initialize CUDA before fork."""
+    result = run_script("check_test_utils_no_cuda_init.py")
+    if result.returncode != 0:
+        pytest.fail(f"tests.utils import initialized CUDA:\n{result.stderr}")
+
+
 def test_device_count_respects_env_after_platform_import():
     """Test that device_count respects CUDA_VISIBLE_DEVICES after import."""
     result = run_script("check_device_count_respects_env.py")
