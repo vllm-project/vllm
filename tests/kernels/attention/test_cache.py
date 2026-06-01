@@ -255,10 +255,10 @@ def test_reshape_and_cache_flash(
     nvfp4_key_data = None
     nvfp4_value_data = None
     if kv_cache_dtype == "nvfp4":
-        from vllm.utils.torch_utils import _nvfp4_split_data_scale
+        from vllm.utils.torch_utils import nvfp4_split_data_scale
 
-        nvfp4_key_data, key_scale_cache = _nvfp4_split_data_scale(key_cache)
-        nvfp4_value_data, value_scale_cache = _nvfp4_split_data_scale(value_cache)
+        nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
+        nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
     if kv_cache_dtype == "nvfp4":
         # Global scale = amax / 448 (per-tensor)

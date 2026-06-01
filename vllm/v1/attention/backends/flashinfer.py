@@ -46,7 +46,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
     is_strictly_contiguous,
-    nvfp4_kv_cache_split_views,
+    nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -1486,9 +1486,10 @@ class FlashInferImpl(AttentionImpl):
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
-            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                kv_cache_permute
-            )
+            k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
+            v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
+            nvfp4_kv_data = (k_data, v_data)
+            nvfp4_kv_block_scales = (k_sf, v_sf)
 
         use_dcp = self.dcp_world_size > 1
 

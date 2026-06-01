@@ -13,7 +13,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import (
     nvfp4_kv_cache_full_dim,
-    nvfp4_kv_cache_split_views,
+    nvfp4_split_data_scale,
     set_random_seed,
 )
 
@@ -111,7 +111,9 @@ def make_nvfp4_kv_cache(
     )
 
     # Split into data/scale views in HNC order for trtllm kernel.
-    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(kv_cache_hnc)
+    k_cache_hnc, v_cache_hnc = kv_cache_hnc.split(num_kv_heads, dim=1)
+    k_data, k_scales = nvfp4_split_data_scale(k_cache_hnc)
+    v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
 
     # Dequantize for the FA2 reference baseline.
     ref_k = dequant_nvfp4_kv_cache(
