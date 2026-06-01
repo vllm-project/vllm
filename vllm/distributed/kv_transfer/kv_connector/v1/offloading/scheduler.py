@@ -602,6 +602,13 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        """Load offloaded KV into freshly allocated GPU blocks.
+
+        Committed KV invariant: only GPU blocks that already have ``block_hash``
+        count toward locally computed tokens. With async scheduling or
+        speculative decode, ``allocate_slots`` may reserve blocks before hashes
+        exist; Phase A local counts must be clamped here before issuing loads.
+        """
         if num_external_tokens == 0:
             return
 
