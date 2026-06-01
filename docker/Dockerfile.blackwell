@@ -219,13 +219,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 setuptools_scm wheel -r requirements/cuda.txt \
+        && uv pip install --python /opt/venv/bin/python3 setuptools_rust maturin setuptools_scm wheel -r requirements/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 setuptools_scm wheel cmake ninja -r requirements/cuda.txt \
+        && uv pip install --python /opt/venv/bin/python3 setuptools_rust setuptools_scm wheel cmake ninja -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
@@ -236,6 +236,28 @@ COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
 COPY vllm/__init__.py vllm/__init__.py
+# we need tools 
+COPY tools/ tools/
+COPY rust/ rust/
+
+# 👇 ADD THIS BLOCK HERE TO BUILD THE RUST FRONTEND
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    libprotobuf-dev \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+# Sync submodules and build the release binary
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/workspace/rust/target \
+    cd rust \
+    && cargo build --release \
+    && mkdir -p /vllm-bin \
+    && cp target/release/vllm-rs /vllm-bin/vllm-rs \
+    && chmod +x /vllm-bin/vllm-rs
+# 👆 END OF RUST FRONTEND BLOCK
 
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
@@ -370,13 +392,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+        && uv pip install --python /opt/venv/bin/python3 setuptools_rust maturin -r requirements/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 setuptools_scm wheel cmake ninja -r requirements/cuda.txt \
+        && uv pip install --python /opt/venv/bin/python3 setuptools_rust maturin setuptools_scm wheel cmake ninja -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
 	# && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         # --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
@@ -387,6 +409,8 @@ WORKDIR /workspace
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
 COPY . .
+# Copy rust interface
+COPY --from=csrc-build /vllm-bin/vllm-rs ./vllm/vllm-rs
 
 ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
@@ -529,7 +553,7 @@ RUN apt-get update -y \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
 
-# Install CUDA development tools for runtime JIT compilation
+# Install CUDA development
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
     CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
@@ -582,12 +606,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.6
+ARG FLASHINFER_VERSION=0.6.11.post2
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && flashinfer show-config \
-    && flashinfer download-cubin
+    && flashinfer show-config 
+#   && flashinfer download-cubin
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -623,8 +647,26 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
-    uv pip install --system accelerate modelscope \
-        "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+    uv pip install --system \
+	accelerate \
+	modelscope \
+	jsonschema \
+	pydantic_extra_types \
+	optuna \
+	msgpack \
+        av \
+	librosa \
+	soundfile \
+	vllm[audio] \
+	"bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
+
+# ============================================================
+# Install Mooncake
+# ============================================================
+# COPY tools/install_mooncake.sh /tmp/install_mooncake.sh
+# RUN chmod +x /tmp/install_mooncake.sh && \
+#    /tmp/install_mooncake.sh && \
+#    rm /tmp/install_mooncake.sh
 
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
@@ -656,6 +698,16 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
+# 👇 Rust – Inject the binary into the final environment
+# 1. Copy the binary from the csrc-build container root to a safe staging directory
+COPY --from=csrc-build /vllm-bin/vllm-rs /tmp/vllm-rs
+# 2. Use a RUN instruction to determine the python path, move it, and set executable permissions
+RUN . /etc/environment && \
+    PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    mkdir -p ${PYTHON_SITE_PACKAGES}/vllm && \
+    mv /tmp/vllm-rs ${PYTHON_SITE_PACKAGES}/vllm/vllm-rs && \
+    chmod +x ${PYTHON_SITE_PACKAGES}/vllm/vllm-rs
+
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
@@ -679,6 +731,23 @@ ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
 COPY examples examples
 COPY benchmarks benchmarks
 COPY ./vllm/collect_env.py .
+
+# =============================================================================
+# RUST FRONTEND ENGINE INTEGRATION
+# =============================================================================
+# 1. Copy the compiled binary out of the csrc-build stage to a safe staging zone
+COPY --from=csrc-build /vllm-bin/vllm-rs /tmp/vllm-rs
+
+# 2. Automatically discover the system site-packages folder, move the binary, and grant execution rights
+RUN PYTHON_SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    mkdir -p ${PYTHON_SITE_PACKAGES}/vllm && \
+    mv /tmp/vllm-rs ${PYTHON_SITE_PACKAGES}/vllm/vllm-rs && \
+    chmod +x ${PYTHON_SITE_PACKAGES}/vllm/vllm-rs
+
+# Verify the binary is natively discoverable by the Python framework
+RUN python3 -c "import os, vllm; binary_path=os.path.join(os.path.dirname(vllm.__file__), 'vllm-rs'); print(f'Rust frontend checked at: {binary_path} | Executable status: {os.access(binary_path, os.X_OK)}')"
+
+
 #################### vLLM installation IMAGE ####################
 #################### TEST IMAGE ####################
 # image to run unit testing suite
