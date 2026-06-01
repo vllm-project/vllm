@@ -707,9 +707,10 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
-                limit_lookahead_tokens = load_kv_async and self.use_eagle
                 effective_lookahead_tokens = (
-                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
+                    0
+                    if self.use_eagle and request.num_computed_tokens == 0
+                    else self.num_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
