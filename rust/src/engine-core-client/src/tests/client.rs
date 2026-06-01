@@ -925,6 +925,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
     assert!(client.ready_responses()[0].max_model_len > 0);
+    assert_eq!(client.vllm_version(), "test-vllm-version");
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -2111,6 +2112,226 @@ async fn collective_rpc_flattens_results_from_all_engines() {
             Value::from("engine-1-worker")
         ]
     );
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+/// Spawn a mock engine that handles a single utility call, asserts the method
+/// name and serialized args match, and replies with `result`.
+fn spawn_mock_utility_engine(
+    handshake_address: String,
+    engine_id: Vec<u8>,
+    expected_method: &'static str,
+    expected_args: Value,
+    result: bool,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_mock_engine_task(handshake_address, engine_id, move |dealer, push| {
+        Box::pin(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+            let payload = decode_value(&utility[1]);
+            let array = match payload {
+                Value::Array(array) => array,
+                other => panic!("expected utility payload array, got {other:?}"),
+            };
+            // Utility requests serialize as `(client_index, call_id, method, args)`.
+            let call_id = array[1].as_u64().expect("call_id");
+            assert_eq!(array[2], Value::from(expected_method));
+            assert_eq!(array[3], expected_args, "unexpected utility args");
+            send_outputs(
+                push,
+                EngineCoreOutputs {
+                    utility_output: Some(UtilityOutput {
+                        call_id: call_id.into(),
+                        failure_message: None,
+                        result: Some(utility_result_value(result)),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+        })
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_error_when_engines_disagree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let error = client.is_sleeping().await.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            Error::InconsistentUtilityResults { method, .. } if method == "is_sleeping"
+        ),
+        "expected InconsistentUtilityResults, got {error:?}",
+    );
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn is_sleeping_returns_value_when_all_engines_agree() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "is_sleeping",
+        Value::Array(vec![]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.is_sleeping().await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_true_when_all_engines_succeed() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(client.reset_prefix_cache(false, false).await.unwrap());
+
+    let _ = shutdown_tx_0.send(());
+    let _ = shutdown_tx_1.send(());
+    engine_task_0.await.unwrap();
+    engine_task_1.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_prefix_cache_returns_false_when_any_engine_fails() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+
+    let (shutdown_tx_0, engine_task_0) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-0".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        true,
+    );
+    let (shutdown_tx_1, engine_task_1) = spawn_mock_utility_engine(
+        handshake_address.clone(),
+        b"engine-1".to_vec(),
+        "reset_prefix_cache",
+        Value::Array(vec![Value::from(false), Value::from(false)]),
+        false,
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            2,
+            "test-model",
+            Duration::from_secs(2),
+            5,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    assert!(!client.reset_prefix_cache(false, false).await.unwrap());
 
     let _ = shutdown_tx_0.send(());
     let _ = shutdown_tx_1.send(());

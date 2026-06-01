@@ -114,8 +114,34 @@ def _gdn_attention_core_xpu_impl(
     attn_metadata = attn_metadata_raw[self.prefix]
     assert isinstance(attn_metadata, GDNAttentionMetadata)
 
-    # TODO: xpu does not support speculative decoding yet
-    assert attn_metadata.spec_sequence_masks is None  # type: ignore[attr-defined]
+    num_actual_tokens = attn_metadata.num_actual_tokens
+    num_accepted_tokens = attn_metadata.num_accepted_tokens
+
+    num_prefills = attn_metadata.num_prefills
+    num_decodes = attn_metadata.num_decodes
+    num_spec_decodes = attn_metadata.num_spec_decodes
+
+    has_initial_state = attn_metadata.has_initial_state
+
+    non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+    non_spec_token_indx = attn_metadata.non_spec_token_indx
+    non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+    non_spec_state_indices_tensor = (
+        non_spec_state_indices_tensor.contiguous()
+        if non_spec_state_indices_tensor is not None
+        else None
+    )
+
+    spec_query_start_loc = attn_metadata.spec_query_start_loc
+    spec_token_indx = attn_metadata.spec_token_indx
+    spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
+
+    spec_sequence_masks = attn_metadata.spec_sequence_masks
+    if spec_sequence_masks is not None:
+        if non_spec_token_indx is not None:
+            non_spec_token_indx = non_spec_token_indx.to(torch.int32)
+        if spec_token_indx is not None:
+            spec_token_indx = spec_token_indx.to(torch.int32)
 
     conv_weights = self.conv1d.weight.view(
         self.conv1d.weight.size(0), self.conv1d.weight.size(2)
@@ -137,12 +163,18 @@ def _gdn_attention_core_xpu_impl(
         activation=self.activation,
         A_log=self.A_log,
         dt_bias=self.dt_bias,
-        num_prefills=attn_metadata.num_prefills,  # type: ignore[attr-defined]
-        num_decodes=attn_metadata.num_decodes,  # type: ignore[attr-defined]
-        has_initial_state=attn_metadata.has_initial_state,  # type: ignore[attr-defined]
-        non_spec_query_start_loc=attn_metadata.non_spec_query_start_loc,  # type: ignore[attr-defined]
-        non_spec_state_indices_tensor=attn_metadata.non_spec_state_indices_tensor,  # type: ignore[attr-defined]
-        num_actual_tokens=attn_metadata.num_actual_tokens,  # type: ignore[attr-defined]
+        num_prefills=num_prefills,  # type: ignore[attr-defined]
+        num_decodes=num_decodes,  # type: ignore[attr-defined]
+        num_spec_decodes=num_spec_decodes,  # type: ignore[attr-defined]
+        has_initial_state=has_initial_state,  # type: ignore[attr-defined]
+        non_spec_query_start_loc=non_spec_query_start_loc,  # type: ignore[attr-defined]
+        non_spec_token_indx=non_spec_token_indx,  # type: ignore[attr-defined]
+        non_spec_state_indices_tensor=non_spec_state_indices_tensor,  # type: ignore[attr-defined]
+        spec_query_start_loc=spec_query_start_loc,  # type: ignore[attr-defined]
+        spec_token_indx=spec_token_indx,  # type: ignore[attr-defined]
+        spec_state_indices_tensor=spec_state_indices_tensor,
+        num_accepted_tokens=num_accepted_tokens,  # type: ignore[attr-defined]
+        num_actual_tokens=num_actual_tokens,  # type: ignore[attr-defined]
         tp_size=self.tp_size,
         reorder_input=not self.gqa_interleaved_layout,
     )

@@ -211,6 +211,8 @@ class MoRIIOConfig:
     dp_rank: int
     dp_size: int
     tp_size: int
+    transfer_timeout: float
+    defer_timeout: float
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -231,6 +233,10 @@ class MoRIIOConfig:
         # read_mode        -> If true, run the connector in READ mode (consumer
         #                     pulls KV from producer) instead of the default
         #                     WRITE mode.
+        # transfer_timeout -> Timeout for waiting_for_transfer_complete before
+        #                     raising TransferError (sec).
+        # defer_timeout    -> Timeout before a deferred send with no finished_sending
+        #                     notification is reaped and its blocks force-freed (sec).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -260,6 +266,15 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
+        transfer_timeout = float(
+            extra_config.get(
+                "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
+            )
+        )
+        defer_timeout = float(
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        )
+
         return cls(
             local_ip=get_ip(),
             local_kv_port=get_open_port(),
@@ -278,6 +293,8 @@ class MoRIIOConfig:
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
             backend=backend,
+            transfer_timeout=transfer_timeout,
+            defer_timeout=defer_timeout,
         )
 
 
@@ -297,6 +314,14 @@ class MoRIIOConstants:
     DEFAULT_NOTIFY_PORT = "61005"
 
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
+
+    # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
+    # Overridable via kv_connector_extra_config["transfer_timeout"].
+    DEFAULT_TRANSFER_TIMEOUT = 30.0
+    # Timeout (seconds) before a deferred send with no finished_sending
+    # notification is reaped and its blocks force-freed.
+    # Overridable via kv_connector_extra_config["defer_timeout"].
+    DEFAULT_DEFER_TIMEOUT = 60.0
 
 
 # The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):
