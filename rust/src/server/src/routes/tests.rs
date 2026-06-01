@@ -399,6 +399,9 @@ struct FakeChatBackend {
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
 }
 
+/// Synthetic BOS id used when `add_special_tokens` is true in tests.
+const FAKE_BOS_TOKEN_ID: u32 = 1;
+
 #[derive(Debug)]
 struct FakeChatTokenizer;
 
@@ -406,9 +409,12 @@ impl Tokenizer for FakeChatTokenizer {
     fn encode(
         &self,
         text: &str,
-        _add_special_tokens: bool,
+        add_special_tokens: bool,
     ) -> vllm_text::tokenizer::Result<Vec<u32>> {
         let mut token_ids = Vec::new();
+        if add_special_tokens {
+            token_ids.push(FAKE_BOS_TOKEN_ID);
+        }
         let mut rest = text;
         while !rest.is_empty() {
             if let Some(stripped) = rest.strip_prefix("<image>") {
@@ -452,6 +458,7 @@ impl Tokenizer for FakeChatTokenizer {
 
     fn id_to_token(&self, id: u32) -> Option<String> {
         match id {
+            FAKE_BOS_TOKEN_ID => Some("<bos>".to_string()),
             999 => Some("<image>".to_string()),
             151655 => Some("<|image_pad|>".to_string()),
             0xF001 => Some("<think>".to_string()),
@@ -460,6 +467,7 @@ impl Tokenizer for FakeChatTokenizer {
             0xF004 => Some("<|END_THINKING|>".to_string()),
             0xF005 => Some("◁think▷".to_string()),
             0xF006 => Some("◁/think▷".to_string()),
+            id if id < 128 => char::from_u32(id).map(|ch| ch.to_string()),
             _ => None,
         }
     }
@@ -1860,7 +1868,8 @@ async fn non_stream_completions_echo_prepends_prompt_text() {
                         "model": "Qwen/Qwen1.5-0.5B-Chat",
                         "prompt": "hello",
                         "echo": true,
-                        "stream": false
+                        "stream": false,
+                        "add_special_tokens": false
                     })
                     .to_string(),
                 ))
@@ -2063,7 +2072,8 @@ async fn non_stream_completions_include_prompt_logprobs() {
                         "prompt": "hello",
                         "stream": false,
                         "echo": true,
-                        "logprobs": 1
+                        "logprobs": 1,
+                        "add_special_tokens": false
                     })
                     .to_string(),
                 ))
@@ -2586,7 +2596,8 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
                         "prompt": "hello",
                         "echo": true,
                         "stream": true,
-                        "stream_options": {"include_usage": true}
+                        "stream_options": {"include_usage": true},
+                        "add_special_tokens": false
                     })
                     .to_string(),
                 ))
@@ -3698,4 +3709,355 @@ async fn completions_empty_stop_string_returns_validation_error() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+async fn post_json(
+    app: &mut axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| json!({ "raw": String::from_utf8_lossy(&bytes) }));
+    (status, json)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_completion_round_trips_through_detokenize() {
+    let mut app = test_app().await;
+    let prompt = "Hello world";
+
+    let (_, tokenize_json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": prompt,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    let tokens = tokenize_json["tokens"]
+        .as_array()
+        .expect("tokens array")
+        .iter()
+        .map(|v| v.as_u64().expect("token id") as u32)
+        .collect::<Vec<_>>();
+
+    let (status, detokenize_json) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "tokens": tokens,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detokenize_json["prompt"], prompt);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_completion_add_special_tokens_changes_ids() {
+    let mut app = test_app().await;
+
+    let (_, with_special) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hi",
+            "add_special_tokens": true,
+        }),
+    )
+    .await;
+    let (_, without_special) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hi",
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+
+    let with_ids: Vec<u32> = with_special["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+    let without_ids: Vec<u32> = without_special["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+
+    assert_ne!(with_ids, without_ids);
+    assert_eq!(with_ids.first().copied(), Some(FAKE_BOS_TOKEN_ID));
+    assert_eq!(without_ids.first().copied(), Some(b'h' as u32));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_completion_return_token_strs_matches_tokens() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hi",
+            "add_special_tokens": false,
+            "return_token_strs": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let tokens = json["tokens"].as_array().expect("tokens");
+    let token_strs = json["token_strs"].as_array().expect("token_strs");
+    assert_eq!(tokens.len(), token_strs.len());
+    assert_eq!(token_strs.len(), json["count"].as_u64().unwrap() as usize);
+    assert!(!token_strs[0].as_str().unwrap().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_completion_count_and_max_model_len() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["count"].as_u64().unwrap() as usize,
+        json["tokens"].as_array().unwrap().len()
+    );
+    assert!(json["max_model_len"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_includes_generation_prompt_in_token_count() {
+    let mut app = test_app().await;
+    let messages = json!([{"role": "user", "content": "hi"}]);
+
+    let (_, with_prompt) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": messages,
+            "add_generation_prompt": true,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    let (_, without_prompt) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": messages,
+            "add_generation_prompt": false,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+
+    let with_len = with_prompt["tokens"].as_array().unwrap().len();
+    let without_len = without_prompt["tokens"].as_array().unwrap().len();
+    assert!(with_len > without_len);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_conflicting_generation_flags_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "add_generation_prompt": true,
+            "continue_final_message": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_unknown_model_returns_404() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "does-not-exist",
+            "prompt": "hello",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "model_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn detokenize_unknown_model_returns_404() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({
+            "model": "does-not-exist",
+            "tokens": [72, 101, 108, 108, 111],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "model_not_found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn detokenize_empty_tokens_returns_empty_prompt() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "tokens": [],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["prompt"], "");
+}
+
+/// Decode an explicit token sequence — pins `/detokenize` independently of
+/// `/tokenize` (the round-trip test alone would pass even if encode and decode
+/// were both wrong in mirrored ways).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn detokenize_decodes_known_token_ids() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/detokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "tokens": [72, 101, 108, 108, 111],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["prompt"], "Hello");
+}
+
+/// `continue_final_message` without a trailing assistant message must 400.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_continue_without_assistant_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "add_generation_prompt": false,
+            "continue_final_message": true,
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+/// `continue_final_message` must not append a new generation suffix vs `add_generation_prompt`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
+    let mut app = test_app().await;
+    let messages = json!([
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "partial,"}
+    ]);
+
+    let (_, continue_final) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": messages,
+            "add_generation_prompt": false,
+            "continue_final_message": true,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+    let (_, new_assistant) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": messages,
+            "add_generation_prompt": true,
+            "continue_final_message": false,
+            "add_special_tokens": false,
+        }),
+    )
+    .await;
+
+    let continue_len = continue_final["tokens"].as_array().unwrap().len();
+    let new_len = new_assistant["tokens"].as_array().unwrap().len();
+    assert!(new_len > continue_len);
 }

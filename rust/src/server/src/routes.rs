@@ -41,6 +41,8 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
         .route("/v1/chat/completions", post(openai::chat_completions))
+        .route("/tokenize", post(openai::tokenize))
+        .route("/detokenize", post(openai::detokenize))
         // vLLM specific inference endpoints
         .route("/inference/v1/generate", post(inference::generate));
 
