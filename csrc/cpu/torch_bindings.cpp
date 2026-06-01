@@ -518,7 +518,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 
   // WNA16
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || defined(__riscv_v)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
       "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "

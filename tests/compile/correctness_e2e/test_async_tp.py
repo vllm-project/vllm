@@ -92,7 +92,13 @@ def test_async_tp_pass_correctness(
         "mp",
     ]
 
-    compare_two_settings(model_id, async_tp_args, tp_args, method="generate")
+    compare_two_settings(
+        model_id,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )
 
 
 @create_new_process_for_each_test()
@@ -154,4 +160,10 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
         "mp",
     ]
 
-    compare_two_settings(NVFP4_MODEL_ID, async_tp_args, tp_args, method="generate")
+    compare_two_settings(
+        NVFP4_MODEL_ID,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )
