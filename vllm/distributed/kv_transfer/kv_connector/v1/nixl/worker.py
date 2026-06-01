@@ -922,12 +922,9 @@ class NixlConnectorWorker:
                         f"{self.transfer_topo.is_kv_layout_blocks_first}"
                     )
 
-                if not self.use_mla:
-                    # Different kv cache shape is not supported by HeteroTP.
-                    # This must also hold true for Mamba-like models.
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All kv cache tensors must have the same size"
-                    )
+                # Allow heterogeneous per-layer KV tensor sizes (non-MLA), e.g.
+                # MiniMax-M3 full-attn + MLA indexer; per-layer sizes live in
+                # block_len_per_layer. Equal-TP enforced at handshake.
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
                 self.device_id = max(cache.get_device(), 0)
@@ -1524,6 +1521,34 @@ class NixlConnectorWorker:
                         self.block_len_per_layer[i] // block_size_ratio
                         == nixl_agent_meta.block_lens[i]
                     ), "KV cache sizes must match between P and D when replicated"
+        elif (
+            len(set(self.block_len_per_layer)) > 1
+            or len(set(nixl_agent_meta.block_lens)) > 1
+        ):
+            # Non-MLA, non-replicated, HETEROGENEOUS per-layer block lengths
+            # (e.g. MiniMax-M3: full-attn K/V layers + smaller MLA lightning-
+            # indexer layers grouped together). Check either side so a P/D pair
+            # with one homogeneous side still validates per-layer. Only equal-TP
+            # is supported: the linear tp_ratio scaling assumes a uniform
+            # block_len, which does not hold across heterogeneous layers.
+            assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
+                "Number of KV layers must match between prefill and decode"
+            )
+            if abs(tp_ratio) != 1 or block_size_ratio != 1:
+                raise NotImplementedError(
+                    "Non-MLA heterogeneous KV cache (mixed full-attention + MLA "
+                    "layers) requires equal tensor-parallel and block size "
+                    "between prefill and decode; got tp_ratio="
+                    f"{tp_ratio}, block_size_ratio={block_size_ratio}."
+                )
+            if not self._has_mamba:
+                # Validate each layer independently (like the MLA/replicated
+                # path); the descriptor builders index block_lens[i] per layer.
+                for i in range(len(self.block_len_per_layer)):
+                    assert (
+                        self.block_len_per_layer[i] // block_size_ratio
+                        == nixl_agent_meta.block_lens[i]
+                    ), "Per-layer KV block_len mismatch between P and D"
         else:
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:

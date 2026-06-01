@@ -706,6 +706,9 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
                 for spec in kv_cache_specs.values()
             )
         elif isinstance(one_spec, FullAttentionSpec):
+            # MLAAttentionSpec subclasses FullAttentionSpec, so mixed
+            # full-attention + MLA-indexer models (e.g. MiniMax-M3, DeepSeek-3.2)
+            # intentionally group into one UniformTypeKVCacheSpecs here.
             return all(
                 isinstance(spec, FullAttentionSpec) for spec in kv_cache_specs.values()
             )
