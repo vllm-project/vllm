@@ -401,12 +401,12 @@ class CoreEngineActorManager:
             self._coord_store = store
 
         if placement_groups is not None:
-            assert local_dp_ranks is not None, (
-                "local_dp_ranks must be provided if placement_groups is provided"
-            )
-            assert len(placement_groups) == len(local_dp_ranks), (
-                "placement_groups and local_dp_ranks must have the same length"
-            )
+            assert (
+                local_dp_ranks is not None
+            ), "local_dp_ranks must be provided if placement_groups is provided"
+            assert len(placement_groups) == len(
+                local_dp_ranks
+            ), "placement_groups and local_dp_ranks must have the same length"
             logger.info("Using provided placement groups")
             # TODO(rui): validate passed-in placement groups
             self.created_placement_groups = []
@@ -415,9 +415,9 @@ class CoreEngineActorManager:
                 CoreEngineActorManager.create_dp_placement_groups(vllm_config)
             )
             self.created_placement_groups = placement_groups
-        assert len(placement_groups) == dp_size, (
-            "Number of placement groups must match data parallel size"
-        )
+        assert (
+            len(placement_groups) == dp_size
+        ), "Number of placement groups must match data parallel size"
 
         self.placement_group_is_local = []
         refs = []
@@ -511,9 +511,9 @@ class CoreEngineActorManager:
             available_resources.values(), key=lambda x: dp_master_ip_key not in x
         )
         assert len(nodes) > 0, "No nodes with resources found in Ray cluster."
-        assert dp_master_ip_key in nodes[0], (
-            f"The DP master node (ip: {dp_master_ip}) is missing or dead"
-        )
+        assert (
+            dp_master_ip_key in nodes[0]
+        ), f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
             int(node_resources[device_str])
@@ -557,9 +557,9 @@ class CoreEngineActorManager:
 
             # if we need multiple nodes per dp group, we require for now that
             # available nodes are homogeneous
-            assert set(n_node_devices) == {max_device_per_node}, (
-                f"Nodes are not homogeneous, {nodes}"
-            )
+            assert set(n_node_devices) == {
+                max_device_per_node
+            }, f"Nodes are not homogeneous, {nodes}"
             assert world_size % max_device_per_node == 0, (
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
                 f"be a multiple of number of devices per node ({max_device_per_node})."
@@ -587,9 +587,9 @@ class CoreEngineActorManager:
                 and key.startswith("node:")
                 and "_group_" not in key
             ]
-            assert len(node_ip_keys) == 1, (
-                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
-            )
+            assert (
+                len(node_ip_keys) == 1
+            ), f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
             node_ip_key = node_ip_keys[0]
             node_ip = node_ip_key.split(":")[1]
 
@@ -675,9 +675,9 @@ class CoreEngineActorManager:
                 "Available resources: "
                 f"{available_resources}"
             )
-        assert len(placement_groups) == dp_size, (
-            f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
-        )
+        assert (
+            len(placement_groups) == dp_size
+        ), f"Created {len(placement_groups)} DP placement groups, expected {dp_size}"
         assert len(local_dp_ranks) == dp_size, (
             f"local_dp_ranks length {len(local_dp_ranks)} does not match "
             f"expected {dp_size}"
@@ -710,9 +710,9 @@ class CoreEngineActorManager:
         nodes = list_nodes()
         nodes = sorted(nodes, key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, "The first node must be the head node"
-        assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
-            "There can only be one head node"
-        )
+        assert (
+            len(nodes) == 1 or nodes[1].node_ip != dp_master_ip
+        ), "There can only be one head node"
 
         available_resources = available_resources_per_node()
         total_resources = total_resources_per_node()

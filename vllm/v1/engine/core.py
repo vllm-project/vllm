@@ -1685,9 +1685,9 @@ class DPEngineCoreProc(EngineCoreProc):
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        assert vllm_config.model_config.is_moe, (
-            "DPEngineCoreProc should only be used for MoE models"
-        )
+        assert (
+            vllm_config.model_config.is_moe
+        ), "DPEngineCoreProc should only be used for MoE models"
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
