@@ -276,6 +276,15 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
+            # Preserve the user --block-size as hash_block_size before
+            # worker-side block_size inflation flows back here, so
+            # resolve_kv_cache_block_sizes() returns hash_block_size !=
+            # block_size for hybrid models (gates sub-block BlockStored
+            # emission in SingleTypeKVCacheManager).
+            if vllm_config.cache_config.hash_block_size is None:
+                vllm_config.cache_config.hash_block_size = (
+                    vllm_config.cache_config.block_size
+                )
             vllm_config.cache_config.block_size = min(
                 g.kv_cache_spec.block_size for g in kv_cache_groups
             )
@@ -321,14 +330,25 @@ class EngineCore:
         if kv_cache_config is None:
             return []
 
+        # Report hash_block_size as block_size when sub-block emission is
+        # active so downstream KV-event consumers use the right hashing
+        # granularity. Falls back to spec.block_size when hash_block_size is
+        # unset or equals the physical block size.
+        cache_config = self.vllm_config.cache_config
+        hash_bs = getattr(cache_config, "hash_block_size", None)
         metadata: list[dict[str, int | str | None]] = []
         for group_idx, group in enumerate(kv_cache_config.kv_cache_groups):
             spec = group.kv_cache_spec
+            effective_block_size = (
+                hash_bs
+                if hash_bs is not None and hash_bs < spec.block_size
+                else spec.block_size
+            )
             metadata.append(
                 {
                     "group_idx": group_idx,
                     "kind": get_kv_cache_spec_kind(spec).value,
-                    "block_size": spec.block_size,
+                    "block_size": effective_block_size,
                     "sliding_window": getattr(spec, "sliding_window", None),
                 }
             )
