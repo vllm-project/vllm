@@ -435,9 +435,9 @@ class FlashInferBackend(AttentionBackend):
         if force_use_trtllm_attention() is False:
             return False
 
-        return supports_trtllm_attention(
-            is_prefill=True
-        ) and supports_trtllm_attention(is_prefill=False)
+        return supports_trtllm_attention(is_prefill=True) and supports_trtllm_attention(
+            is_prefill=False
+        )
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
@@ -496,6 +496,7 @@ class TRTLLMPrefill:
 
     max_seq_len: int
     """The maximum sequence length for KV Cache."""
+
 
 @dataclass
 class FlashInferTrtllmAPIDecode:
@@ -1012,9 +1013,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        all_uses_direct_block_tables = (
-            num_prefills == 0 or prefill_use_trtllm
-        ) and (num_decodes == 0 or decode_with_flashinfer_trtllm_api)
+        all_uses_direct_block_tables = (num_prefills == 0 or prefill_use_trtllm) and (
+            num_decodes == 0 or decode_with_flashinfer_trtllm_api
+        )
 
         if not all_uses_direct_block_tables:
             if self.has_sinks:
@@ -1520,9 +1521,7 @@ class FlashInferImpl(AttentionImpl):
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
         decode_with_xqa = isinstance(attn_metadata.decode, XQADecode)
         decode_with_trtllm_gen = isinstance(attn_metadata.decode, TRTLLMGenDecode)
-        decode_with_flashinfer_trtllm_api = (
-            decode_with_xqa or decode_with_trtllm_gen
-        )
+        decode_with_flashinfer_trtllm_api = decode_with_xqa or decode_with_trtllm_gen
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:

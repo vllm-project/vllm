@@ -71,7 +71,9 @@ def test_supports_sm100_with_artifactory(_art, _cap):
 
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
-@patch("vllm.utils.flashinfer.current_platform.is_device_capability", return_value=False)
+@patch(
+    "vllm.utils.flashinfer.current_platform.is_device_capability", return_value=False
+)
 @patch(
     "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=False,
