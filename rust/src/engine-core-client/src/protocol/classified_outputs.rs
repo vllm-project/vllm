@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
 
-use super::{EngineCoreOutput, EngineCoreOutputs, UtilityOutput};
+use super::utility::UtilityOutput;
+use super::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::stats::SchedulerStats;
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
@@ -150,7 +151,7 @@ mod tests {
     fn engine_core_outputs_classify_utility() {
         let outputs = EngineCoreOutputs {
             utility_output: Some(UtilityOutput {
-                call_id: 42,
+                call_id: 42_u64.into(),
                 failure_message: None,
                 result: None,
             }),
@@ -201,7 +202,7 @@ mod tests {
                 ..Default::default()
             }],
             utility_output: Some(UtilityOutput {
-                call_id: 1,
+                call_id: 1_u64.into(),
                 failure_message: None,
                 result: None,
             }),
