@@ -979,19 +979,33 @@ def enable_batch_invariant_mode():
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    if current_platform.is_cuda():
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
-    # NCCL determinism settings
-    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
-    os.environ["NCCL_COLLNET_ENABLE"] = "0"
-    os.environ["NCCL_NVLS_ENABLE"] = "0"
-    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
-    os.environ["NCCL_MIN_NCHANNELS"] = "1"
-    os.environ["NCCL_MAX_NCHANNELS"] = "1"
-    os.environ["NCCL_PROTO"] = "Simple"
-    os.environ["NCCL_ALGO"] = "allreduce:tree"
-    os.environ["NCCL_NTHREADS"] = "1"
-    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+        # NCCL determinism settings
+        os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+        os.environ["NCCL_COLLNET_ENABLE"] = "0"
+        os.environ["NCCL_NVLS_ENABLE"] = "0"
+        os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+        os.environ["NCCL_MIN_NCHANNELS"] = "1"
+        os.environ["NCCL_MAX_NCHANNELS"] = "1"
+        os.environ["NCCL_PROTO"] = "Simple"
+        os.environ["NCCL_ALGO"] = "allreduce:tree"
+        os.environ["NCCL_NTHREADS"] = "1"
+        os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+    elif current_platform.is_xpu():
+        # oneCCL position-invariant allreduce
+        #
+        # Ring allreduce with P>2 ranks splits the tensor into P chunks,
+        # each reduced starting from a different rank. Because FP addition
+        # is NOT associative, elements in different chunks get different
+        # rounding. With TP=2 this is invisible (commutativity), but with
+        # TP>=3 elements at different flat positions get different results.
+        #
+        # Fix: force recursive_doubling which reduces ALL elements with the
+        # same tree structure: (p0+p1) + (p2+p3), giving position-invariant
+        # results regardless of where the element sits in the tensor.
+        os.environ["CCL_ALLREDUCE"] = "recursive_doubling"
 
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
