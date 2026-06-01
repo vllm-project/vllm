@@ -1,4 +1,5 @@
 #include "ops.h"
+#include "cuda_utils.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/library.h>
@@ -659,6 +660,19 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
 
   // GGML block size lookup (no tensor args)
   ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
+  cuda_utils.def(
+      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd, cuda_utils) {
+  cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
+                  TORCH_BOX(
+                      &get_max_shared_memory_per_block_device_attribute));
 }
 
 // Cache ops
