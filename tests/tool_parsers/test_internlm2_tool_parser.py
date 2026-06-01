@@ -10,6 +10,7 @@ from tests.tool_parsers.common_tests import (
     ToolParserTests,
 )
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.internlm2_tool_parser import Internlm2ToolParser
 
 
 class TestInternLM2ToolParser(ToolParserTests):
@@ -120,3 +121,42 @@ class TestInternLM2ToolParser(ToolParserTests):
                 ),
             },
         )
+
+
+def test_extract_tool_calls_multiple_action_start_markers(default_tokenizer):
+    parser = Internlm2ToolParser(default_tokenizer)
+    request = MagicMock()
+
+    model_output = (
+        "prefix text "
+        '<|action_start|><|plugin|>{"name":"tool1","parameters":{"x":1}}<|action_end|>'
+        '<|action_start|><|plugin|>{"name":"tool2","parameters":{"x":2}}<|action_end|>'
+    )
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    assert result.content == "prefix text "
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "tool1"
+
+
+def test_extract_tool_calls_streaming_multiple_action_start_markers(default_tokenizer):
+    parser = Internlm2ToolParser(default_tokenizer)
+    request = MagicMock()
+
+    current_text = (
+        "prefix text "
+        '<|action_start|><|plugin|>{"name":"tool1","parameters":{"x":1}}<|action_end|>'
+        '<|action_start|><|plugin|>{"name":"tool2","parameters":{"x":2}}<|action_end|>'
+    )
+    delta = parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=current_text,
+        delta_text=current_text,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+
+    assert delta is not None
