@@ -662,10 +662,7 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
-        # When the fused kernel runs it writes K into the indexer cache itself,
-        # so SparseAttnIndexer must skip its own indexer_k_quant_and_cache call.
-        # The kernel hard-asserts the DSv3.2 shape (head_dim 128, rope_dim 64)
-        # and is not registered for the GLM 5 DSA variant.
+        # Fused indexer writes K into its own cache; gated to DSv3.2 shape.
         self.use_qk_rope_cache_fusion = (
             current_platform.is_rocm()
             and rocm_aiter_ops.is_dsv32_indexer_qk_fusion_enabled()
@@ -691,10 +688,6 @@ class Indexer(nn.Module):
         # Folded into weights_out by the fused kernel alongside Q's per-token
         # scale; the unfused path applies it after Q quant.
         self._weights_scale = self.softmax_scale * self.n_head**-0.5
-        # The fused kernel asserts norm_{weight,bias}.dtype == q.dtype, but
-        # LayerNorm stores both as fp32. Cast once on first forward (lands
-        # inside profile_run, pre-cudagraph-capture) and reuse so the
-        # captured graph sees a stable address.
         self._k_norm_weight_q_dtype: torch.Tensor | None = None
         self._k_norm_bias_q_dtype: torch.Tensor | None = None
         self.indexer_op = SparseAttnIndexer(
