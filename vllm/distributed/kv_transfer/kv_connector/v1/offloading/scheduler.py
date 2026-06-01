@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -73,6 +74,36 @@ class GroupOffloadConfig(NamedTuple):
     # than the MLA full-attention group).
     # None for full-attention groups or when the optimization doesn't apply.
     alignment_block_count: int | None = None
+
+
+def _count_hash_backed_gpu_blocks(
+    group_blocks: Sequence[KVCacheBlock],
+    num_gpu_blocks: int,
+) -> int:
+    """Leading GPU blocks whose KV is committed (non-null blocks have a hash)."""
+    capped_blocks = num_gpu_blocks
+    for i, block in enumerate(group_blocks[:num_gpu_blocks]):
+        if not block.is_null and block.block_hash is None:
+            capped_blocks = i
+            break
+    return capped_blocks
+
+
+def _effective_locally_computed_tokens(
+    num_locally_computed_tokens: int,
+    num_external_tokens: int,
+    kv_group_configs: Sequence[GroupOffloadConfig],
+    group_blocks_list: Sequence[Sequence[KVCacheBlock]],
+) -> int:
+    """Cap local prefix tokens to what allocated GPU blocks have committed."""
+    effective_local = num_locally_computed_tokens
+    num_cached_tokens = num_locally_computed_tokens + num_external_tokens
+    for group_config, group_blocks in zip(kv_group_configs, group_blocks_list):
+        gpu_block_size = group_config.gpu_block_size
+        num_gpu_blocks = cdiv(num_cached_tokens, gpu_block_size)
+        hash_backed_blocks = _count_hash_backed_gpu_blocks(group_blocks, num_gpu_blocks)
+        effective_local = min(effective_local, hash_backed_blocks * gpu_block_size)
+    return effective_local
 
 
 def get_sliding_window_size_in_blocks(
@@ -577,6 +608,24 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status[request.request_id]
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
+        effective_local = _effective_locally_computed_tokens(
+            num_locally_computed_tokens,
+            num_external_tokens,
+            self.config.kv_group_configs,
+            blocks.blocks,
+        )
+        if effective_local < num_locally_computed_tokens:
+            logger.warning(
+                "Request %s: clamping locally computed tokens from %s to %s "
+                "(hash-backed GPU blocks only; async scheduling / speculative "
+                "decode may allocate unhashed blocks before KV is committed)",
+                request.request_id,
+                num_locally_computed_tokens,
+                effective_local,
+            )
+            req_status.num_locally_computed_tokens = effective_local
+            num_locally_computed_tokens = effective_local
+
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
         keys_to_load: list[OffloadKey] = []
@@ -595,16 +644,8 @@ class OffloadingConnectorScheduler:
             num_gpu_blocks = cdiv(num_cached_tokens, gpu_block_size)
 
             assert len(group_blocks) >= num_gpu_blocks
-            num_locally_computed_gpu_blocks = num_gpu_blocks
-            # Skip null placeholder blocks (used for sliding window or mamba padding).
-            for i, block in enumerate(group_blocks[:num_gpu_blocks]):
-                if not block.is_null and block.block_hash is None:
-                    num_locally_computed_gpu_blocks = i
-                    break
-
-            assert (
-                num_locally_computed_tokens
-                <= num_locally_computed_gpu_blocks * gpu_block_size
+            num_locally_computed_gpu_blocks = _count_hash_backed_gpu_blocks(
+                group_blocks, num_gpu_blocks
             )
             num_pending_gpu_blocks = num_gpu_blocks - num_locally_computed_gpu_blocks
 
@@ -637,6 +678,9 @@ class OffloadingConnectorScheduler:
             # blocks (including hits) are offloaded.
             if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
                 group_state.next_stored_block_idx = num_blocks
+
+        if not keys_to_load:
+            return
 
         # Fence dst blocks against finished-request pending stores.
         if (
