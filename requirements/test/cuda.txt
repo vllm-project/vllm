@@ -269,7 +269,9 @@ h11==0.14.0
     #   httpcore
     #   uvicorn
 h2==4.3.0
-    # via httpx
+    # via
+    #   -c requirements/common.txt
+    #   httpx
 harfile==0.3.0
     # via schemathesis
 hf-xet==1.4.3
