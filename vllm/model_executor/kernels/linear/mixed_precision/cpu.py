@@ -211,11 +211,10 @@ class CPUWNA16LinearKernel(MPLinearKernel):
 
 
 def _get_isa_hint(dtype: torch.dtype) -> str:
-    if current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
-        return "rvv"
-
     supports_amx = torch.cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
+    elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+        return "rvv"
     else:
         return "vec"
