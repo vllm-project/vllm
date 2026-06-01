@@ -1,7 +1,9 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
 use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
-/// Tool parser for DeepSeek V3.2 models.
+block to address the issue:
+
+### SEARCH:// Tool parser for DeepSeek V3.2 models.
 ///
 /// Example tool call content:
 ///
