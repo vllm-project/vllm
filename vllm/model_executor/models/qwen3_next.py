@@ -59,6 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
@@ -404,19 +405,9 @@ def fused_qk_rmsnorm_rope_gate(
     return q_out, k_out, gate_out
 
 
-@CustomOp.register("qwen3_fused_qk_norm_rope_gate")
-class Qwen3FusedQKNormRopeGate(CustomOp):
-    """Fused split + GemmaRMSNorm(q, k) + partial NeoX RoPE + gate extraction.
-
-    Used by Qwen3.5 / Qwen3-Next gated attention. ``forward_cuda`` runs the
-    single Triton kernel above; ``forward_native`` is the PyTorch fallback for
-    platforms without Triton (CPU / TPU / XPU). The op is constructed with
-    ``enforce_enable=True`` so the Triton path is used on CUDA/ROCm even when
-    the model is compiled with Inductor (where custom ops are off by default).
-
-    ``q_weight`` / ``k_weight`` are the raw ``GemmaRMSNorm`` parameters; the
-    effective gamma (``weight + 1``) is computed inside the op.
-    """
+@CustomOp.register("qwen35_fused_qk_norm_rope_gate")
+class FusedQKNormRopeGate(CustomOp):
+    """Fused split + GemmaRMSNorm(q, k) + partial NeoX RoPE + gate extraction."""
 
     def __init__(
         self,
@@ -426,12 +417,15 @@ class Qwen3FusedQKNormRopeGate(CustomOp):
         rotary_dim: int,
         eps: float,
     ) -> None:
-        super().__init__(enforce_enable=True)
+        super().__init__()
         self.num_q_heads = num_q_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.rotary_dim = rotary_dim
         self.eps = eps
+        self._forward_method = (
+            self.forward_cuda if current_platform.is_cuda() else self.forward_native
+        )
 
     def forward_cuda(
         self,
@@ -593,7 +587,7 @@ class Qwen3NextAttention(nn.Module):
             self.rotary_emb, "is_neox_style", False
         )
         if self.use_fused_qk_norm_rope_gate:
-            self.qk_norm_rope_gate = Qwen3FusedQKNormRopeGate(
+            self.qk_norm_rope_gate = FusedQKNormRopeGate(
                 num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
@@ -601,14 +595,17 @@ class Qwen3NextAttention(nn.Module):
                 eps=config.rms_norm_eps,
             )
 
-    def forward(
+    def _project_qkv_gate(
         self,
+        qkv: torch.Tensor,
         positions: torch.Tensor,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ):
-        qkv, _ = self.qkv_proj(hidden_states)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
+        Dispatches between the fused Triton kernel and the eager
+        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
+        gating is disabled.
+        """
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
@@ -621,10 +618,7 @@ class Qwen3NextAttention(nn.Module):
                 self.rotary_emb.cos_sin_cache,
                 positions.view(-1),
             )
-            attn_output = self.attn(q, k, v)
-            attn_output = attn_output * torch.sigmoid(gate)
-            output[:], _ = self.o_proj(attn_output)
-            return
+            return q, k, v, gate
 
         if self.attn_output_gate:
             q_gate, k, v = qkv.split(
@@ -637,6 +631,7 @@ class Qwen3NextAttention(nn.Module):
             gate = gate.reshape(*orig_shape, -1)
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            gate = None
 
         q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
             -1, self.num_heads * self.head_dim
@@ -644,15 +639,20 @@ class Qwen3NextAttention(nn.Module):
         k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
             -1, self.num_kv_heads * self.head_dim
         )
-
         q, k = self.rotary_emb(positions, q, k)
+        return q, k, v, gate
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ):
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
-
-        if self.attn_output_gate:
-            gate = torch.sigmoid(gate)
-            attn_output = attn_output * gate
-
+        if gate is not None:
+            attn_output = attn_output * torch.sigmoid(gate)
         output[:], _ = self.o_proj(attn_output)
 
 
