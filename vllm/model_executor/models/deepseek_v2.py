@@ -726,15 +726,15 @@ class Indexer(nn.Module):
 
             cos_sin_cache = rotary_emb._match_cos_sin_cache_dtype(q)
             cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
-            if (
-                self._k_norm_weight_q_dtype is None
-                or self._k_norm_weight_q_dtype.dtype != q.dtype
-            ):
+            # LayerNorm weight/bias are fp32 (their native dtype); the
+            # fused AITER kernel requires fp32, and casting to bf16 here
+            # loses precision and drifts K from the unfused path.
+            if self._k_norm_weight_q_dtype is None:
                 self._k_norm_weight_q_dtype = (
-                    self.k_norm.weight.detach().to(q.dtype).contiguous()
+                    self.k_norm.weight.detach().to(torch.float32).contiguous()
                 )
                 self._k_norm_bias_q_dtype = (
-                    self.k_norm.bias.detach().to(q.dtype).contiguous()
+                    self.k_norm.bias.detach().to(torch.float32).contiguous()
                 )
             return self.indexer_op(
                 hidden_states,

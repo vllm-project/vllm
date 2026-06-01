@@ -844,7 +844,11 @@ def rocm_aiter_sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
             weights_scale,
-            preshuffle=False,
+            # Required when block_size > 1 (vLLM uses 64): downstream
+            # cp_gather_indexer_k_quant_cache_triton and
+            # rocm_fp8_paged_mqa_logits read the cache in MFMA 16x16
+            # SHUFFLE layout, matching the unfused triton K-quant write.
+            preshuffle=True,
             is_neox=is_neox_style,
         )
         weights = weights_out
