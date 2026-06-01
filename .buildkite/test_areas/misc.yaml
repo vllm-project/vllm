@@ -52,7 +52,7 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 

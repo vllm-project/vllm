@@ -117,8 +117,12 @@ class CpuGpuBuffer:
         pin_memory: bool,
         with_numpy: bool = True,
     ) -> None:
-        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=pin_memory)
-        self.gpu = torch.zeros_like(self.cpu, device=device)
+        # these buffers are mutable runtime state, so allocate them as normal
+        with torch.inference_mode(False):
+            self.cpu = torch.zeros(
+                *size, dtype=dtype, device="cpu", pin_memory=pin_memory
+            )
+            self.gpu = torch.zeros_like(self.cpu, device=device)
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
