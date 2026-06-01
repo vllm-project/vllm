@@ -253,7 +253,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 
 ```bash
 # run benchmarking script
-vllm bench serve--save-result --save-detailed \
+vllm bench serve --save-result --save-detailed \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
