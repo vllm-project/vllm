@@ -60,6 +60,7 @@ from vllm.utils.system_utils import (
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -810,6 +811,9 @@ class WorkerProc:
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
