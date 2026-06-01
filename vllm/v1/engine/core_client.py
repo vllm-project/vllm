@@ -1422,6 +1422,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
         requested_dp_rank = request.data_parallel_rank
+        count_recorded = False
         if requested_dp_rank is not None:
             if self._is_active_dp_rank(requested_dp_rank):
                 eng_index = self._local_engine_index_for_dp_rank(requested_dp_rank)
@@ -1430,8 +1431,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                         f"DP rank {requested_dp_rank} is not managed by this client"
                     )
                 self.lb_engines[eng_index][0] += self.client_count
+                count_recorded = True
             else:
                 eng_index = self._choose_active_engine_index()
+                count_recorded = True
                 logger.warning(
                     "Request %s targeted sleeping DP rank %s; routing to active "
                     "DP rank %s instead.",
@@ -1451,8 +1454,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     eng_index,
                 )
                 eng_index = self._choose_active_engine_index()
+                count_recorded = True
             elif eng_index is None:
                 eng_index = self._choose_active_engine_index()
+                count_recorded = True
+        if not count_recorded:
+            self.lb_engines[eng_index][0] += self.client_count
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
         self.reqs_in_flight[request.request_id] = chosen_engine

@@ -935,9 +935,6 @@ class EplbState:
             # remaining GPUs, transfer the experts while we haven't shutdown
             # the GPUs to be released.
             coordinator = get_ep_group()
-            # assert isinstance(coordinator, StatelessGroupCoordinator)
-            # tcp_store_group = coordinator.tcp_store_group
-            # num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)
             if isinstance(coordinator, StatelessGroupCoordinator):
                 tcp_store_group = coordinator.tcp_store_group
                 num_nodes = _node_count_with_rank_mapping(tcp_store_group, rank_mapping)

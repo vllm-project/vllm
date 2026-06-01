@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.distributed.parallel_state as parallel_state
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -49,6 +50,34 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_update_nixl_ep_sleep_mask_requires_masking_backend(monkeypatch):
+    monkeypatch.setattr(
+        parallel_state,
+        "get_ep_group",
+        lambda: SimpleNamespace(
+            device_communicator=SimpleNamespace(all2all_manager=object())
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="nixl_ep"):
+        GPUModelRunner._update_nixl_ep_sleep_mask(object(), [1])
+
+
+def test_update_nixl_ep_sleep_mask_updates_manager(monkeypatch):
+    all2all_manager = Mock()
+    monkeypatch.setattr(
+        parallel_state,
+        "get_ep_group",
+        lambda: SimpleNamespace(
+            device_communicator=SimpleNamespace(all2all_manager=all2all_manager)
+        ),
+    )
+
+    GPUModelRunner._update_nixl_ep_sleep_mask(object(), [1, 2])
+
+    all2all_manager.set_masked_ranks.assert_called_once_with([1, 2])
 
 
 def initialize_kv_cache(runner: GPUModelRunner):

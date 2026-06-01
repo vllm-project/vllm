@@ -1862,12 +1862,12 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
-    def retag_sleep_mode_weights(self) -> None:
+    def retag_sleep_mode_weights(self, model: nn.Module | None = None) -> None:
         """Split sleep-mode weight allocations into shared/expert buckets."""
         if not self.vllm_config.model_config.enable_sleep_mode:
             return
 
-        model = self.get_model()
+        model = model or self.get_model()
         if not is_mixture_of_experts(model):
             return
 
@@ -5112,8 +5112,7 @@ class GPUModelRunner(
                             spec_config.draft_model_config,
                         )
                         eplb_models += 1
-                        self.retag_sleep_mode_weights()
-                        logger.info("retag_sleep_mode_weights done")
+                        self.retag_sleep_mode_weights(self.drafter.model)
 
                 self._setup_eagle3_aux_hidden_state_outputs()
 
@@ -5144,8 +5143,7 @@ class GPUModelRunner(
                         self.model_config,
                     )
                     eplb_models += 1
-                    self.retag_sleep_mode_weights()
-                    logger.info("retag_sleep_mode_weights done")
+                    self.retag_sleep_mode_weights(self._moe_model)
 
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
@@ -5475,9 +5473,19 @@ class GPUModelRunner(
 
         device_communicator = get_ep_group().device_communicator
         if device_communicator is None:
+            if sleeping_ep_ranks:
+                raise RuntimeError(
+                    "Flash EP scaling requires an EP device communicator with "
+                    "NIXL peer masking support."
+                )
             return
         all2all_manager = device_communicator.all2all_manager
         if all2all_manager is None or not hasattr(all2all_manager, "set_masked_ranks"):
+            if sleeping_ep_ranks:
+                raise RuntimeError(
+                    "Flash EP scaling requires --all2all-backend nixl_ep so "
+                    "sleeping EP ranks can be masked."
+                )
             return
         all2all_manager.set_masked_ranks(list(sleeping_ep_ranks))
 
@@ -5742,9 +5750,6 @@ class GPUModelRunner(
             _sleep_skip_forward
             and self.parallel_config.data_parallel_rank >= active_ep_size
         ):
-            # logger.info(
-            #     "Dummy run skipped before DP synchronization for sleeping EP rank."
-            # )
             return torch.tensor([]), torch.tensor([])
 
         _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
@@ -5929,13 +5934,6 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                # outputs = self.model(
-                #     input_ids=input_ids,
-                #     positions=positions,
-                #     intermediate_tensors=intermediate_tensors,
-                #     inputs_embeds=inputs_embeds,
-                #     **model_kwargs,
-                # )
                 if not _sleep_skip_forward:
                     outputs = self.model(
                         input_ids=input_ids,
@@ -5947,10 +5945,6 @@ class GPUModelRunner(
                 else:
                     outputs = None
 
-            # if self.use_aux_hidden_state_outputs:
-            #     hidden_states, _ = outputs
-            # else:
-            #     hidden_states = outputs
             if outputs is not None:
                 if self.use_aux_hidden_state_outputs:
                     hidden_states, _ = outputs
@@ -6030,7 +6024,7 @@ class GPUModelRunner(
             self.eplb_step(is_dummy=True, is_profile=is_profile)
 
         if _sleep_skip_forward:
-            logger.info(
+            logger.debug_once(
                 "Dummy run skipped model/drafter (sync-only EP sleep or CuMem "
                 "weight offload); returning empty hidden states."
             )
