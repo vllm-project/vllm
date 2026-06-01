@@ -249,8 +249,6 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
 
     def _compute_cos_sin_cache(self) -> torch.Tensor:
         inv_freq = self._compute_inv_freq(self.scaling_factor)
-        # Keep t on inv_freq.device so meta-device model construction does not
-        # mix a meta inv_freq with a CPU/CUDA position tensor in einsum.
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
             device=inv_freq.device,
