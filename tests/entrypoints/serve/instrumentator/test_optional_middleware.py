@@ -9,13 +9,27 @@ from http import HTTPStatus
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware
 
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,
 # using a chat capable model is overkill.
 MODEL_NAME = "intfloat/multilingual-e5-small"
+
+
+def _build_request_id_test_client() -> TestClient:
+    app = FastAPI()
+    app.add_middleware(XRequestIdMiddleware)
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    return TestClient(app)
 
 
 @pytest.fixture(scope="module")
@@ -148,15 +162,11 @@ async def test_enable_request_id_header(server: RemoteOpenAIServer):
     assert len(response.headers.get("X-Request-Id", "")) == 32
 
 
-@pytest.mark.parametrize(
-    "server",
-    ["--enable-request-id-headers"],
-    indirect=True,
-)
-@pytest.mark.asyncio
-async def test_custom_request_id_header(server: RemoteOpenAIServer):
-    response = requests.get(
-        server.url_for("health"), headers={"X-Request-Id": "Custom"}
-    )
+@pytest.mark.skip_global_cleanup
+def test_custom_request_id_header():
+    with _build_request_id_test_client() as client:
+        response = client.get("/health", headers={"X-Request-Id": "Custom"})
+
+    assert response.status_code == HTTPStatus.OK
     assert "X-Request-Id" in response.headers
     assert response.headers.get("X-Request-Id") == "Custom"
