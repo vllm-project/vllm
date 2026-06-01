@@ -2150,15 +2150,20 @@ class Scheduler(SchedulerInterface):
         Handle KV load failures reported at request level.
 
         Directly processes the failed request IDs reported by the connector.
+        All affected requests have num_computed_tokens reset to 0.
 
         Async-loading requests (WAITING_FOR_REMOTE_KVS) use
         delay_cache_blocks=True, so external blocks are never hashed
         before the transfer completes — no eviction needed on failure.
 
         Sync-loading requests (RUNNING) use delay_cache_blocks=False,
-        so blocks may already be in the prefix cache.  We evict *all*
-        blocks of such requests to prevent cache pollution.  This is
-        aggressive (valid local-prefix blocks are evicted too) but safe.
+        so blocks may already be in the prefix cache:
+        - fail policy: evict *all* blocks of such requests to prevent
+          cache pollution (aggressive — valid local-prefix blocks are
+          evicted too, but safe).
+        - recompute policy: blocks are intentionally kept so the
+          request reuses them when recomputing from scratch. The
+          recompute overwrites them with correct data.
 
         Returns:
             Set of affected request IDs to skip in update_from_output
@@ -2182,23 +2187,28 @@ class Scheduler(SchedulerInterface):
                     self.failed_recving_kv_req_ids.add(req_id)
             else:
                 sync_failed_req_ids.add(req_id)
-                # TODO: Evicting all blocks is aggressive - it removes
-                # valid local-prefix blocks too.  Ideally we would only
-                # evict externally-loaded blocks.
+                # Collect all blocks for potential eviction. We remove
+                # all blocks (not just externally-loaded ones) because
+                # any block may contain corrupted data from the failed
+                # transfer.
                 for group_ids in self.kv_cache_manager.get_block_ids(req_id):
                     blocks_to_evict.update(group_ids)
-                logger.warning(
-                    "Sync-loaded request %s reported KV load failure. "
-                    "Evicting all blocks (aggressive).",
-                    req_id,
-                )
 
         all_failed = async_failed_req_ids | sync_failed_req_ids
         if not all_failed:
             return set()
 
+        # Under fail policy, evict all blocks of sync-loaded requests
+        # to prevent cache pollution. Under recompute, blocks are kept
+        # so the request can reuse them during full recomputation.
         if blocks_to_evict and should_fail:
             self.kv_cache_manager.evict_blocks(blocks_to_evict)
+            logger.warning(
+                "Evicting %d block(s) from %d sync-loaded request(s) "
+                "due to KV load failure (failure_policy=fail).",
+                len(blocks_to_evict),
+                len(sync_failed_req_ids),
+            )
 
         if should_fail:
             logger.error(
