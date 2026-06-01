@@ -25,9 +25,6 @@ rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
     # ROCm's vLLM C RMSNorm kernel operates on contiguous 2D tensors.
     # Higher-rank callers still normalize over the last dimension, so flatten
@@ -36,11 +33,17 @@ def rms_norm(
         original_shape = x.shape
         x = x.reshape(-1, original_shape[-1])
         output = torch.empty_like(x)
-        torch.ops._C.rms_norm(output, x, weight, epsilon)
+        if weight is None:
+            torch.ops._C.rms_norm_weightless(output, x, epsilon)
+        else:
+            torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.reshape(original_shape)
 
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-    torch.ops._C.rms_norm(output, x, weight, epsilon)
+    if weight is None:
+        torch.ops._C.rms_norm_weightless(output, x, epsilon)
+    else:
+        torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
 
 
@@ -64,10 +67,6 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    if weight is None:
-        # Kernel requires weight tensor, pass ones
-        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-
     assert variance_size is None
     if IS_ROCM and (not x.is_contiguous() or not x_residual.is_contiguous()):
         output, residual = ir.ops.fused_add_rms_norm.impls["native"].impl_fn(
@@ -84,8 +83,14 @@ def fused_add_rms_norm(
         original_shape = x.shape
         x = x.view(-1, original_shape[-1])
         x_residual = x_residual.view(-1, original_shape[-1])
-        torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+        if weight is None:
+            torch.ops._C.fused_add_rms_norm_weightless(x, x_residual, epsilon)
+        else:
+            torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
         return x.view(original_shape), x_residual.view(original_shape)
 
-    torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+    if weight is None:
+        torch.ops._C.fused_add_rms_norm_weightless(x, x_residual, epsilon)
+    else:
+        torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
