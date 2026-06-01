@@ -161,4 +161,33 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("org/mm-m2-base"),
         Some(names::MINIMAX_M2)
     );
+
+    // InternLM2 positive: both dashed and underscored versioned names route.
+    assert_eq!(
+        factory.resolve_name_for_model("internlm/internlm2-chat-7b"),
+        Some(names::INTERNLM)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("internlm/internlm2_5-7b-chat"),
+        Some(names::INTERNLM)
+    );
+
+    // Negative: other internlm-org models do NOT route to the InternLM2 parser,
+    // since they use unrelated prompt formats.
+    //   - InternLM v1 (`internlm-chat-7b`) routes to Llama
+    //   - InternLM3 (`internlm3-8b-instruct`) routes to Llama
+    //   - Intern-S1 / Intern-S1-Pro have their own parser (Python PR #40115)
+    assert_eq!(
+        factory.resolve_name_for_model("internlm/internlm-chat-7b"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("internlm/internlm3-8b-instruct"),
+        None
+    );
+    assert_eq!(factory.resolve_name_for_model("internlm/Intern-S1"), None);
+    assert_eq!(
+        factory.resolve_name_for_model("internlm/Intern-S1-Pro"),
+        None
+    );
 }
