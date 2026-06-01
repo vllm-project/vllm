@@ -46,7 +46,6 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
-    get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
@@ -221,13 +220,6 @@ class OpenAIServingResponses(OpenAIServing):
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
-            )
-            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
-            # We need to add them to the stop token ids.
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
             )
 
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
