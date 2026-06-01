@@ -20,6 +20,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.kernels.linear.scaled_mm import (
     CutlassFP8ScaledMMLinearKernel,
+    MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -280,10 +281,8 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
     is comparable but no pre-quantized checkpoint is required.
     """
 
-    def __init__(self):
-        super().__init__()
-        self.weight_quant_key = kFp8StaticChannelSym
-        self.activation_quant_key = kFp8DynamicTokenSym
+    weight_quant_key = kFp8StaticChannelSym
+    activation_quant_key = kFp8DynamicTokenSym
 
     def create_weights(
         self,
@@ -313,6 +312,15 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
+        # PTPC requires per-token activation FP8; MarlinFP8 is W8A16 and
+        # would silently produce a weight-only fp8 model.
+        if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
+            raise ValueError(
+                "FP8 PTPC online quant requires a kernel that honors "
+                "per-token activation quantization; MarlinFP8 is W8A16 "
+                "weight-only. Requires SM89+ for Cutlass FP8 or ROCm MI3xx "
+                "for rowwise scaled_mm."
+            )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -323,8 +331,8 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
             layer.weight, scale=None, use_per_token_if_dynamic=True
         )
 
-        replace_parameter(layer, "weight", qweight.t().data)
-        replace_parameter(layer, "weight_scale", weight_scale.data)
+        replace_parameter(layer, "weight", qweight.t())
+        replace_parameter(layer, "weight_scale", weight_scale)
 
         self.fp8_linear.process_weights_after_loading(layer)
 
@@ -336,15 +344,14 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # if batch invariant mode is enabled, use BF16 dequant
+        # if batch invariant mode is enabled dequant
         if envs.VLLM_BATCH_INVARIANT and not isinstance(
             self.fp8_linear, CutlassFP8ScaledMMLinearKernel
         ):
-            weight_bf16 = (
-                layer.weight.to(torch.bfloat16)
-                * layer.weight_scale.to(torch.bfloat16).t()
+            weight_dequant = (
+                layer.weight.to(x.dtype) * layer.weight_scale.to(x.dtype).t()
             )
-            return torch.nn.functional.linear(x, weight_bf16.t(), bias)
+            return torch.nn.functional.linear(x, weight_dequant.t(), bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
 
@@ -363,6 +370,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     weight_scale_name: str
     weight_block_size: list[int] | None
+    per_act_token_quant: bool = False
+    per_out_ch_quant: bool = False
 
     def __init__(
         self,
@@ -464,6 +473,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
             block_shape=self.weight_block_size,
+            per_act_token_quant=self.per_act_token_quant,
+            per_out_ch_quant=self.per_out_ch_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
@@ -604,6 +615,9 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
     Activations are quantized dynamically per token at runtime.
     """
 
+    per_act_token_quant: bool = True
+    per_out_ch_quant: bool = True
+
     def __init__(
         self,
         *,
@@ -618,10 +632,13 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
             activation_key=kFp8DynamicTokenSym,
             allow_vllm_cutlass=True,
         )
-        # FlashInfer's per-tensor MoE branch builds a single alpha scalar
-        # (oracle/fp8.py make_fp8_moe_quant_config) which is incompatible
-        # with per-channel weight scales.
+        # Reject backends whose make_fp8_moe_quant_config branch silently
+        # drops per_act_token_quant / per_out_ch_quant or collapses scales:
+        # MARLIN / CPU route through fp8_w8a16_moe_quant_config; FLASHINFER_*
+        # fold scales into a per-tensor alpha (oracle/fp8.py).
         if self.fp8_backend in (
+            Fp8MoeBackend.MARLIN,
+            Fp8MoeBackend.CPU,
             Fp8MoeBackend.FLASHINFER_CUTLASS,
             Fp8MoeBackend.FLASHINFER_TRTLLM,
         ):
@@ -654,12 +671,12 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
 
         for expert in range(layer.local_num_experts):
             w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert].contiguous(),
+                layer.w13_weight[expert],
                 scale=None,
                 use_per_token_if_dynamic=True,
             )
             w2[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert].contiguous(),
+                layer.w2_weight[expert],
                 scale=None,
                 use_per_token_if_dynamic=True,
             )
@@ -675,23 +692,3 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         )
 
         layer._already_called_process_weights_after_loading = True
-
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> "FusedMoEQuantConfig":
-        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-            make_fp8_moe_quant_config,
-        )
-
-        return make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
-            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
-            a1_scale=None,
-            a2_scale=None,
-            w1_bias=getattr(layer, "w13_bias", None),
-            w2_bias=getattr(layer, "w2_bias", None),
-            block_shape=None,
-            per_act_token_quant=True,
-            per_out_ch_quant=True,
-        )

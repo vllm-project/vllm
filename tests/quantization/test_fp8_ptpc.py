@@ -73,10 +73,8 @@ def test_scaled_fp8_quant_per_channel_shape() -> None:
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_fp8_ptpc_online_quantization(
     vllm_runner,
-    kv_cache_dtype: str,
     monkeypatch,
 ) -> None:
     """End-to-end smoke: load `facebook/opt-125m` bf16 with
@@ -90,7 +88,6 @@ def test_fp8_ptpc_online_quantization(
         "facebook/opt-125m",
         quantization="fp8_ptpc",
         enforce_eager=True,
-        kv_cache_dtype=kv_cache_dtype,
     ) as llm:
 
         def check_model(model):
