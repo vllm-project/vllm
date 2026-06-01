@@ -57,11 +57,11 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.zeros(
+        return torch.empty(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
-        return torch.zeros((m, n // block_size), device=device, dtype=torch.uint8)
+        return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
 
 
 def create_fp4_output_tensors(
@@ -69,15 +69,20 @@ def create_fp4_output_tensors(
     n: int,
     device: torch.device,
     is_sf_swizzled_layout: bool,
+    padded_n: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Allocate both output tensors for scaled_fp4_quant:
     (quantized_output, output_scale).
 
-    Must match the C++ scaled_fp4_quant_func allocation exactly.
+    Must match the C++ scaled_fp4_quant_func allocation exactly when
+    ``padded_n`` is ``None``. When ``padded_n`` is provided, allocate a larger
+    packed-FP4 output/scale buffer so the quantization kernel can write
+    CUTLASS-compatible K padding directly
     """
-    output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
-    output_scale = create_fp4_scale_tensor(m, n, device, is_sf_swizzled_layout)
+    physical_n = padded_n if padded_n is not None else n
+    output = torch.empty((m, physical_n // 2), device=device, dtype=torch.uint8)
+    output_scale = create_fp4_scale_tensor(m, physical_n, device, is_sf_swizzled_layout)
     return output, output_scale
 
 
@@ -278,123 +283,6 @@ def merge_attn_states(
         prefill_tokens_with_context,
         output_scale,
     )
-
-
-def convert_vertical_slash_indexes(
-    q_seqlens: torch.Tensor,  # [BATCH, ]
-    kv_seqlens: torch.Tensor,  # [BATCH, ]
-    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
-    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
-    context_size: int,
-    block_size_M: int,
-    block_size_N: int,
-    causal: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    batch_size = slash_indexes.size(0)
-    num_heads = slash_indexes.size(1)
-    nnz_slash = slash_indexes.size(2)
-    nnz_vertical = vertical_indexes.size(2)
-    num_rows = (context_size + block_size_M - 1) // block_size_M
-
-    block_count = torch.zeros(
-        batch_size, num_heads, num_rows, dtype=q_seqlens.dtype, device=q_seqlens.device
-    )
-    block_offset = torch.zeros(
-        batch_size,
-        num_heads,
-        num_rows,
-        nnz_slash,
-        dtype=q_seqlens.dtype,
-        device=q_seqlens.device,
-    )
-    column_count = torch.zeros(
-        batch_size, num_heads, num_rows, dtype=q_seqlens.dtype, device=q_seqlens.device
-    )
-    column_index = torch.zeros(
-        batch_size,
-        num_heads,
-        num_rows,
-        nnz_vertical,
-        dtype=q_seqlens.dtype,
-        device=q_seqlens.device,
-    )
-
-    torch.ops._C.convert_vertical_slash_indexes(
-        block_count,
-        block_offset,
-        column_count,
-        column_index,
-        q_seqlens,
-        kv_seqlens,
-        vertical_indexes,
-        slash_indexes,
-        context_size,
-        block_size_M,
-        block_size_N,
-        causal,
-    )
-    return block_count, block_offset, column_count, column_index
-
-
-def convert_vertical_slash_indexes_mergehead(
-    q_seqlens: torch.Tensor,  # [BATCH, ]
-    kv_seqlens: torch.Tensor,  # [BATCH, ]
-    vertical_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_V]
-    slash_indexes: torch.Tensor,  # [BATCH, N_HEADS, NNZ_S]
-    # [N_HEADS] : different head use different number of indices
-    vertical_indices_count: torch.Tensor,
-    slash_indices_count: torch.Tensor,
-    context_size: int,
-    block_size_M: int,
-    block_size_N: int,
-    causal: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    batch_size = slash_indexes.size(0)
-    num_heads = slash_indexes.size(1)
-    nnz_slash = slash_indexes.size(2)
-    nnz_vertical = vertical_indexes.size(2)
-    num_rows = (context_size + block_size_M - 1) // block_size_M
-
-    block_count = torch.empty(
-        batch_size, num_heads, num_rows, dtype=q_seqlens.dtype, device=q_seqlens.device
-    )
-    block_offset = torch.empty(
-        batch_size,
-        num_heads,
-        num_rows,
-        nnz_slash,
-        dtype=q_seqlens.dtype,
-        device=q_seqlens.device,
-    )
-    column_count = torch.empty(
-        batch_size, num_heads, num_rows, dtype=q_seqlens.dtype, device=q_seqlens.device
-    )
-    column_index = torch.empty(
-        batch_size,
-        num_heads,
-        num_rows,
-        nnz_vertical,
-        dtype=q_seqlens.dtype,
-        device=q_seqlens.device,
-    )
-
-    torch.ops._C.convert_vertical_slash_indexes_mergehead(
-        block_count,
-        block_offset,
-        column_count,
-        column_index,
-        q_seqlens,
-        kv_seqlens,
-        vertical_indexes,
-        slash_indexes,
-        vertical_indices_count,
-        slash_indices_count,
-        context_size,
-        block_size_M,
-        block_size_N,
-        causal,
-    )
-    return block_count, block_offset, column_count, column_index
 
 
 # pos encoding ops
@@ -1714,6 +1602,7 @@ def scaled_fp4_quant(
     input_global_scale: torch.Tensor,
     is_sf_swizzled_layout: bool = True,
     backend: str = "none",
+    padded_n: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Quantize input tensor to FP4 and return quantized tensor and scale.
@@ -1728,6 +1617,8 @@ def scaled_fp4_quant(
         input: The input tensor to be quantized to FP4
         input_global_scale: A scalar scaling factor for the entire tensor.
         use_8x4_sf_layout: Whether to use the 8x4 or 128x4 layout for the scaling
+        padded_n: Optional padded K dimension. When provided, the quantized
+            output and scale tensors are allocated for ``padded_n``
 
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The output tensor in FP4 but every
@@ -1745,9 +1636,16 @@ def scaled_fp4_quant(
     assert input.dtype in (torch.float16, torch.bfloat16), (
         f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
     )
+    if padded_n is not None:
+        assert padded_n >= n, f"padded_n must be >= n, got padded_n={padded_n}, n={n}."
+        assert padded_n % block_size == 0, (
+            f"padded_n has to be a multiple of {block_size}, but got {padded_n}."
+        )
 
     use_8x4_sf_layout = True if "trtllm" in backend and m <= 32 else False  # noqa: SIM210
-
+    if use_8x4_sf_layout and padded_n is not None and padded_n != n:
+        # TODO: support this case
+        raise ValueError("padded_n is not supported with TRTLLM 8x4 scale layout.")
     if use_8x4_sf_layout:
         output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
             input, input_global_scale
@@ -1755,7 +1653,11 @@ def scaled_fp4_quant(
     else:
         # Pre-allocate and call .out variant (same behavior as old in-place API)
         output, output_scale = create_fp4_output_tensors(
-            m, n, input.device, is_sf_swizzled_layout
+            m,
+            n,
+            input.device,
+            is_sf_swizzled_layout,
+            padded_n=padded_n,
         )
         torch.ops._C.scaled_fp4_quant.out(
             input,
@@ -2465,36 +2367,6 @@ def dsv3_router_gemm(
     return output
 
 
-def dsv4_norm_router_gemm(
-    x: torch.Tensor,
-    norm_weight: torch.Tensor,
-    gate_weight: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused RMSNorm + router GEMV for DeepSeek V4.
-
-    Returns ``(normed_x, router_logits)`` where
-        normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
-        router_logits[m,n] = sum_k(normed_x[m,k] * gate_weight[n,k])
-
-    DSV4-specific constraints (caller must check before dispatching here):
-      - x, norm_weight, gate_weight all bf16 contiguous
-      - x.shape == [num_tokens, 7168] with num_tokens in [1, 16]
-      - gate_weight.shape == [num_experts, 7168] with num_experts in {256, 384}
-      - SM 9.x or 10.x device
-
-    Logits output is fp32 (hard-coded by DSV4 router).
-    """
-    num_tokens, hidden = x.shape
-    num_experts = gate_weight.shape[0]
-    normed_x = torch.empty_like(x)
-    logits = torch.empty(num_tokens, num_experts, device=x.device, dtype=torch.float32)
-    torch.ops._moe_C.dsv4_norm_router_gemm(
-        logits, normed_x, x, norm_weight, gate_weight, float(eps)
-    )
-    return normed_x, logits
-
-
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2658,32 +2530,7 @@ def moe_wna16_marlin_gemm(
     )
 
 
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
-
-    @register_fake("_moe_C::marlin_gemm_moe")
-    def marlin_gemm_moe_fake(
-        a: torch.Tensor,
-        b_q_weights: torch.Tensor,
-        sorted_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        b_scales: torch.Tensor,
-        b_zero_points: torch.Tensor,
-        g_idx: torch.Tensor,
-        perm: torch.Tensor,
-        workspace: torch.Tensor,
-        b_q_type: ScalarType,
-        size_m: torch.SymInt,
-        size_n: torch.SymInt,
-        size_k: torch.SymInt,
-        is_k_full: bool,
-        num_experts: int,
-        topk: int,
-        moe_block_size: int,
-        replicate_input: bool,
-        apply_weights: bool,
-    ) -> torch.Tensor:
-        return torch.empty((size_m, topk, size_n), dtype=a.dtype, device=a.device)
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "moe_wna16_marlin_gemm"):
 
     @register_fake("_moe_C::moe_wna16_marlin_gemm")
     def moe_wna16_marlin_gemm_fake(
@@ -2946,6 +2793,50 @@ def indexer_k_quant_and_cache(
 ) -> None:
     torch.ops._C_cache_ops.indexer_k_quant_and_cache(
         k, kv_cache, slot_mapping, quant_block_size, kv_cache_dtype
+    )
+
+
+def top_k_per_row_prefill(
+    logits: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    raw_topk_indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        raw_topk_indices,
+        num_rows,
+        stride0,
+        stride1,
+        topk_tokens,
+    )
+
+
+def top_k_per_row_decode(
+    logits: torch.Tensor,
+    next_n: int,
+    seq_lens: torch.Tensor,
+    raw_topk_indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        raw_topk_indices,
+        num_rows,
+        stride0,
+        stride1,
+        topk_tokens,
     )
 
 

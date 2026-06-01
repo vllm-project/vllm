@@ -15,7 +15,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    BlockHashListWithBlockSize,
+)
 
 logger = init_logger(__name__)
 
@@ -29,6 +32,7 @@ class KeyMetadata:
     pcp_rank: int
     dcp_rank: int
     pp_rank: int
+    group_id: int = 0
 
 
 @dataclass(order=True)
@@ -46,6 +50,7 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
+                self.key_metadata.group_id,
                 self.chunk_hash,
             )
         )
@@ -57,6 +62,7 @@ class PoolKey:
             f"@pcp{self.key_metadata.pcp_rank}"
             f"@dcp{self.key_metadata.dcp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
+            f"@group:{self.key_metadata.group_id}"
             f"@{self.chunk_hash}"
         )
 
@@ -64,9 +70,20 @@ class PoolKey:
 class ChunkedTokenDatabase:
     """Maps token positions to store keys and GPU memory addresses."""
 
-    def __init__(self, metadata: KeyMetadata, block_size: int):
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        hash_block_size: int | None = None,
+    ):
         self.metadata = metadata
         self.block_size = block_size
+        self.hash_block_size = hash_block_size or block_size
+        if self.block_size % self.hash_block_size != 0:
+            raise ValueError(
+                f"block_size ({self.block_size}) must be a multiple of "
+                f"hash_block_size ({self.hash_block_size})"
+            )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
 
@@ -77,9 +94,6 @@ class ChunkedTokenDatabase:
         self.kv_caches_base_addr = kv_caches_base_addr
 
     def set_block_len(self, block_len: list[int]):
-        for length in block_len:
-            if length % self.block_size != 0:
-                raise ValueError(f"block_len {length} % {self.block_size} != 0")
         self.block_len = block_len
 
     def prepare_value(
@@ -96,7 +110,8 @@ class ChunkedTokenDatabase:
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
             addr = base_addr + block_id * self.block_len[index % length]
-            size = self.block_len[index % length] // self.block_size * (end - start)
+            assert (end - start) % self.block_size == 0
+            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
             addr_list.append(addr)
             size_list.append(size)
         return addr_list, size_list, block_id
@@ -104,38 +119,34 @@ class ChunkedTokenDatabase:
     def process_tokens(
         self,
         token_len: int,
-        block_hashes: list[BlockHash] | list[str],
+        block_hashes: list[BlockHash],
         mask_num: int = 0,
     ) -> Iterable[tuple[int, int, PoolKey]]:
         """Process tokens and yield (start_idx, end_idx, pool_key) tuples.
 
         Args:
             token_len: Total number of tokens.
-            block_hashes: Block hashes for each block.
+            block_hashes: Block hashes computed at ``hash_block_size`` granularity.
+                When ``block_size > hash_block_size`` consecutive hashes are merged
+                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
             mask_num: Number of tokens to skip from the beginning.
         """
         if not block_hashes:
             return
-        if not isinstance(block_hashes[0], str):
-            block_hashes = [
-                h.hex()  # type: ignore[union-attr]
-                for h in block_hashes
-            ]
-        for chunk_id, hash_val in enumerate(block_hashes):
+        if self.block_size == self.hash_block_size:
+            chunk_hashes: Iterable[BlockHash] = block_hashes
+        else:
+            chunk_hashes = BlockHashListWithBlockSize(
+                block_hashes, self.hash_block_size, self.block_size
+            )
+        for chunk_id, h in enumerate(chunk_hashes):
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:
                 break
             end_idx = min(start_idx + self.block_size, token_len)
             if start_idx < mask_num:
                 continue
-            else:
-                yield (
-                    start_idx,
-                    end_idx,
-                    self._make_key_by_hash(
-                        hash_val  # type: ignore[arg-type]
-                    ),
-                )
+            yield start_idx, end_idx, self._make_key_by_hash(h.hex())
 
 
 @dataclass
@@ -154,7 +165,7 @@ class RequestTracker:
 
     req_id: str
     token_len: int
-    allocated_block_ids: list[int]
+    allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
     # Snapshot of the prefill range length at tracker creation time.
@@ -162,19 +173,29 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
+    def reset(self) -> None:
+        self.token_len = 0
+        self.allocated_block_ids = ()
+        self.num_saved_tokens = 0
+        self.token_ids = None
+        self.prefill_end_tokens = 0
+
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
     ) -> None:
-        if len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            pass
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+        # Backward-compat: accept a single list (broadcast to single group).
+        if isinstance(new_block_ids, list):
+            new_block_ids = (new_block_ids,)
+        if len(new_block_ids) != len(self.allocated_block_ids):
+            raise ValueError(
+                f"Group count mismatch: tracker has "
+                f"{len(self.allocated_block_ids)} groups, update has "
+                f"{len(new_block_ids)}"
+            )
+        for existing, new in zip(self.allocated_block_ids, new_block_ids, strict=True):
+            if new:
+                existing.extend(new)
 
 
 @dataclass
@@ -183,7 +204,7 @@ class ReqMeta:
 
     req_id: str
     token_len_chunk: int
-    block_ids: list[int]
+    block_ids: tuple[list[int], ...]
     block_hashes: list[BlockHash]
 
     can_save: bool | None = None
@@ -222,6 +243,12 @@ class ReqMeta:
         )
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        # A ReqMeta must never carry both a save AND a load.
+        # The save would also be wasted work — the bytes are being looked up
+        # in the store right now. Later cached_reqs steps save new tokens
+        # normally.
+        if load_spec is not None and load_spec.can_load:
+            skip_save = True
         if skip_save and load_spec is None:
             return None
 

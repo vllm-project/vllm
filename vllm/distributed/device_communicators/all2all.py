@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -324,15 +325,21 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return 0
 
 
+@dataclass
+class _NixlEPBufferState:
+    buffer: Any
+    connected_ep_size: int
+    active_ep_size: int
+
+
 class NixlEPAll2AllManager(All2AllManagerBase):
     """
     All2All communication based on NIXL EP kernels.
     This backend supports elastic EP with dynamic rank connection/disconnection.
     """
 
-    # (nixl_ep_buffer, ep_size)
-    _buffer: tuple[Any, int] | None = None
-    _lock = threading.Lock()
+    _buffer: _NixlEPBufferState | None = None
+    _lock = threading.RLock()
 
     def __init__(self, cpu_group, tcp_store_group=None):
         assert tcp_store_group is not None
@@ -367,47 +374,103 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             num_experts_per_rank=num_experts_per_rank,
             num_rdma_bytes=num_rdma_bytes,
         )
-        ranks_to_connect = list(range(self.cpu_group.size()))
+        ranks_to_connect = list(range(self.world_size))
         buffer.connect_ranks(ranks_to_connect)
-        NixlEPAll2AllManager._buffer = (buffer, self.cpu_group.size())
+        NixlEPAll2AllManager._buffer = _NixlEPBufferState(
+            buffer=buffer,
+            connected_ep_size=self.world_size,
+            active_ep_size=self.world_size,
+        )
 
-    def _update_buffer(self):
+    def _connect_to_ep_size(self, ep_size: int, *, make_active: bool) -> None:
         assert NixlEPAll2AllManager._buffer is not None
-        buffer, current_ep_size = NixlEPAll2AllManager._buffer
-        current_ranks = list(range(current_ep_size))
-        new_ep_size = self.cpu_group.size()
-        buffer.set_tcp_store_group(self.tcp_store_group.store)
-        if new_ep_size > len(current_ranks):
-            ranks_to_connect = list(range(len(current_ranks), new_ep_size))
-            buffer.connect_ranks(ranks_to_connect)
+        state = NixlEPAll2AllManager._buffer
+        if ep_size <= state.connected_ep_size:
+            return
+
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        ranks_to_connect = list(range(state.connected_ep_size, ep_size))
+        state.buffer.connect_ranks(ranks_to_connect, activate=make_active)
+        state.connected_ep_size = ep_size
+        if make_active:
+            state.active_ep_size = ep_size
+
+    def _disconnect_to_ep_size(self, ep_size: int) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        if ep_size >= state.connected_ep_size:
+            return
+
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        ranks_to_disconnect = list(range(ep_size, state.connected_ep_size))
+        state.buffer.disconnect_ranks(ranks_to_disconnect)
+        state.connected_ep_size = ep_size
+        state.active_ep_size = min(state.active_ep_size, ep_size)
+
+    def _unmask_connected_ranks(self, target_ep_size: int) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        state.buffer.set_tcp_store_group(self.tcp_store_group.store)
+        if target_ep_size <= state.active_ep_size:
+            return
+        assert state.connected_ep_size >= target_ep_size
+
+        for rank in range(state.active_ep_size, target_ep_size):
+            state.buffer.update_mask_buffer(rank, mask=False)
+        state.active_ep_size = target_ep_size
+
+    def _stage_ep_size(self) -> None:
+        assert NixlEPAll2AllManager._buffer is not None
+        state = NixlEPAll2AllManager._buffer
+        target_ep_size = self.world_size
+
+        # Scale-up can safely connect standby ranks while leaving them masked.
+        # Scale-down must not disconnect active ranks until commit.
+        if target_ep_size > state.connected_ep_size:
+            self._connect_to_ep_size(target_ep_size, make_active=False)
+
+    def commit_staged_state(self) -> None:
+        """Commit staged NIXL EP state to the active communication set."""
+        with NixlEPAll2AllManager._lock:
+            assert NixlEPAll2AllManager._buffer is not None
+            state = NixlEPAll2AllManager._buffer
+            target_ep_size = self.world_size
+
+            if target_ep_size < state.connected_ep_size:
+                self._disconnect_to_ep_size(target_ep_size)
+            elif target_ep_size > state.connected_ep_size:
+                self._connect_to_ep_size(target_ep_size, make_active=True)
+
+            self._unmask_connected_ranks(target_ep_size)
+
+    def _ensure_ep_size(self, *, stage: bool) -> None:
+        if stage:
+            self._stage_ep_size()
         else:
-            ranks_to_disconnect = current_ranks[new_ep_size:]
-            buffer.disconnect_ranks(ranks_to_disconnect)
-        NixlEPAll2AllManager._buffer = (buffer, new_ep_size)
+            self.commit_staged_state()
 
     def get_handle(self, kwargs):
         with NixlEPAll2AllManager._lock:
-            if (
-                NixlEPAll2AllManager._buffer is not None
-                and NixlEPAll2AllManager._buffer[1] == self.cpu_group.size()
-            ):
-                return NixlEPAll2AllManager._buffer[0]
-
-            num_experts_per_rank = (
-                kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
-            )
-            nixl_kwargs = dict(
-                max_num_tokens_per_dp_rank=kwargs["max_num_tokens_per_dp_rank"],
-                token_hidden_size=kwargs["token_hidden_size"],
-                num_experts_per_rank=num_experts_per_rank,
-            )
-            if NixlEPAll2AllManager._buffer is None:
-                self._init_buffer(**nixl_kwargs)
+            stage = bool(kwargs.get("stage", False))
+            state = NixlEPAll2AllManager._buffer
+            if state is None:
+                assert not stage, (
+                    "NIXL EP staged initialization requires an existing buffer"
+                )
+                max_num_tokens_per_dp_rank = kwargs["max_num_tokens_per_dp_rank"]
+                num_experts_per_rank = (
+                    kwargs["num_global_experts"] // kwargs["num_ep_ranks"]
+                )
+                self._init_buffer(
+                    max_num_tokens_per_dp_rank=max_num_tokens_per_dp_rank,
+                    token_hidden_size=kwargs["token_hidden_size"],
+                    num_experts_per_rank=num_experts_per_rank,
+                )
             else:
-                self._update_buffer()
+                self._ensure_ep_size(stage=stage)
 
             assert NixlEPAll2AllManager._buffer is not None
-            handle = NixlEPAll2AllManager._buffer[0]
+            handle = NixlEPAll2AllManager._buffer.buffer
             return handle
 
     def dispatch(
@@ -432,7 +495,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         # NOTE(yongji): NIXLEPAll2AllManager instance is recreated during
         # scale-up/down, so we cannot destroy the persistent buffer here.
         assert NixlEPAll2AllManager._buffer is not None
-        buffer = NixlEPAll2AllManager._buffer[0]
+        buffer = NixlEPAll2AllManager._buffer.buffer
         buffer.set_tcp_store_group(None)
 
     # NIXL EP uses RDMA so no SMs are used for communication
@@ -571,6 +634,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.initialized = False
         self.moe_alltoall: MoeAlltoAll | None = None
         self.mapping = None
+        self.workspace_size = 0
+        self.max_num_tokens = 0
+        self.top_k = 0
+        self.num_experts = 0
 
     def initialize(
         self,
@@ -581,9 +648,54 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         dispatch_dtype_bytes_per_elem: int = 0,
         dispatch_scale_bytes_per_token: int = 0,
     ):
-        """Initialize the MoeAlltoAll workspace."""
+        """Initialize (or grow) the MoeAlltoAll workspace."""
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
+        total_dispatch_payload_size_per_token = (
+            hidden_bytes
+            + dispatch_scale_bytes_per_token
+            + top_k * 4  # int32 topks ids
+            + top_k * 4  # float32 topk weights
+        )
+        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
+        needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
+            ep_size=self.world_size,
+            max_num_tokens=max_num_tokens,
+            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
+            combine_payload_size_per_token=combine_payload_size_per_token,
+        )
+        # workspace_size and max_num_tokens are kernel-side max-bounds, so
+        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
+        # need the shared workspace grown to the union. top_k and num_experts
+        # must match across layers: top_k is a strict-equality assert at
+        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
+        # feeds the expert-to-rank routing math, so any mismatch would crash
+        # or silently corrupt routing. All ranks see the same MoE layers in
+        # the same order with identical shapes, so the skip / rebuild
+        # branches are taken consistently across ranks.
         if self.initialized:
-            return
+            assert top_k == self.top_k, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous top_k across MoE layers (got {top_k}, "
+                f"was built with {self.top_k})"
+            )
+            assert num_experts == self.num_experts, (
+                "FlashInfer one-sided MoeAlltoAll does not support "
+                f"heterogeneous num_experts across MoE layers (got "
+                f"{num_experts}, was built with {self.num_experts})"
+            )
+            if (
+                needed_workspace_size <= self.workspace_size
+                and max_num_tokens <= self.max_num_tokens
+            ):
+                return
+
+        self.workspace_size = max(self.workspace_size, needed_workspace_size)
+        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
+        self.top_k = top_k
+        self.num_experts = num_experts
 
         self.cleanup()
         gpus_per_node = torch.accelerator.device_count()
@@ -610,38 +722,17 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         ep_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
         )
-        if dispatch_dtype_bytes_per_elem == 0:
-            hidden_bytes = hidden_size // 2
-        else:
-            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
-        total_dispatch_payload_size_per_token = (
-            hidden_bytes
-            + dispatch_scale_bytes_per_token
-            + top_k * 4  # int32 topks ids
-            + top_k * 4  # float32 topk weights
-        )
-        combine_payload_size_per_token = hidden_size * 2  # bf16 hidden states
-        self.workspace_size = moe_a2a_get_workspace_size_per_rank(
-            ep_size=self.world_size,
-            max_num_tokens=max_num_tokens,
-            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
-            combine_payload_size_per_token=combine_payload_size_per_token,
-        )
 
         self.moe_alltoall = MoeAlltoAll(
             mapping=self.mapping,
-            max_num_tokens=max_num_tokens,
-            top_k=top_k,
-            num_experts=num_experts,
+            max_num_tokens=self.max_num_tokens,
+            top_k=self.top_k,
+            num_experts=self.num_experts,
             workspace_size_per_rank=self.workspace_size,
             mnnvl_config=ep_config,
         )
 
         self.gpus_per_node = gpus_per_node
-        self.max_num_tokens = max_num_tokens
-        self.top_k = top_k
-        self.num_experts = num_experts
-        self.hidden_size = hidden_size
         self.initialized = True
 
         logger.info(
@@ -649,7 +740,10 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             self.rank,
             self.world_size,
         )
-        dist.barrier()
+        # Scope barrier to the EP group: with PP, different EP groups can
+        # rebuild a different number of times if their MoE layers have
+        # different shape sequences, so a world-level barrier would deadlock.
+        dist.barrier(group=self.cpu_group)
 
     def get_handle(self, kwargs):
         return self
