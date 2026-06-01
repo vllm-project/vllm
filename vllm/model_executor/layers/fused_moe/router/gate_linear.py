@@ -73,7 +73,9 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
-        # cuteDSL ll_router_gemm eligibility (SM90+, any dims)
+        # cuteDSL ll_router_gemm eligibility. Any dims supported, but SM90+ required bc:
+        # 1. PDL support. Both dot-product and split-K kernels.
+        # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
         self.allow_ll_router_gemm = False
         if can_use_specialized_kernels:
             from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
@@ -114,7 +116,7 @@ class GateLinear(ReplicatedLinear):
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= 8:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,
