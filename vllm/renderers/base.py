@@ -404,8 +404,6 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: "TextPrompt",
         params: "TokenizeParams",
     ) -> bool:
-        """Return True if the request asks for token offsets AND the
-        tokenizer can provide them AND no multimodal data is present."""
         return (
             params.return_token_offsets
             and getattr(tokenizer, "is_fast", False)
@@ -418,8 +416,6 @@ class BaseRenderer(ABC, Generic[_T]):
         encoding,
         prompt: "TextPrompt",
     ) -> "TokensPrompt":
-        """Build a TokensPrompt from a BatchEncoding that has both
-        `input_ids` and `offset_mapping` populated."""
         return TokensPrompt(
             prompt_token_ids=list(encoding["input_ids"]),
             prompt_token_offsets=[
@@ -781,11 +777,7 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
-        # `prompt_token_offsets` is only defined on TokensInput; the
-        # multimodal branch never carries offsets (offset computation is
-        # skipped in `_tokenize_prompt` whenever multi_modal_* fields are
-        # present), so guarding on the type discriminator is both
-        # type-safe and behavior-preserving.
+        # Narrow the union — `prompt_token_offsets` is only on TokensInput.
         if engine_input["type"] == "token" and (
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
@@ -848,8 +840,7 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
-        # See `_process_tokens` for why this is gated on the type
-        # discriminator.
+        # Narrow the union — `prompt_token_offsets` is only on TokensInput.
         if engine_input["type"] == "token" and (
             (offsets := prompt.get("prompt_token_offsets")) is not None
         ):
