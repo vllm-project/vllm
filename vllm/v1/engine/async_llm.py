@@ -289,7 +289,7 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
@@ -423,7 +423,7 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         data_parallel_rank: int | None = None,
     ) -> RequestOutputCollector:
         self._validate_streaming_input_sampling_params(sampling_params)
@@ -534,7 +534,7 @@ class AsyncLLM(EngineClient):
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
@@ -807,7 +807,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
+        priority: float = 0.0,
         tokenization_kwargs: dict[str, Any] | None = None,
         reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
