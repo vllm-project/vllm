@@ -3,7 +3,6 @@
 
 import csv
 import json
-import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -159,25 +158,6 @@ TorchProfilerActivityMap = {
 }
 
 
-def _event_to_row(event: object) -> dict[str, object]:
-    """Extract every public, non-callable metric from a FunctionEventAvg."""
-    row: dict[str, object] = {}
-    # Reading every attribute touches deprecated cuda_* aliases; silence them.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        for attr in dir(event):
-            if attr.startswith("_"):
-                continue
-            try:
-                value = getattr(event, attr)
-            except Exception:
-                continue
-            if callable(value):
-                continue
-            row[attr] = value
-    return row
-
-
 class TorchProfilerWrapper(WorkerProfiler):
     def __init__(
         self,
@@ -290,7 +270,21 @@ class TorchProfilerWrapper(WorkerProfiler):
         if _is_uri_path(profiler_dir):
             return
 
-        rows = [_event_to_row(event) for event in self.profiler.key_averages()]
+        # Extract every public, non-callable metric from each event.
+        rows: list[dict[str, object]] = []
+        for event in self.profiler.key_averages():
+            row: dict[str, object] = {}
+            for attr in dir(event):
+                if attr.startswith("_"):
+                    continue
+                try:
+                    value = getattr(event, attr)
+                except Exception:
+                    continue
+                if not callable(value):
+                    row[attr] = value
+            rows.append(row)
+
         # Stable, sorted superset of every metric seen across the events.
         fieldnames = sorted({key for row in rows for key in row})
 
