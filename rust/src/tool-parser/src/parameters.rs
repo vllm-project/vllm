@@ -177,10 +177,10 @@ impl JsonParamType {
         match kind.as_str() {
             "string" | "str" | "text" | "varchar" | "char" | "enum" => Some(Self::String),
             "integer" | "int" => Some(Self::Integer),
-            "number" | "float" => Some(Self::Number),
+            "number" | "float" | "double" => Some(Self::Number),
             "boolean" | "bool" | "binary" => Some(Self::Boolean),
-            "object" => Some(Self::Object),
-            "array" | "arr" | "sequence" => Some(Self::Array),
+            "object" | "dict" | "map" => Some(Self::Object),
+            "array" | "arr" | "list" | "sequence" => Some(Self::Array),
             "null" => Some(Self::Null),
             _ if kind.starts_with("int")
                 || kind.starts_with("uint")
@@ -224,10 +224,11 @@ fn convert_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
 
 /// Convert one raw string value to a JSON number.
 fn convert_number(value: &str) -> Option<Value> {
-    if let Ok(parsed) = value.parse::<i64>() {
-        return Some(Value::Number(Number::from(parsed)));
-    }
-    Number::from_f64(value.parse::<f64>().ok()?).map(Value::Number)
+    serde_json::from_str::<Number>(value)
+        .or_else(|_| value.parse::<i64>().map(Number::from))
+        .or_else(|_| value.parse::<f64>().ok().and_then(Number::from_f64).ok_or(()))
+        .ok()
+        .map(Value::Number)
 }
 
 /// Convert one raw string value to a boolean.
@@ -287,9 +288,12 @@ mod tests {
                 "text": { "type": "string" },
                 "count": { "type": "integer" },
                 "size": { "type": "number" },
+                "ratio": { "type": "double" },
                 "enabled": { "type": "boolean" },
                 "payload": { "type": "object" },
+                "mapping": { "type": "map" },
                 "items": { "type": "array" },
+                "names": { "type": "list" },
                 "nothing": { "type": "null" }
             }
         }));
@@ -297,14 +301,17 @@ mod tests {
         assert_eq!(params.convert("text", "42"), json!("42"));
         assert_eq!(params.convert("count", "42"), json!(42));
         assert_eq!(params.convert("size", "5.0"), json!(5.0));
+        assert_eq!(params.convert("ratio", "2.5"), json!(2.5));
         assert_eq!(params.convert("enabled", "1"), json!(true));
         assert_eq!(params.convert("payload", r#"{"k":1}"#), json!({ "k": 1 }));
+        assert_eq!(params.convert("mapping", r#"{"k":1}"#), json!({ "k": 1 }));
         assert_eq!(params.convert("items", "[1,2]"), json!([1, 2]));
+        assert_eq!(params.convert("names", r#"["a","b"]"#), json!(["a", "b"]));
         assert_eq!(params.convert("nothing", "null"), json!(null));
     }
 
     #[test]
-    fn number_conversion_parses_int_then_float() {
+    fn number_conversion_preserves_json_number_spelling_with_legacy_fallback() {
         let params = ToolSchema::from_schema(&json!({
             "type": "object",
             "properties": {
@@ -312,15 +319,21 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("value", "5"), json!(5));
-        assert_eq!(params.convert("value", "5.0"), json!(5.0));
-        assert_eq!(params.convert("value", "5."), json!(5.0));
-        assert_eq!(params.convert("value", "+1"), json!(1));
-        assert_eq!(params.convert("value", "+1.0"), json!(1.0));
+        assert_eq!(converted_number_text(&params, "5"), "5");
+        assert_eq!(converted_number_text(&params, "5.0"), "5.0");
+        assert_eq!(converted_number_text(&params, "5.00"), "5.00");
+        assert_eq!(converted_number_text(&params, "1e0"), "1e+0");
+        assert_eq!(converted_number_text(&params, "5."), "5.0");
+        assert_eq!(converted_number_text(&params, "+1"), "1");
+        assert_eq!(converted_number_text(&params, "+1.0"), "1.0");
         assert_eq!(
-            params.convert("value", "9223372036854775807.5"),
-            json!(9223372036854775808.0)
+            converted_number_text(&params, "9223372036854775807.5"),
+            "9223372036854775807.5"
         );
+    }
+
+    fn converted_number_text(params: &ToolSchema, value: &str) -> String {
+        serde_json::to_string(&params.convert("value", value)).unwrap()
     }
 
     #[test]

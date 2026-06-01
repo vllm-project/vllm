@@ -31,7 +31,6 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
@@ -46,8 +45,10 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
     from datasets import load_dataset
@@ -83,6 +84,7 @@ class SampleRequest:
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+    timestamp: float | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -1218,16 +1220,19 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         vocab_size = tokenizer.vocab_size
-        # Can't use tokenizer.all_special_ids since
-        # it returns ONLY ids from special_tokens_map.json
-        # We want to exclude placeholder tokens and all
-        # tokens that indicate start/end of image as it
-        # may break prompt replacement logic.
-        prohibited_tokens = list(
-            tok_id
-            for tok_id, token in tokenizer.added_tokens_decoder.items()
-            if token.special
-        )
+        if is_mistral_tokenizer(tokenizer):
+            prohibited_tokens = tokenizer.all_special_ids
+        else:
+            # Can't use tokenizer.all_special_ids since
+            # it returns ONLY ids from special_tokens_map.json
+            # We want to exclude placeholder tokens and all
+            # tokens that indicate start/end of image as it
+            # may break prompt replacement logic.
+            prohibited_tokens = list(
+                tok_id
+                for tok_id, token in tokenizer.added_tokens_decoder.items()
+                if token.special
+            )
         all_tokens = np.arange(vocab_size)
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
         logger.debug(
@@ -1399,6 +1404,168 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
+class TimedTrace(BenchmarkDataset):
+    """
+    Implements a base class to replay various timed traces.
+    Loads data from a JSON file and generates sample requests
+    based on the timing information in the traces.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+
+        # Set parameters with defaults from timed_trace_group arguments
+        self.chunk_size = int(kwargs.get("timed_trace_chunk_hash_size", 16))
+        self.sec_multiplier = float(kwargs.get("timed_trace_sec_multiplier", 1))
+        self.label_ts = str(kwargs.get("timed_trace_label_timestamp"))
+        self.label_input_length = str(kwargs.get("timed_trace_label_input_length"))
+        self.label_output_length = str(kwargs.get("timed_trace_label_output_length"))
+        self.label_hash_ids = str(kwargs.get("timed_trace_label_hash_ids"))
+        print(
+            f"timed-trace: chunk_size: {self.chunk_size}, "
+            f"sec_multiplier: {self.sec_multiplier}, "
+            f'label_ts: "{self.label_ts}", '
+            f'label_input_length: "{self.label_input_length}", '
+            f'label_output_length: "{self.label_output_length}", '
+            f'label_hash_ids: "{self.label_hash_ids}"'
+        )
+        self._expanded_generated_prompts = {}
+        self.load_data()
+
+    def load_data(self) -> None:
+        # check if the file is there
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # load and we will do transformation once we have the Tokenizer available
+        # this is jsonl data format
+        with open(self.dataset_path) as f:
+            self.data = f.readlines()
+
+    def _sample_token(
+        self, num_tokens: int, tokenizer: TokenizerLike, seed: int | None = None
+    ) -> list[int]:
+        # Initialize vocab only if it doesn't exist yet
+        if not hasattr(self, "vocab"):
+            self.vocab = tokenizer.get_vocab()
+            # Remove the special tokens.
+            self.vocab = {
+                k: v
+                for k, v in self.vocab.items()
+                if v not in tokenizer.all_special_ids
+            }
+            # Create a sorted list of vocab values for deterministic sampling
+            self.vocab_values_sorted = sorted(self.vocab.values())
+
+        # Use the provided seed if given, otherwise use global random state
+        if seed is not None:
+            rng = random.Random(seed)
+            sampled_token_ids = rng.choices(self.vocab_values_sorted, k=num_tokens)
+        else:
+            sampled_token_ids = random.choices(self.vocab_values_sorted, k=num_tokens)
+
+        return sampled_token_ids
+
+    def _expand_prompt(
+        self,
+        chunked_hashes: list[int],
+        target_input_size: int,
+        tokenizer: TokenizerLike,
+    ) -> list[int]:
+        raw_tokenized_prompt = []
+        for h in chunked_hashes:
+            # Calculate how many tokens to expand for this chunk
+            expanded_size = (
+                self.chunk_size
+                if target_input_size >= self.chunk_size
+                else target_input_size
+            )
+
+            # Cache key includes size for partial chunks at the end
+            key = f"{h}:{expanded_size}"
+
+            if key not in self._expanded_generated_prompts:
+                # Convert key to a deterministic seed
+                key_seed = hash(key) & 0xFFFFFFFF  # Convert to 32-bit int
+                self._expanded_generated_prompts[key] = self._sample_token(
+                    expanded_size, tokenizer, seed=key_seed
+                )
+            # once inserted get the tokenized prompt and append to the list
+            raw_tokenized_prompt.extend(self._expanded_generated_prompts[key])
+            target_input_size -= expanded_size
+
+            if target_input_size <= 0:
+                break
+
+        return raw_tokenized_prompt
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        assert tokenizer is not None, "Tokenizer must be provided, now is Null"
+
+        for ind, entry in enumerate(self.data):
+            if len(samples) >= num_requests:
+                break
+
+            # now we create the SampleRequest with timing info
+            entry = json.loads(entry.strip())
+            input_length = entry.get(self.label_input_length)
+            if input_length is None:
+                raise ValueError(
+                    f"Input length field '{self.label_input_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-input-length to specify the correct "
+                    f"field name."
+                )
+            new_output_len = entry.get(self.label_output_length)
+            if new_output_len is None:
+                raise ValueError(
+                    f"Output length field '{self.label_output_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-output-length to specify the correct "
+                    f"field name."
+                )
+            prompt_ids = self._expand_prompt(
+                entry.get(self.label_hash_ids, []), input_length, tokenizer
+            )
+            prompt = tokenizer.decode(prompt_ids)
+
+            # Get timestamp with proper error handling
+            ts_value = entry.get(self.label_ts)
+            if ts_value is None:
+                raise ValueError(
+                    f"Timestamp field '{self.label_ts}' not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-timestamp to specify the correct field name."
+                )
+            timestamp = float(ts_value) * self.sec_multiplier
+
+            prompt_len = len(prompt_ids)
+
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=None,
+                    multi_modal_data=None,
+                    request_id=request_id_prefix + str(ind),
+                    timestamp=timestamp,
+                )
+            )
+        return samples
+
+
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--trust-remote-code",
@@ -1431,6 +1598,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "prefix_repetition",
             "spec_bench",
             "speed_bench",
+            "timed_trace",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1519,6 +1687,53 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+
+    timed_trace_group = parser.add_argument_group("timed-trace dataset options")
+    timed_trace_group.add_argument(
+        "--timed-trace-chunk-hash-size",
+        type=int,
+        default=16,
+        help=(
+            "Each hash tokens, if present, represent how many token "
+            "hashes. For example in the Moonshot traces it is 512, while "
+            "the Qwen/Alibaba has 16."
+        ),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-sec-multiplier",
+        type=float,
+        default=1,
+        help=(
+            "What multiplier to use when converting timestamps to "
+            "seconds. We will multiply timestamps by this. For example"
+            "if the timestamps are in milliseconds, then pass 0.001."
+            "If they are already in seconds, then the default 1 is sufficient."
+        ),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-timestamp",
+        type=str,
+        default="timestamp",
+        help="What json label to use to index the timestamp in the trace.",
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-input-length",
+        type=str,
+        default="input_length",
+        help=("What json label to use to index the input length field in the trace."),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-output-length",
+        type=str,
+        default="output_length",
+        help=("What json label to use to index the output length field in the trace."),
+    )
+    timed_trace_group.add_argument(
+        "--timed-trace-label-hash-ids",
+        type=str,
+        default="hash_ids",
+        help=("What json label to use to index the hash ids for the input prompts."),
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
@@ -2049,6 +2264,14 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
             skip_chat_template=args.skip_chat_template,
             **hf_kwargs,
+        )
+
+    elif args.dataset_name == "timed_trace":
+        dataloader = TimedTrace(**vars(args))
+        input_requests = dataloader.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -3111,7 +3334,10 @@ class MMVUDataset(HuggingFaceDataset):
         self._remote_path_root = (
             f"https://huggingface.co/datasets/{self.hf_name}/resolve/main"
         )
-        self._local_path_root = snapshot_download(self.hf_name, repo_type="dataset")
+        self._local_path_root = hf_api().snapshot_download(
+            self.hf_name,
+            repo_type="dataset",
+        )
 
     def sample(
         self,
