@@ -33,7 +33,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.attention import (
-        DeepseekV4MLAAttention,
+        DeepseekV4Attention,
     )
 
 
@@ -599,7 +599,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def forward_mqa(  # type: ignore[override]
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
@@ -677,7 +677,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def _forward_decode(
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,
         swa_metadata: DeepseekV4ROCMAiterSparseSWAMetadata,
@@ -740,7 +740,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def _forward_prefill(
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         positions: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,

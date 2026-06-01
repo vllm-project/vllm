@@ -29,7 +29,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.attention import (
-        DeepseekV4MLAAttention,
+        DeepseekV4Attention,
     )
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     """Abstract parent for DeepseekV4 sparse MLA impls.
 
-    V4 sparse MLA is driven by the layer (``DeepseekV4MLAAttention.forward``)
+    V4 sparse MLA is driven by the layer (``DeepseekV4Attention.forward``)
     rather than the v1 framework, so ``forward_mqa`` is overridden with a
     classmethod that takes the layer as its first argument. This Liskov-broken
     override is intentional: the grandparent's instance-method ``forward_mqa``
@@ -55,7 +55,7 @@ class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMeta
     @abstractmethod
     def forward_mqa(  # type: ignore[override]
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
@@ -129,7 +129,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def forward_mqa(  # type: ignore[override]
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
@@ -210,7 +210,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def _forward_decode(
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         kv_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_metadata: "DeepseekSparseSWAMetadata",
@@ -304,7 +304,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
     @classmethod
     def _forward_prefill(
         cls,
-        layer: "DeepseekV4MLAAttention",
+        layer: "DeepseekV4Attention",
         q: torch.Tensor,
         positions: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
