@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.platforms import current_platform
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -2175,13 +2176,16 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            # Skip-if-missing: the worker-side KV connector can report a
-            # completion for a request that has already been removed from
-            # ``self.requests`` (e.g. WRITE-mode connectors like MoRI-IO
-            # report finished_sending out-of-band, racing with the
-            # scheduler's normal lifecycle removal). Asserting here causes
-            # spurious crashes; tolerate the race by skipping the free.
-            if req_id in self.requests:
+            if current_platform.is_rocm():
+                # ROCm/MoRI-IO skip-if-missing: WRITE-mode connectors like
+                # MoRI-IO can report ``finished_sending`` out-of-band from a
+                # deferred-write task, racing with the scheduler's normal
+                # lifecycle removal. Tolerate the race by skipping the free
+                # if the request is already gone.
+                if req_id in self.requests:
+                    self._free_blocks(self.requests[req_id])
+            else:
+                assert req_id in self.requests
                 self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
