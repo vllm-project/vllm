@@ -96,9 +96,9 @@ def test_video_processor_from_model_repo(
 
     backend = get_video_loader_backend_for_processor(video_processor)
     loader = VIDEO_LOADER_REGISTRY.load(backend)
-    assert loader is expected_loader_cls, (
+    assert isinstance(loader, expected_loader_cls), (
         f"{model_repo!r}: backend={backend!r} loaded "
-        f"{loader.__name__}, expected {expected_loader_cls.__name__}"
+        f"{type(loader)}, expected {expected_loader_cls}"
     )
 
 
