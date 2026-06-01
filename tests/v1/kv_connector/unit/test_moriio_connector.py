@@ -38,7 +38,7 @@ from vllm.utils.network_utils import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
 )
 
 from .utils import create_request, create_scheduler
@@ -420,14 +420,14 @@ def test_register_kv_caches(mock_parallel_groups):
     TP_RANK = 0
     DP_RANK = 0
     # Create test kv cache tensors using KVCacheSpec layout
-    shape = compute_kv_cache_shape(
+    shape = compute_layer_kv_cache_shape_bytes(
         FullAttentionSpec(
             block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
         ),
         2,
     )
-    shared_tensor = torch.zeros(*shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -515,14 +515,14 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     ROLE = "kv_consumer"
     vllm_config = create_vllm_config(role=ROLE)
     # Create test kv cache tensors using KVCacheSpec layout
-    shape = compute_kv_cache_shape(
+    shape = compute_layer_kv_cache_shape_bytes(
         FullAttentionSpec(
             block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
         ),
         2,
     )
-    shared_tensor = torch.zeros(*shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*shape, dtype=torch.float16)
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING
@@ -96,24 +96,25 @@ class KVCacheSpec:
     """
     A base class for specifying the KV cache format of one layer.
 
-    RFC #42082 standard vocabulary — set by subclass ``__post_init__``:
+    RFC #42082 standard vocabulary (properties, overridden by subclasses):
       num_heads: int          — heads (1 if headless, e.g. MLA)
       tokens_per_state: int   — -1 infinite (recurrent), 1 standard, N compressed
-      state_content_size: int — bytes per state per head
+      state_content_size_bytes: int — bytes per state per head
     """
 
-    # number of tokens in a block
     block_size: int
 
-    # RFC #42082 fields — set via _init_derived() in subclass __post_init__
-    num_heads: int = field(init=False, default=0, repr=False)
-    tokens_per_state: int = field(init=False, default=0, repr=False)
-    state_content_size: int = field(init=False, default=0, repr=False)
+    @property
+    def num_heads(self) -> int:
+        raise NotImplementedError
 
-    def _init_derived(self, **kwargs: int) -> None:
-        """Set computed fields on a frozen dataclass."""
-        for k, v in kwargs.items():
-            object.__setattr__(self, k, v)
+    @property
+    def tokens_per_state(self) -> int:
+        raise NotImplementedError
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        raise NotImplementedError
 
     @property
     def page_size_bytes(self) -> int:
@@ -223,20 +224,20 @@ def num_states_for(block_size: int, tokens_per_state: int) -> int:
     return block_size // tokens_per_state
 
 
-def compute_kv_cache_shape(
-    spec: AttentionSpec,
+def compute_layer_kv_cache_shape_bytes(
+    spec: KVCacheSpec,
     num_blocks: int,
     block_size: int | None = None,
 ) -> tuple[int, ...]:
-    """Return the standard 4D logical shape (B, H, N, C) for this spec.
+    """Return the standard 4D logical shape ``(B, H, N, C)`` in bytes.
 
-    Physical layout permutations are applied separately via
-    ``KVCacheLayout.layer_stride_order``.
+    ``C`` is always ``state_content_size_bytes`` (bytes per state per head),
+    regardless of the spec's dtype.  Physical layout permutations are
+    applied separately via ``KVCacheLayout.layer_stride_order``.
     """
     bs = block_size if block_size is not None else spec.storage_block_size
     ns = num_states_for(bs, spec.tokens_per_state)
-    c_elements = spec.state_content_size // get_dtype_size(spec.dtype)
-    return (num_blocks, spec.num_heads, ns, c_elements)
+    return (num_blocks, spec.num_heads, ns, spec.state_content_size_bytes)
 
 
 def reshape_kv_cache(
@@ -247,45 +248,31 @@ def reshape_kv_cache(
     layout: KVCacheLayout,
     block_size: int | None = None,
 ) -> list[torch.Tensor]:
-    """View a flat buffer as 5D ``[L, B, H, N, C]`` and return per-slot views.
+    """View a flat ``int8`` buffer as 4D ``[B, H, N, C]`` per slot.
 
-    For ``AttentionSpec``, the raw int8 buffer is reinterpreted as
-    ``spec.dtype``, viewed with the full 5D physical layout from
-    ``layout.stride_order``, then permuted back to the logical
-    ``[L, B, H, N, C]`` shape.  ``result[i]`` gives slot *i*'s 4D
-    logical view ``(B, H, N, C)``.
-
-    For non-``AttentionSpec`` specs (e.g. ``MambaSpec``), this function
-    currently returns raw ``int8`` byte slices — the buffer is split
-    into ``num_layer_slots`` equal-sized regions with no dtype cast and
-    no per-state reshape. This does NOT match what Mamba kernels expect
-    (a list of typed (conv, ssm, ...) state tensors, one per entry in
-    ``MambaSpec.shapes``/``dtypes``); the legacy ``gpu_model_runner.py``
-    path builds those typed views directly via ``torch.as_strided`` and
-    bypasses this function.
+    Works uniformly for all ``KVCacheSpec`` subclasses.  The buffer is
+    first shaped as int8 using :func:`compute_layer_kv_cache_shape_bytes` (C in bytes),
+    then reinterpreted as ``spec.dtype`` when the spec has one.
     """
-    if not isinstance(spec, AttentionSpec):
-        slot_size = raw.numel() // num_layer_slots
-        return [
-            raw[i * slot_size : (i + 1) * slot_size] for i in range(num_layer_slots)
-        ]
-
-    logical_4d = compute_kv_cache_shape(spec, num_blocks, block_size)
-    logical_5d = (num_layer_slots, *logical_4d)
+    dtype = getattr(spec, "dtype", None)
+    logical_shape_bytes = (
+        num_layer_slots,
+        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size),
+    )
     stride_order = layout.stride_order
-    physical_5d = tuple(logical_5d[i] for i in stride_order)
+    physical_shape_bytes = tuple(logical_shape_bytes[i] for i in stride_order)
     inv_order = [stride_order.index(i) for i in range(5)]
 
-    kv_tensor = raw.view(spec.dtype)
-    if spec.page_size_padded is not None:
-        dtype_size = get_dtype_size(spec.dtype)
-        page_stride = spec.page_size_bytes // dtype_size
-        strides = list(torch.empty(physical_5d).stride())
-        strides[inv_order[_DIM_B]] = page_stride
-        cache = torch.as_strided(kv_tensor, size=physical_5d, stride=tuple(strides))
+    if page_size_padded := getattr(spec, "page_size_padded", None):
+        strides = list(torch.empty(physical_shape_bytes).stride())
+        strides[inv_order[_DIM_B]] = page_size_padded
+        cache = torch.as_strided(raw, size=physical_shape_bytes, stride=tuple(strides))
     else:
-        cache = kv_tensor.view(physical_5d)
+        cache = raw.view(physical_shape_bytes)
     cache_logical = cache.permute(*inv_order)
+
+    if dtype is not None:
+        cache_logical = cache_logical.view(dtype)
 
     return [cache_logical[i] for i in range(num_layer_slots)]
 
@@ -296,36 +283,20 @@ def allocate_kv_cache(
     num_layer_slots: int,
     layout: KVCacheLayout,
     device: torch.device | str = "cuda",
-    dtype: torch.dtype | None = None,
     block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """Allocate KV cache for a uniform group and return per-slot views.
 
-    Allocates a single contiguous tensor and uses :func:`reshape_kv_cache`
-    to produce per-slot 4D logical views whose physical layout is
-    determined by ``layout.stride_order``.
-
-    Args:
-        spec: KV cache spec (shared by all layers in the group).
-        num_blocks: Number of cache blocks per layer slot.
-        num_layer_slots: Number of layer slots in the group.
-        layout: Physical KV cache layout.
-        device: Target device.
-        dtype: Override dtype (defaults to ``spec.dtype``).
-        block_size: Override block size for shape computation.
-
-    Returns:
-        List of ``num_layer_slots`` per-slot tensors, each with logical
-        shape ``(B, H, N, C)`` and strides matching the chosen layout.
+    Allocates a single contiguous ``int8`` buffer and uses
+    :func:`reshape_kv_cache` to produce per-slot 4D logical views
+    whose physical layout is determined by ``layout.stride_order``.
     """
-    if dtype is None:
-        dtype = spec.dtype
-
-    logical_4d = compute_kv_cache_shape(spec, num_blocks, block_size)
-    total_elements = prod(logical_4d) * num_layer_slots
-    buf = torch.zeros(total_elements, device=device, dtype=dtype)
-    raw = buf.view(torch.int8)
-    return reshape_kv_cache(raw, spec, num_blocks, num_layer_slots, layout)
+    total_bytes = (
+        prod(compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size))
+        * num_layer_slots
+    )
+    buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
+    return reshape_kv_cache(buf, spec, num_blocks, num_layer_slots, layout)
 
 
 # ---------------------------------------------------------------------------
@@ -341,19 +312,30 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
-    def __post_init__(self):
+    @property
+    def tokens_per_state(self) -> int:
+        return 1
+
+    """
+    NOTE: for instead of interleaving K and V in the content dimension, i.e.
+       [L, B, H, N, 2 * head_dim] | k, v = torch.split(kv_cache, head_dim, dim=4)
+    we store K and V sequentially in the head dimension, i.e.
+       [L, B, 2 * H, N, head_dim] | k, v = torch.split(kv_cache, head_dim, dim=2)
+    """
+
+    @property
+    def num_heads(self) -> int:
+        if self.kv_quant_mode.is_nvfp4:
+            return 2 * self.num_kv_heads
+        return self.num_kv_heads
+
+    @property
+    def state_content_size_bytes(self) -> int:
         hs = self.head_size
-        num_heads = self.num_kv_heads
         if self.kv_quant_mode.is_nvfp4:
             hs = nvfp4_kv_cache_full_dim(hs)
-            num_heads = 2 * self.num_kv_heads
-        self._init_derived(
-            num_heads=num_heads,
-            tokens_per_state=1,
-            state_content_size=2 * hs * get_dtype_size(self.dtype)
-            if not self.kv_quant_mode.is_nvfp4
-            else hs * get_dtype_size(self.dtype),
-        )
+            return hs * get_dtype_size(self.dtype)
+        return 2 * hs * get_dtype_size(self.dtype)
 
     @property
     def page_size_bytes(self) -> int:
@@ -411,9 +393,11 @@ class FullAttentionSpec(AttentionSpec):
     attention_chunk_size: int | None = None
 
     def __post_init__(self):
-        super().__post_init__()
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def state_content_size_bytes(self) -> int:
         hs_k = self.head_size
         hs_v = self.head_size_v
         if self.kv_quant_mode.is_nvfp4:
@@ -422,11 +406,8 @@ class FullAttentionSpec(AttentionSpec):
             assert hs_k == hs_v, (
                 "nvfp4 with asymmetric K/V head sizes not yet supported"
             )
-        self._init_derived(
-            state_content_size=hs_k * get_dtype_size(self.dtype)
-            if self.kv_quant_mode.is_nvfp4
-            else (hs_k + hs_v) * get_dtype_size(self.dtype),
-        )
+            return hs_k * get_dtype_size(self.dtype)
+        return (hs_k + hs_v) * get_dtype_size(self.dtype)
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
@@ -539,10 +520,11 @@ class TQFullAttentionSpec(FullAttentionSpec):
 
     tq_slot_size: int = 0
 
-    def __post_init__(self):
-        super().__post_init__()
+    @property
+    def state_content_size_bytes(self) -> int:
         if self.tq_slot_size > 0:
-            self._init_derived(state_content_size=self.tq_slot_size)
+            return self.tq_slot_size
+        return super().state_content_size_bytes
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -570,19 +552,21 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B/token.
-            # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
-            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
-            content = 584 if self.model_version == "deepseek_v4" else 656
-        else:
-            content = self.head_size * get_dtype_size(self.dtype)
-        self._init_derived(
-            num_heads=1,
-            tokens_per_state=self.compress_ratio,
-            state_content_size=content,
-        )
         _apply_alignment_padding(self)
+
+    @property
+    def num_heads(self) -> int:
+        return 1
+
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        if self.cache_dtype_str == "fp8_ds_mla":
+            return 584 if self.model_version == "deepseek_v4" else 656
+        return self.head_size * get_dtype_size(self.dtype)
 
     @property
     def storage_block_size(self) -> int:
@@ -643,9 +627,9 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
     count.
     """
 
-    def __post_init__(self):
-        super().__post_init__()
-        self._init_derived(num_heads=self.num_kv_heads)
+    @property
+    def num_heads(self) -> int:
+        return self.num_kv_heads
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -682,7 +666,6 @@ class SlidingWindowSpec(AttentionSpec):
     head_size_v: int = None  # type: ignore[assignment]
 
     def __post_init__(self):
-        super().__post_init__()
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
 
@@ -752,17 +735,21 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.model_version == "deepseek_v4":
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B/token.
-            content = 584
-        else:
-            content = self.head_size * get_dtype_size(self.dtype)
-        self._init_derived(
-            num_heads=1,
-            tokens_per_state=self.compress_ratio,
-            state_content_size=content,
-        )
         _apply_alignment_padding(self)
+
+    @property
+    def num_heads(self) -> int:
+        return 1
+
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        if self.model_version == "deepseek_v4":
+            return 584
+        return self.head_size * get_dtype_size(self.dtype)
 
     @property
     def storage_block_size(self) -> int:
@@ -825,14 +812,19 @@ class MambaSpec(KVCacheSpec):
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 
-    def __post_init__(self):
-        self._init_derived(
-            num_heads=1,
-            tokens_per_state=-1,
-            state_content_size=sum(
-                prod(shape) * get_dtype_size(dtype)
-                for (shape, dtype) in zip(self.shapes, self.dtypes)
-            ),
+    @property
+    def num_heads(self) -> int:
+        return 1
+
+    @property
+    def tokens_per_state(self) -> int:
+        return -1
+
+    @property
+    def state_content_size_bytes(self) -> int:
+        return sum(
+            prod(shape) * get_dtype_size(dtype)
+            for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
 
     @property

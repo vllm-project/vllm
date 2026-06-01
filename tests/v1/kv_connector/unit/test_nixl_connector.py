@@ -59,7 +59,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -387,9 +387,11 @@ def test_kv_transfer_handshake(dist_init):
         kv_cache_spec = cast(
             AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
         )
-        shape = compute_kv_cache_shape(kv_cache_spec, kv_cache_config.num_blocks)
-        shared_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
-        unique_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
+        shape = compute_layer_kv_cache_shape_bytes(
+            kv_cache_spec, kv_cache_config.num_blocks
+        )
+        shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
+        unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
         kv_caches = {
             "layer0": shared_tensor,
             "layer1": unique_tensor,
@@ -480,7 +482,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Mock register_kv_caches attribute needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
         rep_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-        test_shape = compute_kv_cache_shape(rep_spec, 1)
+        test_shape = compute_layer_kv_cache_shape_bytes(rep_spec, 1)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1578,9 +1580,11 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         mock_thread.return_value.is_alive.return_value = False
 
         # Create test kv cache tensors using proper backend shape
-        shape = compute_kv_cache_shape(kv_cache_spec, kv_cache_config.num_blocks)
-        shared_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
-        unique_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
+        shape = compute_layer_kv_cache_shape_bytes(
+            kv_cache_spec, kv_cache_config.num_blocks
+        )
+        shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
+        unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
         kv_caches = {
             "layer0": shared_tensor,
             "layer1": unique_tensor,
@@ -2331,9 +2335,11 @@ def test_compatibility_hash_validation(
     kv_cache_spec = cast(
         AttentionSpec, kv_cache_config.kv_cache_groups[0].kv_cache_spec
     )
-    shape = compute_kv_cache_shape(kv_cache_spec, kv_cache_config.num_blocks)
-    shared_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
-    unique_tensor = torch.zeros(*shape, dtype=kv_cache_spec.dtype)
+    shape = compute_layer_kv_cache_shape_bytes(
+        kv_cache_spec, kv_cache_config.num_blocks
+    )
+    shared_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
+    unique_tensor = torch.zeros(*shape, dtype=torch.int8).view(kv_cache_spec.dtype)
     # Build kv_caches from the actual layer names in kv_cache_config so that
     # _layer_specs lookups in register_kv_caches always find a matching key.
     layer_names = [
@@ -2455,7 +2461,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
 
     backend = get_current_attn_backend(local_vllm_config)
     probe_spec = decode_worker.kv_cache_config.kv_cache_groups[0].kv_cache_spec
-    test_shape = compute_kv_cache_shape(probe_spec, 1)
+    test_shape = compute_layer_kv_cache_shape_bytes(probe_spec, 1)
     decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,
         tp_size=decode_worker.world_size,

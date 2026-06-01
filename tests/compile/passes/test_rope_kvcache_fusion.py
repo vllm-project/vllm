@@ -36,7 +36,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
 )
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
@@ -123,7 +123,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        kv_cache_shape = compute_kv_cache_shape(
+        kv_cache_shape = compute_layer_kv_cache_shape_bytes(
             FullAttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -133,13 +133,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             num_blocks,
         )
 
-        # Create dummy KV cache (identity layout -- spec-driven stride
-        # ordering is applied at a higher level by the model runner)
         kv_cache = torch.zeros(
             kv_cache_shape,
-            dtype=self.kv_cache_dtype,
+            dtype=torch.int8,
             device=self.device,
-        )
+        ).view(self.kv_cache_dtype)
 
         self.attn.kv_cache = kv_cache
 

@@ -13,7 +13,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
     reshape_kv_cache,
 )
 
@@ -49,10 +49,13 @@ def test_reshape_shape_correctness(layout):
     raw = _alloc_raw_buffer(spec, NUM_BLOCKS, num_slots)
     views = reshape_kv_cache(raw, spec, NUM_BLOCKS, num_slots, layout)
 
-    expected_4d = compute_kv_cache_shape(spec, NUM_BLOCKS)
+    byte_4d = compute_layer_kv_cache_shape_bytes(spec, NUM_BLOCKS)
+    dtype_size = torch.tensor([], dtype=spec.dtype).element_size()
+    expected_4d = (*byte_4d[:3], byte_4d[3] // dtype_size)
     assert len(views) == num_slots
     for v in views:
         assert v.shape == expected_4d
+        assert v.dtype == spec.dtype
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
@@ -86,10 +89,15 @@ def test_reshape_mamba_spec():
     )
 
     assert len(views) == num_slots
+    expected_shape = (
+        NUM_BLOCKS,
+        mamba_spec.num_heads,
+        1,
+        mamba_spec.state_content_size_bytes,
+    )
     for v in views:
-        assert v.shape == (slot_bytes,)
-    assert torch.equal(views[0], raw[:slot_bytes])
-    assert torch.equal(views[1], raw[slot_bytes:])
+        assert v.shape == expected_shape
+        assert v.dtype == torch.int8
 
 
 @pytest.fixture(autouse=True)

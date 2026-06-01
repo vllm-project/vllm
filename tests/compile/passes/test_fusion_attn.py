@@ -42,7 +42,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
     get_kv_quant_mode,
 )
 
@@ -121,20 +121,22 @@ class AttentionQuantPatternModel(torch.nn.Module):
             kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
         )
         layout = resolve_kv_cache_layout()
-        kv_cache_shape = compute_kv_cache_shape(spec, num_blocks)
+        kv_cache_shape = compute_layer_kv_cache_shape_bytes(spec, num_blocks)
         kv_cache_stride_order = layout.layer_stride_order
         physical_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
         inv_order = [
             kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
 
+        from math import prod
+
         raw_tensor = torch.zeros(
-            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
-            dtype=self.attn.kv_cache_torch_dtype,
+            prod(kv_cache_shape),
+            dtype=torch.int8,
             device=self.device,
         )
         raw_tensor = raw_tensor.view(physical_shape)
-        kv_cache = raw_tensor.permute(*inv_order)
+        kv_cache = raw_tensor.permute(*inv_order).view(self.attn.kv_cache_torch_dtype)
 
         self.attn.kv_cache = kv_cache
 

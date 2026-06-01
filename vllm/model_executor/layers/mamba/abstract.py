@@ -41,10 +41,20 @@ class MambaBase(AttentionLayerBase):
 
             spec = self.get_kv_cache_spec(get_current_vllm_config())
             assert isinstance(spec, MambaSpec)
-            num_blocks = value.numel() // spec.page_size_bytes
+            if value.dim() > 1:
+                num_blocks = value.shape[0]
+                raw_1d = torch.as_strided(
+                    value,
+                    (num_blocks * spec.page_size_bytes,),
+                    (1,),
+                    value.storage_offset(),
+                )
+            else:
+                num_blocks = value.numel() // spec.page_size_bytes
+                raw_1d = value
             self._kv_cache = tuple(
                 self._unpack_states(
-                    value,
+                    raw_1d,
                     spec.shapes,
                     spec.dtypes,
                     spec.page_size_bytes,

@@ -1209,7 +1209,7 @@ def _validate_layout_compatibility(
     """Validate that the KV cache layout is compatible with tensor shapes.
 
     When a ``KVCacheTensor`` contains layers with different N (num_states),
-    H (num_heads), or C (state_content_size), the per-layer-per-block
+    H (num_heads), or C (state_content_size_bytes), the per-layer-per-block
     content [H, N, C] must be contiguous in physical memory
     (i.e. ``layout[0, 0, ...].is_contiguous()``).
     """
@@ -1236,11 +1236,11 @@ def _validate_layout_compatibility(
         ]
         if len(attn_specs) <= 1:
             continue
-        shapes = {(s.num_heads, s.state_content_size) for s in attn_specs}
+        shapes = {(s.num_heads, s.state_content_size_bytes) for s in attn_specs}
         if len(shapes) > 1:
             raise ValueError(
                 f"Groups {kv_cache_groups} share a KVCacheTensor but have different "
-                f" (num_heads, state_content_size) for layers {all_layer_names}. "
+                f" (num_heads, state_content_size_bytes) for layers {all_layer_names}. "
                 f"Use a layout where [H, N, C] is contiguous "
                 f"(e.g. VLLM_KV_CACHE_LAYOUT=LBHNC or VLLM_KV_CACHE_LAYOUT=BLHNC)."
             )
@@ -1281,7 +1281,7 @@ def get_kv_cache_config_from_groups(
 
     # Step 1: Bucket every layer across all groups by a shape-aware key.
     # Under non-block-contiguous layouts (LBNHC/BHLNC), attention layers with
-    # mismatched (num_heads, state_content_size) can't safely share a
+    # mismatched (num_heads, state_content_size_bytes) can't safely share a
     # KVCacheTensor (the [H, N, C] byte interpretation diverges across the
     # aliased layers), so the key includes those dims. Under block-contiguous
     # layouts (LBHNC/BLHNC) the [H, N, C] content is identically packed
@@ -1296,7 +1296,7 @@ def get_kv_cache_config_from_groups(
             return (ps,)
         spec = _get_per_layer_spec(group, layer_name)
         if isinstance(spec, AttentionSpec):
-            return (ps, spec.num_heads, spec.state_content_size)
+            return (ps, spec.num_heads, spec.state_content_size_bytes)
         return (ps,)
 
     buckets: dict[tuple, list[list[str]]] = defaultdict(

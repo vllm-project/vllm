@@ -28,7 +28,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
-    compute_kv_cache_shape,
+    compute_layer_kv_cache_shape_bytes,
 )
 from vllm.v1.request import RequestStatus
 
@@ -619,14 +619,14 @@ def test_register_kv_caches():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        shape = compute_kv_cache_shape(
+        shape = compute_layer_kv_cache_shape_bytes(
             FullAttentionSpec(
                 block_size=16, num_kv_heads=4, head_size=64, dtype=torch.float16
             ),
             2,
         )
-        tensor1 = torch.zeros(*shape, dtype=torch.float16)
-        tensor2 = torch.zeros(*shape, dtype=torch.float16)
+        tensor1 = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
+        tensor2 = torch.zeros(*shape, dtype=torch.int8).view(torch.float16)
         kv_caches = {"layer0": tensor1, "layer1": tensor2}
 
         with patch.object(

@@ -71,10 +71,9 @@ def _allocate_and_reshape_kv_caches(
     runner.compilation_config = MagicMock(static_forward_context=defaultdict(MagicMock))
     runner.kv_caches = []
 
-    kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
     kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
-    return runner._reshape_kv_cache_tensors(
-        kv_cache_raw_tensors, kernel_block_sizes, layout=KVCacheLayout.LBNHC
+    return runner._allocate_kv_caches(
+        kv_cache_config, kernel_block_sizes, layout=KVCacheLayout.LBNHC
     )
 
 
