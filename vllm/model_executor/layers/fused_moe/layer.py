@@ -1363,7 +1363,7 @@ class FusedMoE(PluggableLayer):
             else ""
         )
 
-        per_expert_mapping = [
+        return [
             # (param_name, weight_name, expert_id, shard_id)
             (
                 f"experts.{base_layer}w13_"
@@ -1380,22 +1380,6 @@ class FusedMoE(PluggableLayer):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
-
-        # HF's fused-MoE checkpoint layout (transformers >= v5, or any earlier
-        # checkpoint re-saved with save_original_format=False) packs all experts
-        # of a layer into two 3-D tensors: experts.gate_up_proj (E, 2*I, H) and
-        # experts.down_proj (E, H, I). These names are fixed by HF and do not
-        # depend on the ckpt_*_proj_name arguments above, so they are emitted
-        # unconditionally. For the gate_up_proj aliases the expert_id field is
-        # repurposed as a shard_idx (0=gate, 1=up) that load_weights' 3-D branch
-        # uses to split the fused tensor into w1 and w3.
-        fused_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-
-        return per_expert_mapping + fused_mapping
 
     @property
     def hidden_size(self) -> int:
@@ -1435,6 +1419,31 @@ def fused_moe_make_expert_params_mapping(
         num_experts,
         num_redundant_experts,
     )
+
+
+def fused_moe_make_hf_fused_expert_params_mapping() -> list[tuple[str, str, int, str]]:
+    """Expert-mapping aliases for HF's fused-MoE checkpoint layout.
+
+    HF's fused layout (transformers >= v5, or any earlier checkpoint re-saved
+    with save_original_format=False) packs all experts of a layer into two
+    3-D tensors: experts.gate_up_proj (E, 2*I, H) and experts.down_proj
+    (E, H, I). For the gate_up_proj aliases the expert_id field is repurposed
+    as a shard_idx (0=gate, 1=up) that FusedMoE.load_weights' dim()==3 branch
+    uses to split the fused tensor into w1 and w3.
+
+    These aliases are intentionally NOT included in make_expert_params_mapping:
+    the substrings "experts.gate_up_proj"/"experts.down_proj" also match
+    "shared_experts.*" names, so emitting them for every MoE model misroutes
+    shared-expert weights (e.g. DeepSeek-V2 -> KeyError on
+    shared_experts.w2_weight). Only models whose load_weights can actually
+    consume a 3-D fused tensor (Qwen3 MoE, the transformers MoE mixin) append
+    them, via this single shared definition.
+    """
+    return [
+        ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+        ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+        ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+    ]
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

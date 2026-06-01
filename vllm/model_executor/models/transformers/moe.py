@@ -28,6 +28,7 @@ from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
+    fused_moe_make_hf_fused_expert_params_mapping,
 )
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
@@ -161,10 +162,15 @@ class MoEMixin(MixtureOfExperts):
         Params for weights, fp8 weight scales, fp8 activation scales
         (param_name, weight_name, expert_id, shard_id)
         """
-        # Models saved with ModuleList experts. make_expert_params_mapping also
-        # appends the aliases for HF's fused-experts layout
-        # (experts.gate_up_proj / experts.down_proj), which is shared across all
-        # the ckpt naming styles below, so de-dup while preserving order.
+        # Models saved with fused experts. These are checkpoints released:
+        # - After Transformers v5
+        # - Before Transformers v5, but re-saved with save_original_format=False
+        # In the fused experts case, we repurpose the expert_id as shard_idx for
+        # deconcatenating w1 and w3 in FusedMoE.load_weights. These aliases are
+        # the same regardless of the ckpt naming style below, so they are added
+        # once up front rather than per style.
+        expert_mapping = fused_moe_make_hf_fused_expert_params_mapping()
+        # Models saved with ModuleList experts
         ckpt_names = [
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
             ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
@@ -173,20 +179,17 @@ class MoEMixin(MixtureOfExperts):
         ]
         num_experts = self.model_config.get_num_experts()
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        expert_mapping: list[tuple[str, str, int, str]] = []
-        seen: set[tuple[str, str, int, str]] = set()
         for gate_proj, down_proj, up_proj in ckpt_names:
-            for entry in fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name=gate_proj,
-                ckpt_down_proj_name=down_proj,
-                ckpt_up_proj_name=up_proj,
-                num_experts=num_experts,
-                num_redundant_experts=num_redundant_experts,
-            ):
-                if entry not in seen:
-                    seen.add(entry)
-                    expert_mapping.append(entry)
+            expert_mapping.extend(
+                fused_moe_make_expert_params_mapping(
+                    self,
+                    ckpt_gate_proj_name=gate_proj,
+                    ckpt_down_proj_name=down_proj,
+                    ckpt_up_proj_name=up_proj,
+                    num_experts=num_experts,
+                    num_redundant_experts=num_redundant_experts,
+                )
+            )
         return expert_mapping
 
     def recursive_replace(self):
