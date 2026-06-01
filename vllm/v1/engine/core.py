@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1835,29 +1836,40 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator:
-            if request_wave > self.current_wave:
-                self.current_wave = request_wave
-            # NB: don't gate this on ``request_wave != self.current_wave``.
-            # Both default to 0, so the very first request after engine init
-            # would otherwise hit ``0 != 0 == False``, ``engines_running``
-            # would stay False, and no ``start_wave`` would be broadcast to
-            # the DP coordinator. The rank that received the first request
-            # enters its forward pass and blocks forever on the EP all2all
-            # collective because the other DP ranks (seeing
-            # ``engines_running=False`` and no local work) skip
-            # ``execute_dummy_batch`` and never participate.
-            # We re-broadcast whenever engines are idle and the scheduler
-            # is unpaused, which is harmless in steady-state (engines are
-            # already running) and required for the cold first wave.
-            if (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
-                self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+        if current_platform.is_rocm():
+            # ROCm/Wide-EP first-wave wake fix: drop the
+            # ``request_wave != self.current_wave`` outer gate so the very
+            # first request after engine init also broadcasts
+            # ``start_wave`` (otherwise ``0 != 0`` skips the broadcast and
+            # the first DP rank hangs forever on the EP all2all collective
+            # because the other ranks never call ``execute_dummy_batch``).
+            # Steady-state remains correct because ``engines_running`` is
+            # already True so the inner branch short-circuits.
+            if self.has_coordinator:
+                if request_wave > self.current_wave:
+                    self.current_wave = request_wave
+                if (
+                    not self.engines_running
+                    and self.scheduler.pause_state == PauseState.UNPAUSED
+                ):
+                    self.engines_running = True
+                    self.output_queue.put_nowait(
+                        (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                    )
+        else:
+            if self.has_coordinator and request_wave != self.current_wave:
+                if request_wave > self.current_wave:
+                    self.current_wave = request_wave
+                elif (
+                    not self.engines_running
+                    and self.scheduler.pause_state == PauseState.UNPAUSED
+                ):
+                    # Request received for an already-completed wave, notify
+                    # front-end that we need to start the next one.
+                    self.engines_running = True
+                    self.output_queue.put_nowait(
+                        (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                    )
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
