@@ -111,6 +111,23 @@ direct_register_custom_op(
 )
 
 
+def _should_use_minimax_fused_allreduce() -> bool:
+    from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
+
+    if not _ENABLE_CUSTOM_ALL_REDUCE:
+        return False
+
+    device_communicator = getattr(get_tp_group(), "device_communicator", None)
+    if device_communicator is None:
+        return True
+
+    if not getattr(device_communicator, "use_custom_allreduce", False):
+        return False
+
+    ca_comm = getattr(device_communicator, "ca_comm", None)
+    return ca_comm is not None and not getattr(ca_comm, "disabled", True)
+
+
 @CustomOp.register("minimax_text01_rmsnorm_tp")
 class MiniMaxText01RMSNormTP(CustomOp):
     def __init__(
@@ -138,7 +155,11 @@ class MiniMaxText01RMSNormTP(CustomOp):
         self.variance_epsilon = eps
 
         self.workspace = None
-        if _MINIMAX_FUSED_AR_RMS_QK is not None and self.tp_world > 1:
+        if (
+            _MINIMAX_FUSED_AR_RMS_QK is not None
+            and self.tp_world > 1
+            and _should_use_minimax_fused_allreduce()
+        ):
             from .lamport_workspace import (
                 get_allreduce_workspace,
             )

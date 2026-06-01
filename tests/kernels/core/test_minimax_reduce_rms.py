@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MiniMax QK RMS-norm: NCCL reference vs Lamport fused kernel."""
 
+import sys
+from types import ModuleType, SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
@@ -14,6 +17,122 @@ from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
+
+_LAMPORT_WORKSPACE_MODULE = (
+    "vllm.model_executor.layers.minimax_rms_norm.lamport_workspace"
+)
+
+
+def _patch_lamport_workspace(monkeypatch, get_allreduce_workspace):
+    module = ModuleType(_LAMPORT_WORKSPACE_MODULE)
+    module.get_allreduce_workspace = get_allreduce_workspace
+    monkeypatch.setitem(sys.modules, _LAMPORT_WORKSPACE_MODULE, module)
+
+
+def _build_minimax_norm(norm_cls):
+    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+
+    vllm_config = VllmConfig(device_config=DeviceConfig("cpu"))
+    with set_current_vllm_config(vllm_config):
+        return norm_cls(8)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_minimax_rmsnorm_skips_workspace_when_custom_allreduce_disabled(
+    monkeypatch,
+):
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.minimax_rms_norm import rms_norm_tp
+
+    monkeypatch.setattr(rms_norm_tp, "_MINIMAX_FUSED_AR_RMS_QK", object())
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parallel_state, "_ENABLE_CUSTOM_ALL_REDUCE", False)
+
+    def fail_workspace(*args, **kwargs):
+        pytest.fail("MiniMax workspace should honor disable_custom_all_reduce")
+
+    _patch_lamport_workspace(monkeypatch, fail_workspace)
+
+    norm = _build_minimax_norm(rms_norm_tp.MiniMaxText01RMSNormTP)
+
+    assert norm.workspace is None
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_minimax_rmsnorm_skips_disabled_custom_allreduce_communicator(
+    monkeypatch,
+):
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.minimax_rms_norm import rms_norm_tp
+
+    tp_group = SimpleNamespace(
+        cpu_group=object(),
+        device_communicator=SimpleNamespace(
+            use_custom_allreduce=True,
+            ca_comm=SimpleNamespace(disabled=True),
+        ),
+    )
+
+    monkeypatch.setattr(rms_norm_tp, "_MINIMAX_FUSED_AR_RMS_QK", object())
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(rms_norm_tp, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(parallel_state, "_ENABLE_CUSTOM_ALL_REDUCE", True)
+
+    def fail_workspace(*args, **kwargs):
+        pytest.fail("MiniMax workspace should follow disabled CA communicator")
+
+    _patch_lamport_workspace(monkeypatch, fail_workspace)
+
+    norm = _build_minimax_norm(rms_norm_tp.MiniMaxText01RMSNormTP)
+
+    assert norm.workspace is None
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_minimax_rmsnorm_uses_workspace_when_custom_allreduce_available(
+    monkeypatch,
+):
+    from vllm.distributed import parallel_state
+    from vllm.model_executor.layers.minimax_rms_norm import rms_norm_tp
+
+    workspace = torch.empty(0)
+    calls = []
+    tp_group = SimpleNamespace(
+        cpu_group=object(),
+        device_communicator=SimpleNamespace(
+            use_custom_allreduce=True,
+            ca_comm=SimpleNamespace(disabled=False),
+        ),
+    )
+
+    monkeypatch.setattr(rms_norm_tp, "_MINIMAX_FUSED_AR_RMS_QK", object())
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(rms_norm_tp, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(rms_norm_tp, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(parallel_state, "_ENABLE_CUSTOM_ALL_REDUCE", True)
+
+    def fake_workspace(**kwargs):
+        calls.append(kwargs)
+        return workspace
+
+    _patch_lamport_workspace(monkeypatch, fake_workspace)
+
+    norm = _build_minimax_norm(rms_norm_tp.MiniMaxText01RMSNormTP)
+
+    assert norm.workspace is workspace
+    assert calls == [
+        {
+            "rank": 1,
+            "world_size": 2,
+            "max_tokens": 2048,
+            "process_group": tp_group.cpu_group,
+        }
+    ]
 
 
 @ensure_current_vllm_config()
