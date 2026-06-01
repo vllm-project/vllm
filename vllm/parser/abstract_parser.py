@@ -651,8 +651,14 @@ class DelegatingParser(Parser):
             return False
         return not state.reasoning_ended
 
-    def _in_tool_call_phase(self, state: StreamState) -> bool:
+    def _in_tool_call_phase(
+        self,
+        state: StreamState,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> bool:
         if self._tool_parser is None:
+            return False
+        if isinstance(request, ChatCompletionRequest) and request.tool_choice == "none":
             return False
         return state.reasoning_ended
 
@@ -698,7 +704,7 @@ class DelegatingParser(Parser):
                 delta_token_ids = current_token_ids
 
         # Tool call extraction
-        if self._in_tool_call_phase(state):
+        if self._in_tool_call_phase(state, request):
             if not state.tool_call_text_started:
                 state.tool_call_text_started = True
                 state.previous_text = ""
@@ -739,7 +745,7 @@ class DelegatingParser(Parser):
         if (
             delta_message is None
             and not self._in_reasoning_phase(state)
-            and not self._in_tool_call_phase(state)
+            and not self._in_tool_call_phase(state, request)
         ):
             delta_message = DeltaMessage(content=delta_text)
 
