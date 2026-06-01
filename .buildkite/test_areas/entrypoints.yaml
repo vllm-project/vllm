@@ -64,7 +64,7 @@ steps:
   commands:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
-  - pytest -v -s tests/entrypoints/generate
+  - pytest -v -s entrypoints/generate
   mirror:
     amd:
       device: mi325_1
