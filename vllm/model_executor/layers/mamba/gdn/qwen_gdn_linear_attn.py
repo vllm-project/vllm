@@ -66,7 +66,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-# Optional ROCm AITER Triton kernels for the GDN decode fast-path.
+# Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
@@ -990,8 +990,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 projected_states_ba,
                 z,
                 core_attn_out,
-                fast_kernel=True,
                 layer_name=_encode_layer_name(self.prefix),
+                use_aiter=True,
             )
 
             self._output_projection(core_attn_out, z, output, num_tokens)
@@ -1051,7 +1051,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b,
             a,
             core_attn_out,
-            fast_kernel=False,
             layer_name=_encode_layer_name(self.prefix),
         )
 
@@ -1299,7 +1298,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
         the packed layout and falls through to ``_forward_core``.
 
         Args:
@@ -1330,7 +1329,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
-            return self._forward_core_decode_fast(
+            return self._forward_core_decode_aiter(
                 qkvz=qkvz,
                 ba=ba,
                 z_out=z_out,
@@ -1616,7 +1615,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-    def _forward_core_decode_fast(
+    def _forward_core_decode_aiter(
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,
@@ -1718,10 +1717,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         a = a_bhv.unsqueeze(1)
         b = b_bhv.unsqueeze(1)
 
-        # NOTE: omit `output_state_indices` -- older flashinfer
-        # releases (e.g. 0.6.8.post1) reject the kwarg, and the
-        # default (write back to read slot) is what we want.
-        #
         # `.detach()` on `nn.Parameter`s: FI ingests via `from_dlpack`
         # which rejects `requires_grad=True`. detach is a free view
         # and preserves strides, so the FI compile cache stays stable.
@@ -1816,17 +1811,17 @@ def qwen_gdn_attention_core(
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Custom op dispatching to _forward_core or _forward_core_rocm.
 
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When ``fast_kernel=False`` (standard path):
+    When ``use_aiter=False`` (standard path):
         qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When ``fast_kernel=True`` (AITER Triton fast path, ROCm only):
+    When ``use_aiter=True`` (AITER Triton path, ROCm only):
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
@@ -1835,7 +1830,7 @@ def qwen_gdn_attention_core(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if fast_kernel:
+    if use_aiter:
         self._forward_core_rocm(
             qkvz=qkv_or_qkvz,
             ba=b_or_ba,
@@ -1856,8 +1851,8 @@ def gdn_attention_core_fake(
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Fake implementation for torch.compile."""
     return
