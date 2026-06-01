@@ -396,6 +396,13 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
+        VLLM_RVV_VLEN GREATER 0 AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
