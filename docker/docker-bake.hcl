@@ -95,7 +95,10 @@ target "test" {
   inherits = ["_common", "_labels"]
   target   = "test"
   tags     = ["vllm:test"]
-  output   = ["type=docker"]
+  args = {
+    INSTALL_KV_CONNECTORS = "true"
+  }
+  output = ["type=docker"]
 }
 
 target "openai" {
@@ -114,6 +117,7 @@ target "test-ubuntu2404" {
   args = {
     UBUNTU_VERSION          = "24.04"
     GDRCOPY_OS_VERSION      = "Ubuntu24_04"
+    INSTALL_KV_CONNECTORS   = "true"
   }
   output = ["type=docker"]
 }
