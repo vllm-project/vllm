@@ -1018,7 +1018,7 @@ def unified_mla_kv_cache_update(
             layer_slot_mapping,
             kv_cache_dtype,
             k_scale,
-            getattr(attn_layer, "num_kv_cache_nan_insertions", None),
+            attn_layer.num_kv_cache_nan_insertions,
         )
 
     return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
