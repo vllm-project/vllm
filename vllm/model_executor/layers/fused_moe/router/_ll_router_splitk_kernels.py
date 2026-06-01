@@ -297,10 +297,7 @@ class LLRouterSplitK:
                 k_valid = (k_base_first + rv) < K_total
                 for m in range(tApA.shape[1]):
                     tApA[rv, m, 0] = (
-                        cute.elem_less(
-                            tAcA[(0, rv), m, 0, 0][0], mA.shape[0]
-                        )
-                        & k_valid
+                        cute.elem_less(tAcA[(0, rv), m, 0, 0][0], mA.shape[0]) & k_valid
                     )
 
             tBpB = cute.make_rmem_tensor(
@@ -318,10 +315,7 @@ class LLRouterSplitK:
                 k_valid = (k_base_first + rv) < K_total
                 for n in range(tBpB.shape[1]):
                     tBpB[rv, n, 0] = (
-                        cute.elem_less(
-                            tBcB[(0, rv), n, 0, 0][0], mB.shape[0]
-                        )
-                        & k_valid
+                        cute.elem_less(tBcB[(0, rv), n, 0, 0][0], mB.shape[0]) & k_valid
                     )
 
             producer_state = pipeline.make_pipeline_state(
