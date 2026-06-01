@@ -668,7 +668,7 @@ class Scheduler(SchedulerInterface):
                         new_computed_blocks, per_group_hits = (
                             self._get_computed_blocks_per_group(request)
                         )
-                        num_new_local_computed_tokens = max(per_group_hits)
+                        num_new_local_computed_tokens = min(per_group_hits)
                     else:
                         new_computed_blocks, num_new_local_computed_tokens = (
                             self.kv_cache_manager.get_computed_blocks(request)
