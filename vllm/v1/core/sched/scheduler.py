@@ -210,6 +210,7 @@ class Scheduler(SchedulerInterface):
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
+        self.use_dflash = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
@@ -219,6 +220,7 @@ class Scheduler(SchedulerInterface):
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.use_dflash():
+                self.use_dflash = True
                 # DFlash requires an extra lookahead slot since it uses in-fill-style
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
@@ -709,7 +711,11 @@ class Scheduler(SchedulerInterface):
                 # of local and remote blocks.
                 effective_lookahead_tokens = (
                     0
-                    if self.use_eagle and request.num_computed_tokens == 0
+                    if (
+                        self.use_eagle
+                        and not self.use_dflash
+                        and request.num_computed_tokens == 0
+                    )
                     else self.num_lookahead_tokens
                 )
 
