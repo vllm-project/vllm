@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cfloat>
+#include <type_traits>
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -394,15 +395,6 @@ __global__ void reshape_and_cache_flash_kernel(
   }
 }
 
-template <typename T>
-__device__ __forceinline__ bool check_nan(T v) {
-  return __hisnan(v);
-}
-template <>
-__device__ __forceinline__ bool check_nan(float v) {
-  return __isnanf(v);
-}
-
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           bool kDebug = false>
 __global__ void concat_and_cache_mla_kernel(
@@ -446,7 +438,13 @@ __global__ void concat_and_cache_mla_kernel(
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
       }
       if constexpr (kDebug) {
-        nan_count += check_nan(src[src_idx]);
+        if constexpr (std::is_same_v<scalar_t, uint16_t>) {
+          nan_count += __hisnan(*reinterpret_cast<const __half*>(&src[src_idx]));
+        } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+          nan_count += __hisnan(src[src_idx]);
+        } else {
+          nan_count += __isnanf(src[src_idx]);
+        }
       }
     }
   };
