@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 base64.workspace = true
+dashmap.workspace = true
 fastokens.workspace = true
 riptoken.workspace = true
 rustc-hash.workspace = true

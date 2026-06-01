@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use tracing::info;
-use vllm_tokenizer::{DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer, TiktokenTokenizer};
+use vllm_tokenizer::{
+    CacheConfig, CachedTokenizer, DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer,
+    TiktokenTokenizer,
+};
 
 use self::config::{GenerationConfig, load_generation_config};
 pub use self::config::{
@@ -17,10 +20,20 @@ use crate::backend::{SamplingHints, TextBackend};
 use crate::error::Result;
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
+    let cache_config = CacheConfig::default();
     match tokenizer {
-        TokenizerSource::HuggingFace(path) => Ok(Arc::new(HuggingFaceTokenizer::new(path)?)),
-        TokenizerSource::Tiktoken(path) => Ok(Arc::new(TiktokenTokenizer::new(path)?)),
-        TokenizerSource::Tekken(path) => Ok(Arc::new(TekkenTokenizer::new(path)?)),
+        TokenizerSource::HuggingFace(path) => Ok(Arc::new(CachedTokenizer::new(
+            HuggingFaceTokenizer::new(path)?,
+            cache_config,
+        ))),
+        TokenizerSource::Tiktoken(path) => Ok(Arc::new(CachedTokenizer::new(
+            TiktokenTokenizer::new(path)?,
+            cache_config,
+        ))),
+        TokenizerSource::Tekken(path) => Ok(Arc::new(CachedTokenizer::new(
+            TekkenTokenizer::new(path)?,
+            cache_config,
+        ))),
     }
 }
 
