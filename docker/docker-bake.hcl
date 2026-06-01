@@ -59,13 +59,14 @@ target "_common" {
   dockerfile = "docker/Dockerfile"
   context    = "."
   args = {
-    max_jobs             = MAX_JOBS
-    nvcc_threads         = NVCC_THREADS
-    torch_cuda_arch_list = TORCH_CUDA_ARCH_LIST
-    VLLM_BUILD_COMMIT    = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
-    VLLM_BUILD_PIPELINE  = VLLM_BUILD_PIPELINE
-    VLLM_BUILD_URL       = VLLM_BUILD_URL
-    VLLM_IMAGE_TAG       = VLLM_IMAGE_TAG
+    max_jobs              = MAX_JOBS
+    nvcc_threads          = NVCC_THREADS
+    torch_cuda_arch_list  = TORCH_CUDA_ARCH_LIST
+    INSTALL_KV_CONNECTORS = "true"
+    VLLM_BUILD_COMMIT     = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    VLLM_BUILD_PIPELINE   = VLLM_BUILD_PIPELINE
+    VLLM_BUILD_URL        = VLLM_BUILD_URL
+    VLLM_IMAGE_TAG        = VLLM_IMAGE_TAG
   }
 }
 

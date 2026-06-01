@@ -887,6 +887,31 @@ RUN apt-get update -y \
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
 
+# install kv_connectors if requested (same logic as vllm-openai-base)
+ARG INSTALL_KV_CONNECTORS=false
+ARG CUDA_VERSION
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+RUN --mount=type=cache,target=/opt/uv/cache \
+    --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
+    CUDA_HOME=/usr/local/cuda; \
+    BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
+                libcublas-dev-${CUDA_VERSION_DASH} \
+                libcusolver-dev-${CUDA_VERSION_DASH}"; \
+    if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+            apt-get update -y && \
+            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            apt-get purge -y ${BUILD_PKGS} && \
+            rm -rf /var/lib/apt/lists/* \
+        ); \
+        uv pip uninstall --system nixl-cu12 nixl-cu13 2>/dev/null || true; \
+        uv pip install --system --no-deps nixl-cu${CUDA_MAJOR}; \
+    fi
+    
 # Install development dependencies (for testing)
 COPY requirements/lint.txt requirements/lint.txt
 COPY requirements/test/cuda.in requirements/test/cuda.in
@@ -922,6 +947,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# Prevent early CUDA initialization when CUDA-dependent packages (cupy, nixl)
+# are installed — tests that fork subprocesses would otherwise fail.
+ENV CUDA_MODULE_LOADING=LAZY
+
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
@@ -936,6 +965,7 @@ COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 # will not be imported by other tests
 RUN mkdir src
 RUN mv vllm src/vllm
+
 #################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
@@ -978,8 +1008,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
-        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
+        # Remove all nixl-cu* variants then install only the one matching this
+        # image's CUDA (nixl>=1.1.0 installs both)
+        uv pip uninstall --system nixl-cu12 nixl-cu13 2>/dev/null || true; \
+        uv pip install --system --no-deps nixl-cu${CUDA_MAJOR}; \
     fi
 
 # Optional override: install mooncake-transfer-engine from a URL instead of the
