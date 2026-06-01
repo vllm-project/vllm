@@ -1275,10 +1275,12 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180
@@ -1368,7 +1370,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling  --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: OpenAI API correctness # TBD
   timeout_in_minutes: 180
@@ -2782,10 +2784,12 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180

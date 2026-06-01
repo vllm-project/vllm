@@ -142,7 +142,7 @@ class GenerativeScoringResponse(OpenAIBaseModel):
 # ============================================================================
 
 
-class OpenAIServingGenerativeScoring(OpenAIServing):
+class ServingGenerativeScoring(OpenAIServing):
     """Serving class for generative scoring computation.
 
     This class handles computing the probability of specified token IDs
