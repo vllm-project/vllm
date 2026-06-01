@@ -272,23 +272,43 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
+                reasoner = self._get_reasoner(request)
+                detect_reasoning_end = (
+                    not apply_bitmask
+                    and reasoner is not None
+                    and not self.enable_in_reasoning
+                )
+                history_prefix: list[int] | None = None
+
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                if self.vllm_config.model_config.is_diffusion and req_tokens:
-                    # Diffusion LLMs don't sample a bonus token after the
-                    # scheduled positions, so don't append the -1 placeholder.
-                    token_iter: Iterable[int] = req_tokens
-                else:
-                    token_iter = itertools.chain(req_tokens, (-1,))
-                for token in token_iter:
+                for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    advance_grammar = apply_bitmask
                     if token == -1:
-                        # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
+                        advance_grammar = False
+                    elif detect_reasoning_end and not apply_bitmask:
+                        if history_prefix is None:
+                            history_prefix = list(request.all_token_ids)
+                        simulated = history_prefix + list(req_tokens[: i + 1])
+                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
+                            # Reasoning ended mid-window. Constrain the rest
+                            # of the window but skip advancing the grammar
+                            # through the marker token (it is reasoning
+                            # content, not grammar content).
+                            apply_bitmask = True
+                            advance_grammar = False
+                    if advance_grammar and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
+                    cumulative_index += 1
+                if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                    # Diffusion LLMs don't sample a bonus token after the
+                    # scheduled positions, so skip its bitmask in that case.
+                    bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
+                    self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
