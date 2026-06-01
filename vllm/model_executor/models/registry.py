@@ -452,6 +452,10 @@ _MULTIMODAL_MODELS = {
         "KeyeVL1_5ForConditionalGeneration",
     ),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),
+    "LocateAnythingForConditionalGeneration": (
+        "locate_anything",
+        "LocateAnythingForConditionalGeneration",
+    ),
     "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),
     "MoonshotKimiaForCausalLM": ("kimi_audio", "KimiAudioForConditionalGeneration"),
     "LightOnOCRForConditionalGeneration": (
