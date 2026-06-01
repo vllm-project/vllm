@@ -859,6 +859,93 @@ def test_running_long_prefill_leaves_budget_for_running_short_prefill():
     assert second_mixed.num_scheduled_tokens[short_prefill_req.request_id] == 25
 
 
+def test_running_very_long_prefill_defers_waiting_very_long_prefill():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=2048,
+        max_num_seqs=3,
+        enable_chunked_prefill=True,
+    )
+    first_long_req = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        req_ids=["first_long"],
+    )[0]
+    second_long_req = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        req_ids=["second_long"],
+    )[0]
+    short_req = create_requests(
+        num_requests=1,
+        num_tokens=20,
+        req_ids=["short"],
+    )[0]
+
+    scheduler.add_request(first_long_req)
+    first_chunk = scheduler.schedule()
+    assert first_chunk.num_scheduled_tokens[first_long_req.request_id] == 100
+    scheduler.update_from_output(
+        first_chunk,
+        ModelRunnerOutput(
+            req_ids=[first_long_req.request_id],
+            req_id_to_index={first_long_req.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(second_long_req)
+    scheduler.add_request(short_req)
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[first_long_req.request_id] == 50
+    assert second_long_req.request_id not in mixed_output.num_scheduled_tokens
+    assert mixed_output.num_scheduled_tokens[short_req.request_id] == 20
+
+
+def test_running_very_long_prefill_ignores_deferred_long_waiting_pressure():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=2048,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+    )
+    first_long_req = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        req_ids=["first_long"],
+    )[0]
+    second_long_req = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        req_ids=["second_long"],
+    )[0]
+
+    scheduler.add_request(first_long_req)
+    first_chunk = scheduler.schedule()
+    assert first_chunk.num_scheduled_tokens[first_long_req.request_id] == 100
+    scheduler.update_from_output(
+        first_chunk,
+        ModelRunnerOutput(
+            req_ids=[first_long_req.request_id],
+            req_id_to_index={first_long_req.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    scheduler.add_request(second_long_req)
+    mixed_output = scheduler.schedule()
+
+    assert mixed_output.num_scheduled_tokens[first_long_req.request_id] == 100
+    assert second_long_req.request_id not in mixed_output.num_scheduled_tokens
+
+
 def test_running_long_prefill_leaves_budget_for_later_running_decode():
     scheduler = create_scheduler(
         max_num_batched_tokens=100,

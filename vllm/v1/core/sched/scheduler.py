@@ -361,6 +361,39 @@ class Scheduler(SchedulerInterface):
             for request in requests
         )
 
+    def _very_long_prefill_threshold(self) -> int:
+        return self.max_num_scheduled_tokens * 4
+
+    def _is_very_long_prefill(
+        self,
+        request: Request,
+        num_computed_tokens: int | None = None,
+    ) -> bool:
+        if not self.scheduler_config.enable_chunked_prefill:
+            return False
+        if num_computed_tokens is None:
+            num_computed_tokens = request.num_computed_tokens
+        return (
+            request.num_prompt_tokens > self._very_long_prefill_threshold()
+            and num_computed_tokens < request.num_prompt_tokens
+        )
+
+    def _has_active_very_long_prefill(self) -> bool:
+        return any(self._is_very_long_prefill(request) for request in self.running)
+
+    def _has_waiting_requests_for_running_prefill(self, request: Request) -> bool:
+        if not (self.waiting or self.skipped_waiting):
+            return False
+        if not self._is_very_long_prefill(request):
+            return True
+        return any(
+            not self._is_very_long_prefill(waiting_request)
+            for waiting_request in self.waiting
+        ) or any(
+            not self._is_very_long_prefill(waiting_request)
+            for waiting_request in self.skipped_waiting
+        )
+
     def _limit_mixed_decode_prefill_chunk(
         self,
         request: Request,
@@ -388,10 +421,7 @@ class Scheduler(SchedulerInterface):
         # Very long prefills span many scheduling steps; a smaller chunk keeps
         # already-active decoders from seeing long inter-token gaps and leaves
         # room for short requests that arrive behind an active long prefill.
-        very_long_prefill_steps = 4
-        very_long_prefill_threshold = (
-            self.max_num_scheduled_tokens * very_long_prefill_steps
-        )
+        very_long_prefill_threshold = self._very_long_prefill_threshold()
         if has_decode_pressure:
             if remaining_prefill > very_long_prefill_threshold:
                 mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 16)
@@ -485,7 +515,7 @@ class Scheduler(SchedulerInterface):
                 request,
                 num_new_tokens,
                 scheduled_running_reqs,
-                bool(self.waiting or self.skipped_waiting)
+                self._has_waiting_requests_for_running_prefill(request)
                 or has_unscheduled_running_prefill,
                 has_pending_running_decode,
             )
@@ -795,6 +825,14 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
+
+                if (
+                    self._is_very_long_prefill(request, num_computed_tokens)
+                    and self._has_active_very_long_prefill()
+                ):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
