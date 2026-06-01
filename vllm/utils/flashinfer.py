@@ -141,6 +141,13 @@ flashinfer_b12x_fused_moe = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+# BGMV MoE (multi-LoRA through expert routing)
+flashinfer_bgmv_moe_shrink = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "bgmv_moe_shrink"
+)
+flashinfer_bgmv_moe_expand = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "bgmv_moe_expand"
+)
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
@@ -239,6 +246,17 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_bgmv_moe() -> bool:
+    """Return `True` if FlashInfer BGMV MoE (multi-LoRA) kernel is available."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe.bgmv_moe")
+    if not mod:
+        return False
+    return hasattr(mod, "bgmv_moe_shrink") and hasattr(mod, "bgmv_moe_expand")
 
 
 @functools.cache
