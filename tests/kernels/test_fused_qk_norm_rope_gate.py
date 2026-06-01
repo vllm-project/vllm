@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.model_executor.models.qwen3_next import FusedQKNormRopeGate
+from vllm.model_executor.models.qwen3_next import fused_qk_rmsnorm_rope_gate
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -26,16 +26,74 @@ NUM_TOKENS = [1, 4, 37]
 CUDA_DEVICES = ["cuda:0"]
 
 
+def _ref_qk_rmsnorm_rope_gate(
+    q_gate: torch.Tensor,
+    k: torch.Tensor,
+    q_gamma: torch.Tensor,
+    k_gamma: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    eps: float,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """PyTorch reference: split + RMSNorm + partial NeoX RoPE + gate extraction.
+
+    Matches ``fused_qk_rmsnorm_rope_gate``'s contract: ``q_gamma`` / ``k_gamma``
+    are the already-adjusted effective gammas (for GemmaRMSNorm the caller
+    has done ``weight + 1`` before passing them in).
+    """
+    n_tokens = q_gate.shape[0]
+    half = rotary_dim // 2
+
+    # Per head the q projection is laid out as [q | gate].
+    q_gate = q_gate.view(n_tokens, num_q_heads, 2 * head_dim)
+    q = q_gate[..., :head_dim]
+    gate = q_gate[..., head_dim:].reshape(n_tokens, num_q_heads * head_dim)
+    k = k.view(n_tokens, num_kv_heads, head_dim)
+
+    def rms_norm(x: torch.Tensor, gamma: torch.Tensor) -> torch.Tensor:
+        orig_dtype = x.dtype
+        x = x.float()
+        var = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(var + eps)
+        return (x * gamma.float()).to(orig_dtype)
+
+    q = rms_norm(q, q_gamma)
+    k = rms_norm(k, k_gamma)
+
+    # Partial NeoX RoPE on the first ``rotary_dim`` elements of each head;
+    # cos_sin_cache row is packed as [cos(half) | sin(half)].
+    pos = positions.view(-1)
+    cos = cos_sin_cache[pos, :half].float()[:, None, :]
+    sin = cos_sin_cache[pos, half:rotary_dim].float()[:, None, :]
+
+    def rope(x: torch.Tensor) -> torch.Tensor:
+        x_rot, x_pass = x[..., :rotary_dim], x[..., rotary_dim:]
+        x1 = x_rot[..., :half].float()
+        x2 = x_rot[..., half:].float()
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        rotated = torch.cat([o1, o2], dim=-1).to(x.dtype)
+        return torch.cat([rotated, x_pass], dim=-1)
+
+    q = rope(q).reshape(n_tokens, num_q_heads * head_dim)
+    k = rope(k).reshape(n_tokens, num_kv_heads * head_dim)
+    return q, k, gate
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="FusedQKNormRopeGate Triton kernel requires CUDA/ROCm",
+    reason="fused_qk_rmsnorm_rope_gate Triton kernel requires CUDA/ROCm",
 )
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @torch.inference_mode()
-def test_fused_qk_norm_rope_gate_matches_native(
+def test_fused_qk_norm_rope_gate_matches_reference(
     default_vllm_config,
     device: str,
     dtype: torch.dtype,
@@ -49,14 +107,17 @@ def test_fused_qk_norm_rope_gate_matches_native(
         num_tokens, NUM_Q_HEADS * 2 * HEAD_DIM, dtype=dtype, device=device
     )
     k = torch.randn(num_tokens, NUM_KV_HEADS * HEAD_DIM, dtype=dtype, device=device)
-    q_weight = torch.empty(HEAD_DIM, dtype=dtype, device=device).normal_(
-        mean=0.0, std=0.1
+    # GemmaRMSNorm-style: the kernel takes the effective gamma (weight + 1).
+    q_gamma = (
+        torch.empty(HEAD_DIM, dtype=dtype, device=device).normal_(mean=0.0, std=0.1)
+        + 1.0
     )
-    k_weight = torch.empty(HEAD_DIM, dtype=dtype, device=device).normal_(
-        mean=0.0, std=0.1
+    k_gamma = (
+        torch.empty(HEAD_DIM, dtype=dtype, device=device).normal_(mean=0.0, std=0.1)
+        + 1.0
     )
 
-    # FusedQKNormRopeGate only fuses the NeoX-style RoPE path.
+    # fused_qk_rmsnorm_rope_gate only handles NeoX-style RoPE.
     rope = RotaryEmbedding(
         head_size=HEAD_DIM,
         rotary_dim=ROTARY_DIM,
@@ -67,19 +128,31 @@ def test_fused_qk_norm_rope_gate_matches_native(
     ).to(device)
     positions = torch.arange(num_tokens, dtype=torch.long, device=device)
 
-    op = FusedQKNormRopeGate(
-        num_q_heads=NUM_Q_HEADS,
-        num_kv_heads=NUM_KV_HEADS,
-        head_dim=HEAD_DIM,
-        rotary_dim=ROTARY_DIM,
-        eps=RMS_NORM_EPS,
+    q_ref, k_ref, gate_ref = _ref_qk_rmsnorm_rope_gate(
+        q_gate,
+        k,
+        q_gamma,
+        k_gamma,
+        rope.cos_sin_cache,
+        positions,
+        RMS_NORM_EPS,
+        NUM_Q_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        ROTARY_DIM,
     )
-
-    q_ref, k_ref, gate_ref = op.forward_native(
-        q_gate, k, q_weight, k_weight, rope.cos_sin_cache, positions
-    )
-    q_out, k_out, gate_out = op.forward_cuda(
-        q_gate, k, q_weight, k_weight, rope.cos_sin_cache, positions
+    q_out, k_out, gate_out = fused_qk_rmsnorm_rope_gate(
+        q_gate,
+        k,
+        q_gamma,
+        k_gamma,
+        rope.cos_sin_cache,
+        positions,
+        RMS_NORM_EPS,
+        NUM_Q_HEADS,
+        NUM_KV_HEADS,
+        HEAD_DIM,
+        ROTARY_DIM,
     )
 
     atol, rtol = (2e-3, 2e-3) if dtype == torch.float16 else (1e-2, 1e-2)

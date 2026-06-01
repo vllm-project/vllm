@@ -23,7 +23,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -405,101 +404,6 @@ def fused_qk_rmsnorm_rope_gate(
     return q_out, k_out, gate_out
 
 
-@CustomOp.register("qwen35_fused_qk_norm_rope_gate")
-class FusedQKNormRopeGate(CustomOp):
-    """Fused split + GemmaRMSNorm(q, k) + partial NeoX RoPE + gate extraction."""
-
-    def __init__(
-        self,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        rotary_dim: int,
-        eps: float,
-    ) -> None:
-        super().__init__()
-        self.num_q_heads = num_q_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.rotary_dim = rotary_dim
-        self.eps = eps
-        self._forward_method = (
-            self.forward_cuda if current_platform.is_cuda() else self.forward_native
-        )
-
-    def forward_cuda(
-        self,
-        q_gate: torch.Tensor,
-        k: torch.Tensor,
-        q_weight: torch.Tensor,
-        k_weight: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return fused_qk_rmsnorm_rope_gate(
-            q_gate,
-            k,
-            q_weight.float() + 1.0,
-            k_weight.float() + 1.0,
-            cos_sin_cache,
-            positions,
-            self.eps,
-            self.num_q_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            self.rotary_dim,
-        )
-
-    def forward_native(
-        self,
-        q_gate: torch.Tensor,
-        k: torch.Tensor,
-        q_weight: torch.Tensor,
-        k_weight: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        n_tokens = q_gate.shape[0]
-        hd = self.head_dim
-        rd = self.rotary_dim
-        half = rd // 2
-
-        # Per head the q projection is laid out as [q | gate].
-        q_gate = q_gate.view(n_tokens, self.num_q_heads, 2 * hd)
-        q = q_gate[..., :hd]
-        gate = q_gate[..., hd:].reshape(n_tokens, self.num_q_heads * hd)
-        k = k.view(n_tokens, self.num_kv_heads, hd)
-
-        def gemma_rms(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-            orig_dtype = x.dtype
-            x = x.float()
-            var = x.pow(2).mean(dim=-1, keepdim=True)
-            x = x * torch.rsqrt(var + self.eps)
-            return (x * (weight.float() + 1.0)).to(orig_dtype)
-
-        q = gemma_rms(q, q_weight)
-        k = gemma_rms(k, k_weight)
-
-        # Partial NeoX RoPE on the first ``rotary_dim`` elements of each head;
-        # cos_sin_cache row is packed as [cos(half) | sin(half)].
-        pos = positions.view(-1)
-        cos = cos_sin_cache[pos, :half].float()[:, None, :]
-        sin = cos_sin_cache[pos, half:rd].float()[:, None, :]
-
-        def rope(x: torch.Tensor) -> torch.Tensor:
-            x_rot, x_pass = x[..., :rd], x[..., rd:]
-            x1 = x_rot[..., :half].float()
-            x2 = x_rot[..., half:].float()
-            o1 = x1 * cos - x2 * sin
-            o2 = x2 * cos + x1 * sin
-            rotated = torch.cat([o1, o2], dim=-1).to(x.dtype)
-            return torch.cat([rotated, x_pass], dim=-1)
-
-        q = rope(q).reshape(n_tokens, self.num_q_heads * hd)
-        k = rope(k).reshape(n_tokens, self.num_kv_heads * hd)
-        return q, k, gate
-
-
 class Qwen3NextAttention(nn.Module):
     def __init__(
         self,
@@ -580,20 +484,11 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
-        # Only valid for gated, NeoX-style attention; other configs use the
-        # eager path below. The CustomOp dispatches to a Triton kernel on
-        # CUDA/ROCm and a PyTorch fallback elsewhere.
-        self.use_fused_qk_norm_rope_gate = self.attn_output_gate and getattr(
-            self.rotary_emb, "is_neox_style", False
+        self.use_fused_qk_norm_rope_gate = (
+            self.attn_output_gate
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and current_platform.is_cuda()
         )
-        if self.use_fused_qk_norm_rope_gate:
-            self.qk_norm_rope_gate = FusedQKNormRopeGate(
-                num_q_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                rotary_dim=self.rotary_emb.rotary_dim,
-                eps=config.rms_norm_eps,
-            )
 
     def _project_qkv_gate(
         self,
@@ -610,13 +505,20 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            q, k, gate = self.qk_norm_rope_gate(
+            # GemmaRMSNorm uses ``weight + 1`` as the effective gamma; the
+            # fused kernel expects the already-adjusted gamma.
+            q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
-                self.q_norm.weight,
-                self.k_norm.weight,
+                self.q_norm.weight.float() + 1.0,
+                self.k_norm.weight.float() + 1.0,
                 self.rotary_emb.cos_sin_cache,
                 positions.view(-1),
+                self.q_norm.variance_epsilon,
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.rotary_emb.rotary_dim,
             )
             return q, k, v, gate
 
