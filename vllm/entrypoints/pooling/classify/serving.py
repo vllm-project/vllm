@@ -38,7 +38,9 @@ class ServingClassification(PoolingServing):
         id2label = getattr(self.model_config.hf_config, "id2label", {})
         num_prompt_tokens = 0
         items: list[ClassificationData] = []
-        classify_batch = ClassificationRequestOutput.from_base_batch(ctx.final_res_batch)
+        classify_batch = ClassificationRequestOutput.from_base_batch(
+            ctx.final_res_batch
+        )
         for idx, (classify_res, final_res) in enumerate(
             zip(classify_batch, ctx.final_res_batch)
         ):
