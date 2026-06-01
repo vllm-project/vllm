@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from transformers import CONFIG_MAPPING, PretrainedConfig
+from transformers import LlamaConfig, PretrainedConfig
 
 
 class OmniASRConfig(PretrainedConfig):
@@ -61,6 +61,14 @@ class OmniASRConfig(PretrainedConfig):
             Size of the target vocabulary for the decoder output projection.
         num_languages (`int`, *optional*, defaults to 1694):
             Number of supported languages for language conditioning.
+        bos_token_id (`int`, *optional*, defaults to 0):
+            Token id for beginning-of-sequence.
+        eos_token_id (`int`, *optional*, defaults to 2):
+            Token id for end-of-sequence.
+        pad_token_id (`int`, *optional*, defaults to 1):
+            Token id for padding.
+        lid_marker_token_id (`int`, *optional*, defaults to 9812):
+            Token id for lid marker
 
     Example:
 
@@ -80,27 +88,28 @@ class OmniASRConfig(PretrainedConfig):
 
     def __init__(
         self,
-        sampling_rate=16000,
-        subsampling_factor=320,
-        feature_dim=512,
-        feature_extractor_layer_descs=None,
-        feature_extractor_bias=True,
-        feature_extractor_layer_norm_convs=True,
-        encoder_embed_dim=1024,
-        encoder_num_heads=16,
-        encoder_ffn_dim=4096,
-        encoder_num_layers=24,
-        pos_encoder_kernel_size=128,
-        pos_encoder_groups=16,
-        projection_dim=None,
-        text_config=None,
-        lang_embeddings_p=0.5,
-        n_special_tokens=1,
-        target_vocab_size=9812,
-        num_languages=1694,
-        bos_token_id=0,
-        eos_token_id=2,
-        pad_token_id=1,
+        sampling_rate: int = 16000,
+        subsampling_factor: int = 320,
+        feature_dim: int = 512,
+        feature_extractor_layer_descs: list[tuple[int, int, int]] | None = None,
+        feature_extractor_bias: bool = True,
+        feature_extractor_layer_norm_convs: bool = True,
+        encoder_embed_dim: int = 1024,
+        encoder_num_heads: int = 16,
+        encoder_ffn_dim: int = 4096,
+        encoder_num_layers: int = 24,
+        pos_encoder_kernel_size: int = 128,
+        pos_encoder_groups: int = 16,
+        projection_dim: int | None = None,
+        text_config: dict | LlamaConfig | None = None,
+        lang_embeddings_p: float = 0.5,
+        n_special_tokens: int = 1,
+        target_vocab_size: int = 9812,
+        num_languages: int = 1694,
+        bos_token_id: int = 0,
+        eos_token_id: int = 2,
+        pad_token_id: int = 1,
+        lid_marker_token_id: int = 9812,
         **kwargs,
     ):
         super().__init__(
@@ -132,21 +141,27 @@ class OmniASRConfig(PretrainedConfig):
         self.pos_encoder_kernel_size = pos_encoder_kernel_size
         self.pos_encoder_groups = pos_encoder_groups
 
-        text_config = text_config or {
-            "model_type": "llama",
-            "hidden_size": 4096,
-            "num_attention_heads": 8,
-            "num_key_value_heads": 8,
-            "num_hidden_layers": 12,
-            "intermediate_size": 2816,
-            "max_position_embeddings": 8192,
-            "rope_theta": 10000.0,
-            "vocab_size": 9813,
-        }
-        self.text_config = CONFIG_MAPPING["llama"](**text_config)
+        if text_config is None:
+            text_config = {
+                "model_type": "llama",
+                "hidden_size": 4096,
+                "num_attention_heads": 8,
+                "num_key_value_heads": 8,
+                "num_hidden_layers": 12,
+                "intermediate_size": 2816,
+                "max_position_embeddings": 8192,
+                "rope_theta": 10000.0,
+                "vocab_size": 9813,
+                "rms_norm_eps": 1e-05,
+            }
+        if isinstance(text_config, dict):
+            text_config = text_config.copy()
+            text_config.setdefault("architectures", ["LlamaForCausalLM"])
+            text_config = LlamaConfig(**text_config)
+        self.text_config: LlamaConfig = text_config
         self.projection_dim = projection_dim or self.text_config.hidden_size
-
         self.lang_embeddings_p = lang_embeddings_p
         self.n_special_tokens = n_special_tokens
         self.target_vocab_size = target_vocab_size
         self.num_languages = num_languages
+        self.lid_marker_token_id = lid_marker_token_id
