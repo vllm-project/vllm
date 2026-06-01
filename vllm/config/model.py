@@ -186,6 +186,9 @@ class ModelConfig:
     allowed_media_domains: list[str] | None = None
     """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
+    forbid_media_private_networks_access: bool = False
+    """If set, only media URLs that resolve to a public domain can be used for
+    multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
@@ -389,6 +392,7 @@ class ModelConfig:
             "hf_config_path",
             "allowed_local_media_path",
             "allowed_media_domains",
+            "forbid_media_private_networks_access",
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",

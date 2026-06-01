@@ -97,6 +97,7 @@ def _make_mock_model_config(*, enable_prompt_embeds: bool = True) -> mock.MagicM
     mc.multimodal_config = None
     mc.allowed_local_media_path = None
     mc.allowed_media_domains = None
+    mc.forbid_media_private_networks_access = False
     # Test text-only code path in `MultiModalItemTracker.resolve_items`.
     mc.is_multimodal_model = False
     # `safe_load_prompt_embeds` pins each tensor to the model's hidden_size

@@ -570,6 +570,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self._model_config.allowed_media_domains
 
     @property
+    def forbid_media_private_networks_access(self):
+        return self._model_config.forbid_media_private_networks_access
+
+    @property
     def mm_registry(self):
         return MULTIMODAL_REGISTRY
 
@@ -915,6 +919,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=tracker.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
+            forbid_media_private_networks_access=tracker.forbid_media_private_networks_access,
         )
 
         self._mm_processor_kwargs = mm_processor_kwargs
@@ -1055,6 +1060,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             media_io_kwargs=tracker.media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
+            forbid_media_private_networks_access=tracker.forbid_media_private_networks_access,
         )
         self._mm_processor_kwargs: dict[str, Any] | None = mm_processor_kwargs
 

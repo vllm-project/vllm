@@ -86,7 +86,9 @@ async def test_fetch_image_base64(
         allowed_media_domains=[
             "www.bogotobogo.com",
             "github.com",
-        ]
+        ],
+        # Private domain restriction should not apply to data URLs.
+        forbid_media_private_networks_access=True,
     )
     url_image = url_images[raw_image_url]
 
@@ -337,11 +339,7 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 @pytest.mark.parametrize("private_video_url", TEST_VIDEO_URLS_PRIVATE_NETWORK)
 async def test_forbid_private_networks_access_for_media(private_video_url: str):
     connector = MediaConnector(
-        media_io_kwargs={
-            "video": {
-                "forbid_private_networks_access": True,
-            }
-        },
+        forbid_media_private_networks_access=True,
     )
 
     with pytest.raises(ValueError):
