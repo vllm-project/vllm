@@ -5,6 +5,8 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
+from pydantic import field_validator
+
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
@@ -89,6 +91,36 @@ class KVTransferConfig:
         factors: list[Any] = []
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator("kv_buffer_size", mode="after")
+    @classmethod
+    def _check_kv_buffer_size(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"kv_buffer_size must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("kv_rank", mode="after")
+    @classmethod
+    def _check_kv_rank(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError(f"kv_rank must be non-negative (>= 0) when set, got {v}.")
+        return v
+
+    @field_validator("kv_parallel_size", mode="after")
+    @classmethod
+    def _check_kv_parallel_size(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"kv_parallel_size must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("kv_port", mode="after")
+    @classmethod
+    def _check_kv_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError(
+                f"kv_port must be in valid port range [1, 65535], got {v}."
+            )
+        return v
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

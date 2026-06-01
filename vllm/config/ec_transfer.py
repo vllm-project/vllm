@@ -5,6 +5,8 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
+from pydantic import field_validator
+
 from vllm.config.utils import config
 
 ECProducer = Literal["ec_producer", "ec_both"]
@@ -74,6 +76,36 @@ class ECTransferConfig:
         factors: list[Any] = []
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
+
+    @field_validator("ec_buffer_size", mode="after")
+    @classmethod
+    def _check_ec_buffer_size(cls, v: float) -> float:
+        if v <= 0:
+            raise ValueError(f"ec_buffer_size must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("ec_rank", mode="after")
+    @classmethod
+    def _check_ec_rank(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError(f"ec_rank must be non-negative (>= 0) when set, got {v}.")
+        return v
+
+    @field_validator("ec_parallel_size", mode="after")
+    @classmethod
+    def _check_ec_parallel_size(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"ec_parallel_size must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("ec_port", mode="after")
+    @classmethod
+    def _check_ec_port(cls, v: int) -> int:
+        if not (1 <= v <= 65535):
+            raise ValueError(
+                f"ec_port must be in valid port range [1, 65535], got {v}."
+            )
+        return v
 
     def __post_init__(self) -> None:
         if self.engine_id is None:
