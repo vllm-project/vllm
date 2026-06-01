@@ -194,7 +194,7 @@ def build_app(
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if envs.VLLM_SERVER_DEV_MODE:
-        from vllm.entrypoints.serve.dev_mode import register_vllm_dev_mode_api_routers
+        from vllm.entrypoints.serve import register_vllm_dev_mode_api_routers
 
         register_vllm_dev_mode_api_routers(app)
 
