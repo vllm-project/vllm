@@ -6,12 +6,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
-from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
+)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -109,6 +113,7 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
+        max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -118,6 +123,11 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
+        # When unset, fall back to `max_model_len` so the recycling-aware cap
+        # collapses to the prior (uncapped) admission behavior. The scheduler
+        # always supplies the real value at runtime.
+        if max_num_batched_tokens is None:
+            max_num_batched_tokens = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -131,6 +141,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=max_num_batched_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -142,6 +153,13 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+        self.kv_cache_event_metadata = tuple(
+            (
+                get_kv_cache_spec_kind(group.kv_cache_spec).value,
+                get_kv_cache_spec_sliding_window(group.kv_cache_spec),
+            )
+            for group in kv_cache_config.kv_cache_groups
+        )
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
@@ -215,45 +233,6 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
-    def can_fit_full_sequence(
-        self,
-        request: Request,
-        num_new_computed_tokens: int = 0,
-        new_computed_blocks: KVCacheBlocks | None = None,
-        num_external_computed_tokens: int = 0,
-        num_encoder_tokens: int = 0,
-    ) -> bool:
-        """Check if the KV cache has enough free blocks to hold the full
-        sequence, accounting for prefix cache hits and sliding window.
-
-        This is used as an admission gate to prevent over-admitting requests
-        when chunked prefill would otherwise only check the first chunk.
-        """
-        if new_computed_blocks is not None:
-            new_computed_block_list = new_computed_blocks.blocks
-        else:
-            new_computed_block_list = self.empty_kv_cache_blocks.blocks
-
-        num_local_computed_tokens = (
-            request.num_computed_tokens + num_new_computed_tokens
-        )
-        total_computed_tokens = min(
-            num_local_computed_tokens + num_external_computed_tokens,
-            self.max_model_len,
-        )
-        full_num_tokens = min(request.num_tokens, self.max_model_len)
-
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=full_num_tokens,
-            new_computed_blocks=new_computed_block_list,
-            num_encoder_tokens=num_encoder_tokens,
-            total_computed_tokens=total_computed_tokens,
-            num_tokens_main_model=full_num_tokens,
-        )
-
-        return num_blocks_to_allocate <= self.block_pool.get_num_free_blocks()
-
     def allocate_slots(
         self,
         request: Request,
@@ -264,6 +243,7 @@ class KVCacheManager:
         num_external_computed_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
+        full_sequence_must_fit: bool = False,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -285,6 +265,10 @@ class KVCacheManager:
             num_encoder_tokens: The number of encoder tokens to allocate for
                 cross-attention in encoder-decoder models(e.g., Whisper).
                 For decoder-only models, this should be 0.
+            full_sequence_must_fit: Only allocate blocks if the KV cache has enough
+                free blocks to hold the full sequence, accounting for prefix cache hits
+                and sliding window. Used as an admission gate to prevent over-admitting
+                requests when chunked prefill would otherwise only check the first chunk
 
         Blocks layout:
         ```
@@ -358,10 +342,26 @@ class KVCacheManager:
             num_local_computed_tokens + num_external_computed_tokens,
             self.max_model_len,
         )
+
+        if full_sequence_must_fit:
+            # First check and fail if the full request sequence won't fit.
+            full_num_tokens = min(request.num_tokens, self.max_model_len)
+
+            num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+                request_id=request.request_id,
+                num_tokens=full_num_tokens,
+                new_computed_blocks=new_computed_block_list,
+                num_encoder_tokens=num_encoder_tokens,
+                total_computed_tokens=total_computed_tokens,
+                num_tokens_main_model=full_num_tokens,
+                apply_admission_cap=True,
+            )
+            if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+                return None
+
         num_tokens_main_model = total_computed_tokens + num_new_tokens
         num_tokens_need_slot = min(
-            num_tokens_main_model + num_lookahead_tokens,
-            self.max_model_len,
+            num_tokens_main_model + num_lookahead_tokens, self.max_model_len
         )
 
         # Free the blocks that are skipped during the attention computation
@@ -513,7 +513,25 @@ class KVCacheManager:
         Returns:
             A list of KV cache events.
         """
-        return self.block_pool.take_events()
+        events = self.block_pool.take_events()
+        for event in events:
+            if not isinstance(event, BlockStored):
+                continue
+            if event.group_idx is None:
+                continue
+            if event.group_idx < 0 or event.group_idx >= len(
+                self.kv_cache_event_metadata
+            ):
+                logger.warning(
+                    "Group index `%s` not in KV cache metadata", event.group_idx
+                )
+                continue
+            # Annotate here so BlockPool can keep emitting structural cache
+            # events without owning semantic KV cache spec metadata.
+            kind, sliding_window = self.kv_cache_event_metadata[event.group_idx]
+            event.kv_cache_spec_kind = kind
+            event.kv_cache_spec_sliding_window = sliding_window
+        return events
 
     def get_blocks(self, request_id: str) -> KVCacheBlocks:
         """Get the blocks of a request."""

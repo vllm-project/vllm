@@ -15,11 +15,11 @@ from transformers import (
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -561,7 +561,7 @@ class Blip2ForConditionalGeneration(
                 config.qformer_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.qformer",
+                prefix=maybe_prefix(prefix, "qformer"),
             )
             self.language_projection = nn.Linear(
                 config.qformer_config.hidden_size,
