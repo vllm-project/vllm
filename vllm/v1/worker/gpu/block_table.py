@@ -6,7 +6,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory, StagedWriteTensor
 
 
 class BlockTables:
@@ -16,8 +16,8 @@ class BlockTables:
         max_num_reqs: int,
         max_num_batched_tokens: int,
         max_num_blocks_per_group: list[int],
-        device: torch.device,
         kernel_block_sizes: list[int],
+        buffer_factory: BufferFactory,
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
@@ -26,7 +26,7 @@ class BlockTables:
         self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.device = device
+        self.device = buffer_factory.device
 
         self.cp_size = cp_size
         self.cp_rank = cp_rank
@@ -43,12 +43,12 @@ class BlockTables:
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
-            block_table = StagedWriteTensor(
-                (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
+            block_table = buffer_factory.staged_write_tensor(
+                (self.max_num_reqs, max_num_blocks), torch.int32
             )
             self.block_tables.append(block_table)
 
-        self.num_blocks = UvaBackedTensor(
+        self.num_blocks = buffer_factory.uva_backed_tensor(
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
         )

@@ -7,7 +7,7 @@ import torch
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 
 
 @triton.jit
@@ -222,13 +222,13 @@ class LogprobTokenIdsState:
     See `SamplingParams.logprob_token_ids`.
     """
 
-    def __init__(self, max_num_reqs: int, device: torch.device):
+    def __init__(self, max_num_reqs: int, buffer_factory: BufferFactory):
         self.max_num_reqs = max_num_reqs
-        self.num_token_ids = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
-        self.token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_LOGPROB_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+        self.num_token_ids = buffer_factory.uva_backed_tensor(
+            max_num_reqs, dtype=torch.int32
+        )
+        self.token_ids = buffer_factory.staged_write_tensor(
+            (max_num_reqs, MAX_LOGPROB_TOKEN_IDS), torch.int32
         )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:

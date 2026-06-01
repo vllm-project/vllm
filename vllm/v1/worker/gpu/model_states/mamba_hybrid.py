@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -61,9 +62,9 @@ class MambaHybridModelState(DefaultModelState):
         vllm_config: VllmConfig,
         model: nn.Module,
         encoder_cache: EncoderCache | None,
-        device: torch.device,
+        buffer_factory: BufferFactory,
     ) -> None:
-        super().__init__(vllm_config, model, encoder_cache, device)
+        super().__init__(vllm_config, model, encoder_cache, buffer_factory)
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )

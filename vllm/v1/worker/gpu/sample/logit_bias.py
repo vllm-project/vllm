@@ -5,7 +5,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 MAX_NUM_LOGIT_BIAS_TOKENS = 1024
@@ -13,37 +13,35 @@ MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState:
-    def __init__(self, max_num_reqs: int, device: torch.device):
+    def __init__(self, max_num_reqs: int, buffer_factory: BufferFactory):
         self.max_num_reqs = max_num_reqs
 
         # Allowed token IDs.
-        self.num_allowed_token_ids = UvaBackedTensor(
+        self.num_allowed_token_ids = buffer_factory.uva_backed_tensor(
             self.max_num_reqs, dtype=torch.int32
         )
-        self.allowed_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+        self.allowed_token_ids = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_NUM_ALLOWED_TOKEN_IDS), torch.int32
         )
         # Logit bias.
-        self.num_logit_bias = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.logit_bias_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
-            dtype=torch.int32,
-            device=device,
+        self.num_logit_bias = buffer_factory.uva_backed_tensor(
+            self.max_num_reqs, dtype=torch.int32
         )
-        self.logit_bias = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS),
-            dtype=torch.float32,
-            device=device,
+        self.logit_bias_token_ids = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS), torch.int32
+        )
+        self.logit_bias = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_NUM_LOGIT_BIAS_TOKENS), torch.float32
         )
         # Min tokens.
-        self.min_lens = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.num_stop_token_ids = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        self.stop_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_STOP_TOKEN_IDS),
-            dtype=torch.int32,
-            device=device,
+        self.min_lens = buffer_factory.uva_backed_tensor(
+            self.max_num_reqs, dtype=torch.int32
+        )
+        self.num_stop_token_ids = buffer_factory.uva_backed_tensor(
+            self.max_num_reqs, dtype=torch.int32
+        )
+        self.stop_token_ids = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_NUM_STOP_TOKEN_IDS), torch.int32
         )
 
         # Using any of the above.

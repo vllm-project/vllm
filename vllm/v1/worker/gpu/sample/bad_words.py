@@ -5,7 +5,6 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
 MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
@@ -18,20 +17,20 @@ class BadWordsState:
         self.max_num_reqs = req_states.max_num_reqs
         self.device = req_states.device
 
+        buffer_factory = req_states.buffer_factory
+
         # flattened bad word tokens: [max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS]
-        self.bad_word_token_ids = StagedWriteTensor(
-            (self.max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS),
-            dtype=torch.int32,
-            device=self.device,
+        self.bad_word_token_ids = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS), torch.int32
         )
         # cumulative offsets of bad words: [max_num_reqs, MAX_NUM_BAD_WORDS + 1]
-        self.bad_word_offsets = StagedWriteTensor(
-            (self.max_num_reqs, MAX_NUM_BAD_WORDS + 1),
-            dtype=torch.int32,
-            device=self.device,
+        self.bad_word_offsets = buffer_factory.staged_write_tensor(
+            (self.max_num_reqs, MAX_NUM_BAD_WORDS + 1), torch.int32
         )
         # number of bad words per request
-        self.num_bad_words = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self.num_bad_words = buffer_factory.uva_backed_tensor(
+            self.max_num_reqs, dtype=torch.int32
+        )
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         bad_words_token_ids = sampling_params.bad_words_token_ids

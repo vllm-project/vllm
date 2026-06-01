@@ -5,7 +5,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
 from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
@@ -15,15 +15,18 @@ _NP_INT64_MAX = np.iinfo(np.int64).max
 
 
 class SamplingStates:
-    def __init__(self, max_num_reqs: int, vocab_size: int):
+    def __init__(
+        self, max_num_reqs: int, vocab_size: int, buffer_factory: BufferFactory
+    ):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
 
-        self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
-        self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.seeds = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
+        uva_tensor = buffer_factory.uva_backed_tensor
+        self.temperature = uva_tensor(max_num_reqs, dtype=torch.float32)
+        self.top_k = uva_tensor(max_num_reqs, dtype=torch.int32)
+        self.top_p = uva_tensor(max_num_reqs, dtype=torch.float32)
+        self.min_p = uva_tensor(max_num_reqs, dtype=torch.float32)
+        self.seeds = uva_tensor(max_num_reqs, dtype=torch.int64)
 
         # Initialize top_k and top_p manually because 0 is an invalid value for them.
         self.top_k.np.fill(self.vocab_size)

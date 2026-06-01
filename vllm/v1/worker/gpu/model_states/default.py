@@ -11,6 +11,7 @@ from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -26,13 +27,13 @@ class DefaultModelState(ModelState):
         vllm_config: VllmConfig,
         model: nn.Module,
         encoder_cache: EncoderCache | None,
-        device: torch.device,
+        buffer_factory: BufferFactory,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.model = model
-        self.device = device
+        self.device = buffer_factory.device
 
         self.supports_mm_inputs = encoder_cache is not None
         self.max_model_len = self.model_config.max_model_len
@@ -59,7 +60,7 @@ class DefaultModelState(ModelState):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
-            device=self.device,
+            buffer_factory=buffer_factory,
         )
 
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:

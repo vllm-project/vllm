@@ -190,6 +190,33 @@ class StagedWriteTensor:
         self._staged_write_cu_lens.clear()
 
 
+class BufferFactory:
+    """Creates UVA-backed buffer types with a shared device and max_concurrency."""
+
+    def __init__(self, device: torch.device, max_concurrency: int = 2):
+        self.device = device
+        self.max_concurrency = max_concurrency
+
+    def uva_backed_tensor(
+        self, size: int | Sequence[int], dtype: torch.dtype
+    ) -> UvaBackedTensor:
+        return UvaBackedTensor(size, dtype, max_concurrency=self.max_concurrency)
+
+    def staged_write_tensor(
+        self,
+        size: int | Sequence[int],
+        dtype: torch.dtype,
+        uva_instead_of_gpu: bool = False,
+    ) -> StagedWriteTensor:
+        return StagedWriteTensor(
+            size,
+            dtype,
+            device=self.device,
+            max_concurrency=self.max_concurrency,
+            uva_instead_of_gpu=uva_instead_of_gpu,
+        )
+
+
 @triton.jit
 def _apply_write_kernel(
     output_ptr,

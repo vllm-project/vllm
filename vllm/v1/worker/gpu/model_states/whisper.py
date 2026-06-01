@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -47,7 +48,7 @@ class WhisperModelState(ModelState):
         vllm_config: VllmConfig,
         model: nn.Module,
         encoder_cache: EncoderCache | None,
-        device: torch.device,
+        buffer_factory: BufferFactory,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -56,7 +57,7 @@ class WhisperModelState(ModelState):
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = self.model_config.max_model_len
-        self.device = device
+        self.device = buffer_factory.device
 
         assert encoder_cache is not None
         self.encoder_cache = encoder_cache

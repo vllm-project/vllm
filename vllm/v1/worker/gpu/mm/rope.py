@@ -8,7 +8,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsXDRoPE
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 
 
 class RopeState:
@@ -35,29 +35,30 @@ class RopeState:
         max_num_reqs: int,
         max_num_tokens: int,
         max_model_len: int,
-        device: torch.device,
+        buffer_factory: BufferFactory,
     ):
         self.num_dims = num_dims
         self.has_delta = has_delta
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.max_model_len = max_model_len
-        self.device = device
+        self.device = buffer_factory.device
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # wasting a lot of CPU memory.
-        self.prefill_positions = StagedWriteTensor(
+        self.prefill_positions = buffer_factory.staged_write_tensor(
             (max_num_reqs * num_dims, max_model_len),
-            dtype=torch.int32,
-            device=device,
+            torch.int32,
             uva_instead_of_gpu=True,
         )
         self.positions = torch.zeros(
-            (num_dims, max_num_tokens + 1), dtype=torch.int64, device=device
+            (num_dims, max_num_tokens + 1), dtype=torch.int64, device=self.device
         )
 
         # Delta is non-zero for M-RoPE, always 0 for XD-RoPE.
-        self.prefill_delta = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.prefill_delta = buffer_factory.uva_backed_tensor(
+            max_num_reqs, dtype=torch.int32
+        )
 
     def init_prefill_positions(
         self,
@@ -120,7 +121,7 @@ def get_rope_state(
     max_num_reqs: int,
     max_num_tokens: int,
     max_model_len: int,
-    device: torch.device,
+    buffer_factory: BufferFactory,
 ) -> RopeState | None:
     """Create a RopeState if the model uses multi-dimensional RoPE."""
     if model_config.uses_mrope:
@@ -131,7 +132,7 @@ def get_rope_state(
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             max_model_len=max_model_len,
-            device=device,
+            buffer_factory=buffer_factory,
         )
     if model_config.uses_xdrope_dim > 0:
         assert isinstance(model, SupportsXDRoPE)
@@ -141,7 +142,7 @@ def get_rope_state(
             max_num_reqs=max_num_reqs,
             max_num_tokens=max_num_tokens,
             max_model_len=max_model_len,
-            device=device,
+            buffer_factory=buffer_factory,
         )
     return None
 

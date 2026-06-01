@@ -27,7 +27,6 @@ class Sampler:
         self,
         max_num_reqs: int,
         vocab_size: int,
-        device: torch.device,
         req_states: RequestState,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
@@ -39,11 +38,14 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
         self.use_fp64_gumbel = use_fp64_gumbel
 
-        self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
+        buffer_factory = req_states.buffer_factory
+        self.sampling_states = SamplingStates(max_num_reqs, vocab_size, buffer_factory)
         self.penalties_state = PenaltiesState(req_states)
-        self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.logit_bias_state = LogitBiasState(max_num_reqs, buffer_factory)
         self.bad_words_state = BadWordsState(req_states)
-        self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.logprob_token_ids_state = LogprobTokenIdsState(
+            max_num_reqs, buffer_factory
+        )
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(

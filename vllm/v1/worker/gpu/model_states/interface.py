@@ -11,6 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.states import RequestState
@@ -42,7 +43,7 @@ class ModelState(ABC):
         vllm_config: VllmConfig,
         model: nn.Module,
         encoder_cache: EncoderCache | None,
-        device: torch.device,
+        buffer_factory: BufferFactory,
     ) -> None:
         raise NotImplementedError
 

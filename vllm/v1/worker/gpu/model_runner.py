@@ -60,7 +60,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.buffer_utils import BufferFactory, async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -156,6 +156,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
+        # Buffer parallelism.
+        max_concurrency = self.parallel_config.pipeline_parallel_size + 1
+        self.buffer_factory = BufferFactory(self.device, max_concurrency)
+
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
@@ -196,7 +200,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
-            device=self.device,
+            buffer_factory=self.buffer_factory,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
@@ -215,7 +219,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler = Sampler(
                 max_num_reqs=self.max_num_reqs,
                 vocab_size=self.vocab_size,
-                device=self.device,
                 req_states=self.req_states,
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.num_speculative_steps + 1,
@@ -305,7 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Initialize the components that require the model.
         self.model_state = init_model_state(
-            self.vllm_config, self.model, self.encoder_cache, self.device
+            self.vllm_config, self.model, self.encoder_cache, self.buffer_factory
         )
         if self.is_pooling_model and self.is_last_pp_rank:
             self.pooling_runner = PoolingRunner(self.model)
@@ -401,11 +404,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
-            device=self.device,
             kernel_block_sizes=kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            buffer_factory=self.buffer_factory,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config

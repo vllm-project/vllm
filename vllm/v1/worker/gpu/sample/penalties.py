@@ -7,7 +7,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -19,9 +18,10 @@ class PenaltiesState:
         self.vocab_size = req_states.vocab_size
         self.device = req_states.device
 
-        self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
-        self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        uva_tensor = req_states.buffer_factory.uva_backed_tensor
+        self.repetition_penalty = uva_tensor(max_num_reqs, dtype=torch.float32)
+        self.frequency_penalty = uva_tensor(max_num_reqs, dtype=torch.float32)
+        self.presence_penalty = uva_tensor(max_num_reqs, dtype=torch.float32)
         self.use_penalty = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize repetition penalty manually because 0 is an invalid value for it.
