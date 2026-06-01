@@ -276,7 +276,8 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                # Phase 1: scheduled spec-draft positions.
+                for token in req_tokens:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
@@ -286,6 +287,23 @@ class StructuredOutputManager:
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
+                # Phase 2: bonus-token position. Use the request-level gate, not
+                # the in-loop `apply_bitmask`: an earlier -1 padding flips that
+                # to False and would leave the bonus row as the unconstrained
+                # full mask, letting the model emit tokens the grammar excludes
+                # (e.g. </think> when `structural_tag.excludes` lists it) and
+                # tripping accept_tokens in Scheduler._update_from_output. See
+                # https://github.com/vllm-project/vllm/issues/44006.
+                self._fill_bitmasks(
+                    (
+                        (
+                            grammar,
+                            cumulative_index,
+                            self.should_fill_bitmask(request),
+                        ),
+                    )
+                )
+                cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
 
