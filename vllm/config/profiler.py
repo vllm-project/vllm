@@ -14,7 +14,7 @@ from vllm.utils.hashing import safe_hash
 logger = init_logger(__name__)
 
 ProfilerKind = Literal["torch", "cuda"]
-ProfilerTableFormat = Literal["csv", "json"]
+ProfilerTableFormat = Literal["txt", "csv", "json"]
 
 
 def _is_uri_path(path: str) -> bool:
@@ -60,10 +60,10 @@ class ProfilerConfig:
     torch_profiler_dump_cuda_time_total: bool = True
     """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
 
-    torch_profiler_export_format: ProfilerTableFormat | None = None
-    """If set, additionally exports the profiler key-averages table as a
-    structured file ('csv' or 'json') alongside the default .txt table.
-    Defaults to None (no structured export). Only applicable when profiler is
+    torch_profiler_table_format: ProfilerTableFormat = "txt"
+    """Format used to save the profiler key-averages table. Defaults to 'txt'
+    (the human-readable torch table). Set to 'csv' or 'json' to instead export
+    a structured file with per-event metrics. Only applicable when profiler is
     'torch'."""
 
     torch_profiler_record_shapes: bool = False
@@ -146,9 +146,9 @@ class ProfilerConfig:
         if self.profiler == "torch" and not profiler_dir:
             raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
 
-        if self.torch_profiler_export_format and self.profiler != "torch":
+        if self.torch_profiler_table_format != "txt" and self.profiler != "torch":
             raise ValueError(
-                "torch_profiler_export_format is only applicable when profiler "
+                "torch_profiler_table_format is only applicable when profiler "
                 "is set to 'torch'"
             )
 
