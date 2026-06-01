@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from math import lcm
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -40,12 +39,16 @@ class KVCacheCoordinator(ABC):
         enable_kv_cache_events: bool,
         dcp_world_size: int,
         pcp_world_size: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        # The scheduling granularity (LCM of all group block sizes), must be a multiple
+        # of the hash_block_size and the block size of each group.
+        self.scheduler_block_size = scheduler_block_size
 
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
@@ -73,6 +76,7 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
+                scheduler_block_size=self.scheduler_block_size,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -290,6 +294,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         enable_kv_cache_events: bool,
         dcp_world_size: int,
         pcp_world_size: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
@@ -302,6 +307,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
@@ -338,6 +344,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         enable_kv_cache_events: bool,
         dcp_world_size: int,
         pcp_world_size: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
@@ -350,6 +357,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
@@ -405,6 +413,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         enable_kv_cache_events: bool,
         dcp_world_size: int,
         pcp_world_size: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
@@ -417,6 +426,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
@@ -468,14 +478,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             key=lambda x: not isinstance(x[0], FullAttentionSpec),
         )
 
-        # The LCM of the block sizes of all attention types.
-        # The cache hit length must be a multiple of the LCM of the block sizes
-        # to make sure the cache hit length is a multiple of the block size of
-        # each attention type. Requiring this because we don't support partial
-        # block cache hit yet.
-        block_sizes = [spec.block_size for spec, _, _ in attention_groups]
-        self.lcm_block_size = lcm(*block_sizes)
-
         # Attention-group indices (into ``self.attention_groups``) that
         # contain at least one EAGLE/MTP KV cache group.
         self.eagle_attn_group_indices: set[int] = {
@@ -486,18 +488,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         # Cache hits in this coordinator are always a multiple of
-        # ``lcm_block_size`` tokens (see ``find_longest_cache_hit``). Within an
-        # aligned region, SWA groups only consult a subset of blocks per
-        # ``lcm_block_size``-segment so the unused blocks also stay out of the
-        # prefix-cache hash map.
+        # ``scheduler_block_size`` tokens (see ``find_longest_cache_hit``).
+        # Within an aligned region, SWA groups only consult a subset of blocks
+        # per ``scheduler_block_size``-segment so the unused blocks also stay
+        # out of the prefix-cache hash map.
         num_computed_tokens = (
-            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+            num_computed_tokens // self.scheduler_block_size * self.scheduler_block_size
         )
         for manager in self.single_type_managers:
             manager.cache_blocks(
                 request,
                 num_computed_tokens,
-                alignment_tokens=self.lcm_block_size,
+                alignment_tokens=self.scheduler_block_size,
             )
 
     def find_longest_cache_hit(
@@ -576,7 +578,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     use_eagle=use_eagle,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=self.scheduler_block_size,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
                 if use_eagle:
@@ -616,6 +618,7 @@ def get_kv_cache_coordinator(
     enable_kv_cache_events: bool,
     dcp_world_size: int,
     pcp_world_size: int,
+    scheduler_block_size: int,
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
@@ -628,6 +631,7 @@ def get_kv_cache_coordinator(
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
@@ -641,6 +645,7 @@ def get_kv_cache_coordinator(
             enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=metrics_collector,
         )
@@ -653,6 +658,7 @@ def get_kv_cache_coordinator(
         enable_kv_cache_events,
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
+        scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
         metrics_collector=metrics_collector,
     )
