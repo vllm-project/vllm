@@ -275,6 +275,13 @@ class LLRouterSplitK:
             tAcA = thr_A.partition_S(cA)
             tBcB = thr_B.partition_S(cB)
 
+            # K-predicate helpers (needed for both first and subsequent tiles)
+            k_elems_per_copy = 8
+            k_threads = bK // k_elems_per_copy
+            k_tidx = dma_tidx % k_threads
+            k_offset_in_tile = k_tidx * k_elems_per_copy
+            k_base_first = k_start * bK + k_offset_in_tile
+
             tApA = cute.make_rmem_tensor(
                 cute.make_layout(
                     (
@@ -287,9 +294,13 @@ class LLRouterSplitK:
                 cutlass.Boolean,
             )
             for rv in range(tApA.shape[0]):
+                k_valid = (k_base_first + rv) < K_total
                 for m in range(tApA.shape[1]):
-                    tApA[rv, m, 0] = cute.elem_less(
-                        tAcA[(0, rv), m, 0, 0][0], mA.shape[0]
+                    tApA[rv, m, 0] = (
+                        cute.elem_less(
+                            tAcA[(0, rv), m, 0, 0][0], mA.shape[0]
+                        )
+                        & k_valid
                     )
 
             tBpB = cute.make_rmem_tensor(
@@ -304,9 +315,13 @@ class LLRouterSplitK:
                 cutlass.Boolean,
             )
             for rv in range(tBpB.shape[0]):
+                k_valid = (k_base_first + rv) < K_total
                 for n in range(tBpB.shape[1]):
-                    tBpB[rv, n, 0] = cute.elem_less(
-                        tBcB[(0, rv), n, 0, 0][0], mB.shape[0]
+                    tBpB[rv, n, 0] = (
+                        cute.elem_less(
+                            tBcB[(0, rv), n, 0, 0][0], mB.shape[0]
+                        )
+                        & k_valid
                     )
 
             producer_state = pipeline.make_pipeline_state(
@@ -329,12 +344,6 @@ class LLRouterSplitK:
             )
             mainloop_pipeline.producer_commit(producer_state)
             producer_state.advance()
-
-            # K-predicate helpers for partial last tile
-            k_elems_per_copy = 8
-            k_threads = bK // k_elems_per_copy
-            k_tidx = dma_tidx % k_threads
-            k_offset_in_tile = k_tidx * k_elems_per_copy
 
             for local_k in range(1, my_tiles):
                 k_tile = k_start + local_k

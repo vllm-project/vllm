@@ -1,0 +1,379 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Tests for cuteDSL low-latency router GEMM (dot-product + split-K)."""
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA required"
+)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _require_sm90_and_cutedsl():
+    if torch.cuda.get_device_capability()[0] < 9:
+        pytest.skip("Requires SM90+ (Hopper/Blackwell)")
+    from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
+        is_available,
+    )
+    if not is_available():
+        pytest.skip("cuteDSL (CUTLASS Python) not installed")
+
+
+# ===== Helpers =====
+
+
+def _ref(a, b):
+    return torch.mm(a.float(), b.float().T)
+
+
+def _assert_close(out, ref, *, min_cos_sim=0.99, context=""):
+    assert out.device.type == "cuda", f"{context}: not on CUDA"
+    assert torch.isfinite(out).all(), f"{context}: NaN/Inf"
+    cos = F.cosine_similarity(
+        out.reshape(-1).float(), ref.reshape(-1).float(), dim=0
+    ).item()
+    assert cos > min_cos_sim, (
+        f"{context}: cos_sim {cos:.6f} < {min_cos_sim} "
+        f"(abs_err={(out.float() - ref.float()).abs().max().item():.2e})"
+    )
+
+
+def _gemm(a, b):
+    from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
+        ll_router_gemm,
+    )
+    return ll_router_gemm(a, b)
+
+
+# ===== Shapes =====
+
+SHAPES = [
+    (256, 7168, "DSV3"),
+    (256, 14400, "DSV4-Flash"),
+    (128, 5120, "DeepSeek-V2"),
+    (8, 4096, "Mixtral-8x7B"),
+    (64, 2880, "non-aligned-K"),
+    (256, 2048, "split-K-boundary"),
+]
+
+SHAPES_SPLITK = [(n, k, d) for n, k, d in SHAPES if k >= 2048]
+
+
+# =================================================================
+# Dot-product kernel (M<=4 or K<2048)
+# =================================================================
+
+
+@pytest.mark.parametrize("M", [1, 2, 3, 4])
+@pytest.mark.parametrize("N,K,desc", SHAPES, ids=[s[2] for s in SHAPES])
+def test_dotprod(M, N, K, desc):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.dtype == torch.float32
+    assert out.shape == (M, N)
+    _assert_close(out, _ref(a, b), context=f"dotprod {M}x{N}x{K}")
+
+
+@pytest.mark.parametrize("M", [1, 4, 8, 16])
+def test_dotprod_small_K(M):
+    """K<2048 forces dot-product regardless of M."""
+    torch.manual_seed(42)
+    a = torch.randn(M, 1024, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 1024, dtype=torch.bfloat16, device="cuda")
+    _assert_close(_gemm(a, b), _ref(a, b), context=f"small_K M={M}")
+
+
+@pytest.mark.parametrize("K", [16, 32, 64, 128, 256, 512, 1024, 1536])
+def test_dotprod_K_sweep(K):
+    torch.manual_seed(42)
+    a = torch.randn(4, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(32, K, dtype=torch.bfloat16, device="cuda")
+    _assert_close(_gemm(a, b), _ref(a, b), context=f"K={K}")
+
+
+# =================================================================
+# Split-K kernel (M>4 and K>=2048)
+# =================================================================
+
+
+@pytest.mark.parametrize("M", [5, 6, 8, 12, 16])
+@pytest.mark.parametrize(
+    "N,K,desc", SHAPES_SPLITK, ids=[s[2] for s in SHAPES_SPLITK]
+)
+def test_splitk(M, N, K, desc):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.dtype == torch.float32
+    assert out.shape == (M, N)
+    _assert_close(out, _ref(a, b), context=f"splitk {M}x{N}x{K}")
+
+
+@pytest.mark.parametrize("K", [2048, 2304, 2880, 3072, 4096, 5120, 7168, 14400])
+def test_splitk_K_sweep(K):
+    """Includes non-tile-aligned K (2880) and uneven split (2304)."""
+    torch.manual_seed(42)
+    a = torch.randn(8, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
+    _assert_close(_gemm(a, b), _ref(a, b), context=f"splitk K={K}")
+
+
+# =================================================================
+# Dispatch boundary (M=4/5, K=2032/2048)
+# =================================================================
+
+
+@pytest.mark.parametrize("M", [4, 5])
+@pytest.mark.parametrize("K", [2032, 2048])
+def test_dispatch_boundary(M, K):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
+    path = "splitk" if M > 4 and K >= 2048 else "dotprod"
+    _assert_close(_gemm(a, b), _ref(a, b), context=f"M={M} K={K} ({path})")
+
+
+# =================================================================
+# Arbitrary N
+# =================================================================
+
+
+@pytest.mark.parametrize("N", [1, 3, 7, 16, 17, 64, 128, 256, 384])
+def test_arbitrary_N_dotprod(N):
+    torch.manual_seed(42)
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(N, 2048, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.shape == (4, N)
+    _assert_close(out, _ref(a, b), context=f"dotprod N={N}")
+
+
+@pytest.mark.parametrize("N", [1, 8, 16, 17, 64, 128, 256])
+def test_arbitrary_N_splitk(N):
+    torch.manual_seed(42)
+    a = torch.randn(8, 4096, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(N, 4096, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.shape == (8, N)
+    _assert_close(out, _ref(a, b), context=f"splitk N={N}")
+
+
+# =================================================================
+# Single token (M=1, decode path)
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "N,K",
+    [(256, 7168), (256, 14400), (8, 4096), (384, 7168)],
+    ids=["DSV3", "DSV4-Flash", "Mixtral", "DSV4-Pro"],
+)
+def test_single_token(N, K):
+    torch.manual_seed(42)
+    a = torch.randn(1, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(N, K, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    assert out.shape == (1, N)
+    _assert_close(out, _ref(a, b), context=f"M=1 {N}x{K}")
+
+
+# =================================================================
+# Numerical robustness
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
+)
+def test_large_values(M, K):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 100
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda") * 100
+    out = _gemm(a, b)
+    assert torch.isfinite(out).all()
+    _assert_close(out, _ref(a, b), context=f"large M={M}")
+
+
+def test_near_zero():
+    torch.manual_seed(42)
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda") * 1e-4
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda") * 1e-4
+    out = _gemm(a, b)
+    assert torch.isfinite(out).all()
+    assert out.abs().max() < 1.0
+
+
+def test_zeros():
+    a = torch.zeros(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
+    assert (_gemm(a, b) == 0).all()
+
+
+def test_ones():
+    a = torch.ones(1, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(32, 2048, dtype=torch.bfloat16, device="cuda")
+    _assert_close(_gemm(a, b), _ref(a, b), context="ones")
+
+
+# =================================================================
+# Output dtype
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
+)
+def test_output_fp32(M, K):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
+    assert _gemm(a, b).dtype == torch.float32
+
+
+# =================================================================
+# Determinism
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "M,K", [(1, 4096), (4, 4096), (5, 4096), (8, 4096), (16, 4096)]
+)
+def test_deterministic(M, K):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(128, K, dtype=torch.bfloat16, device="cuda")
+    torch.testing.assert_close(_gemm(a, b), _gemm(a, b), atol=0, rtol=0)
+
+
+# =================================================================
+# Cross-kernel consistency
+# =================================================================
+
+
+@pytest.mark.parametrize("K", [2048, 4096, 7168])
+def test_dotprod_vs_splitk(K):
+    """First 4 rows from split-K (M=5) match dot-product (M=4)."""
+    torch.manual_seed(42)
+    a = torch.randn(5, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
+    _assert_close(
+        _gemm(a, b)[:4], _gemm(a[:4], b),
+        min_cos_sim=0.999, context=f"cross-kernel K={K}",
+    )
+
+
+# =================================================================
+# CUDA graph
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "M,K", [(4, 2048), (8, 4096)], ids=["dotprod", "splitk"]
+)
+def test_cudagraph(M, K):
+    torch.manual_seed(42)
+    a = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, K, dtype=torch.bfloat16, device="cuda")
+    _gemm(a, b)
+    torch.cuda.synchronize()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = _gemm(a, b)
+    for _ in range(5):
+        g.replay()
+    torch.cuda.synchronize()
+    _assert_close(out, _ref(a, b), context=f"cudagraph M={M}")
+
+
+def test_cudagraph_20x_replay():
+    torch.manual_seed(42)
+    a = torch.randn(4, 4096, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(256, 4096, dtype=torch.bfloat16, device="cuda")
+    _gemm(a, b)
+    torch.cuda.synchronize()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = _gemm(a, b)
+    results = []
+    for _ in range(20):
+        g.replay()
+        torch.cuda.synchronize()
+        results.append(out.clone())
+    for i in range(1, len(results)):
+        torch.testing.assert_close(results[0], results[i], atol=0, rtol=0,
+                                   msg=f"Replay {i} differs")
+
+
+def test_cudagraph_input_update():
+    torch.manual_seed(42)
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
+    _gemm(a, b)
+    torch.cuda.synchronize()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = _gemm(a, b)
+    a.copy_(torch.randn_like(a))
+    g.replay()
+    torch.cuda.synchronize()
+    _assert_close(out, _ref(a, b), context="cudagraph input update")
+
+
+# =================================================================
+# Negative tests — invalid inputs
+# =================================================================
+
+
+@pytest.mark.parametrize(
+    "M,K,N,dtype",
+    [
+        pytest.param(4, 2048, 64, torch.float32, id="fp32_input"),
+        pytest.param(4, 2048, 64, torch.float16, id="fp16_input"),
+        pytest.param(8, 4096, 64, torch.float32, id="fp32_splitk_path"),
+    ],
+)
+def test_invalid_dtype(M, K, N, dtype):
+    a = torch.randn(M, K, device="cuda", dtype=dtype)
+    b = torch.randn(N, K, device="cuda", dtype=dtype)
+    with pytest.raises(ValueError, match="dtype=bfloat16"):
+        _gemm(a, b)
+
+
+def test_invalid_device_cpu():
+    a = torch.randn(4, 2048, dtype=torch.bfloat16)
+    b = torch.randn(64, 2048, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="device_type=cuda"):
+        _gemm(a, b)
+
+
+def test_invalid_shape_K_mismatch():
+    """K mismatch silently computes wrong results — verify output is wrong."""
+    torch.manual_seed(42)
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 4096, dtype=torch.bfloat16, device="cuda")
+    out = _gemm(a, b)
+    ref = torch.mm(a.float(), b[:, :2048].float().T)
+    cos = F.cosine_similarity(
+        out.reshape(-1).float(), ref.reshape(-1).float(), dim=0
+    ).item()
+    assert cos < 0.5, "K-mismatch should produce wrong results"
+
+
+def test_invalid_1d_input():
+    a = torch.randn(2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises((RuntimeError, ValueError, IndexError)):
+        _gemm(a, b)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

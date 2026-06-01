@@ -116,7 +116,7 @@ class GateLinear(ReplicatedLinear):
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 8:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,
