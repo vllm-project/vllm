@@ -777,35 +777,6 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),
 }
 
-_AUTOMATIC_CONVERTED_MODELS = {
-    # Use as_seq_cls_model for automatic conversion
-    "GemmaForSequenceClassification": _HfExamplesInfo(
-        "BAAI/bge-reranker-v2-gemma",
-        hf_overrides={
-            "architectures": ["GemmaForSequenceClassification"],
-            "classifier_from_token": ["Yes"],
-            "method": "no_post_processing",
-        },
-    ),
-    "LlamaForSequenceClassification": _HfExamplesInfo(
-        "Skywork/Skywork-Reward-V2-Llama-3.2-1B"
-    ),
-    "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),
-    "Qwen3ForSequenceClassification": _HfExamplesInfo(
-        "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
-    ),
-    "Qwen3ForTokenClassification": _HfExamplesInfo("bd2lcco/Qwen3-0.6B-finetuned"),
-    "Qwen3VLForSequenceClassification": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-Reranker-2B",
-        is_available_online=False,
-        hf_overrides={
-            "architectures": ["Qwen3VLForSequenceClassification"],
-            "classifier_from_token": ["no", "yes"],
-            "is_original_qwen3_reranker": True,
-        },
-    ),
-}
-
 _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
@@ -1730,4 +1701,3 @@ class HfExampleModels:
 
 
 HF_EXAMPLE_MODELS = HfExampleModels(_EXAMPLE_MODELS)
-AUTO_EXAMPLE_MODELS = HfExampleModels(_AUTOMATIC_CONVERTED_MODELS)
