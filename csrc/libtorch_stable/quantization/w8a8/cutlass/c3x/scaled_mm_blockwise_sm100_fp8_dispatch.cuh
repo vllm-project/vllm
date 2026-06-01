@@ -16,7 +16,7 @@
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
-#include "libtorch_stable/quantization/w8a8/cutlass/c3x/cutlass_gemm_caller.cuh"
+#include "cutlass_gemm_caller.cuh"
 
 namespace vllm {
 

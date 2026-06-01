@@ -1,4 +1,4 @@
-#include "libtorch_stable/quantization/gptq_allspark/allspark_utils.cuh"
+#include "allspark_utils.cuh"
 
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>

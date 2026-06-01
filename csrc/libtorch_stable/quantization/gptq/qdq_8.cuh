@@ -5,7 +5,7 @@ Copied from https://github.com/turboderp/exllamav2
 #ifndef _qdq_8_cuh
 #define _qdq_8_cuh
 
-#include "libtorch_stable/quantization/gptq/qdq_util.cuh"
+#include "qdq_util.cuh"
 
 namespace vllm {
 namespace gptq {

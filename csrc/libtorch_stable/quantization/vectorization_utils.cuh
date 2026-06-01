@@ -1,5 +1,5 @@
 #pragma once
-#include "libtorch_stable/quantization/vectorization.cuh"
+#include "vectorization.cuh"
 
 namespace vllm {
 

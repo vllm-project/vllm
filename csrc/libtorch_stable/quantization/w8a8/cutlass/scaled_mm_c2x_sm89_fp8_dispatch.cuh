@@ -2,7 +2,7 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
-#include "libtorch_stable/quantization/w8a8/cutlass/scaled_mm_c2x.cuh"
+#include "scaled_mm_c2x.cuh"
 #include "cutlass/float8.h"
 
 /**

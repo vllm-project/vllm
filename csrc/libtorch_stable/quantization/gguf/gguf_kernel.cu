@@ -2,18 +2,18 @@
 #include <cuda_runtime.h>
 
 #include "../../../cuda_compat.h"
-#include "libtorch_stable/dispatch_utils.h"
-#include "libtorch_stable/torch_utils.h"
+#include "../../dispatch_utils.h"
+#include "../../torch_utils.h"
 
 #include <torch/csrc/stable/ops.h>
 
-#include "libtorch_stable/quantization/gguf/ggml-common.h"
-#include "libtorch_stable/quantization/gguf/vecdotq.cuh"
-#include "libtorch_stable/quantization/gguf/dequantize.cuh"
-#include "libtorch_stable/quantization/gguf/mmvq.cuh"
-#include "libtorch_stable/quantization/gguf/mmq.cuh"
-#include "libtorch_stable/quantization/gguf/moe.cuh"
-#include "libtorch_stable/quantization/gguf/moe_vec.cuh"
+#include "ggml-common.h"
+#include "vecdotq.cuh"
+#include "dequantize.cuh"
+#include "mmvq.cuh"
+#include "mmq.cuh"
+#include "moe.cuh"
+#include "moe_vec.cuh"
 
 // Q8 gemv
 template <typename scalar_t>

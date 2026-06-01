@@ -1,8 +1,8 @@
 #include "../../../../quantization/w8a8/fp8/common.cuh"
-#include "libtorch_stable/dispatch_utils.h"
+#include "../../../dispatch_utils.h"
 #include "../../../../cub_helpers.h"
-#include "libtorch_stable/quantization/vectorization_utils.cuh"
-#include "libtorch_stable/torch_utils.h"
+#include "../../vectorization_utils.cuh"
+#include "../../../torch_utils.h"
 #include <torch/csrc/stable/macros.h>
 namespace vllm {
 

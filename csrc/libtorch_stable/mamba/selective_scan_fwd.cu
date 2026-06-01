@@ -1,8 +1,8 @@
 // clang-format off
 // adapted from https://github.com/state-spaces/mamba/blob/main/csrc/selective_scan/selective_scan_fwd_kernel.cuh
-#include "libtorch_stable/torch_utils.h"
+#include "../torch_utils.h"
 #include <torch/csrc/stable/macros.h>
-#include "libtorch_stable/mamba/selective_scan.h"
+#include "selective_scan.h"
 
 #ifndef USE_ROCM
     #include <cub/block/block_load.cuh>
@@ -13,8 +13,8 @@
     namespace cub = hipcub;
 #endif
 
-#include "libtorch_stable/mamba/selective_scan.h"
-#include "libtorch_stable/mamba/static_switch.h"
+#include "selective_scan.h"
+#include "static_switch.h"
 
 template<int kNThreads_, int kNItems_, int kNRows_, bool kIsEvenLen_,
          bool kIsVariableB_, bool kIsVariableC_,

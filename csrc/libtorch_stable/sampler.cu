@@ -1,6 +1,6 @@
 #include "../cuda_compat.h"
-#include "libtorch_stable/dispatch_utils.h"
-#include "libtorch_stable/torch_utils.h"
+#include "dispatch_utils.h"
+#include "torch_utils.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>

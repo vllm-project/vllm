@@ -1,7 +1,7 @@
-#include "libtorch_stable/torch_utils.h"
+#include "torch_utils.h"
 
 #include "../cuda_compat.h"
-#include "libtorch_stable/dispatch_utils.h"
+#include "dispatch_utils.h"
 
 namespace vllm {
 

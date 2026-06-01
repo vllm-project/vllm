@@ -1,9 +1,9 @@
 
-#include "libtorch_stable/torch_utils.h"
+#include "../../torch_utils.h"
 
-#include "libtorch_stable/dispatch_utils.h"
-#include "libtorch_stable/quantization/fused_kernels/layernorm_utils.cuh"
-#include "libtorch_stable/quantization/fused_kernels/quant_conversions.cuh"
+#include "../../dispatch_utils.h"
+#include "layernorm_utils.cuh"
+#include "quant_conversions.cuh"
 
 namespace vllm {
 

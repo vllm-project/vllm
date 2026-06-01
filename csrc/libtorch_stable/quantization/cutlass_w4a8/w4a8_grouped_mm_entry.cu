@@ -20,9 +20,9 @@
 #include "cutlass_extensions/torch_utils.hpp"
 #include "cutlass_extensions/common.hpp"
 
-#include "libtorch_stable/quantization/cutlass_w4a8/get_group_starts.cuh"
+#include "get_group_starts.cuh"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
-#include "libtorch_stable/quantization/cutlass_w4a8/w4a8_utils.cuh"
+#include "w4a8_utils.cuh"
 
 namespace vllm::cutlass_w4a8_moe {
 

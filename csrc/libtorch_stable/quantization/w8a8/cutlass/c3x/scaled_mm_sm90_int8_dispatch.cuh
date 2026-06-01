@@ -2,8 +2,8 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
-#include "libtorch_stable/quantization/w8a8/cutlass/c3x/scaled_mm.cuh"
-#include "libtorch_stable/quantization/w8a8/cutlass/c3x/cutlass_gemm_caller.cuh"
+#include "scaled_mm.cuh"
+#include "cutlass_gemm_caller.cuh"
 
 /**
  * This file defines Gemm kernel configurations for SM90 (int8) based on the

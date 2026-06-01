@@ -6,7 +6,7 @@
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "quantization/utils.cuh"
-#include "libtorch_stable/quantization/fused_kernels/quant_conversions.cuh"
+#include "quant_conversions.cuh"
 
 #include "../../../cub_helpers.h"
 #include "../../../cuda_compat.h"

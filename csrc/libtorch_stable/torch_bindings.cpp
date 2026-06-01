@@ -1,4 +1,4 @@
-#include "libtorch_stable/ops.h"
+#include "ops.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/library.h>

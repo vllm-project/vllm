@@ -18,12 +18,12 @@
 #include <cuda_runtime.h>
 #include <type_traits>
 
-#include "libtorch_stable/torch_utils.h"
+#include "torch_utils.h"
 
-#include "libtorch_stable/async_util.cuh"
+#include "async_util.cuh"
 #include "../cuda_compat.h"
 #include "../type_convert.cuh"
-#include "libtorch_stable/dispatch_utils.h"
+#include "dispatch_utils.h"
 
 #define CHECK_TYPE(x, st)                                                  \
   STD_TORCH_CHECK(x.scalar_type() == st, #x " dtype is ", x.scalar_type(), \

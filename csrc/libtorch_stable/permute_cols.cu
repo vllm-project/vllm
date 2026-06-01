@@ -6,7 +6,7 @@
 
 #include <cuda_fp16.h>
 
-#include "libtorch_stable/torch_utils.h"
+#include "torch_utils.h"
 
 static constexpr int default_threads = 256;
 static constexpr int div_ceil(int a, int b) { return (a + b - 1) / b; }
