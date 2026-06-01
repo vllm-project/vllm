@@ -204,60 +204,347 @@ class OMPProcessManager:
         logical_cpu_list = cr_utils.get_allowed_cpu_list()
 
         local_world_size = self.local_world_size
-        assert (
-            len(allowed_numa_nodes) >= local_world_size or self.simulate_multi_node
-        ), (
-            f"Not enough allowed NUMA nodes to bind threads of "
-            f"{local_world_size} local CPUWorkers. "
-            f"Allowed NUMA nodes are {allowed_numa_nodes}. "
-            "Please try to bind threads manually or decrease DP/TP/PP."
+
+        # Detect if we need drawer/book/socket-aware binding
+        # s390x hierarchy: drawer > book > socket > core
+        cpu_arch = current_platform.get_cpu_architecture()
+        use_drawer_aware_binding = False
+        use_book_aware_binding = False
+        use_socket_aware_binding = False
+        num_topology_domains = len(allowed_numa_nodes)
+
+        if cpu_arch == CpuArchEnum.S390X:
+            # Priority 1: Check for multiple drawers
+            drawers_per_numa: dict[int, set[int]] = {}
+            for cpu in logical_cpu_list:
+                if cpu.drawer >= 0:
+                    key = cpu.numa_node
+                    if key not in drawers_per_numa:
+                        drawers_per_numa[key] = set()
+                    drawers_per_numa[key].add(cpu.drawer)
+            use_drawer_aware_binding = any(
+                len(drawers) > 1 for drawers in drawers_per_numa.values()
+            )
+
+            if use_drawer_aware_binding:
+                # Use drawer-level binding (highest isolation)
+                num_topology_domains = len(
+                    set(
+                        (cpu.numa_node, cpu.drawer)
+                        for cpu in logical_cpu_list
+                        if cpu.drawer >= 0
+                    )
+                )
+            else:
+                # Priority 2: Check for multiple books per NUMA node
+                books_per_numa: dict[int, set[int]] = {}
+                for cpu in logical_cpu_list:
+                    if cpu.book >= 0:
+                        key = cpu.numa_node
+                        if key not in books_per_numa:
+                            books_per_numa[key] = set()
+                        books_per_numa[key].add(cpu.book)
+                use_book_aware_binding = any(
+                    len(books) > 1 for books in books_per_numa.values()
+                )
+                if use_book_aware_binding:
+                    # Use book-level binding
+                    num_topology_domains = len(
+                        set(
+                            (cpu.numa_node, cpu.book)
+                            for cpu in logical_cpu_list
+                            if cpu.book >= 0
+                        )
+                    )
+
+        if not (use_drawer_aware_binding or use_book_aware_binding):
+            # For other architectures, check for multiple sockets per NUMA
+            sockets_per_numa: dict[int, set[int]] = {}
+            for cpu in logical_cpu_list:
+                if cpu.socket >= 0:
+                    key = cpu.numa_node
+                    if key not in sockets_per_numa:
+                        sockets_per_numa[key] = set()
+                    sockets_per_numa[key].add(cpu.socket)
+            use_socket_aware_binding = any(
+                len(sockets) > 1 for sockets in sockets_per_numa.values()
+            )
+            if use_socket_aware_binding:
+                # Count unique (numa_node, socket) pairs as topology domains
+                num_topology_domains = len(
+                    set(
+                        (cpu.numa_node, cpu.socket)
+                        for cpu in logical_cpu_list
+                        if cpu.socket >= 0
+                    )
+                )
+
+        # Now check if we have enough topology domains for binding
+        # Note: s390x allows flexible TP to support varying requirements
+        # Other architectures require strict TP <= topology domains
+        drawers_info = (
+            f", drawers={drawers_per_numa}" if use_drawer_aware_binding else ""
         )
+        books_info = f", books={books_per_numa}" if use_book_aware_binding else ""
+        sockets_info = (
+            f", sockets={sockets_per_numa}" if use_socket_aware_binding else ""
+        )
+
+        if not self.simulate_multi_node and num_topology_domains < local_world_size:
+            if cpu_arch == CpuArchEnum.S390X and (
+                use_drawer_aware_binding or use_book_aware_binding
+            ):
+                # s390x: Allow TP > topology domains with round-robin, just warn
+                topology_level = "drawers" if use_drawer_aware_binding else "books"
+                logger.warning(
+                    "tensor_parallel_size=%d exceeds available %s (%d). "
+                    "Workers will be distributed across %s which may cause "
+                    "performance degradation due to shared resources. "
+                    "Topology: NUMA nodes=%s%s%s",
+                    local_world_size,
+                    topology_level,
+                    num_topology_domains,
+                    topology_level,
+                    allowed_numa_nodes,
+                    drawers_info,
+                    books_info,
+                )
+            else:
+                # Other architectures: Strict requirement
+                raise AssertionError(
+                    f"Not enough topology domains to bind {local_world_size} workers. "
+                    f"Found {num_topology_domains} domain(s): "
+                    f"NUMA nodes={allowed_numa_nodes}"
+                    f"{drawers_info}"
+                    f"{books_info}"
+                    f"{sockets_info}. "
+                    f"Please try to bind threads manually or set "
+                    f"tensor_parallel_size={num_topology_domains}."
+                )
 
         # Generate OMP CPU list for each rank
         cpu_lists_of_ranks = []
         reserved_cpu_list = []
         total_cpu_num = 0
-        for local_rank in range(self.local_world_size):
-            if not self.simulate_multi_node:
-                selected_numa_node = allowed_numa_nodes[local_rank]
-                selected_logical_cpu_list = [
-                    x for x in logical_cpu_list if x.numa_node == selected_numa_node
-                ]
-            else:
-                world_size_across_dp = self.local_world_size * self.internal_dp_size
-                assert len(logical_cpu_list) >= world_size_across_dp
-                selected_logical_cpu_list = sorted(
-                    logical_cpu_list, key=lambda x: x.numa_node
-                )
-                sim_cpu_num_per_node = (
-                    len(selected_logical_cpu_list) // world_size_across_dp
-                )
-                assert self.local_dp_rank is not None
-                start_idx = (
-                    local_rank + self.local_world_size * self.local_dp_rank
-                ) * sim_cpu_num_per_node
-                selected_logical_cpu_list = selected_logical_cpu_list[
-                    start_idx : (start_idx + sim_cpu_num_per_node)
-                ]
 
-            # Select logical CPUs on same physical cores via cpu_selector
-            core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
-            for cpu_info in selected_logical_cpu_list:
-                if cpu_info.physical_core not in core_to_cpus:
-                    core_to_cpus[cpu_info.physical_core] = []
-                core_to_cpus[cpu_info.physical_core].append(cpu_info)
-            selected_logical_cpu_list = []
-            for cpu_list in core_to_cpus.values():
-                cpu_list = sorted(cpu_list, key=lambda x: x.id)
-                selected_logical_cpu_list.extend(cpu_selector(cpu_list))
-
-            # sort selected cores based on core id
-            selected_logical_cpu_list = sorted(
-                selected_logical_cpu_list, key=lambda x: x.id
+        if use_drawer_aware_binding:
+            # Group CPUs by (NUMA node, drawer) for maximum isolation
+            numa_drawer_pairs = sorted(
+                set(
+                    (cpu.numa_node, cpu.drawer)
+                    for cpu in logical_cpu_list
+                    if cpu.drawer >= 0
+                )
             )
 
-            cpu_lists_of_ranks.append(selected_logical_cpu_list)
-            total_cpu_num += len(selected_logical_cpu_list)
+            logger.info(
+                "Detected %d drawer(s) across %d NUMA node(s) - "
+                "using drawer-aware binding for maximum isolation",
+                len(numa_drawer_pairs),
+                len(allowed_numa_nodes),
+            )
+
+            # Warn if TP size doesn't match optimal topology (s390x specific)
+            if (
+                local_world_size < len(numa_drawer_pairs)
+                and not self.simulate_multi_node
+            ):
+                logger.warning(
+                    "tensor_parallel_size=%d is less than "
+                    "the number of drawers (%d). "
+                    "Some drawers will be unused. For optimal utilization, "
+                    "consider setting tensor_parallel_size=%d.",
+                    local_world_size,
+                    len(numa_drawer_pairs),
+                    len(numa_drawer_pairs),
+                )
+
+            for local_rank in range(self.local_world_size):
+                # s390x specific: Use round-robin distribution if TP > num_drawers
+                drawer_index = local_rank % len(numa_drawer_pairs)
+                selected_numa, selected_drawer = numa_drawer_pairs[drawer_index]
+                selected_logical_cpu_list = [
+                    x
+                    for x in logical_cpu_list
+                    if x.numa_node == selected_numa and x.drawer == selected_drawer
+                ]
+
+                # Select logical CPUs on same physical cores via cpu_selector
+                core_to_cpus_drawer: dict[int, list[LogicalCPUInfo]] = {}
+                for cpu_info in selected_logical_cpu_list:
+                    if cpu_info.physical_core not in core_to_cpus_drawer:
+                        core_to_cpus_drawer[cpu_info.physical_core] = []
+                    core_to_cpus_drawer[cpu_info.physical_core].append(cpu_info)
+                selected_logical_cpu_list = []
+                for cpu_list in core_to_cpus_drawer.values():
+                    cpu_list = sorted(cpu_list, key=lambda x: x.id)
+                    selected_logical_cpu_list.extend(cpu_selector(cpu_list))
+
+                selected_logical_cpu_list = sorted(
+                    selected_logical_cpu_list, key=lambda x: x.id
+                )
+                cpu_lists_of_ranks.append(selected_logical_cpu_list)
+                total_cpu_num += len(selected_logical_cpu_list)
+
+        elif use_book_aware_binding:
+            # Group CPUs by (NUMA node, book) instead of just NUMA node
+            # Collect unique (numa_node, book) pairs
+            numa_book_pairs = sorted(
+                set(
+                    (cpu.numa_node, cpu.book)
+                    for cpu in logical_cpu_list
+                    if cpu.book >= 0
+                )
+            )
+
+            logger.info(
+                "Detected %d book(s) across %d NUMA node(s) - "
+                "using book-aware binding for optimal data locality",
+                len(numa_book_pairs),
+                len(allowed_numa_nodes),
+            )
+
+            # Warn if TP size doesn't match optimal topology (s390x specific)
+            if local_world_size < len(numa_book_pairs) and not self.simulate_multi_node:
+                logger.warning(
+                    "tensor_parallel_size=%d is less than "
+                    "the number of books (%d). "
+                    "Some books will be unused. For optimal utilization, "
+                    "consider setting tensor_parallel_size=%d.",
+                    local_world_size,
+                    len(numa_book_pairs),
+                    len(numa_book_pairs),
+                )
+            for local_rank in range(self.local_world_size):
+                # s390x specific: Use round-robin distribution if TP > num_books
+                # to support flexible memory configurations
+                book_index = local_rank % len(numa_book_pairs)
+                selected_numa, selected_book = numa_book_pairs[book_index]
+                selected_logical_cpu_list = [
+                    x
+                    for x in logical_cpu_list
+                    if x.numa_node == selected_numa and x.book == selected_book
+                ]
+
+                # Select logical CPUs on same physical cores via cpu_selector
+                core_to_cpus_book: dict[int, list[LogicalCPUInfo]] = {}
+                for cpu_info in selected_logical_cpu_list:
+                    if cpu_info.physical_core not in core_to_cpus_book:
+                        core_to_cpus_book[cpu_info.physical_core] = []
+                    core_to_cpus_book[cpu_info.physical_core].append(cpu_info)
+                selected_logical_cpu_list = []
+                for cpu_list in core_to_cpus_book.values():
+                    cpu_list = sorted(cpu_list, key=lambda x: x.id)
+                    selected_logical_cpu_list.extend(cpu_selector(cpu_list))
+
+                selected_logical_cpu_list = sorted(
+                    selected_logical_cpu_list, key=lambda x: x.id
+                )
+                cpu_lists_of_ranks.append(selected_logical_cpu_list)
+                total_cpu_num += len(selected_logical_cpu_list)
+
+        elif use_socket_aware_binding:
+            # Group CPUs by (NUMA node, socket) instead of just NUMA node
+            # Collect unique (numa_node, socket) pairs
+            numa_socket_pairs = sorted(
+                set(
+                    (cpu.numa_node, cpu.socket)
+                    for cpu in logical_cpu_list
+                    if cpu.socket >= 0
+                )
+            )
+
+            logger.info(
+                "Detected %d socket(s) across %d NUMA node(s) - "
+                "using socket-aware binding for optimal data locality",
+                len(numa_socket_pairs),
+                len(allowed_numa_nodes),
+            )
+
+            # Warn if TP size doesn't match optimal topology
+            if (
+                local_world_size < len(numa_socket_pairs)
+                and not self.simulate_multi_node
+            ):
+                logger.warning(
+                    "tensor_parallel_size=%d is less than "
+                    "the number of sockets (%d). "
+                    "Some sockets will be unused.",
+                    local_world_size,
+                    len(numa_socket_pairs),
+                )
+            # Note: TP > sockets case would be caught by assertion above
+
+            for local_rank in range(self.local_world_size):
+                # Use round-robin distribution for simulation mode
+                socket_index = local_rank % len(numa_socket_pairs)
+                selected_numa, selected_socket = numa_socket_pairs[socket_index]
+                selected_logical_cpu_list = [
+                    x
+                    for x in logical_cpu_list
+                    if x.numa_node == selected_numa and x.socket == selected_socket
+                ]
+
+                # Select logical CPUs on same physical cores via cpu_selector
+                core_to_cpus_socket: dict[int, list[LogicalCPUInfo]] = {}
+                for cpu_info in selected_logical_cpu_list:
+                    if cpu_info.physical_core not in core_to_cpus_socket:
+                        core_to_cpus_socket[cpu_info.physical_core] = []
+                    core_to_cpus_socket[cpu_info.physical_core].append(cpu_info)
+                selected_logical_cpu_list = []
+                for cpu_list in core_to_cpus_socket.values():
+                    cpu_list = sorted(cpu_list, key=lambda x: x.id)
+                    selected_logical_cpu_list.extend(cpu_selector(cpu_list))
+
+                selected_logical_cpu_list = sorted(
+                    selected_logical_cpu_list, key=lambda x: x.id
+                )
+                cpu_lists_of_ranks.append(selected_logical_cpu_list)
+                total_cpu_num += len(selected_logical_cpu_list)
+
+        else:
+            # Original NUMA-only binding for systems without book/socket complexity
+            for local_rank in range(self.local_world_size):
+                if not self.simulate_multi_node:
+                    selected_numa_node = allowed_numa_nodes[local_rank]
+                    selected_logical_cpu_list = [
+                        x for x in logical_cpu_list if x.numa_node == selected_numa_node
+                    ]
+                else:
+                    world_size_across_dp = self.local_world_size * self.internal_dp_size
+                    assert len(logical_cpu_list) >= world_size_across_dp
+                    selected_logical_cpu_list = sorted(
+                        logical_cpu_list, key=lambda x: x.numa_node
+                    )
+                    sim_cpu_num_per_node = (
+                        len(selected_logical_cpu_list) // world_size_across_dp
+                    )
+                    assert self.local_dp_rank is not None
+                    start_idx = (
+                        local_rank + self.local_world_size * self.local_dp_rank
+                    ) * sim_cpu_num_per_node
+                    selected_logical_cpu_list = selected_logical_cpu_list[
+                        start_idx : (start_idx + sim_cpu_num_per_node)
+                    ]
+
+                # Select logical CPUs on same physical cores via cpu_selector
+                core_to_cpus: dict[int, list[LogicalCPUInfo]] = {}
+                for cpu_info in selected_logical_cpu_list:
+                    if cpu_info.physical_core not in core_to_cpus:
+                        core_to_cpus[cpu_info.physical_core] = []
+                    core_to_cpus[cpu_info.physical_core].append(cpu_info)
+                selected_logical_cpu_list = []
+                for cpu_list in core_to_cpus.values():
+                    cpu_list = sorted(cpu_list, key=lambda x: x.id)
+                    selected_logical_cpu_list.extend(cpu_selector(cpu_list))
+
+                # sort selected cores based on core id
+                selected_logical_cpu_list = sorted(
+                    selected_logical_cpu_list, key=lambda x: x.id
+                )
+
+                cpu_lists_of_ranks.append(selected_logical_cpu_list)
+                total_cpu_num += len(selected_logical_cpu_list)
 
         # Reserve CPUs for other processes
         if total_cpu_num <= self.reserve_cpu_num:
