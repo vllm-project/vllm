@@ -385,6 +385,11 @@ class IterationStats:
             req_stats.is_corrupted = True
 
         if envs.VLLM_DEBUG_MLA_CACHE and output.kv_cache_nans_per_layer:
+            # Here we're trying to figure out which:
+            #  - phase (prefill/decode)
+            #  - layer
+            #  - rank (done implicitly by prometheus)
+            # introduced the first NaN into the KV$.
             phase = "prefill" if is_prefilling else "decode"
             ts = output.kv_cache_nan_timestamp
             for layer, count in output.kv_cache_nans_per_layer.items():
