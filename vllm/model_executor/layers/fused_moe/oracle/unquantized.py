@@ -144,6 +144,32 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
     )
 
 
+def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
+    """Gate for routing LoRA-enabled BF16 MoE to the FlashInfer TRT-LLM
+    gemm1_lora_delta path (PR #3153). Conservative: device + routing method;
+    the experts class's own _supports_* checks and the modular_kernel LoRA
+    gate provide the final filtering.
+
+    NOTE: MXFP8 / MXINT4 LoRA variants exist in trtllm_lora_moe.py but are
+    selected by their quantized-MoE methods, not here.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmBf16LoRAExperts,
+    )
+
+    if not TrtLlmBf16LoRAExperts._supports_current_device():
+        return False
+    if not TrtLlmBf16LoRAExperts._supports_routing_method(
+        moe_config.routing_method, None, None
+    ):
+        return False
+    if not TrtLlmBf16LoRAExperts._supports_parallel_config(
+        moe_config.moe_parallel_config
+    ):
+        return False
+    return True
+
+
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
@@ -163,6 +189,20 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     if moe_config.is_lora_enabled:
+        # Opt-in: only when the user explicitly requests the FlashInfer TRT-LLM
+        # backend AND the gemm1_lora_delta path is usable (Blackwell + supported
+        # routing) do we route LoRA through it. Otherwise (auto, or any other
+        # explicit backend) keep the always-available Triton LoRA path. This
+        # preserves the historical "LoRA -> Triton" default and respects an
+        # explicit non-trtllm choice.
+        if moe_config.moe_backend == "flashinfer_trtllm" and _trtllm_bf16_lora_supported(
+            moe_config
+        ):
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+                TrtLlmBf16LoRAExperts,
+            )
+
+            return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
         return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
             UnquantizedMoeBackend.TRITON
         )

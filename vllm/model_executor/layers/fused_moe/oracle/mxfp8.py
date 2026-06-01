@@ -38,8 +38,25 @@ def _select_kernel_cls(
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
+    # Opt-in: only when the user explicitly requests the FlashInfer TRT-LLM
+    # backend do we offer the LoRA-aware MXFP8 experts (gemm1_lora_delta path,
+    # PR #3153). Under "auto", LoRA + MXFP8 keeps its historical fallback
+    # (the non-LoRA trtllm candidates are rejected by the LoRA gate, so
+    # auto-selection moves on to the next backend, e.g. Marlin).
+    candidates = list(backend_to_kernel_cls(backend))
+    if (
+        config.is_lora_enabled
+        and backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        and config.moe_backend == "flashinfer_trtllm"
+    ):
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+            TrtLlmMxfp8LoRAExperts,
+        )
+
+        candidates = [TrtLlmMxfp8LoRAExperts, *candidates]
+
     last_reason: str | None = None
-    for cls in backend_to_kernel_cls(backend):
+    for cls in candidates:
         supported, reason = cls.is_supported_config(
             cls,
             config,
