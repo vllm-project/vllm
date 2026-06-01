@@ -17,7 +17,7 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "cuda_vec_utils.cuh"
+#include "../../cuda_vec_utils.cuh"
 
 #include <cuda_runtime_api.h>
 #include <cuda_runtime.h>
