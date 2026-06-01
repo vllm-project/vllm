@@ -92,6 +92,17 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+def _convert_to_scalar_descale(descale: torch.Tensor | None) -> torch.Tensor | None:
+    if descale is None:
+        return None
+    if descale.numel() == 1 and sum(descale.stride()) == 0:
+        return descale
+    # Take the first element (this is a view, not a copy)
+    # Since the tensor is expanded from a scalar, all elements are the same
+    first_elem = descale.reshape(-1)[0:1]
+    return first_elem.as_strided((1,), (0,))
+
+
 def _gdn_attention_core_xpu_impl(
     core_attn_out: torch.Tensor,
     z: torch.Tensor,
@@ -488,6 +499,10 @@ class xpu_ops:
         else:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])  # noqa: F841
+        # Convert expanded descale tensors to scalar views for XPU kernel compatibility
+        k_descale = _convert_to_scalar_descale(k_descale)
+        v_descale = _convert_to_scalar_descale(v_descale)
+
 
         return flash_attn_varlen_func(
             out=out,
