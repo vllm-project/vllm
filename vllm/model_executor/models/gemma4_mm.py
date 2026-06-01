@@ -72,6 +72,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -926,6 +927,7 @@ class Gemma4MultimodalEmbedder(nn.Module):
 class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsQuant,
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
@@ -945,11 +947,14 @@ class Gemma4ForConditionalGeneration(
     # Maps checkpoint prefixes to vLLM module paths.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.embed_audio.": "embed_audio.",
-            "model.embed_vision.": "embed_vision.",
-            "model.language_model.": "language_model.model.",
-            "model.vision_tower.": "vision_tower.",
+            # vision tower
+            "model.vision_tower": "vision_tower",
+            "model.embed_vision": "embed_vision",
+            # audio tower
             "model.audio_tower.": "audio_tower.",
+            "model.embed_audio.": "embed_audio.",
+            # backbone
+            "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
         }
