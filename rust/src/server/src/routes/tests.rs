@@ -27,9 +27,10 @@ use vllm_chat::{
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
+use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
-    UtilityOutput, UtilityResultEnvelope, decode_value,
+    decode_value,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{
@@ -369,10 +370,10 @@ fn utility_none_result() -> UtilityResultEnvelope {
     UtilityResultEnvelope::without_type_info(Value::Nil)
 }
 
-fn utility_outputs(call_id: i64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
+fn utility_outputs(call_id: u64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
     EngineCoreOutputs {
         utility_output: Some(UtilityOutput {
-            call_id,
+            call_id: call_id.into(),
             failure_message: None,
             result: Some(result),
         }),
@@ -991,6 +992,27 @@ async fn list_models_returns_configured_model() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn version_returns_engine_vllm_version() {
+    let mut app = test_app().await;
+    let response = app
+        .call(Request::builder().uri("/version").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(
+        json,
+        json!({
+            "version": "test-vllm-version",
+            "rust_frontend_version": env!("CARGO_PKG_VERSION"),
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2989,7 +3011,7 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("reset_prefix_cache"));
             assert_eq!(
@@ -3031,7 +3053,7 @@ async fn reset_mm_cache_route_sends_expected_utility_call() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("reset_mm_cache"));
             assert_eq!(array[3], Value::Array(Vec::new()));
@@ -3070,7 +3092,7 @@ async fn reset_encoder_cache_route_sends_expected_utility_call() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("reset_encoder_cache"));
             assert_eq!(array[3], Value::Array(Vec::new()));
@@ -3109,7 +3131,7 @@ async fn collective_rpc_route_sends_expected_utility_call_and_returns_results() 
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("collective_rpc"));
             assert_eq!(
@@ -3194,7 +3216,7 @@ async fn sleep_route_uses_python_compatible_default_query_values() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("sleep"));
             assert_eq!(
@@ -3236,7 +3258,7 @@ async fn wake_up_route_without_tags_sends_none() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("wake_up"));
             assert_eq!(array[3], Value::Array(vec![Value::Nil]));
@@ -3275,7 +3297,7 @@ async fn is_sleeping_route_returns_json_payload() {
 
             let payload = decode_value(&utility[1]).expect("decode utility payload");
             let array = payload.as_array().expect("utility payload array");
-            let call_id = array[1].as_i64().expect("call id");
+            let call_id = array[1].as_u64().expect("call id");
 
             assert_eq!(array[2], Value::from("is_sleeping"));
             assert_eq!(array[3], Value::Array(Vec::new()));
