@@ -583,44 +583,93 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # the last matched block.
             sliding_window_contiguous_blocks += 1
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        num_contiguous_blocks = 0
         match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
+
+        # Strided probe + expand: probe every sliding_window_contiguous_blocks-th
+        # position right-to-left. Any valid window of
+        # sliding_window_contiguous_blocks consecutive cached blocks must contain
+        # at least one position that falls on a stride boundary, so we only need
+        # O(max_num_blocks / sliding_window_contiguous_blocks) probes. On a hit,
+        # expand O(sliding_window_contiguous_blocks) to find the full run.
+        # This optimizes time complexity from O(max_num_blocks) to
+        # O(max_num_blocks / sliding_window_contiguous_blocks +
+        # sliding_window_contiguous_blocks),
+        probe = max_num_blocks - 1
+        stride = max(sliding_window_contiguous_blocks, 1)
+        while probe >= 0 and not match_found:
+            if not block_pool.get_cached_block(block_hashes[probe], kv_cache_group_ids):
+                probe -= stride
+                continue
+
+            run_start = probe
+            run_end = probe
+
+            while (
+                run_end + 1 < max_num_blocks
+                and run_end - probe < sliding_window_contiguous_blocks - 1
+                and block_pool.get_cached_block(
+                    block_hashes[run_end + 1], kv_cache_group_ids
+                )
             ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
-                if num_contiguous_blocks == 0 and block_size != alignment_tokens:
-                    post_pop_blocks = i if use_eagle else i + 1
-                    if (post_pop_blocks * block_size) % alignment_tokens != 0:
+                run_end += 1
+
+            while (
+                run_start - 1 >= 0
+                and probe - run_start < sliding_window_contiguous_blocks - 1
+                and block_pool.get_cached_block(
+                    block_hashes[run_start - 1], kv_cache_group_ids
+                )
+            ):
+                run_start -= 1
+
+            run_length = run_end - run_start + 1
+
+            if run_length >= sliding_window_contiguous_blocks:
+                window_end = run_end
+                if block_size != alignment_tokens:
+                    while (
+                        window_end >= run_start + sliding_window_contiguous_blocks - 1
+                    ):
+                        post_pop = window_end if use_eagle else window_end + 1
+                        if (post_pop * block_size) % alignment_tokens == 0:
+                            break
+                        window_end -= 1
+                    else:
+                        probe = run_start - stride
                         continue
-                # Add the cached block to the computed blocks.
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed[i] = cached
-                num_contiguous_blocks += 1
-                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks :]
-                    match_found = True
-                    break
+
+                window_start = window_end - sliding_window_contiguous_blocks + 1
+                for i in range(window_start, window_end + 1):
+                    cached_block = block_pool.get_cached_block(
+                        block_hashes[i], kv_cache_group_ids
+                    )
+                    if cached_block:
+                        for computed, cached in zip(computed_blocks, cached_block):
+                            computed[i] = cached
+
+                for computed in computed_blocks:
+                    del computed[window_end + 1 :]
+                match_found = True
             else:
-                num_contiguous_blocks = 0
+                probe = run_start - stride
+
+        if not match_found:
+            num_contiguous_blocks = 0
+            for i in range(min(max_num_blocks, sliding_window_contiguous_blocks)):
+                if cached_block := block_pool.get_cached_block(
+                    block_hashes[i], kv_cache_group_ids
+                ):
+                    for computed, cached in zip(computed_blocks, cached_block):
+                        computed[i] = cached
+                    num_contiguous_blocks = i + 1
+                else:
+                    break
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
