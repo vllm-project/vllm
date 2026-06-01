@@ -179,9 +179,6 @@ class TrtLlmNvFp4ExpertsBase:
             300000, _calc_max_supported_tokens(self.topk, self.moe_config.num_experts)
         )
 
-    def supports_expert_map(self) -> bool:
-        return False
-
 
 class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular):
     """
