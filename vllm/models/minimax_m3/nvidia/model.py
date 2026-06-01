@@ -89,6 +89,21 @@ def _is_moe_layer(config: PretrainedConfig, layer_id: int) -> bool:
     return moe_layer_freq[layer_id] != 0
 
 
+def _fi_gemma_rmsnorm(
+    norm: GemmaRMSNorm,
+    x: torch.Tensor,
+    residual: torch.Tensor | None = None,
+):
+    from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
+
+    # TODO: enable PDL for rmsnorm.
+    if residual is None:
+        return gemma_rmsnorm(x, norm.weight, norm.variance_epsilon)
+
+    gemma_fused_add_rmsnorm(x, residual, norm.weight, norm.variance_epsilon)
+    return x, residual
+
+
 class MiniMaxM3MLP(nn.Module):
     """Dense SwiGLU-OAI MLP (used by the leading dense layers)."""
 
@@ -307,9 +322,9 @@ class MiniMaxM3Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
         q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        q = self.q_norm(q_by_head).view(q.shape)
+        q = _fi_gemma_rmsnorm(self.q_norm, q_by_head).view(q.shape)
         k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        k = self.k_norm(k_by_head).view(k.shape)
+        k = _fi_gemma_rmsnorm(self.k_norm, k_by_head).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -514,21 +529,24 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
-        q = self.q_norm(q.view(*q.shape[:-1], self.num_heads, self.head_dim)).view(
-            q.shape
-        )
-        k = self.k_norm(k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)).view(
-            k.shape
-        )
+        q = _fi_gemma_rmsnorm(
+            self.q_norm, q.view(*q.shape[:-1], self.num_heads, self.head_dim)
+        ).view(q.shape)
+        k = _fi_gemma_rmsnorm(
+            self.k_norm, k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
+        ).view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
 
         # Lightning-indexer branch: project, per-head norm, RoPE.
         index_q, _ = self.index_q_proj(hidden_states)
         index_k, _ = self.index_k_proj(hidden_states)
-        index_q = self.index_q_norm(
-            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim)
+        index_q = _fi_gemma_rmsnorm(
+            self.index_q_norm,
+            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim),
         ).view(index_q.shape)
-        index_k = self.index_k_norm(index_k)  # single shared index head
+        index_k = _fi_gemma_rmsnorm(
+            self.index_k_norm, index_k
+        )  # single shared index head
         index_q, index_k = self.index_rotary_emb(positions, index_q, index_k)
 
         # Pre-insert K/V and index-K; the sparse attention reads them from cache.
@@ -614,16 +632,20 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = _fi_gemma_rmsnorm(self.input_layernorm, hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = _fi_gemma_rmsnorm(
+                self.input_layernorm, hidden_states, residual
+            )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected (dense MLP or MoE)
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = _fi_gemma_rmsnorm(
+            self.post_attention_layernorm, hidden_states, residual
+        )
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
@@ -680,7 +702,7 @@ class MiniMaxM3Model(nn.Module):
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(positions, hidden_states, residual)
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states, _ = _fi_gemma_rmsnorm(self.norm, hidden_states, residual)
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
