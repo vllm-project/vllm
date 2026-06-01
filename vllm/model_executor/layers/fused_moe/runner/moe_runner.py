@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import (
     ForwardContext,
     get_forward_context,
@@ -941,6 +942,10 @@ class MoERunner(MoERunnerInterface):
     #
     # EPLB
     #
+
+    @property
+    def eplb_state(self) -> EplbLayerState | None:
+        return self.router.eplb_state
 
     def set_eplb_state(
         self,
