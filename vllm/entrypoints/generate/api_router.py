@@ -192,7 +192,7 @@ async def init_generate_state(
 
     from .generative_scoring.serving import ServingGenerativeScoring
 
-    state.generative_scoring = ServingGenerativeScoring(
+    state.serving_generative_scoring = ServingGenerativeScoring(
         engine_client,
         state.openai_serving_models,
         request_logger=request_logger,
