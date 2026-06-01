@@ -1095,8 +1095,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # The emulation backend computes in higher precision, so it skips the MXFP4
-        # kernel-tile padding that the native backends apply below.
+        # Native backends pad to kernel-tile sizes; emulation has no kernel tile and
+        # only needs OCP MX block alignment, so it gets its own rounding below
+        # instead of reusing the native path.
         if (
             self.mxfp4_backend is not None
             and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
@@ -1107,9 +1108,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 )
             )
         else:
-            # It still needs OCP_MX block alignment though: scale buffers are sized
-            # `dim // OCP_MX_BLOCK_SIZE`, so round per-partition sizes up — else a shard
-            # like 2880 // 4 = 720 truncates the buffer and corrupts the weights.
+            # Scale buffers are sized `dim // OCP_MX_BLOCK_SIZE`; round both dims up so
+            # a shard like 2880 // 4 = 720 doesn't floor-truncate and corrupt weights.
             hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
             intermediate_size_per_partition = round_up(
                 intermediate_size_per_partition, OCP_MX_BLOCK_SIZE
