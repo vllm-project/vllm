@@ -462,10 +462,10 @@ class MediaConnector:
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
         video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        if "video_backend" not in video_io_kwargs:
-            video_backend = get_video_loader_backend_for_processor(video_processor)
-            if video_backend is not None:
-                video_io_kwargs["video_backend"] = video_backend
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
         video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return self.load_from_url(
@@ -490,10 +490,10 @@ class MediaConnector:
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
         video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        if "video_backend" not in video_io_kwargs:
-            video_backend = get_video_loader_backend_for_processor(video_processor)
-            if video_backend is not None:
-                video_io_kwargs["video_backend"] = video_backend
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
         video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return await self.load_from_url_async(
