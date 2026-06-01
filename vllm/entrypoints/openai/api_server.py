@@ -196,7 +196,7 @@ def build_app(
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import (
+        from vllm.entrypoints.generate.api_router import (
             register_generate_api_routers,
         )
 
@@ -219,12 +219,6 @@ def build_app(
         )
 
         elastic_ep_attach_router(app)
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            register_generative_scoring_api_router,
-        )
-
-        register_generative_scoring_api_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
@@ -402,17 +396,11 @@ async def init_app_state(
     )
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import init_generate_state
+        from vllm.entrypoints.generate.api_router import init_generate_state
 
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            init_generative_scoring_state,
-        )
-
-        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
