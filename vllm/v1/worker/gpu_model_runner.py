@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import functools
 import gc
 import itertools
@@ -3099,22 +3100,24 @@ class GPUModelRunner(
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
-            for mm_feature in req_state.mm_features:
+            mm_features = req_state.mm_features
+            # Use binary search to narrow the iteration range.
+            # lo: first feature not yet computed
+            lo = bisect.bisect_left(
+                mm_features,
+                num_computed_tokens + 1,
+                key=lambda f: f.mm_position.offset + f.mm_position.length,
+            )
+            # hi: first feature beyond the current step window
+            hi = bisect.bisect_left(
+                mm_features,
+                num_computed_tokens + num_scheduled_tokens,
+                key=lambda f: f.mm_position.offset,
+            )
+            for mm_feature in mm_features[lo:hi]:
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
-
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
-                if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(
