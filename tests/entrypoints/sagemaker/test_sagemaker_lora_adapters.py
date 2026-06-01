@@ -1,11 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from http import HTTPStatus
+
 import openai  # use the official async_client for correctness check
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from ...utils import RemoteOpenAIServer
 from .conftest import MODEL_NAME_SMOLLM
+
+
+class _FakeLoRAModelHandler:
+    def __init__(self):
+        self.unload_requests = []
+
+    async def load_lora_adapter(self, request):
+        raise AssertionError("unexpected load request")
+
+    async def unload_lora_adapter(self, request):
+        from vllm.entrypoints.utils import create_error_response
+
+        self.unload_requests.append(request)
+        return create_error_response(
+            "The lora adapter 'nonexistent-adapter-name' cannot be found.",
+            "NotFoundError",
+            HTTPStatus.NOT_FOUND,
+        )
+
+
+def _build_sagemaker_lora_test_client(
+    monkeypatch, model_handler: _FakeLoRAModelHandler
+) -> TestClient:
+    from model_hosting_container_standards.common.handler import handler_registry
+    from model_hosting_container_standards.sagemaker.sagemaker_loader import (
+        SageMakerFunctionLoader,
+    )
+
+    from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
+    from vllm.entrypoints.serve.lora.api_router import attach_router
+
+    handler_registry.clear()
+    SageMakerFunctionLoader._default_function_loader = None
+    monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "True")
+
+    app = FastAPI()
+    app.state.openai_serving_models = model_handler
+    attach_router(app)
+    return TestClient(sagemaker_standards_bootstrap(app))
 
 
 @pytest.mark.asyncio
@@ -91,15 +134,17 @@ async def test_sagemaker_load_adapter_invalid_files(
     assert load_response.status_code == 500
 
 
-@pytest.mark.asyncio
-async def test_sagemaker_unload_nonexistent_adapter(
-    basic_server_with_lora: RemoteOpenAIServer,
-):
-    # Attempt to unload an adapter that doesn't exist
-    unload_response = requests.delete(
-        basic_server_with_lora.url_for("adapters", "nonexistent-adapter-name"),
-    )
-    assert unload_response.status_code in (400, 404)
+@pytest.mark.skip_global_cleanup
+def test_sagemaker_unload_nonexistent_adapter(monkeypatch):
+    model_handler = _FakeLoRAModelHandler()
+
+    with _build_sagemaker_lora_test_client(monkeypatch, model_handler) as client:
+        unload_response = client.delete("/adapters/nonexistent-adapter-name")
+
+    assert unload_response.status_code == 404
+    assert len(model_handler.unload_requests) == 1
+    unload_request = model_handler.unload_requests[0]
+    assert unload_request.lora_name == "nonexistent-adapter-name"
 
 
 @pytest.mark.asyncio
