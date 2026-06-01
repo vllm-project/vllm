@@ -278,6 +278,8 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_GPU_NIC_PCIE_MAPPING: str = ""
+    VLLM_NIC_SELECTION_VARS: str = ""
 
 
 def get_default_cache_root():
@@ -1973,6 +1975,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
+    # Must be set together with VLLM_NIC_SELECTION_VARS.
+    "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),
+    # Comma-separated list of env vars to set from the GPU-NIC mapping.
+    # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
+    # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
+    "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
 }
 
 
