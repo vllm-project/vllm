@@ -186,6 +186,13 @@ void fused_add_rms_norm(torch::stable::Tensor& input,
                         torch::stable::Tensor& residual,
                         torch::stable::Tensor& weight, double epsilon);
 
+void rms_norm_weightless(torch::stable::Tensor& out,
+                         torch::stable::Tensor& input, double epsilon);
+
+void fused_add_rms_norm_weightless(torch::stable::Tensor& input,
+                                   torch::stable::Tensor& residual,
+                                   double epsilon);
+
 // Layernorm-quant kernels (shared CUDA/ROCm)
 void rms_norm_static_fp8_quant(torch::stable::Tensor& out,
                                torch::stable::Tensor& input,

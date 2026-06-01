@@ -40,6 +40,12 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void rms_norm_weightless(torch::Tensor& out, torch::Tensor& input,
+                         double epsilon);
+
+void fused_add_rms_norm_weightless(torch::Tensor& input, torch::Tensor& residual,
+                                   double epsilon);
+
 torch::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::Tensor const& q_in, torch::Tensor const& kv, torch::Tensor& k_cache,
     torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
