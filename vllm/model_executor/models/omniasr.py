@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from collections.abc import Iterable, Mapping, Sequence
+from functools import lru_cache
 
 import torch
+from huggingface_hub import hf_hub_download
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 
@@ -58,10 +61,62 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
 
 MAX_AUDIO_CLIP_S = 40
-LID_MARKER_TEXT_ID = 9812
-ENG_LATN_IDX = 417
+WARMUP_AUDIO_SAMPLES = 16000
+SAMPLING_RATE_HZ = 16000
+NORMALIZATION_EPS = 1e-7
 PLACEHOLDER_TOKEN_ID = 1
 BOS_TOKEN_ID = 0
+
+# ISO->Omniasr code mapping for common languages.
+# Users can also pass OmniASR native codes (e.g., "eng_Latn") directly.
+ISO_TO_OMNIASR_CODE = {
+    "en": "eng_Latn",
+    "es": "spa_Latn",
+    "fr": "fra_Latn",
+    "de": "deu_Latn",
+    "zh": "cmn_Hans",
+    "ja": "jpn_Jpan",
+    "ko": "kor_Hang",
+    "ru": "rus_Cyrl",
+    "ar": "arb_Arab",
+    "pt": "por_Latn",
+    "it": "ita_Latn",
+    "hi": "hin_Deva",
+    "tr": "tur_Latn",
+    "pl": "pol_Latn",
+    "nl": "nld_Latn",
+    "vi": "vie_Latn",
+    "th": "tha_Thai",
+    "uk": "ukr_Cyrl",
+    "id": "ind_Latn",
+    "fi": "fin_Latn",
+    "sv": "swe_Latn",
+    "cs": "ces_Latn",
+    "el": "ell_Grek",
+    "he": "heb_Hebr",
+    "ro": "ron_Latn",
+}
+
+
+@lru_cache(maxsize=8)
+def _load_lang_table(model_id: str) -> dict[str, int]:
+    path = hf_hub_download(repo_id=model_id, filename="lang_lookup.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+def _resolve_lang_id(lang: str | None, model_id: str, n_special: int) -> int:
+    """Resolve ISO-639-1 or OmniASR-native code to lang_id."""
+    table = _load_lang_table(model_id)
+    if lang is None:
+        return table["eng_Latn"] + n_special
+    omniasr_code = ISO_TO_OMNIASR_CODE.get(lang, lang)
+    if omniasr_code not in table:
+        raise ValueError(
+            f"Unsupported language: {lang!r}. "
+            f"Use ISO-639-1 (e.g., 'en') or OmniASR native code (e.g., 'eng_Latn')."
+        )
+    return table[omniasr_code] + n_special
 
 
 class OmniASRModel(nn.Module):
@@ -176,23 +231,22 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             x = nn.functional.gelu(x)
         return x
 
-    def get_seq_len(self, num_samples: int) -> int:
+    @staticmethod
+    def compute_seq_len(config: OmniASRConfig, num_samples: int) -> int:
         """
-        Compute output sequence length for a given number of input samples.
+        Compute output sequence length after CNN feature extraction.
 
-        Args:
-            num_samples: Number of input audio samples.
+        Pure function — operates on config without instantiating the module.
+        Mirrors PyTorch Conv1d's output_size formula.
 
-        Returns:
-            Resulting sequence length after convolution layers.
+        IMPORTANT: padding=0, dilation=1 must match the defaults used when
+        Conv1d is constructed in __init__. If __init__ is modified to use
+        non-default padding or dilation, this method MUST be updated too.
         """
         seq_len = num_samples
-        for layer in self.layers:
-            conv = layer["conv"]
-            kernel_size = conv.kernel_size[0]
-            stride = conv.stride[0]
-            padding = conv.padding[0]
-            dilation = conv.dilation[0]
+        padding = 0  # default in Conv1d construction
+        dilation = 1  # default in Conv1d construction
+        for _out_ch, kernel_size, stride in config.feature_extractor_layer_descs:
             seq_len = (
                 seq_len + 2 * padding - dilation * (kernel_size - 1) - 1
             ) // stride + 1
@@ -359,9 +413,7 @@ class Wav2Vec2Frontend(nn.Module):
         )
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
-        x = audio.to(
-            self.feature_extractor.layers[0]["conv"].weight.dtype
-        )  # add dtype conversion
+        x = audio.to(next(self.parameters()).dtype)  # add dtype conversion
         if x.dim() == 2:
             x = x.unsqueeze(1)
         x = self.feature_extractor(x)
@@ -403,7 +455,7 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
     Processing information for the OmniASR model.
 
     Provides metadata and helper methods for handling audio inputs,
-    including sequence length computation and feature extractor access.
+    including sequence length computation.
     """
 
     def get_hf_config(self) -> PretrainedConfig:
@@ -415,23 +467,20 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
-    def get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
-
-    def get_feature_extractor(self) -> Wav2Vec2FeatureExtractor:
-        config = self.get_hf_config()
-        return Wav2Vec2FeatureExtractor(config)
-
     def get_num_audio_tokens(self, num_samples: int) -> int:
-        return self.get_feature_extractor().get_seq_len(num_samples)
+        return Wav2Vec2FeatureExtractor.compute_seq_len(
+            self.get_hf_config(), num_samples
+        )
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(target_sr=self.get_hf_config().sampling_rate)
 
 
 class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo]):
     """
     Multi-modal processor for the OmniASR model.
 
-    Extends EncDecMultiModalProcessor to handle audio modality inputs
+    Extends BaseMultiModalProcessor to handle audio modality inputs
     and coordinate prompt updates for speech-to-text tasks.
     """
 
@@ -443,23 +492,29 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         data = {}
-
+        hf_config = self.info.get_hf_config()
         audios = []
         if mm_data:
             audios = mm_data.get("audios", [])
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
             mm_kwargs = dict(
                 **mm_kwargs,
-                sampling_rate=feature_extractor.sampling_rate,
+                sampling_rate=hf_config.sampling_rate,
             )
+            language = mm_kwargs.get("language")
+            lang_id = _resolve_lang_id(
+                language,
+                self.info.ctx.model_config.model,
+                hf_config.n_special_tokens,
+            )
+            data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
         if isinstance(audios, list) and len(audios) > 0:
             features = []
             for a in audios:
                 t = torch.tensor(a, dtype=torch.float32)
-                t = (t - t.mean()) / torch.sqrt(t.var() + 1e-7)
+                t = (t - t.mean()) / torch.sqrt(t.var() + NORMALIZATION_EPS)
                 features.append(t)
         else:
-            features = [torch.zeros(16000, dtype=torch.float32)]  # placeholder
+            features = [torch.zeros(WARMUP_AUDIO_SAMPLES, dtype=torch.float32)]
 
         tokenizer = self.info.get_tokenizer()
         if isinstance(prompt, str):
@@ -480,6 +535,7 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
+            language_id=MultiModalFieldConfig.batched("audio"),
         )
 
     def _get_prompt_updates(
@@ -488,17 +544,19 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        pad_token_id = self.info.get_hf_config().pad_token_id
+
         def get_audio_replacement_omniasr(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio_len = audios.get_audio_length(item_idx)
             num_tokens = self.info.get_num_audio_tokens(num_samples=audio_len)
             # N audio frames + 1 lid marker + 1 lang_id
-            return [PLACEHOLDER_TOKEN_ID] * (num_tokens + 2)
+            return [pad_token_id] * (num_tokens + 2)
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[PLACEHOLDER_TOKEN_ID],
+                target=[pad_token_id],
                 replacement=get_audio_replacement_omniasr,
             )
         ]
@@ -520,10 +578,9 @@ class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor()
-        sampling_rate = feature_extractor.sampling_rate
+        sampling_rate = self.info.get_hf_config().sampling_rate
         audio_len = sampling_rate * MAX_AUDIO_CLIP_S
         num_audios = mm_counts.get("audio", 0)
         return {
@@ -553,6 +610,7 @@ class OmniAsrForConditionalGeneration(
         super().__init__()
         config: OmniASRConfig = vllm_config.model_config.hf_config
         self.config = config
+        self.model_id = vllm_config.model_config.model
         quant_config = vllm_config.quant_config
         with self._mark_tower_model(vllm_config, "audio"):
             self.model = OmniASRModel(config)
@@ -575,9 +633,11 @@ class OmniAsrForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+        _load_lang_table(self.model_id)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         input_features = kwargs.pop("input_features", None)
+        language_id = kwargs.pop("language_id", None)
         if input_features is None:
             return []
         if isinstance(input_features, list):
@@ -594,10 +654,16 @@ class OmniAsrForConditionalGeneration(
         device = audio_embs[0].device
         dtype = audio_embs[0].dtype
         lid_emb = self.language_model.model.embed_tokens(
-            torch.tensor([LID_MARKER_TEXT_ID], device=device)
+            torch.tensor([self.config.lid_marker_token_id], device=device)
         ).to(dtype)
+        if language_id is not None:
+            lang_id = language_id.flatten()[0].item()
+        else:
+            lang_id = _resolve_lang_id(
+                None, self.model_id, self.config.n_special_tokens
+            )
         lang_emb = self.model.lang_embeddings(
-            torch.tensor([ENG_LATN_IDX], device=device)
+            torch.tensor([lang_id], device=device)
         ).to(dtype)
         lid_lang_embs = torch.cat([lid_emb, lang_emb], dim=0)
         results = []
@@ -680,6 +746,7 @@ class OmniAsrForConditionalGeneration(
                     "text_frontend", "language_model.model.embed_tokens"
                 )
             elif name.startswith("final_proj"):
+                # final_proj is top-level on this class, no prefix needed
                 pass
             else:
                 name = "model." + name
@@ -696,7 +763,11 @@ class OmniAsrForConditionalGeneration(
         cls, model_config: ModelConfig, task_type: str
     ) -> SpeechToTextConfig:
         sampling_rate = model_config.hf_config.sampling_rate
-        assert sampling_rate == 16000
+        if sampling_rate != SAMPLING_RATE_HZ:
+            raise ValueError(
+                f"OmniASR requires 16kHz sampling rate (architecture constraint), "
+                f"got {sampling_rate}"
+            )
         return SpeechToTextConfig(
             max_audio_clip_s=MAX_AUDIO_CLIP_S,
             sample_rate=sampling_rate,
@@ -704,16 +775,15 @@ class OmniAsrForConditionalGeneration(
 
     @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        # Language conditioning: hardcoded to eng_Latn (lang_id=417) for v1.
         # OmniASR uses a separate lang_embeddings layer (not text tokens).
-        # Need to: map ISO 639-1 → OmniASR lang_id, pass through
-        # lang_embeddings, and insert into decoder input sequence.
-        # Currently uses audio-only mode (valid for 20% of training data).
         audio = stt_params.audio
         stt_config = stt_params.stt_config
+        language = stt_params.language
+        mm_kwargs = {"language": language} if language else {}
         return TokensPrompt(
             prompt_token_ids=[PLACEHOLDER_TOKEN_ID, BOS_TOKEN_ID],
             multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+            mm_processor_kwargs=mm_kwargs,
         )
 
     @classmethod
