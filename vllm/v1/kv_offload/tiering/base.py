@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -50,7 +50,7 @@ class SecondaryTierManager(ABC):
 
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
-    async jobs; get_finished() polls for completion.
+    async jobs; get_finished_jobs() polls for completion.
     """
 
     def __init__(
@@ -106,7 +106,7 @@ class SecondaryTierManager(ABC):
           3. Allocating space in this tier
           4. Submitting the async transfer (read from primary via block_ids)
 
-        Report completion via ``get_finished()``.
+        Report completion via ``get_finished_jobs()``.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and block_ids
@@ -131,7 +131,7 @@ class SecondaryTierManager(ABC):
         The implementation must copy data from this tier into the
         primary-tier slots identified by ``block_ids``.
 
-        Report completion via ``get_finished()``.
+        Report completion via ``get_finished_jobs()``.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and block_ids
@@ -140,7 +140,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def get_finished(self) -> Iterable[JobResult]:
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Return all jobs (loads and stores) that completed since the last call.
 
@@ -160,6 +160,28 @@ class SecondaryTierManager(ABC):
         Args:
             keys: Offload keys to mark as recently used.
             req_context: Per-request context.
+        """
+        return
+
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext expressing this tier's preference
+        for how blocks should be offloaded for this request.
+
+        Args:
+            req_context: Per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
         """
         return
 

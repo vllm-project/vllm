@@ -251,6 +251,7 @@ async def get_request(
     ramp_up_strategy: Literal["linear", "exponential"] | None = None,
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
+    self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -290,49 +291,59 @@ async def get_request(
     # Precompute delays among requests to minimize request send laggings
     request_rates = []
     delay_ts = []
-    for request_index, request in enumerate(input_requests):
-        current_request_rate = _get_current_request_rate(
-            ramp_up_strategy,
-            ramp_up_start_rps,
-            ramp_up_end_rps,
-            request_index,
-            total_requests,
-            request_rate,
-        )
-        assert current_request_rate > 0.0, (
-            f"Obtained non-positive request rate {current_request_rate}."
-        )
-        request_rates.append(current_request_rate)
-        if current_request_rate == float("inf"):
-            delay_ts.append(0)
-        elif burstiness == float("inf"):
-            # when burstiness tends to infinity, the delay time becomes constant
-            # and tends to the inverse of the request rate
-            delay_ts.append(1.0 / current_request_rate)
-        else:
-            theta = 1.0 / (current_request_rate * burstiness)
 
-            # Sample the request interval from the gamma distribution.
-            # If burstiness is 1, it follows exponential distribution.
-            delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+    # if the traces have timing info then:
+    if not self_timed:
+        for request_index, request in enumerate(input_requests):
+            current_request_rate = _get_current_request_rate(
+                ramp_up_strategy,
+                ramp_up_start_rps,
+                ramp_up_end_rps,
+                request_index,
+                total_requests,
+                request_rate,
+            )
+            assert current_request_rate > 0.0, (
+                f"Obtained non-positive request rate {current_request_rate}."
+            )
+            request_rates.append(current_request_rate)
+            if current_request_rate == float("inf"):
+                delay_ts.append(0)
+            elif burstiness == float("inf"):
+                # when burstiness tends to infinity, the delay time becomes constant
+                # and tends to the inverse of the request rate
+                delay_ts.append(1.0 / current_request_rate)
+            else:
+                theta = 1.0 / (current_request_rate * burstiness)
 
-    # Calculate the cumulative delay time from the first sent out requests.
-    for i in range(1, len(delay_ts)):
-        delay_ts[i] += delay_ts[i - 1]
-    if ramp_up_strategy is None and delay_ts[-1] != 0:
-        # When ramp_up_strategy is not set, we assume the request rate is fixed
-        # and all requests should be sent in target_total_delay_s, the following
-        # logic would re-scale delay time to ensure the final delay_ts
-        # align with target_total_delay_s.
-        #
-        # NOTE: If we simply accumulate the random delta values
-        # from the gamma distribution, their sum would have 1-2% gap
-        # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stabilizing the throughput data
-        # from different random seeds.
-        target_total_delay_s = total_requests / request_rate
-        normalize_factor = target_total_delay_s / delay_ts[-1]
-        delay_ts = [delay * normalize_factor for delay in delay_ts]
+                # Sample the request interval from the gamma distribution.
+                # If burstiness is 1, it follows exponential distribution.
+                delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+
+        # Calculate the cumulative delay time from the first sent out requests.
+        for i in range(1, len(delay_ts)):
+            delay_ts[i] += delay_ts[i - 1]
+        if ramp_up_strategy is None and delay_ts[-1] != 0:
+            # When ramp_up_strategy is not set, we assume the request rate is fixed
+            # and all requests should be sent in target_total_delay_s, the following
+            # logic would re-scale delay time to ensure the final delay_ts
+            # align with target_total_delay_s.
+            #
+            # NOTE: If we simply accumulate the random delta values
+            # from the gamma distribution, their sum would have 1-2% gap
+            # from target_total_delay_s. The purpose of the following logic is to
+            # close the gap for stabilizing the throughput data
+            # from different random seeds.
+            target_total_delay_s = total_requests / request_rate
+            normalize_factor = target_total_delay_s / delay_ts[-1]
+            delay_ts = [delay * normalize_factor for delay in delay_ts]
+    else:
+        for request_index, request in enumerate(input_requests):
+            # this is cumulative running ts, from which sleep is calculated later
+            delay_ts.append(request.timestamp)
+            # TODO: there is no notion of RPS here, may be we can calculate
+            # from the trace.
+            request_rates.append(0.0)
 
     start_ts = time.time()
     for request_index, request in enumerate(input_requests):
@@ -634,6 +645,7 @@ async def benchmark(
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    self_timed: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -773,18 +785,20 @@ async def benchmark(
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
+    if not self_timed:
+        if ramp_up_strategy is not None:
+            print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+            print(
+                f"Will increase RPS from {ramp_up_start_rps} to "
+                f"{ramp_up_end_rps} RPS over the duration of the benchmark."
+            )
+        else:
+            print(f"Traffic request rate: {request_rate}")
 
-    if ramp_up_strategy is not None:
-        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
-        print(
-            f"Will increase RPS from {ramp_up_start_rps} to "
-            f"{ramp_up_end_rps} RPS over the duration of the benchmark."
-        )
+        print(f"Burstiness factor: {burstiness} ({distribution})")
+        print(f"Maximum request concurrency: {max_concurrency}")
     else:
-        print(f"Traffic request rate: {request_rate}")
-
-    print(f"Burstiness factor: {burstiness} ({distribution})")
-    print(f"Maximum request concurrency: {max_concurrency}")
+        print("Self timing is set, using the timestamps from the trace file.")
 
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
 
@@ -823,6 +837,7 @@ async def benchmark(
         ramp_up_strategy,
         ramp_up_start_rps,
         ramp_up_end_rps,
+        self_timed,
     ):
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
@@ -1437,6 +1452,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
     )
     parser.add_argument(
+        "--self-timed",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use timing information from the traces instead of the configuration. "
+        "This is useful when replaying traces faithfully based on their timestamps. "
+        "When unset, defaults to False, except for --dataset-name=timed_trace where "
+        "it defaults to True. Use --no-self-timed to force off. When off, user "
+        "defined generation rates are used and in trace timing info is ignored.",
+    )
+    parser.add_argument(
         "--percentile-metrics",
         type=str,
         default=None,
@@ -1767,6 +1792,24 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     ):
         args.ignore_eos = True
 
+    if args.dataset_name == "timed_trace":
+        # timed_trace carries per-request timestamps;
+        # ignore EOS so generation runs to the trace's specified output length,
+        # and default to using those timestamps for scheduling unless the user
+        # opted out.
+        args.ignore_eos = True
+        if args.self_timed is None:
+            args.self_timed = True
+    else:
+        # if this is set for anything else, it is an error
+        if args.self_timed is not None:
+            raise ValueError(
+                "--self-timed/--no-self-timed is only supported with "
+                "--dataset-name=timed_trace"
+            )
+        # for any non self-timed trace, this is False
+        args.self_timed = False
+
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
@@ -1846,6 +1889,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        self_timed=args.self_timed,
     )
 
     # Save config and results to json
