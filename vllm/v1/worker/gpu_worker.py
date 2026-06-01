@@ -59,6 +59,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -169,7 +170,11 @@ class Worker(WorkerBase):
         self.model_runner.skip_dummy_model_forward = True
 
         allocator = CuMemAllocator.get_instance()
-        offload_tags = tuple(tags) if (level == 1 and tags) else tuple()
+        if level == 1:
+            selected_tags = expand_weight_sleep_tags(tags)
+            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
+        else:
+            offload_tags = tuple()
         allocator.sleep(offload_tags=offload_tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -185,7 +190,7 @@ class Worker(WorkerBase):
         from vllm.device_allocator.cumem import CuMemAllocator
 
         allocator = CuMemAllocator.get_instance()
-        allocator.wake_up(tags)
+        allocator.wake_up(expand_weight_sleep_tags(tags))
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -351,6 +356,13 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
+        if self.vllm_config.weight_transfer_config is not None:
+            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config.parallel_config,
+                self.model_runner.get_model(),
+            )
+
     def sleep_ep_ranks_by_tags(
         self,
         sleeping_ep_ranks: list[int],
@@ -377,15 +389,6 @@ class Worker(WorkerBase):
 
         if get_ep_group().rank in sleeping_ep_ranks:
             self.wake_up(tags=tags)
-            self._skip_dummy_batch = False
-            self._sync_only_sleep_active = False
-
-        if self.vllm_config.weight_transfer_config is not None:
-            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-                self.model_runner.get_model(),
-            )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

@@ -214,8 +214,6 @@ class CuMemAllocator:
         backup_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
-            if offload_tags is not None and data.tag not in offload_tags:
-                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
