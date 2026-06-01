@@ -557,8 +557,8 @@ class RFMConfig(VerifyAndUpdateConfig):
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = text_config.vocab_size - 1
 
-        if getattr(text_config, "rope_parameters", None) is None:
-            text_config.rope_parameters = {}
+        if not getattr(text_config, "rope_parameters", None):
+            text_config.rope_parameters = {"rope_type": "default"}
         text_config.rope_parameters["force_native_interleaved_mrope"] = True
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
