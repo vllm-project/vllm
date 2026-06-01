@@ -9,21 +9,19 @@ from vllm.model_executor.models.qwen3_next import fused_qk_rmsnorm_rope_gate
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
-# Real Qwen3.5 config (see Qwen3_5Config defaults in
-# vllm/transformers_utils/configs/qwen3_5.py): TP=1 single-rank shapes.
-NUM_Q_HEADS = 16
+# Qwen/Qwen3.6-27B config (huggingface.co/Qwen/Qwen3.6-27B), TP=1 shapes.
+NUM_Q_HEADS = 24
 NUM_KV_HEADS = 4
 HEAD_DIM = 256
 PARTIAL_ROTARY_FACTOR = 0.25
 ROTARY_DIM = int(HEAD_DIM * PARTIAL_ROTARY_FACTOR)  # 64
 RMS_NORM_EPS = 1e-6
-MAX_POSITION_EMBEDDINGS = 32768
-ROPE_THETA = 10000.0
+MAX_POSITION_EMBEDDINGS = 262144
+ROPE_THETA = 10000000.0
 
 DTYPES = [torch.bfloat16]
 SEEDS = [13]
 NUM_TOKENS = [1, 4, 37]
-CUDA_DEVICES = ["cuda:0"]
 
 
 def _ref_qk_rmsnorm_rope_gate(
@@ -88,18 +86,17 @@ def _ref_qk_rmsnorm_rope_gate(
     not current_platform.is_cuda_alike(),
     reason="fused_qk_rmsnorm_rope_gate Triton kernel requires CUDA/ROCm",
 )
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @torch.inference_mode()
 def test_fused_qk_norm_rope_gate_matches_reference(
     default_vllm_config,
-    device: str,
     dtype: torch.dtype,
     seed: int,
     num_tokens: int,
 ):
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     torch.set_default_device(device)
     set_random_seed(seed)
 
