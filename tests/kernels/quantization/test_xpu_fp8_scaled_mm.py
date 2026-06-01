@@ -137,7 +137,4 @@ def test_xpu_fp8_block_scaled_gemm(
     )
 
     assert kernel_out.dtype == out_dtype
-    rel_diff = torch.mean(torch.abs(kernel_out.float() - ref_out.float())) / torch.mean(
-        torch.abs(ref_out.float())
-    )
-    assert rel_diff < 0.001, f"relative diff {rel_diff} >= 0.001"
+    torch.testing.assert_close(kernel_out, ref_out, atol=6e-2, rtol=6e-2)
