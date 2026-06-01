@@ -526,19 +526,40 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of (num_tokens, max_query_len,
-        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
-        # and skip the launch when nothing changed.
+        # The output is a deterministic function of the per-token sparse
+        # seqlen vector, which generate_sparse_seqlen_kernel defines as
+        #     min(context_len[i] + q + 1, topk_tokens)
+        # for query token q in request i, where context_len = seq_len -
+        # query_len. Per request that vector is fully determined by the pair
+        # (min(context_len, topk_tokens), query_len):
+        #   * context_len >= topk_tokens -> every token clamps to topk_tokens,
+        #     so the exact context_len is irrelevant and min(.., topk_tokens)
+        #     captures it losslessly;
+        #   * context_len <  topk_tokens -> the ramp depends on the exact
+        #     context_len, which min(.., topk_tokens) preserves.
+        # Fingerprint those CPU-side and skip the launch when nothing changed.
+        #
+        # NOTE: the key must be built from context_len, NOT seq_len. Keying on
+        # min(seq_len, topk_tokens) collides across chunked-prefill steps of a
+        # long request: seq_len > topk_tokens for every chunk, so the clamped
+        # seq_len is a constant `topk_tokens` while the real context offset
+        # (and thus paged_kv_indptr / the work-stealing metadata) differs. The
+        # stale cache entry is then reused and prefill attention is silently
+        # corrupted. Keying on context_len fixes this while still pinning the
+        # key in steady-state decode (query_len == 1 and context_len >=
+        # topk_tokens -> constant key -> cache stays warm).
         num_reqs = common_attn_metadata.num_reqs
-        clamped_seq_lens = np.minimum(
-            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+        query_lens_np = seg_lengths.astype(np.int32)
+        clamped_context_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - query_lens_np,
             self.topk_tokens,
-        )
+        ).astype(np.int32)
         metadata_key = (
             num_tokens,
             int(common_attn_metadata.max_query_len),
             self._num_attention_heads,
-            clamped_seq_lens.tobytes(),
+            clamped_context_lens.tobytes(),
+            query_lens_np.tobytes(),
         )
         if metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
