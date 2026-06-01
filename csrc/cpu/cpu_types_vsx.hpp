@@ -129,8 +129,7 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
 
-  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {
-  }
+  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {}
 
   explicit BF16Vec16(const FP32Vec16&);
 
@@ -411,8 +410,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_xl(48, ptr);
   }
 
-  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {
-  }
+  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
 
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
@@ -774,16 +772,16 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
   alignas(16) float temp_fp32[16];
   alignas(16) c10::Half temp_fp16[16];
-  
+
   vec_xst(v.reg.val[0], 0, temp_fp32);
   vec_xst(v.reg.val[1], 16, temp_fp32);
   vec_xst(v.reg.val[2], 32, temp_fp32);
   vec_xst(v.reg.val[3], 48, temp_fp32);
- 
+
   for (int i = 0; i < 16; i++) {
     temp_fp16[i] = c10::Half(temp_fp32[i]);
   }
- 
+
   reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)temp_fp16);
   reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)temp_fp16);
 }
@@ -791,20 +789,19 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
 inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
   alignas(16) c10::Half temp_fp16[16];
   alignas(16) float temp_fp32[16];
-  
+
   vec_xst(v.reg.val[0], 0, (signed short*)temp_fp16);
   vec_xst(v.reg.val[1], 16, (signed short*)temp_fp16);
-  
+
   for (int i = 0; i < 16; i++) {
     temp_fp32[i] = float(temp_fp16[i]);
   }
-  
+
   reg.val[0] = vec_xl(0, temp_fp32);
   reg.val[1] = vec_xl(16, temp_fp32);
   reg.val[2] = vec_xl(32, temp_fp32);
   reg.val[3] = vec_xl(48, temp_fp32);
 }
-
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 #ifdef _ARCH_PWR10
@@ -877,8 +874,7 @@ struct INT8Vec64 {
     data[3] = vec_xl(48, ptr);
   }
 
-  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {
-  }
+  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {}
 
   void save(int8_t* ptr) const {
     vec_xst(data[0], 0, ptr);
@@ -889,24 +885,20 @@ struct INT8Vec64 {
 
   void save(int8_t* ptr, int elem_num) const {
     if (elem_num <= 0) return;
-    
+
     int full_vecs = elem_num / 16;
     for (int i = 0; i < full_vecs && i < 4; i++) {
       vec_xst(data[i], i * 16, ptr);
     }
-    
+
     int remaining = elem_num % 16;
     if (remaining > 0 && full_vecs < 4) {
       vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
     }
   }
 
-  void nt_save(int8_t* ptr) const {
-    save(ptr);
-  }
-
-
+  void nt_save(int8_t* ptr) const { save(ptr); }
 };
-}  
+}  // namespace vec_op
 
 #endif
