@@ -76,6 +76,8 @@ class EngineCoreReadyResponse:
     num_gpu_blocks: int
     block_size: int
     dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
 
 
 class EngineCoreRequest(

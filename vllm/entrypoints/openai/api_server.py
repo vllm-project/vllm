@@ -151,7 +151,7 @@ async def build_async_engine_client_from_engine_args(
         yield async_llm
     finally:
         if async_llm:
-            async_llm.shutdown()
+            async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
 def build_app(
@@ -196,7 +196,7 @@ def build_app(
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import (
+        from vllm.entrypoints.generate.api_router import (
             register_generate_api_routers,
         )
 
@@ -219,12 +219,6 @@ def build_app(
         )
 
         elastic_ep_attach_router(app)
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            register_generative_scoring_api_router,
-        )
-
-        register_generative_scoring_api_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
@@ -402,17 +396,11 @@ async def init_app_state(
     )
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import init_generate_state
+        from vllm.entrypoints.generate.api_router import init_generate_state
 
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            init_generative_scoring_state,
-        )
-
-        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
@@ -533,8 +521,7 @@ def validate_api_server_args(args):
 
 @instrument(span_name="API server setup")
 def setup_server(args):
-    """Validate API server args, set up signal handler, create socket
-    ready to serve."""
+    """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
@@ -559,12 +546,6 @@ def setup_server(args):
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
     set_ulimit()
-
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm while initializing
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, signal_handler)
 
     if args.uds:
         listen_address = f"unix:{args.uds}"
@@ -672,8 +653,14 @@ async def build_and_serve_renderer(
 async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
-    # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer")
+    decorate_logs("APIServer", skip_if_decorated=True)
+
+    # Interrupt initialization if SIGTERM arrives before uvicorn installs its
+    # own signal handlers. Once uvicorn is running it replaces this.
+    def _interrupt_init(*_) -> None:
+        raise KeyboardInterrupt("terminated")
+
+    signal.signal(signal.SIGTERM, _interrupt_init)
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)

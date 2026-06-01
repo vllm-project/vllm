@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 Spec Decode
+  device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -51,7 +52,7 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -165,6 +166,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
+  device: h200_35gb
   key: examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
@@ -235,6 +237,7 @@ steps:
   - bash standalone_tests/python_only_compile.sh
 
 - label: Async Engine, Inputs, Utils, Worker
+  device: h200_35gb
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -364,8 +367,10 @@ steps:
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+    - pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py
   
 - label: Acceptance Length Test (Large Models) # optional
+  device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 25
   gpu: h100
