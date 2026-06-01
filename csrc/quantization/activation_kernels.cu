@@ -301,10 +301,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   int* s_expert_offsets =
       reinterpret_cast<int*>(smem_128 + (SMEM_SIZE_BYTES_Y / 16));
 
-  static constexpr __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
-  static constexpr __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
-  // We assign EPS with it's 16-bit unsigned counterpart to allow constexpr.
-  static constexpr __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
+  const __nv_bfloat16 fp8_min = get_fp8_min<fp8_type>();
+  const __nv_bfloat16 fp8_max = get_fp8_max<fp8_type>();
+  const __nv_bfloat16 EPS = (__nv_bfloat16_raw{.x = 11996});
   int tid = threadIdx.x;
   int warp_id = tid >> 5;
   int lane_id = tid & 0x1f;
