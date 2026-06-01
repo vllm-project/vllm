@@ -19,21 +19,55 @@ pub use self::model_files::{ResolvedModelFiles, TokenizerSource};
 use crate::backend::{SamplingHints, TextBackend};
 use crate::error::Result;
 
+/// Environment variable to enable the tokenizer encode cache.
+///
+/// Set `VLLM_RS_ENABLE_TOKENIZER_CACHE=1` to wrap the tokenizer with a
+/// DashMap-based L0 whole-string cache (inspired by `llm-tokenizer`).
+/// Leave unset or set to `0` to use the original uncached tokenizer.
+///
+/// When enabled, an optional `VLLM_RS_TOKENIZER_CACHE_SIZE` variable
+/// controls the maximum number of cached entries (default: 10 000).
+const ENABLE_TOKENIZER_CACHE_ENV: &str = "VLLM_RS_ENABLE_TOKENIZER_CACHE";
+const TOKENIZER_CACHE_SIZE_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_SIZE";
+
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
-    let cache_config = CacheConfig::default();
-    match tokenizer {
-        TokenizerSource::HuggingFace(path) => Ok(Arc::new(CachedTokenizer::new(
-            HuggingFaceTokenizer::new(path)?,
-            cache_config,
-        ))),
-        TokenizerSource::Tiktoken(path) => Ok(Arc::new(CachedTokenizer::new(
-            TiktokenTokenizer::new(path)?,
-            cache_config,
-        ))),
-        TokenizerSource::Tekken(path) => Ok(Arc::new(CachedTokenizer::new(
-            TekkenTokenizer::new(path)?,
-            cache_config,
-        ))),
+    let enable_cache = std::env::var_os(ENABLE_TOKENIZER_CACHE_ENV)
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false);
+
+    if enable_cache {
+        let max_entries = std::env::var(TOKENIZER_CACHE_SIZE_ENV)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let cache_config = CacheConfig {
+            enable_l0: true,
+            l0_max_entries: max_entries,
+        };
+        tracing::info!(
+            max_entries,
+            "tokenizer encode cache enabled (set by {ENABLE_TOKENIZER_CACHE_ENV})"
+        );
+        match tokenizer {
+            TokenizerSource::HuggingFace(path) => Ok(Arc::new(CachedTokenizer::new(
+                HuggingFaceTokenizer::new(path)?,
+                cache_config,
+            ))),
+            TokenizerSource::Tiktoken(path) => Ok(Arc::new(CachedTokenizer::new(
+                TiktokenTokenizer::new(path)?,
+                cache_config,
+            ))),
+            TokenizerSource::Tekken(path) => Ok(Arc::new(CachedTokenizer::new(
+                TekkenTokenizer::new(path)?,
+                cache_config,
+            ))),
+        }
+    } else {
+        match tokenizer {
+            TokenizerSource::HuggingFace(path) => Ok(Arc::new(HuggingFaceTokenizer::new(path)?)),
+            TokenizerSource::Tiktoken(path) => Ok(Arc::new(TiktokenTokenizer::new(path)?)),
+            TokenizerSource::Tekken(path) => Ok(Arc::new(TekkenTokenizer::new(path)?)),
+        }
     }
 }
 
