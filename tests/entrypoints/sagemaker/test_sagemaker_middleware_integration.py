@@ -11,11 +11,20 @@ import tempfile
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from ...utils import RemoteOpenAIServer
 from .conftest import (
     MODEL_NAME_SMOLLM,
 )
+
+
+def _build_sagemaker_test_client() -> TestClient:
+    from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
+
+    app = FastAPI()
+    return TestClient(sagemaker_standards_bootstrap(app))
 
 
 class TestMiddlewareIntegration:
@@ -34,10 +43,14 @@ class TestMiddlewareIntegration:
             from model_hosting_container_standards.common.fastapi.middleware.source.decorator_loader import (  # noqa: E501
                 decorator_loader,
             )
+            from model_hosting_container_standards.common.handler import (
+                handler_registry,
+            )
             from model_hosting_container_standards.sagemaker.sagemaker_loader import (
                 SageMakerFunctionLoader,
             )
 
+            handler_registry.clear()
             middleware_registry.clear_middlewares()
             decorator_loader.clear()
             SageMakerFunctionLoader._default_function_loader = None
@@ -183,8 +196,8 @@ async def customer_output_formatter(response):
         finally:
             os.unlink(script_path)
 
-    @pytest.mark.asyncio
-    async def test_middleware_with_ping_endpoint(self):
+    @pytest.mark.skip_global_cleanup
+    def test_middleware_with_ping_endpoint(self, monkeypatch, tmp_path):
         """Test that middlewares work with SageMaker ping endpoint."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
@@ -194,12 +207,15 @@ async def customer_output_formatter(response):
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a middleware script
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 from model_hosting_container_standards.common.fastapi.middleware import (
     custom_middleware
 )
+
+async def custom_sagemaker_ping_handler():
+    return {"status": "healthy"}
 
 @custom_middleware("pre_post_process")
 async def ping_tracking_middleware(request, call_next):
@@ -208,40 +224,19 @@ async def ping_tracking_middleware(request, call_next):
         response.headers["X-Ping-Tracked"] = "true"
     return response
 """
-            )
-            script_path = f.name
+        )
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(
+            SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name
+        )
 
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
+        with _build_sagemaker_test_client() as client:
+            response = client.get("/ping")
 
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                # Test ping endpoint with middleware
-                response = requests.get(server.url_for("ping"))
-
-                assert response.status_code == 200
-                assert "X-Ping-Tracked" in response.headers
-                assert response.headers["X-Ping-Tracked"] == "true"
-
-        finally:
-            os.unlink(script_path)
+        assert response.status_code == 200
+        assert "X-Ping-Tracked" in response.headers
+        assert response.headers["X-Ping-Tracked"] == "true"
 
     @pytest.mark.asyncio
     async def test_middleware_env_var_override(self):
