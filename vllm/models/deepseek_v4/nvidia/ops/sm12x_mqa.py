@@ -611,7 +611,7 @@ def _tf32_hc_prenorm_gemm_kernel(
     fn_ptr,
     out_ptr,
     sqrsum_ptr,
-    M: tl.constexpr,
+    M,
     K: tl.constexpr,
     N: tl.constexpr,
     stride_xm: tl.constexpr,
