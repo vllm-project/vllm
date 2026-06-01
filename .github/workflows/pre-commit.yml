@@ -72,6 +72,18 @@ jobs:
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - name: Run actionlint
       run: actionlint -color
+    - name: Determine pre-commit range
+      id: pre_commit_range
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          echo "from_ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          echo "to_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+        elif [[ -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
+          echo "from_ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          echo "to_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "full_scan=true" >> "$GITHUB_OUTPUT"
+        fi
     - name: Install pre-commit
       run: python -m pip install pre-commit
     - name: Run pre-commit
@@ -83,11 +95,11 @@ jobs:
         UV_CACHE_DIR: ${{ runner.temp }}/.cache/uv
         SKIP: actionlint
       run: |
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          pre-commit run \
-            --from-ref "${{ github.event.pull_request.base.sha }}" \
-            --to-ref "${{ github.event.pull_request.head.sha }}" \
-            --hook-stage manual
-        else
+        if [[ "${{ steps.pre_commit_range.outputs.full_scan }}" == "true" ]]; then
           pre-commit run --all-files --hook-stage manual
+        else
+          pre-commit run \
+            --from-ref "${{ steps.pre_commit_range.outputs.from_ref }}" \
+            --to-ref "${{ steps.pre_commit_range.outputs.to_ref }}" \
+            --hook-stage manual
         fi
