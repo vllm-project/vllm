@@ -121,7 +121,6 @@ class MellumDecoderLayer(Qwen3MoeDecoderLayer):
     - Supports interleaved SWA and per-layer RoPE scaling.
     """
 
-
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
 
