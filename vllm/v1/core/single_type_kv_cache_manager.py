@@ -402,7 +402,7 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -422,7 +422,10 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            drop_eagle: Whether to drop the last matched block for EAGLE/MTP.
+            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
+                Always False for non-EAGLE/MTP groups, but can be False for EAGLE/MTP
+                groups too if the last block is already dropped (e.g., in a
+                convergence loop in `find_longest_cache_hit`).
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
@@ -512,7 +515,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -541,7 +544,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if drop_eagle and computed_blocks[0]:
+        if drop_eagle_block and computed_blocks[0]:
             # Need to drop the last matched block if eagle is enabled.
             for computed in computed_blocks:
                 computed.pop()
@@ -590,7 +593,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -603,7 +606,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle
+            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
         )
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
@@ -627,7 +630,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
                 if num_contiguous_blocks == 0 and block_size != alignment_tokens:
-                    post_pop_blocks = i if drop_eagle else i + 1
+                    post_pop_blocks = i if drop_eagle_block else i + 1
                     if (post_pop_blocks * block_size) % alignment_tokens != 0:
                         continue
                 # Add the cached block to the computed blocks.
@@ -655,7 +658,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        if drop_eagle and computed_blocks[0]:
+        if drop_eagle_block and computed_blocks[0]:
             for computed in computed_blocks:
                 computed.pop()
             # Re-align after eagle pop: the pop may break the alignment
@@ -749,7 +752,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -780,7 +783,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            drop_eagle: Whether to drop the last matched block for EAGLE/MTP.
+            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
@@ -793,7 +796,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
         )
-        assert drop_eagle is False, (
+        assert drop_eagle_block is False, (
             "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
@@ -909,7 +912,7 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1203,7 +1206,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        drop_eagle: bool,
+        drop_eagle_block: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,

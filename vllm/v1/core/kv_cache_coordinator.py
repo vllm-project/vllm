@@ -396,7 +396,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            drop_eagle=0 in self.eagle_group_ids,
+            drop_eagle_block=0 in self.eagle_group_ids,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -590,10 +590,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle = use_eagle and idx not in eagle_verified
+                drop_eagle_block = use_eagle and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if drop_eagle:
+                if drop_eagle_block:
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(
                         curr_hit_length + spec.block_size, max_cache_hit_length
@@ -604,11 +604,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
-                    drop_eagle=drop_eagle,
+                    drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.scheduler_block_size,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
-                if drop_eagle:
+                if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
