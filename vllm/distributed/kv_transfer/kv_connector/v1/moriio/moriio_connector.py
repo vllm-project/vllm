@@ -743,6 +743,15 @@ class MoRIIOConnectorScheduler:
                 if new_block_ids is not None:
                     block_ids = new_block_ids[0]
                     # TODO : hybrid attn, etc
+                    # A request that arrived without ``kv_transfer_params``
+                    # (smoke test, mis-routed gateway request, ...) is
+                    # scheduled normally but is never registered in
+                    # ``_reqs_need_pending_save``. The unconditional dict
+                    # access below would raise ``KeyError`` and crash the
+                    # EngineCore, taking the whole replica down. Skip
+                    # silently for non-disagg requests on a producer pod.
+                    if req_id not in self._reqs_need_pending_save:
+                        continue
                     req, existing_blocks = self._reqs_need_pending_save[req_id]
                     updated_blocks = list(existing_blocks) + (block_ids)
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
