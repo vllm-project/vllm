@@ -665,13 +665,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
-        if not self.req_states.remove_request(req_id):
+        req_index = self.req_states.req_id_to_index.get(req_id)
+        if req_index is None:
             return False
+        # Clear all index-keyed auxiliary state BEFORE freeing the index back
+        # to req_states, so a subsequent add_request cannot reuse this index
+        # while we are still cleaning up.
+        self.model_state.remove_request(req_index)
         if self.encoder_cache is not None:
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
+        self.req_states.remove_request(req_id)
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
@@ -689,7 +695,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prompt_token_ids is not None
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
@@ -698,7 +703,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # with the updated prompt_token_ids and mm_features.
             self._remove_request(req_id)
 
-            prompt_len = len(new_req_data.prompt_token_ids)
+            if new_req_data.prompt_token_ids is not None:
+                prompt_len = len(new_req_data.prompt_token_ids)
+            else:
+                assert new_req_data.prompt_embeds is not None
+                prompt_len = len(new_req_data.prompt_embeds)
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
@@ -722,9 +731,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     req_index, prompt_len, new_req_data.sampling_params
                 )
                 assert self.prompt_logprobs_worker is not None
-                self.prompt_logprobs_worker.add_request(
-                    req_id, req_index, new_req_data.sampling_params
-                )
+                # Pure prompt_embeds requests have no real prompt token ids,
+                # so prompt logprobs cannot be computed against them.
+                if new_req_data.prompt_token_ids is not None:
+                    self.prompt_logprobs_worker.add_request(
+                        req_id, req_index, new_req_data.sampling_params
+                    )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1127,12 +1139,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         inputs_embeds = None
-        if self.supports_mm_inputs and self.is_first_pp_rank:
-            # Run MM encoder (if needed) and get multimodal embeddings.
-            # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            inputs_embeds = self.model_state.get_mm_embeddings(
+        if (
+            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
+        ) and self.is_first_pp_rank:
+            # Prepare inputs_embeds (MM encoder outputs and/or prompt_embeds
+            # overlay). Only first PP rank prepares them.
+            # NOTE(woosuk): We must call prepare_inputs_embeds even during dummy
+            # runs because the compiled model expects this input.
+            inputs_embeds = self.model_state.prepare_inputs_embeds(
                 scheduler_output.scheduled_encoder_inputs,
                 input_batch,
                 self.req_states,

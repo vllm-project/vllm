@@ -40,6 +40,7 @@ class DefaultModelState(ModelState):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
+        self.supports_prompt_embeds = self.model_config.enable_prompt_embeds
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
@@ -52,6 +53,16 @@ class DefaultModelState(ModelState):
                 dtype=self.dtype,
                 device=self.device,
             )
+        elif self.supports_prompt_embeds:
+            self.inputs_embeds = torch.zeros(
+                self.max_num_tokens,
+                self.inputs_embeds_size,
+                dtype=self.dtype,
+                device=self.device,
+            )
+        if self.supports_prompt_embeds:
+            self.prompt_embeds: dict[int, torch.Tensor] = {}
+            self.prompt_is_token_ids: dict[int, torch.Tensor | None] = {}
 
         self.rope_state = get_rope_state(
             self.model_config,
@@ -93,41 +104,119 @@ class DefaultModelState(ModelState):
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
+        if self.supports_prompt_embeds:
+            if new_req_data.prompt_embeds is None:
+                self.prompt_embeds.pop(req_index, None)
+                self.prompt_is_token_ids.pop(req_index, None)
+            else:
+                self.prompt_embeds[req_index] = new_req_data.prompt_embeds
+                prompt_is_token_ids = new_req_data.prompt_is_token_ids
+                self.prompt_is_token_ids[req_index] = (
+                    None
+                    if prompt_is_token_ids is None
+                    else torch.tensor(prompt_is_token_ids, dtype=torch.bool)
+                )
+
+    def remove_request(self, req_index: int) -> None:
+        if self.supports_prompt_embeds:
+            self.prompt_embeds.pop(req_index, None)
+            self.prompt_is_token_ids.pop(req_index, None)
 
     def apply_staged_writes(self) -> None:
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
 
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
-            scheduled_encoder_inputs
-        )
-        if mm_kwargs:
-            # Execute the multimodal encoder.
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
-            # Cache the encoder outputs by mm_hash
-            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
-
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            req_states.prefill_len.np[input_batch.idx_mapping_np],
-            req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
-        )
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
-        inputs_embeds = self.encoder_runner.get_inputs_embeds(
-            input_ids_unpadded, mm_embeds, is_mm_embed
-        )
+
+        if self.supports_mm_inputs:
+            mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
+                scheduled_encoder_inputs
+            )
+            if mm_kwargs:
+                # Execute the multimodal encoder.
+                encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+                # Cache the encoder outputs by mm_hash
+                self.encoder_cache.encoder_outputs.update(
+                    zip(mm_hashes, encoder_outputs)
+                )
+
+            mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
+                input_batch.req_ids,
+                input_batch.num_tokens,
+                input_batch.num_scheduled_tokens,
+                input_batch.query_start_loc_np,
+                req_states.prefill_len.np[input_batch.idx_mapping_np],
+                req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
+            )
+            inputs_embeds = self.encoder_runner.get_inputs_embeds(
+                input_ids_unpadded, mm_embeds, is_mm_embed
+            )
+        else:
+            input_embeddings = self.model.embed_input_ids(input_ids_unpadded)
+            self.inputs_embeds[: input_embeddings.shape[0]] = input_embeddings
+            inputs_embeds = self.inputs_embeds
+
+        if self.supports_prompt_embeds:
+            self._apply_prompt_embeds(input_batch, req_states, inputs_embeds)
+
         return inputs_embeds[: input_batch.num_tokens_after_padding]
+
+    def _apply_prompt_embeds(
+        self,
+        input_batch: InputBatch,
+        req_states: RequestState,
+        inputs_embeds: torch.Tensor,
+    ) -> None:
+        prefill_lens = req_states.prefill_len.np[input_batch.idx_mapping_np]
+        computed_lens = req_states.num_computed_prefill_tokens[
+            input_batch.idx_mapping_np
+        ]
+
+        for batch_idx, req_index in enumerate(input_batch.idx_mapping_np):
+            prompt_embeds = self.prompt_embeds.get(int(req_index))
+            if prompt_embeds is None:
+                continue
+
+            query_start = int(computed_lens[batch_idx])
+            query_end = min(
+                query_start + int(input_batch.num_scheduled_tokens[batch_idx]),
+                int(prefill_lens[batch_idx]),
+                prompt_embeds.shape[0],
+            )
+            if query_start >= query_end:
+                continue
+
+            out_start = int(input_batch.query_start_loc_np[batch_idx])
+            out_end = out_start + query_end - query_start
+            src = prompt_embeds[query_start:query_end].to(
+                device=self.device,
+                dtype=self.dtype,
+                non_blocking=True,
+            )
+
+            prompt_is_token_ids = self.prompt_is_token_ids.get(int(req_index))
+            if prompt_is_token_ids is None:
+                inputs_embeds[out_start:out_end].copy_(src)
+                continue
+
+            token_mask = prompt_is_token_ids[query_start:query_end]
+            embed_positions = torch.nonzero(~token_mask, as_tuple=False).flatten()
+            if embed_positions.numel() == 0:
+                continue
+            embed_positions = embed_positions.to(device=self.device, non_blocking=True)
+            inputs_embeds[out_start:out_end].index_copy_(
+                0,
+                embed_positions,
+                src.index_select(0, embed_positions),
+            )
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -146,8 +235,12 @@ class DefaultModelState(ModelState):
 
     def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
-        if self.supports_mm_inputs:
-            inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
+        if self.supports_mm_inputs or self.supports_prompt_embeds:
+            inputs_embeds = (
+                self.encoder_runner.inputs_embeds[:num_tokens]
+                if self.supports_mm_inputs
+                else self.inputs_embeds[:num_tokens]
+            )
             model_inputs["inputs_embeds"] = inputs_embeds
         if self.rope_state is not None:
             model_inputs["positions"] = self.rope_state.get_positions(num_tokens)

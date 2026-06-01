@@ -53,6 +53,9 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def remove_request(self, req_index: int) -> None:
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 
@@ -64,12 +67,21 @@ class ModelState(ABC):
         return None
 
     @abstractmethod
-    def get_mm_embeddings(
+    def prepare_inputs_embeds(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor | None:
+        """Prepare the ``inputs_embeds`` tensor for the current forward pass.
+
+        Despite its location next to ``encoder_runner``, this hook covers all
+        sources of ``inputs_embeds``: multimodal embeddings (via the encoder
+        runner), user-supplied ``prompt_embeds`` overlays, and any future
+        embedding sources. Returns the buffer to feed into ``model.forward``,
+        or ``None`` for ranks/configurations that do not consume embeddings
+        directly.
+        """
         raise NotImplementedError
 
     @abstractmethod
