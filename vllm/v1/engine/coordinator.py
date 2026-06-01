@@ -11,7 +11,7 @@ import zmq
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_tcp_uri, make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
@@ -58,13 +58,14 @@ class DPCoordinator:
 
     def _wait_for_zmq_addrs(self, zmq_addr_pipe) -> tuple[str, str, str]:
         try:
+            timeout = 120
             ready = multiprocessing.connection.wait(
-                [zmq_addr_pipe, self.proc.sentinel], timeout=30
+                [zmq_addr_pipe, self.proc.sentinel], timeout=timeout
             )
             if not ready:
                 raise RuntimeError(
                     "DP Coordinator process failed to report ZMQ addresses "
-                    "during startup."
+                    f"within timeout={timeout} seconds during startup."
                 )
             try:
                 return zmq_addr_pipe.recv()
@@ -91,16 +92,9 @@ class DPCoordinator:
         if parallel_config.enable_elastic_ep:
             local_only_eng = False
 
-        def bind_address(local_only: bool) -> str:
-            return (
-                get_engine_client_zmq_addr(local_only=True, host=host)
-                if local_only
-                else get_tcp_uri(host, 0)
-            )
-
-        front_publish_address = bind_address(local_only)
-        back_publish_address = bind_address(local_only_eng)
-        back_output_address = bind_address(local_only_eng)
+        front_publish_address = get_engine_client_zmq_addr(local_only, host=host)
+        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host=host)
+        back_output_address = get_engine_client_zmq_addr(local_only_eng, host=host)
 
         context = get_mp_context()
         parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=False)
