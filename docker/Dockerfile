@@ -947,6 +947,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# Prevent early CUDA initialization when CUDA-dependent packages (cupy, nixl)
+# are installed — tests that fork subprocesses would otherwise fail.
+ENV CUDA_MODULE_LOADING=LAZY
+
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
