@@ -46,6 +46,7 @@ class MockModelConfig:
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None
+    forbid_media_private_networks_access: bool = False
     encoder_config = None
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
