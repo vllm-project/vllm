@@ -165,6 +165,13 @@ def test_sm120_direct_mqa_logits_block_m_prefers_short_prefill_tile():
     assert sm12x_mqa._fp8_mqa_logits_block_m(65536, 65536) == 64
 
 
+def test_tf32_hc_prenorm_gemm_does_not_specialize_prefill_token_count():
+    kernel = sm12x_mqa._tf32_hc_prenorm_gemm_kernel
+    constexpr_names = {kernel.arg_names[index] for index in kernel.constexprs}
+
+    assert "M" not in constexpr_names
+
+
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(120), reason="SM120 only"
 )
