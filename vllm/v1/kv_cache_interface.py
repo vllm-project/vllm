@@ -156,12 +156,7 @@ class KVCacheSpec:
         return copy.deepcopy(specs[0])
 
 
-# ---------------------------------------------------------------------------
-# Physical layout metadata (RFC #42082)
-# ---------------------------------------------------------------------------
-
-
-# Logical dim indices in the 5D stride permutation [L, B, H, N, C].
+# Logical dim indices in the 5D stride permutation [L, B, H, N, C] (see: RFC #42082).
 _DIM_L, _DIM_B, _DIM_H, _DIM_N, _DIM_C = 0, 1, 2, 3, 4
 
 
@@ -184,15 +179,7 @@ class KVCacheLayout(Enum):
 
     @property
     def layer_stride_order(self) -> tuple[int, ...]:
-        """4D permutation [B, H, N, C] for per-layer tensors (drops L).
-
-        TODO(RFC #42082, part 3): non-layer-compact layouts (BLHNC, BHLNC)
-        interleave layers within a block and cannot be expressed as an
-        independent 4D per-layer view. Callers that want a per-layer view
-        under those layouts must wait for the connector refactor (part 3),
-        which switches to 5D views with meta tensors so the per-layer
-        slicing is no longer needed.
-        """
+        """4D permutation [B, H, N, C] for per-layer tensors."""
         if not self.is_layer_compact:
             compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
             raise ValueError(
