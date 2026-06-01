@@ -1228,3 +1228,13 @@ def test_thinking_budget_invalid_budget_rejected(invalid_budget):
 
     with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
         SamplingParams(thinking_token_budget=invalid_budget)
+
+
+@pytest.mark.parametrize("bad_fqcn", [
+    "mypackage.mymodule.MyLogitsProcessor",  # missing colon
+    "my:package:MyClass",                    # two colons
+])
+def test_load_logitsprocs_by_fqcns_invalid_format_raises(bad_fqcn):
+    from vllm.v1.sample.logits_processor import _load_logitsprocs_by_fqcns
+    with pytest.raises(ValueError, match="<module>:<qualname>"):
+        _load_logitsprocs_by_fqcns([bad_fqcn])
