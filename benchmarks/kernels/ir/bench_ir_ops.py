@@ -145,9 +145,6 @@ def _bench_one(fn, args, cfg: BenchConfig) -> float:
     return ms * 1000
 
 
-# TODO(gmagogsfm): Once compiled native implementation lands (#38775),
-# the benchmark baseline should be the compiled native (what vLLM runs by
-# default) rather than the uncompiled native implementation.
 def collect_timings(
     op: IrOp, shape_configs: list[dict], cfg: BenchConfig
 ) -> tuple[list[str], list[str], dict[str, dict[str, float]]]:
@@ -158,11 +155,15 @@ def collect_timings(
         "_".join(f"{k}={fmt(v)}" for k, v in kwargs.items()) for kwargs in shape_configs
     ]
     providers = [n for n, impl in op.impls.items() if impl.supported]
+    provider_strs = [f"{p}-compiled" if op.impls[p].compiled else p for p in providers]
 
     results: dict[str, dict[str, float]] = {c: {} for c in case_names}
-    for provider in providers:
+    for provider, p_str in zip(providers, provider_strs):
         impl = op.impls[provider]
-        desc = f"{op.name} / {provider}"
+        if impl.compiled:
+            impl = impl.compile()
+
+        desc = f"{op.name} / {p_str}"
         for case_name, kwargs in tqdm(
             zip(case_names, shape_configs),
             desc=desc,
@@ -171,11 +172,11 @@ def collect_timings(
         ):
             args = op.generate_inputs(**kwargs)
             if impl.supports_args(*args):
-                results[case_name][provider] = _bench_one(impl.impl_fn, args, cfg)
+                results[case_name][p_str] = _bench_one(impl.impl_fn, args, cfg)
             else:
-                results[case_name][provider] = float("nan")
+                results[case_name][p_str] = float("nan")
 
-    return case_names, providers, results
+    return case_names, provider_strs, results
 
 
 def analyze_results(
@@ -184,7 +185,7 @@ def analyze_results(
     providers: list[str],
     results: dict[str, dict[str, float]],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]], list[str]]:
-    native_col = "native"
+    native_col = "native-compiled" if "native-compiled" in providers else "native"
     non_native = [p for p in providers if p != native_col]
 
     header_cols = ["case"]
@@ -229,7 +230,9 @@ def analyze_results(
         losses = sum(1 for s in speedups if s < 1.0)
         total = len(speedups)
 
-        print(f"\n{p} vs native ({wins}/{total} faster, {losses}/{total} slower):")
+        print(
+            f"\n{p} vs {native_col} ({wins}/{total} faster, {losses}/{total} slower):"
+        )
         print(f"  geomean speedup: {geomean:.2f}x")
         print(f"  best:            {best_val:.2f}x  ({best_case})")
         print(f"  worst:           {worst_val:.2f}x  ({worst_case})")
@@ -288,10 +291,10 @@ def save_results(
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark vLLM IR ops")
     parser.add_argument(
-        "--ops",
+        "op",
         type=str,
-        default=None,
-        help="Comma-separated list of op names to benchmark (substring match)",
+        nargs="*",
+        help="Op name(s) to benchmark",
     )
     parser.add_argument(
         "--no-cuda-graph",
@@ -339,12 +342,11 @@ def main():
     )
     os.makedirs(save_dir, exist_ok=True)
 
-    op_filters = [f.strip() for f in args.ops.split(",")] if args.ops else None
+    op_names = [f.strip() for f in args.ops] if args.op else IrOp.registry.keys()
     all_summary_rows: list[dict[str, str]] = []
 
-    for op in IrOp.registry.values():
-        if op_filters and not any(f in op.name for f in op_filters):
-            continue
+    for op_name in op_names:
+        op = IrOp.registry[op_name]
         if not op.has_input_generator:
             print(f"Skipping op '{op.name}': no input generator registered")
             continue
@@ -353,6 +355,11 @@ def main():
                 f"No benchmark shape config for op '{op.name}'. "
                 f"Add it to benchmarks/kernels/ir/shapes.py"
             )
+
+        # Sort descending, so that torch.compile first sees the largest shape
+        # (simulates vLLM usage)
+        shape_configs = SHAPE_CONFIGS[op.name]
+        shape_configs.sort(key=lambda x: x["num_tokens"], reverse=True)
 
         case_names, providers, results = collect_timings(
             op, SHAPE_CONFIGS[op.name], cfg

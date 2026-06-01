@@ -5,8 +5,7 @@ import inspect
 import traceback
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar, Literal, overload
-from typing import Any, ClassVar, Protocol, overload
+from typing import Any, ClassVar, Literal, Protocol, overload
 
 import regex as re
 import torch
@@ -732,6 +731,7 @@ class IrOpImplCompiledWrapper:
         self.uncompiled_impl_fn = base_impl.impl_fn
 
         # Compile the implementation
+        compile_kwargs = {"dynamic": False, **compile_kwargs}
         self.compiled_impl_fn = torch.compile(base_impl.impl_fn, **compile_kwargs)
 
         # Create impl_fn that marks dynamic dims and calls compiled implementation
