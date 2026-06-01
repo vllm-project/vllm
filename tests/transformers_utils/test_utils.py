@@ -81,6 +81,23 @@ class TestIsRemoteGGUF:
         assert not is_remote_gguf("repo/model:INVALID_M")
         assert not is_remote_gguf("repo/model:Q9_K_M")
 
+    def test_is_remote_gguf_file_type_only_quants(self):
+        """Test is_remote_gguf with file-type-only quant types.
+
+        Regression test for #42734.
+        """
+        # IQ2_M/IQ3_M/IQ3_XS/MXFP4_MOE are valid LlamaFileType file types
+        # with no GGMLQuantizationType member (and no valid base after
+        # suffix stripping, e.g. IQ2_M -> IQ2 which does not exist)
+        assert is_remote_gguf("unsloth/Qwen3.6-35B-A3B-GGUF:IQ2_M")
+        assert is_remote_gguf("repo/model:IQ3_M")
+        assert is_remote_gguf("repo/model:IQ3_XS")
+        assert is_remote_gguf("repo/model:MXFP4_MOE")
+
+        # Genuinely unknown types are still rejected
+        assert not is_remote_gguf("repo/model:IQ9_M")
+        assert not is_remote_gguf("repo/model:NOTATYPE")
+
     def test_is_remote_gguf_nonstandard_quant_type(self):
         """Test is_remote_gguf with non-standard quant types containing
         a known GGML type."""
@@ -99,6 +116,12 @@ class TestIsRemoteGGUF:
 
         # No dash separator → not recognized as prefixed
         assert not is_remote_gguf("repo/model:UDIQ4NL")
+
+        # Vendor-prefixed file-type-only quants (#42734): the trailing
+        # token (IQ2_M/IQ3_M/IQ3_XS) is a LlamaFileType file type
+        assert is_remote_gguf("unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ2_M")
+        assert is_remote_gguf("user/Model-GGUF:UD-IQ3_M")
+        assert is_remote_gguf("user/Model-GGUF:UD-IQ3_XS")
 
     def test_is_remote_gguf_without_colon(self):
         """Test is_remote_gguf without colon."""

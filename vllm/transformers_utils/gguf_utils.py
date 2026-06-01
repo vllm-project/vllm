@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gguf
 import regex as re
-from gguf.constants import Keys, VisionProjectorType
+from gguf.constants import Keys, LlamaFileType, VisionProjectorType
 from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
@@ -90,10 +90,17 @@ _GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
 def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
     """Check if the quant type is a valid GGUF quant type.
 
-    Supports both exact GGML quant types (e.g., Q4_K, IQ1_S) and
-    extended naming conventions (e.g., Q4_K_M, Q3_K_S, Q5_K_L).
+    The ``quant_type`` in a ``repo_id:quant_type`` reference selects a
+    ``.gguf`` *file*, so it is a ``LlamaFileType`` (file type), not a
+    ``GGMLQuantizationType`` (tensor type). Some file types (e.g.
+    ``IQ2_M``, ``IQ3_XS``, ``MXFP4_MOE``) have no tensor-type member, so
+    both enums are accepted. Extended size suffixes are also supported
+    (e.g. ``Q4_K_M`` -> ``Q4_K``).
     """
-    # Check for exact match first
+    # Accept either a GGUF file type (LlamaFileType, prefixed with
+    # "MOSTLY_") or a tensor quantization type (GGMLQuantizationType).
+    if getattr(LlamaFileType, f"MOSTLY_{gguf_quant_type}", None) is not None:
+        return True
     if getattr(GGMLQuantizationType, gguf_quant_type, None) is not None:
         return True
 
