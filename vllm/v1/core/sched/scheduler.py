@@ -34,6 +34,7 @@ from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
 )
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
@@ -333,6 +334,58 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _get_computed_blocks_per_group(
+        self, request: Request
+    ) -> tuple[KVCacheBlocks, tuple[int, ...]]:
+        """Evaluate each attention group's local cache independently for PD.
+
+        Each group's local cache is evaluated independently so cached FA
+        blocks are preserved even when Mamba has no local state.  Cached
+        blocks retain their block_hash, so get_unhashed_block_ids_all_groups()
+        naturally excludes them from the transfer — only fresh blocks
+        allocated for external tokens are transferred.
+
+        Returns:
+            (blocks, per_group_hits) where per_group_hits is a tuple of
+            hit lengths (in tokens) for each KV cache group.
+        """
+        coordinator = self.kv_cache_manager.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        block_pool = coordinator.block_pool
+        max_hit = request.num_tokens - 1
+        num_groups = len(self.kv_cache_manager.kv_cache_config.kv_cache_groups)
+        hit_blocks: list[list] = [[] for _ in range(num_groups)]
+        hit_lengths: list[int] = [0] * num_groups
+
+        for spec, group_ids, manager_cls in coordinator.attention_groups:
+            blocks = manager_cls.find_longest_cache_hit(
+                block_hashes=request.block_hashes,
+                max_length=max_hit,
+                kv_cache_group_ids=group_ids,
+                block_pool=block_pool,
+                kv_cache_spec=spec,
+                use_eagle=self.use_eagle,
+                alignment_tokens=coordinator.lcm_block_size,
+            )
+            group_hit = len(blocks[0]) * spec.block_size
+            for gid, blks in zip(group_ids, blocks):
+                hit_blocks[gid] = blks
+                hit_lengths[gid] = group_hit
+
+        computed = tuple(hit_blocks)
+        per_group_hits = tuple(hit_lengths)
+        if self.kv_cache_manager.log_stats:
+            assert self.kv_cache_manager.prefix_cache_stats is not None
+            self.kv_cache_manager.prefix_cache_stats.record(
+                num_tokens=request.num_tokens,
+                num_hits=max(hit_lengths) if hit_lengths else 0,
+                preempted=request.num_preemptions > 0,
+            )
+        return (
+            self.kv_cache_manager.create_kv_cache_blocks(computed),
+            per_group_hits,
+        )
+
     def schedule(self) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -604,9 +657,18 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
+                    if self.connector is not None and isinstance(
+                        self.kv_cache_manager.coordinator,
+                        HybridKVCacheCoordinator,
+                    ):
+                        new_computed_blocks, per_group_hits = (
+                            self._get_computed_blocks_per_group(request)
+                        )
+                        num_new_local_computed_tokens = max(per_group_hits)
+                    else:
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
