@@ -11,7 +11,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: Entrypoints Integration (LLM)
   key: entrypoints-integration-llm
@@ -60,9 +60,11 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
   commands:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
   mirror:
     amd:
       device: mi325_1
