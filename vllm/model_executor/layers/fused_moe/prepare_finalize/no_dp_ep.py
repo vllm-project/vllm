@@ -32,7 +32,6 @@ def _quantize_input(
         block_shape=quant_config.block_shape,
         is_scale_swizzled=quant_config.is_scale_swizzled,
         mx_alignment=quant_config.mx_alignment,
-        use_deep_gemm_packed_mxfp8=quant_config.use_deep_gemm_packed_mxfp8,
     )
 
     return a1q, a1q_scale
