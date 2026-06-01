@@ -3,8 +3,6 @@
 
 from fastapi import FastAPI
 
-from vllm import envs
-
 
 def register_instrumentator_api_routers(app: FastAPI):
     from .basic import router as basic_router
