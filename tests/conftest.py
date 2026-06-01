@@ -349,6 +349,51 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _R = TypeVar("_R")
 
 
+def _fix_v4_tied_weights_keys(model_cls: type) -> None:
+    """Normalise v4-format ``_tied_weights_keys`` to the v5 ``dict[str, str]`` form.
+
+    Transformers v5 changed ``PreTrainedModel._tied_weights_keys`` from
+    ``list[str]`` (names of tied weights) to ``dict[str, str]`` (mapping from
+    tied weight name to its source weight name).  Models loaded via
+    ``trust_remote_code`` that were written against v4 still define the old
+    list format, causing an ``AttributeError`` inside
+    ``get_expanded_tied_weights_keys`` when the code calls ``tied_mapping.keys()``.
+
+    Because the dynamic module is cached in ``sys.modules``, patching the class
+    attribute here persists into the subsequent ``from_pretrained()`` call.
+
+    The only widespread tying pattern in decoder-only LLMs is
+    ``lm_head.weight`` → ``model.embed_tokens.weight``.  Keys that do not
+    match this pattern are skipped with a warning so the caller can detect
+    models that need an explicit mapping added here.
+    """
+    tied = getattr(model_cls, "_tied_weights_keys", None)
+    if not isinstance(tied, list) or len(tied) == 0:
+        return
+
+    result: dict[str, str] = {}
+    skipped: list[str] = []
+    for key in tied:
+        # Standard decoder-only LLM: lm_head.weight tied to embed_tokens.weight.
+        if "lm_head" in key and key.endswith(".weight"):
+            result[key] = "model.embed_tokens.weight"
+        else:
+            skipped.append(key)
+
+    if skipped:
+        logger.warning(
+            "HfRunner: %s has v4-format _tied_weights_keys entries that "
+            "could not be automatically converted to the v5 dict format: %s. "
+            "These keys will not be tied; add an explicit mapping in "
+            "_fix_v4_tied_weights_keys if needed.",
+            model_cls.__name__,
+            skipped,
+        )
+
+    if result:
+        model_cls._tied_weights_keys = result
+
+
 class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
@@ -474,6 +519,18 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
+            if trust_remote_code and hasattr(self.config, "auto_map"):
+                from transformers.dynamic_module_utils import (
+                    get_class_from_dynamic_module,
+                )
+
+                for cls_ref in self.config.auto_map.values():
+                    try:
+                        model_cls = get_class_from_dynamic_module(cls_ref, model_name)
+                        _fix_v4_tied_weights_keys(model_cls)
+                    except Exception:
+                        pass
+
             model = cast(
                 nn.Module,
                 auto_cls.from_pretrained(
