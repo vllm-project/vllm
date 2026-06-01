@@ -935,7 +935,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
     ),
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
+    "Glm4vForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-4.1V-9B-Thinking",
+        extras={"4.6V": "zai-org/GLM-4.6V-Flash"},
+    ),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
@@ -1369,7 +1372,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
     ),
     "Step3p7ForConditionalGeneration": _HfExamplesInfo(
-        "stepfun-ai/Step-3.7-Flash", is_available_online=False, trust_remote_code=True
+        "stepfun-ai/Step-3.7-Flash",
+        trust_remote_code=True,
+        use_original_num_layers=True,
+        # The MoE config lives in the nested ``text_config``, so the overrides
+        # must be nested too. Use 4 layers to initialize at least one MoE layer
+        # and shrink ``moe_num_experts`` (a non-standard key not handled by
+        # ``dummy_hf_overrides``) to avoid OOM during init.
+        hf_overrides={"text_config": {"num_hidden_layers": 4, "moe_num_experts": 8}},
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
