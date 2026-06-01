@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -361,7 +362,12 @@ class AsyncLLM(EngineClient):
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        if data_parallel_rank is None:
+        # ROCm-only: stable per-request DP-rank fallback to neutralise the
+        # SO_REUSEPORT shuffle on disagg P/D pairs (MoRI-IO, NIXL WRITE).
+        # Gated to ROCm because (a) MoRI-IO is the in-tree consumer that
+        # exercises this path and (b) we don't want to silently change the
+        # default DP load-balancing behaviour for CUDA users.
+        if current_platform.is_rocm() and data_parallel_rank is None:
             data_parallel_rank = self._pick_dp_rank_for_request(request_id, params)
             if data_parallel_rank is not None:
                 logger.debug(
