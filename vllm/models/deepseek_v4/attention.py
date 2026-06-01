@@ -249,11 +249,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
         )
         # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
-        if (
-            issubclass(self.get_attn_backend(), FlashMLASparseBackend)
-            and kv_cache_dtype.startswith("fp8")
-            and kv_cache_dtype != "fp8_ds_mla"
-        ):
+        if kv_cache_dtype.startswith("fp8") and kv_cache_dtype != "fp8_ds_mla":
             assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"
