@@ -484,10 +484,14 @@ class Qwen3NextAttention(nn.Module):
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # Fuse the gated split + QK-RMSNorm + (partial) NeoX RoPE + gate copy.
+        # TODO: support MRoPE
+        mm_config = model_config.multimodal_config if model_config else None
+        text_only = mm_config is None or mm_config.language_model_only
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
             and current_platform.is_cuda()
+            and text_only
         )
 
     def _project_qkv_gate(
@@ -505,15 +509,17 @@ class Qwen3NextAttention(nn.Module):
             q_gate, k, v = qkv.split(
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
-            # GemmaRMSNorm uses ``weight + 1`` as the effective gamma; the
-            # fused kernel expects the already-adjusted gamma.
+            # mRoPE passes positions as (3, n_tokens) for T/H/W. Fusion is only
+            # enabled text-only, where the three rows are identical, so taking
+            # the T row is exact. (1D positions pass through.)
+            pos = positions[0] if positions.ndim == 2 else positions
             q, k, gate = fused_qk_rmsnorm_rope_gate(
                 q_gate,
                 k,
                 self.q_norm.weight.float() + 1.0,
                 self.k_norm.weight.float() + 1.0,
                 self.rotary_emb.cos_sin_cache,
-                positions.view(-1),
+                pos,
                 self.q_norm.variance_epsilon,
                 self.num_heads,
                 self.num_kv_heads,
