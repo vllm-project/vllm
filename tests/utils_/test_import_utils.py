@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -61,3 +62,70 @@ def test_has_module_returns_false_for_missing_parent_package(monkeypatch):
 
     assert _has_module("triton.language.target_info") is False
     _has_module.cache_clear()
+
+
+class TestHasModule:
+    """Tests for _has_module with trial import verification."""
+
+    def setup_method(self):
+        # Clear the @cache between tests so each test gets a fresh call
+        _has_module.cache_clear()
+
+    def test_returns_true_for_importable_stdlib_module(self):
+        assert _has_module("json") is True
+
+    def test_returns_false_for_nonexistent_module(self):
+        assert _has_module("nonexistent_module_xyz_12345") is False
+
+    def test_returns_false_when_find_spec_succeeds_but_import_fails(self):
+        """Simulate a native extension whose shared library is missing.
+
+        ``find_spec`` finds the package on disk, but the actual import
+        raises ``ImportError`` (e.g. missing ``libcudart.so``).
+        """
+        fake_spec = MagicMock()
+
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                return_value=fake_spec,
+            ),
+            patch(
+                "vllm.utils.import_utils.importlib.import_module",
+                side_effect=ImportError(
+                    "libcudart.so.12: cannot open shared object file"
+                ),
+            ),
+        ):
+            assert _has_module("fake_native_ext") is False
+
+    def test_returns_false_on_os_error_during_import(self):
+        """Some shared-library failures surface as ``OSError``."""
+        fake_spec = MagicMock()
+
+        with (
+            patch(
+                "vllm.utils.import_utils.importlib.util.find_spec",
+                return_value=fake_spec,
+            ),
+        ):
+            assert _has_module("fake_native_ext") is False
+
+    def test_returns_false_when_find_spec_raises(self):
+        """``find_spec`` itself can raise for dotted names whose parent package
+        fails to import. This should be treated as the module being unavailable.
+        """
+        with patch(
+            "vllm.utils.import_utils.importlib.util.find_spec",
+            side_effect=ModuleNotFoundError("No module named 'fake_parent'"),
+        ):
+            assert _has_module("fake_parent.child") is False
+
+    def test_result_is_cached(self):
+        """Verify the @cache decorator prevents repeated imports."""
+        _has_module("json")  # prime the cache
+
+        with patch("vllm.utils.import_utils.importlib.util.find_spec") as mock_spec:
+            result = _has_module("json")  # should hit cache
+            mock_spec.assert_not_called()
+            assert result is True
