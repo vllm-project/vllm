@@ -21,11 +21,24 @@ import tempfile
 
 import pytest
 import requests
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from ...utils import RemoteOpenAIServer
 from .conftest import (
     MODEL_NAME_SMOLLM,
 )
+
+
+def _build_sagemaker_test_client() -> TestClient:
+    from vllm.entrypoints.sagemaker.api_router import (
+        attach_router,
+        sagemaker_standards_bootstrap,
+    )
+
+    app = FastAPI()
+    attach_router(app, ())
+    return TestClient(sagemaker_standards_bootstrap(app))
 
 
 class TestHandlerOverrideIntegration:
@@ -88,8 +101,8 @@ class TestHandlerOverrideIntegration:
         except ImportError:
             pass
 
-    @pytest.mark.asyncio
-    async def test_customer_script_functions_auto_loaded(self):
+    @pytest.mark.skip_global_cleanup
+    def test_customer_script_functions_auto_loaded(self, monkeypatch, tmp_path):
         """Test customer scenario: script functions automatically override
         framework defaults."""
         try:
@@ -100,9 +113,9 @@ class TestHandlerOverrideIntegration:
             pytest.skip("model-hosting-container-standards not available")
 
         # Customer writes a script file with ping() and invoke() functions
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
-            f.write(
-                """
+        script_path = tmp_path / "model.py"
+        script_path.write_text(
+            """
 from fastapi import Request
 
 async def custom_sagemaker_ping_handler():
@@ -118,59 +131,38 @@ async def custom_sagemaker_invocation_handler(request: Request):
         "source": "customer_override"
     }
 """
+        )
+
+        # Customer sets SageMaker environment variables to point to their script
+        monkeypatch.setenv(SageMakerEnvVars.SAGEMAKER_MODEL_PATH, str(tmp_path))
+        monkeypatch.setenv(
+            SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME, script_path.name
+        )
+
+        with _build_sagemaker_test_client() as client:
+            # Customer tests their app and sees their overrides work automatically
+            ping_response = client.get("/ping")
+            assert ping_response.status_code == 200
+            ping_data = ping_response.json()
+
+            invoke_response = client.post(
+                "/invocations",
+                json={
+                    "model": MODEL_NAME_SMOLLM,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "max_tokens": 5,
+                },
             )
-            script_path = f.name
+            assert invoke_response.status_code == 200
+            invoke_data = invoke_response.json()
 
-        try:
-            script_dir = os.path.dirname(script_path)
-            script_name = os.path.basename(script_path)
-
-            # Customer sets SageMaker environment variables to point to their script
-            env_vars = {
-                SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
-                SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-            }
-
-            args = [
-                "--dtype",
-                "bfloat16",
-                "--max-model-len",
-                "2048",
-                "--enforce-eager",
-                "--max-num-seqs",
-                "32",
-            ]
-
-            with RemoteOpenAIServer(
-                MODEL_NAME_SMOLLM, args, env_dict=env_vars
-            ) as server:
-                # Customer tests their server and sees their overrides work
-                # automatically
-                ping_response = requests.get(server.url_for("ping"))
-                assert ping_response.status_code == 200
-                ping_data = ping_response.json()
-
-                invoke_response = requests.post(
-                    server.url_for("invocations"),
-                    json={
-                        "model": MODEL_NAME_SMOLLM,
-                        "messages": [{"role": "user", "content": "Hello"}],
-                        "max_tokens": 5,
-                    },
-                )
-                assert invoke_response.status_code == 200
-                invoke_data = invoke_response.json()
-
-                # Customer sees their functions are used
-                assert ping_data["source"] == "customer_override"
-                assert ping_data["message"] == "Custom ping from customer script"
-                assert invoke_data["source"] == "customer_override"
-                assert invoke_data["predictions"] == [
-                    "Custom response from customer script"
-                ]
-
-        finally:
-            os.unlink(script_path)
+        # Customer sees their functions are used
+        assert ping_data["source"] == "customer_override"
+        assert ping_data["message"] == "Custom ping from customer script"
+        assert invoke_data["source"] == "customer_override"
+        assert invoke_data["predictions"] == [
+            "Custom response from customer script"
+        ]
 
     @pytest.mark.asyncio
     async def test_customer_decorator_usage(self):
