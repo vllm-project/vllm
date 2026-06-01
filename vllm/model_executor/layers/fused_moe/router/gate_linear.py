@@ -95,7 +95,7 @@ class GateLinear(ReplicatedLinear):
         import vllm._custom_ops as ops
 
         # Tier 1: DSV3 specialized kernel
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= 8:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,
