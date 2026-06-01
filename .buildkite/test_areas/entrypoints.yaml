@@ -11,7 +11,7 @@ steps:
   - tests/entrypoints/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm -ignore=entrypoints/offline_mode --ignore=entrypoints/openai -ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: Entrypoints Integration (LLM)
   key: entrypoints-integration-llm
@@ -61,10 +61,12 @@ steps:
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   - tests/entrypoints/generate
+  - tests/tool_use
   commands:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
   - pytest -v -s entrypoints/generate
+  - pytest -v -s tool_use
   mirror:
     amd:
       device: mi325_1
@@ -100,14 +102,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator
+  - pytest -v -s entrypoints/serve --ignore= entrypoints/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
-  - pytest -v -s tool_use
   mirror:
     amd:
       device: mi325_1
@@ -155,6 +154,5 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
-  - vllm/model_executor/models/whisper.py
   commands: # LMEval
   - pytest -s entrypoints/openai/correctness/
