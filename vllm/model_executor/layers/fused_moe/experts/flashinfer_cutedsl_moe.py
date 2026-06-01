@@ -98,9 +98,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
