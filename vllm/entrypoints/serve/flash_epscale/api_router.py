@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-DEFAULT_TAGS = ["shared_weights","expert_weights", "kv_cache"]
+DEFAULT_TAGS = ["shared_weights", "expert_weights", "kv_cache"]
 
 
 def _elapsed_ms(start: float) -> float:
@@ -26,7 +26,7 @@ def _elapsed_ms(start: float) -> float:
 
 def _optional_timeout(payload: dict, key: str, default: float) -> float:
     value = payload.get(key, default)
-    if not isinstance(value, (int, float)) or value <= 0:
+    if type(value) not in (int, float) or value <= 0:
         raise HTTPException(status_code=400, detail=f"{key} must be a positive number")
     return float(value)
 
@@ -56,6 +56,50 @@ async def _query_ep_state(client: EngineClient) -> dict[str, Any]:
     return first
 
 
+def _parse_ep_state(state: dict[str, Any]) -> tuple[int, int, list[int]]:
+    try:
+        ep_world_size = int(state["ep_world_size"])
+        active_ep_size = int(state["active_ep_size"])
+        sleeping_ep_ranks = [int(rank) for rank in state["sleeping_ep_ranks"]]
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"malformed EP sleep state from workers: {state}",
+        ) from e
+
+    if ep_world_size <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"invalid ep_world_size in EP sleep state: {ep_world_size}",
+        )
+    if not 1 <= active_ep_size <= ep_world_size:
+        raise HTTPException(
+            status_code=500,
+            detail=f"invalid active_ep_size in EP sleep state: {active_ep_size}",
+        )
+    if len(set(sleeping_ep_ranks)) != len(sleeping_ep_ranks):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "invalid EP sleep state: sleeping_ep_ranks contains "
+                f"duplicates: {sleeping_ep_ranks}"
+            ),
+        )
+
+    expected_sleeping = list(range(active_ep_size, ep_world_size))
+    if sleeping_ep_ranks != expected_sleeping:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "invalid EP sleep state: sleeping_ep_ranks must be the suffix "
+                f"{expected_sleeping} for active_ep_size={active_ep_size}, got "
+                f"{sleeping_ep_ranks}"
+            ),
+        )
+
+    return ep_world_size, active_ep_size, sleeping_ep_ranks
+
+
 @asynccontextmanager
 async def _timed(timing: dict[str, float], key: str):
     start = time.perf_counter()
@@ -68,18 +112,15 @@ async def _timed(timing: dict[str, float], key: str):
 @asynccontextmanager
 async def _paused(client: EngineClient, timing: dict[str, float]):
     """Stop-the-world only around the steps that require global quiescence
-    (NCCL split, EPLB remap, sleep/wake RPCs).  Always resume on exit, even
-    on error, so the engine never gets stuck paused."""
+    (NCCL split, EPLB remap, sleep/wake RPCs). Always attempts resume on exit;
+    resume failures propagate so the endpoint cannot report false success."""
     async with _timed(timing, "pause"):
         await client.pause_generation(mode="abort", clear_cache=False)
     try:
         yield
     finally:
-        try:
-            async with _timed(timing, "resume"):
-                await client.resume_generation()
-        except Exception:
-            logger.exception("flash_epscale resume failed")
+        async with _timed(timing, "resume"):
+            await client.resume_generation()
 
 
 router = APIRouter()
@@ -89,7 +130,7 @@ router = APIRouter()
 async def flash_epscale(raw_request: Request):
     payload = await raw_request.json()
     target_ep_size = payload.get("ep_size")
-    if not isinstance(target_ep_size, int):
+    if type(target_ep_size) is not int:
         raise HTTPException(status_code=400, detail="ep_size must be an integer")
     tags = optional_tags(payload, "tags") or DEFAULT_TAGS
     drain_timeout = _optional_timeout(payload, "drain_timeout", 300)
@@ -101,9 +142,7 @@ async def flash_epscale(raw_request: Request):
     async with _flash_epscale_lock(raw_request):
         async with _timed(timing, "query_state"):
             state = await _query_ep_state(client)
-        ep_world_size = int(state["ep_world_size"])
-        active_ep_size = int(state["active_ep_size"])
-        current_sleeping = [int(r) for r in state["sleeping_ep_ranks"]]
+        ep_world_size, active_ep_size, current_sleeping = _parse_ep_state(state)
 
         if target_ep_size <= 0 or target_ep_size > ep_world_size:
             raise HTTPException(
@@ -157,8 +196,7 @@ async def flash_epscale(raw_request: Request):
 
         async with _timed(timing, "final_state"):
             final = await _query_ep_state(client)
-        final_active = int(final["active_ep_size"])
-        final_sleeping = [int(r) for r in final["sleeping_ep_ranks"]]
+        _, final_active, final_sleeping = _parse_ep_state(final)
         if final_active != target_ep_size or final_sleeping != target_sleeping:
             timing["total"] = _elapsed_ms(total_start)
             logger.error("flash_epscale final state mismatch timing_ms=%s", timing)
@@ -223,24 +261,86 @@ async def _scale_down(
             status_code=500, detail=f"flash_epscale scale_down drain failed: {e}"
         ) from e
 
-    # 2. Stop-the-world only for the steps that require global quiescence.
-    async with _paused(client, timing):
-        if current_sleeping:
-            async with _timed(timing, "wake"):
+    transition_completed = False
+    try:
+        # 2. Stop-the-world only for steps that require global quiescence.
+        async with _paused(client, timing):
+            sleep_started = False
+            try:
+                if current_sleeping:
+                    async with _timed(timing, "wake"):
+                        await client.collective_rpc(
+                            "wake_up_ep_ranks",
+                            kwargs={
+                                "sleeping_ep_ranks": current_sleeping,
+                                "tags": tags,
+                            },
+                        )
+                async with _timed(timing, "resize"):
+                    await client.collective_rpc(
+                        "resize_sleep_ep_ranks",
+                        kwargs={"sleeping_ep_ranks": target_sleeping},
+                    )
+                async with _timed(timing, "sleep"):
+                    sleep_started = True
+                    await client.collective_rpc(
+                        "sleep_ep_ranks_by_tags",
+                        kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                    )
+                transition_completed = True
+            except Exception:
+                await _restore_scale_down_sleep_state(
+                    client,
+                    current_sleeping=current_sleeping,
+                    target_sleeping=target_sleeping,
+                    tags=tags,
+                    timing=timing,
+                    wake_target_sleeping=sleep_started,
+                )
+                raise
+    except Exception as e:
+        if not transition_completed:
+            try:
+                client.set_active_data_parallel_size(active_ep_size)
+            except Exception:
+                logger.exception("flash_epscale scale_down route restore failed")
+        logger.exception("flash_epscale scale_down transition failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"flash_epscale scale_down transition failed: {e}",
+        ) from e
+
+
+async def _restore_scale_down_sleep_state(
+    client: EngineClient,
+    *,
+    current_sleeping: list[int],
+    target_sleeping: list[int],
+    tags: list[str],
+    timing: dict[str, float],
+    wake_target_sleeping: bool,
+) -> None:
+    """Best-effort rollback for failures after scale_down routing shrinks."""
+    try:
+        if wake_target_sleeping and target_sleeping:
+            async with _timed(timing, "rollback_wake"):
                 await client.collective_rpc(
                     "wake_up_ep_ranks",
-                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+                    kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
                 )
-        async with _timed(timing, "resize"):
+        async with _timed(timing, "rollback_resize"):
             await client.collective_rpc(
                 "resize_sleep_ep_ranks",
-                kwargs={"sleeping_ep_ranks": target_sleeping},
+                kwargs={"sleeping_ep_ranks": current_sleeping},
             )
-        async with _timed(timing, "sleep"):
-            await client.collective_rpc(
-                "sleep_ep_ranks_by_tags",
-                kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
-            )
+        if current_sleeping:
+            async with _timed(timing, "rollback_sleep"):
+                await client.collective_rpc(
+                    "sleep_ep_ranks_by_tags",
+                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+                )
+    except Exception:
+        logger.exception("flash_epscale scale_down rollback failed")
 
 
 async def _scale_up(
@@ -257,28 +357,92 @@ async def _scale_up(
     Routing is opened to the new ranks only after the NCCL group is resized
     and they are awake, so requests never reach a rank that is not ready.
     """
-    async with _paused(client, timing):
-        if current_sleeping:
-            async with _timed(timing, "wake"):
-                await client.collective_rpc(
-                    "wake_up_ep_ranks",
-                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+    try:
+        async with _paused(client, timing):
+            wake_completed = False
+            resize_completed = False
+            sleep_started = False
+            try:
+                if current_sleeping:
+                    async with _timed(timing, "wake"):
+                        await client.collective_rpc(
+                            "wake_up_ep_ranks",
+                            kwargs={
+                                "sleeping_ep_ranks": current_sleeping,
+                                "tags": tags,
+                            },
+                        )
+                    wake_completed = True
+                async with _timed(timing, "resize"):
+                    await client.collective_rpc(
+                        "resize_sleep_ep_ranks",
+                        kwargs={"sleeping_ep_ranks": target_sleeping},
+                    )
+                resize_completed = True
+                if target_sleeping:
+                    async with _timed(timing, "sleep"):
+                        sleep_started = True
+                        await client.collective_rpc(
+                            "sleep_ep_ranks_by_tags",
+                            kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                        )
+            except Exception:
+                await _restore_scale_up_sleep_state(
+                    client,
+                    current_sleeping=current_sleeping,
+                    target_sleeping=target_sleeping,
+                    tags=tags,
+                    timing=timing,
+                    wake_completed=wake_completed,
+                    resize_completed=resize_completed,
+                    sleep_started=sleep_started,
                 )
-        async with _timed(timing, "resize"):
-            await client.collective_rpc(
-                "resize_sleep_ep_ranks",
-                kwargs={"sleeping_ep_ranks": target_sleeping},
-            )
-        if target_sleeping:
-            async with _timed(timing, "sleep"):
-                await client.collective_rpc(
-                    "sleep_ep_ranks_by_tags",
-                    kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
-                )
+                raise
+    except Exception as e:
+        logger.exception("flash_epscale scale_up transition failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"flash_epscale scale_up transition failed: {e}",
+        ) from e
 
     # Open routing to the newly active ranks only after the group is ready.
     async with _timed(timing, "route_grow"):
         client.set_active_data_parallel_size(target_ep_size)
+
+
+async def _restore_scale_up_sleep_state(
+    client: EngineClient,
+    *,
+    current_sleeping: list[int],
+    target_sleeping: list[int],
+    tags: list[str],
+    timing: dict[str, float],
+    wake_completed: bool,
+    resize_completed: bool,
+    sleep_started: bool,
+) -> None:
+    """Best-effort rollback for failures before scale_up routing opens."""
+    try:
+        if sleep_started and target_sleeping:
+            async with _timed(timing, "rollback_wake"):
+                await client.collective_rpc(
+                    "wake_up_ep_ranks",
+                    kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                )
+        if resize_completed:
+            async with _timed(timing, "rollback_resize"):
+                await client.collective_rpc(
+                    "resize_sleep_ep_ranks",
+                    kwargs={"sleeping_ep_ranks": current_sleeping},
+                )
+        if wake_completed and current_sleeping:
+            async with _timed(timing, "rollback_sleep"):
+                await client.collective_rpc(
+                    "sleep_ep_ranks_by_tags",
+                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+                )
+    except Exception:
+        logger.exception("flash_epscale scale_up rollback failed")
 
 
 def attach_router(app: FastAPI):

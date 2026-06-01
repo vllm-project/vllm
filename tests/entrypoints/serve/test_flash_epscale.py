@@ -144,7 +144,6 @@ def test_scale_down_runs_drain_before_pause(monkeypatch):
     assert body["sleeping_ep_ranks"] == [2, 3]
 
     # Routing is shrunk and ranks are drained before pause.
-    drain_call_order = engine.method_calls
     assert engine.set_active_data_parallel_size.call_args_list[0].args == (2,)
     engine.wait_for_dp_ranks_to_drain.assert_awaited_once()
     drain_args = engine.wait_for_dp_ranks_to_drain.await_args
@@ -161,7 +160,6 @@ def test_scale_down_runs_drain_before_pause(monkeypatch):
     resize_idx = methods.index("resize_sleep_ep_ranks")
     sleep_idx = methods.index("sleep_ep_ranks_by_tags")
     assert resize_idx < sleep_idx
-    del drain_call_order  # not asserted further; kept for debugging
 
 
 def test_scale_up_opens_routing_after_resume(monkeypatch):
@@ -232,6 +230,179 @@ def test_resume_runs_even_when_inner_step_fails(monkeypatch):
     engine.resume_generation.assert_awaited()
 
 
+def test_resume_failure_returns_500(monkeypatch):
+    """If resume itself fails, the endpoint must not report success."""
+    client, engine, _ = _build_client(
+        monkeypatch,
+        ep_world_size=4,
+        active_ep_size=4,
+        post_resize_active=2,
+        post_resize_sleeping=[2, 3],
+    )
+    client = TestClient(client.app, raise_server_exceptions=False)
+    engine.resume_generation.side_effect = RuntimeError("resume failed")
+
+    resp = client.post("/flash_epscale", json={"ep_size": 2})
+
+    assert resp.status_code == 500
+    engine.resume_generation.assert_awaited()
+
+
+def test_scale_down_restores_routing_when_resize_fails(monkeypatch):
+    """After route shrink succeeds, later scale_down failures must restore
+    frontend routing to the original active DP size."""
+    client, engine, _ = _build_client(monkeypatch, ep_world_size=4, active_ep_size=4)
+    client = TestClient(client.app, raise_server_exceptions=False)
+
+    async def explode(method, kwargs=None):
+        if method == "resize_sleep_ep_ranks":
+            raise RuntimeError("split failed")
+        if method == "get_ep_sleep_state":
+            return [
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 4,
+                    "sleeping_ep_ranks": [],
+                },
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 4,
+                    "sleeping_ep_ranks": [],
+                },
+            ]
+        return None
+
+    engine.collective_rpc.side_effect = explode
+
+    resp = client.post("/flash_epscale", json={"ep_size": 2})
+
+    assert resp.status_code == 500
+    assert engine.set_active_data_parallel_size.call_args_list[0].args == (2,)
+    assert engine.set_active_data_parallel_size.call_args_list[-1].args == (4,)
+
+
+def test_scale_up_resleeps_current_ranks_when_resize_fails(monkeypatch):
+    """After scale_up wakes sleeping ranks, resize failures should restore
+    the previous sleep state and keep frontend routing closed."""
+    client, engine, _ = _build_client(
+        monkeypatch,
+        ep_world_size=4,
+        active_ep_size=2,
+        current_sleeping=[2, 3],
+    )
+    client = TestClient(client.app, raise_server_exceptions=False)
+    rpc_calls: list[tuple[str, dict]] = []
+
+    async def explode(method, kwargs=None):
+        rpc_calls.append((method, dict(kwargs or {})))
+        if method == "resize_sleep_ep_ranks":
+            raise RuntimeError("resize failed")
+        if method == "get_ep_sleep_state":
+            return [
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 2,
+                    "sleeping_ep_ranks": [2, 3],
+                },
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 2,
+                    "sleeping_ep_ranks": [2, 3],
+                },
+            ]
+        return None
+
+    engine.collective_rpc.side_effect = explode
+
+    resp = client.post("/flash_epscale", json={"ep_size": 3})
+
+    assert resp.status_code == 500
+    methods = [method for method, _ in rpc_calls]
+    assert methods == [
+        "get_ep_sleep_state",
+        "wake_up_ep_ranks",
+        "resize_sleep_ep_ranks",
+        "sleep_ep_ranks_by_tags",
+    ]
+    assert rpc_calls[-1][1] == {
+        "sleeping_ep_ranks": [2, 3],
+        "tags": ["shared_weights", "expert_weights", "kv_cache"],
+    }
+    engine.set_active_data_parallel_size.assert_not_called()
+
+
+def test_scale_up_restores_previous_state_when_sleep_fails(monkeypatch):
+    """If the final scale_up sleep fails, rollback should resize back and
+    re-sleep the originally sleeping ranks."""
+    client, engine, _ = _build_client(
+        monkeypatch,
+        ep_world_size=4,
+        active_ep_size=2,
+        current_sleeping=[2, 3],
+    )
+    client = TestClient(client.app, raise_server_exceptions=False)
+    rpc_calls: list[tuple[str, dict]] = []
+
+    async def explode(method, kwargs=None):
+        kwargs = dict(kwargs or {})
+        rpc_calls.append((method, kwargs))
+        if method == "sleep_ep_ranks_by_tags" and kwargs["sleeping_ep_ranks"] == [3]:
+            raise RuntimeError("sleep failed")
+        if method == "get_ep_sleep_state":
+            return [
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 2,
+                    "sleeping_ep_ranks": [2, 3],
+                },
+                {
+                    "ep_world_size": 4,
+                    "active_ep_size": 2,
+                    "sleeping_ep_ranks": [2, 3],
+                },
+            ]
+        return None
+
+    engine.collective_rpc.side_effect = explode
+
+    resp = client.post("/flash_epscale", json={"ep_size": 3})
+
+    assert resp.status_code == 500
+    assert rpc_calls[1:] == [
+        (
+            "wake_up_ep_ranks",
+            {
+                "sleeping_ep_ranks": [2, 3],
+                "tags": ["shared_weights", "expert_weights", "kv_cache"],
+            },
+        ),
+        ("resize_sleep_ep_ranks", {"sleeping_ep_ranks": [3]}),
+        (
+            "sleep_ep_ranks_by_tags",
+            {
+                "sleeping_ep_ranks": [3],
+                "tags": ["shared_weights", "expert_weights", "kv_cache"],
+            },
+        ),
+        (
+            "wake_up_ep_ranks",
+            {
+                "sleeping_ep_ranks": [3],
+                "tags": ["shared_weights", "expert_weights", "kv_cache"],
+            },
+        ),
+        ("resize_sleep_ep_ranks", {"sleeping_ep_ranks": [2, 3]}),
+        (
+            "sleep_ep_ranks_by_tags",
+            {
+                "sleeping_ep_ranks": [2, 3],
+                "tags": ["shared_weights", "expert_weights", "kv_cache"],
+            },
+        ),
+    ]
+    engine.set_active_data_parallel_size.assert_not_called()
+
+
 def test_inconsistent_worker_state_is_rejected(monkeypatch):
     """Workers reporting different EP states must fail fast with 500."""
     client, engine, _ = _build_client(monkeypatch)
@@ -258,6 +429,52 @@ def test_inconsistent_worker_state_is_rejected(monkeypatch):
     assert "inconsistent EP sleep state" in resp.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    "state, expected_msg",
+    [
+        (
+            {
+                "ep_world_size": 4,
+                "active_ep_size": 2,
+                "sleeping_ep_ranks": [1, 3],
+            },
+            "sleeping_ep_ranks must be the suffix",
+        ),
+        (
+            {
+                "ep_world_size": 4,
+                "active_ep_size": 2,
+                "sleeping_ep_ranks": [2, 2],
+            },
+            "contains duplicates",
+        ),
+        (
+            {
+                "ep_world_size": 4,
+                "active_ep_size": 0,
+                "sleeping_ep_ranks": [0, 1, 2, 3],
+            },
+            "invalid active_ep_size",
+        ),
+    ],
+)
+def test_invalid_worker_state_is_rejected(monkeypatch, state, expected_msg):
+    client, engine, _ = _build_client(monkeypatch)
+
+    async def invalid_state(method, kwargs=None):
+        if method == "get_ep_sleep_state":
+            return [state, state]
+        return None
+
+    engine.collective_rpc.side_effect = invalid_state
+
+    resp = client.post("/flash_epscale", json={"ep_size": 2})
+
+    assert resp.status_code == 500
+    assert expected_msg in resp.json()["detail"]
+    engine.set_active_data_parallel_size.assert_not_called()
+
+
 def test_router_not_attached_outside_dev_mode(monkeypatch):
     monkeypatch.setattr(envs, "VLLM_SERVER_DEV_MODE", False)
     app = FastAPI()
@@ -270,8 +487,13 @@ def test_router_not_attached_outside_dev_mode(monkeypatch):
     "body, expected_msg",
     [
         ({}, "ep_size must be an integer"),
+        ({"ep_size": True}, "ep_size must be an integer"),
         ({"ep_size": 1.5}, "ep_size must be an integer"),
         ({"ep_size": 0}, "must be in [1,"),
+        (
+            {"ep_size": 2, "drain_timeout": True},
+            "drain_timeout must be a positive number",
+        ),
     ],
 )
 def test_param_validation_messages(monkeypatch, body, expected_msg):

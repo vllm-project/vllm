@@ -30,6 +30,26 @@ def required_tags(payload: dict, key: str = "tags") -> list[str]:
     return tags
 
 
+def required_int_list(payload: dict, key: str) -> list[int]:
+    value = payload.get(key)
+    if value is None:
+        raise HTTPException(status_code=400, detail=f"{key} is required")
+    if not isinstance(value, list) or not all(type(item) is int for item in value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{key} must be a list of integers",
+        )
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{key} must not be empty")
+    if any(item < 0 for item in value):
+        raise HTTPException(status_code=400, detail=f"{key} must be non-negative")
+    if len(set(value)) != len(value):
+        raise HTTPException(
+            status_code=400, detail=f"{key} must not contain duplicates"
+        )
+    return value
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
@@ -70,7 +90,7 @@ async def is_sleeping(raw_request: Request):
 @router.post("/sleep_ep_ranks_tags")
 async def sleep_ep_ranks_by_tags(raw_request: Request):
     payload = await raw_request.json()
-    sleeping_ep_ranks = payload["sleeping_ep_ranks"]
+    sleeping_ep_ranks = required_int_list(payload, "sleeping_ep_ranks")
     tags = required_tags(payload, "tags")
 
     await engine_client(raw_request).collective_rpc(
@@ -92,7 +112,7 @@ async def sleep_ep_ranks_by_tags(raw_request: Request):
 @router.post("/wake_up_ep_ranks_tags")
 async def wake_up_ep_ranks_by_tags(raw_request: Request):
     payload = await raw_request.json()
-    sleeping_ep_ranks = payload["sleeping_ep_ranks"]
+    sleeping_ep_ranks = required_int_list(payload, "sleeping_ep_ranks")
     tags = required_tags(payload, "tags")
 
     await engine_client(raw_request).collective_rpc(

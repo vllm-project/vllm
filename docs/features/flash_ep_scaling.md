@@ -86,7 +86,7 @@ Resize the active EP group to `ep_size`.
 ```json
 {
   "ep_size": 4,
-  "tags": ["expert_weights", "kv_cache"],
+  "tags": ["shared_weights", "expert_weights", "kv_cache"],
   "drain_timeout": 300
 }
 ```
@@ -94,7 +94,7 @@ Resize the active EP group to `ep_size`.
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `ep_size` | int | yes | — | New active EP size; must be in `[1, ep_world_size]`. |
-| `tags` | list&nbsp;of&nbsp;str | no | `["expert_weights", "kv_cache"]` | CuMem allocator tags to offload (scale-down) or wake (scale-up). |
+| `tags` | list&nbsp;of&nbsp;str | no | `["shared_weights", "expert_weights", "kv_cache"]` | CuMem allocator tags to offload (scale-down) or wake (scale-up). |
 | `drain_timeout` | number&nbsp;(seconds) | no | `300` | Time to wait for in-flight requests on to-be-inactive ranks to finish. Only used by `scale_down`. |
 
 #### Response body
@@ -107,7 +107,7 @@ Resize the active EP group to `ep_size`.
   "sleeping_ep_ranks": [4, 5, 6, 7],
   "changed": true,
   "action": "scale_down",
-  "tags": ["expert_weights", "kv_cache"],
+  "tags": ["shared_weights", "expert_weights", "kv_cache"],
   "timing_ms": {
     "query_state": 0.0,
     "route_shrink": 0.0,
@@ -146,8 +146,9 @@ Resize the active EP group to `ep_size`.
 
 - `400` — invalid `ep_size`, `tags`, or `drain_timeout`.
 - `500` — workers reported inconsistent EP state, or a step inside
-  the pause window failed. The engine is always resumed before
-  returning the error.
+  the pause window failed. The endpoint attempts to resume the engine
+  before returning the error; resume failures are propagated as errors
+  instead of being reported as success.
 
 ## Helper endpoints
 
