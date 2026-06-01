@@ -100,6 +100,33 @@ class TestIsRemoteGGUF:
         # No dash separator → not recognized as prefixed
         assert not is_remote_gguf("repo/model:UDIQ4NL")
 
+    def test_is_remote_gguf_file_type_only_quants(self):
+        """Test is_remote_gguf with file-type-only quant types.
+
+        Some quant types (``IQ2_M``, ``IQ3_M``, ``IQ3_XS``, ``MXFP4_MOE``)
+        exist only as GGUF file types (``LlamaFileType``) and have no
+        corresponding member in ``GGMLQuantizationType``.  They must be
+        accepted when used as the ``quant_type`` in a ``repo_id:quant_type``
+        reference.
+        """
+        # File-type-only quants (standalone)
+        assert is_remote_gguf("bartowski/Qwen2.5-0.5B-Instruct-GGUF:IQ2_M")
+        assert is_remote_gguf("bartowski/Qwen2.5-0.5B-Instruct-GGUF:IQ3_M")
+        assert is_remote_gguf("bartowski/Qwen2.5-0.5B-Instruct-GGUF:IQ3_XS")
+        assert is_remote_gguf(
+            "bartowski/Qwen2.5-0.5B-Instruct-GGUF:MXFP4_MOE")
+
+        # File-type-only quants with non-standard vendor prefix
+        assert is_remote_gguf("user/Model:UD-IQ2_M")
+        assert is_remote_gguf("user/Model:UD-IQ3_M")
+        assert is_remote_gguf("user/Model:UD-IQ3_XS")
+        assert is_remote_gguf("user/Model:UD-MXFP4_MOE")
+
+        # Non-existent types in the same family must still be rejected
+        assert not is_remote_gguf("repo/model:IQ9_M")
+        assert not is_remote_gguf("repo/model:IQ9_XS")
+        assert not is_remote_gguf("repo/model:MXFP5_MOE")
+
     def test_is_remote_gguf_without_colon(self):
         """Test is_remote_gguf without colon."""
         assert not is_remote_gguf("repo/model")

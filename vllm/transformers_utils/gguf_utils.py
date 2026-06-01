@@ -8,7 +8,7 @@ from pathlib import Path
 
 import gguf
 import regex as re
-from gguf.constants import Keys, VisionProjectorType
+from gguf.constants import Keys, LlamaFileType, VisionProjectorType
 from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
@@ -90,11 +90,23 @@ _GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
 def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
     """Check if the quant type is a valid GGUF quant type.
 
-    Supports both exact GGML quant types (e.g., Q4_K, IQ1_S) and
-    extended naming conventions (e.g., Q4_K_M, Q3_K_S, Q5_K_L).
+    Accepts both GGML tensor quantization types (e.g. ``Q4_K``, ``IQ1_S``)
+    and GGUF file types (e.g. ``IQ2_M``, ``IQ3_XS``, ``MXFP4_MOE``).
+
+    Extended naming conventions such as ``Q4_K_M`` are supported by suffix
+    stripping (``Q4_K_M`` -> ``Q4_K``).
+
+    File-type-only quants (members of ``LlamaFileType`` but not of
+    ``GGMLQuantizationType``) are recognised by prepending ``MOSTLY_``,
+    which matches the ``LlamaFileType`` member naming convention.
     """
-    # Check for exact match first
+    # Check for exact match in GGMLQuantizationType (tensor types)
     if getattr(GGMLQuantizationType, gguf_quant_type, None) is not None:
+        return True
+
+    # Check for exact match in LlamaFileType (file-type-only quants)
+    # LlamaFileType members are named MOSTLY_<QUANT> (e.g. MOSTLY_IQ2_M).
+    if getattr(LlamaFileType, f"MOSTLY_{gguf_quant_type}", None) is not None:
         return True
 
     # Check for extended naming conventions (e.g., Q4_K_M -> Q4_K)
