@@ -3,6 +3,7 @@
 
 import csv
 import json
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -158,27 +159,23 @@ TorchProfilerActivityMap = {
 }
 
 
-# Per-event fields exported when torch_profiler_export_format is set.
-# Each maps to an attribute on torch's FunctionEventAvg (read defensively
-# with getattr so a missing attribute on a given torch version yields None
-# rather than raising).
-_PROFILER_EXPORT_FIELDS = (
-    "key",
-    "count",
-    "node_id",
-    "cpu_time_total",
-    "self_cpu_time_total",
-    "cpu_time",
-    "cuda_time_total",
-    "self_cuda_time_total",
-    "cuda_time",
-    "cpu_memory_usage",
-    "self_cpu_memory_usage",
-    "cuda_memory_usage",
-    "self_cuda_memory_usage",
-    "flops",
-    "input_shapes",
-)
+def _event_to_row(event: object) -> dict[str, object]:
+    """Extract every public, non-callable metric from a FunctionEventAvg."""
+    row: dict[str, object] = {}
+    # Reading every attribute touches deprecated cuda_* aliases; silence them.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for attr in dir(event):
+            if attr.startswith("_"):
+                continue
+            try:
+                value = getattr(event, attr)
+            except Exception:
+                continue
+            if callable(value):
+                continue
+            row[attr] = value
+    return row
 
 
 class TorchProfilerWrapper(WorkerProfiler):
@@ -283,7 +280,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
-    def _export_profiler_table(self, rank: int, export_format: str) -> None:
+    def _export_profiler_table(self, rank: int) -> None:
+        """Write per-event profiler metrics as a structured 'csv' or 'json' file."""
+        export_format = self.profiler_config.torch_profiler_table_format
         profiler_dir = self.profiler_config.torch_profiler_dir
 
         # Skip file write for URI paths (gs://, s3://, etc.)
@@ -291,10 +290,9 @@ class TorchProfilerWrapper(WorkerProfiler):
         if _is_uri_path(profiler_dir):
             return
 
-        rows = [
-            {field: getattr(event, field, None) for field in _PROFILER_EXPORT_FIELDS}
-            for event in self.profiler.key_averages()
-        ]
+        rows = [_event_to_row(event) for event in self.profiler.key_averages()]
+        # Stable, sorted superset of every metric seen across the events.
+        fieldnames = sorted({key for row in rows for key in row})
 
         out_file = f"{profiler_dir}/profiler_out_{rank}.{export_format}"
         if export_format == "json":
@@ -302,11 +300,14 @@ class TorchProfilerWrapper(WorkerProfiler):
                 json.dump(rows, f, indent=2, default=str)
         else:  # csv
             for row in rows:
-                # input_shapes is a nested list; flatten to a string for CSV.
-                if row["input_shapes"] is not None:
-                    row["input_shapes"] = str(row["input_shapes"])
+                # Flatten non-primitive values (lists, tensors, etc.) for CSV.
+                for key, value in row.items():
+                    if value is not None and not isinstance(
+                        value, (int, float, bool, str)
+                    ):
+                        row[key] = str(value)
             with open(out_file, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(_PROFILER_EXPORT_FIELDS))
+                writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
                 writer.writeheader()
                 writer.writerows(rows)
 
@@ -320,9 +321,11 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         profiler_config = self.profiler_config
         rank = self.local_rank
+        export_format = profiler_config.torch_profiler_table_format
         if profiler_config.torch_profiler_dump_cuda_time_total:
             table = self._build_profiler_table(sort_key="self_cuda_time_total")
-            self._write_profiler_table(rank, table)
+            if export_format == "txt":
+                self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -332,16 +335,16 @@ class TorchProfilerWrapper(WorkerProfiler):
             table = self._build_profiler_table(
                 sort_key="self_cpu_time_total", row_limit=50
             )
-            self._write_profiler_table(rank, table)
+            if export_format == "txt":
+                self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
 
-        if profiler_config.torch_profiler_export_format:
-            self._export_profiler_table(
-                rank, profiler_config.torch_profiler_export_format
-            )
+        # Structured formats replace the .txt file and are written once.
+        if export_format in ("csv", "json"):
+            self._export_profiler_table(rank)
 
     @override
     def _profiler_step(self) -> bool:
