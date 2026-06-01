@@ -4511,7 +4511,7 @@ class GPUModelRunner(
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
-        if envs.VLLM_DEBUG_MLA_CACHE:
+        if self.observability_config.debug_mla_cache:
             kv_nans = self._collect_kv_cache_nans()
             kv_nan_ts = time.time()
             kv_nan_first = next(iter(kv_nans)) if kv_nans else None
@@ -5457,16 +5457,12 @@ class GPUModelRunner(
 
     def _collect_kv_cache_nans(self) -> dict[str, int]:
         """Read and reset per-layer NaN counts from MLA attention layers."""
-        result: dict[str, int] = {}
-        for name, layer in self.compilation_config.static_forward_context.items():
-            nan_count = getattr(layer, "num_kv_cache_nan_insertions", None)
-            if nan_count is None:
-                continue
-            count = int(nan_count[0].item())
-            nan_count.zero_()
-            if count > 0:
-                result[name] = count
-        return result
+        if not self._kv_nan_counters:
+            return {}
+        counts = torch.cat(self._kv_nan_counters.values()).tolist()
+        for t in self._kv_nan_counters.values():
+            t.zero_()
+        return {n: c for n, c in zip(self._kv_nan_counters, counts) if c > 0}
 
     def _get_nans_in_logits(
         self,
@@ -7151,6 +7147,13 @@ class GPUModelRunner(
             self.kv_caches,
             num_attn_module,
         )
+        if self.observability_config.debug_mla_cache:
+            sfc = self.compilation_config.static_forward_context
+            self._kv_nan_counters = {
+                name: layer.num_kv_cache_nan_insertions
+                for name, layer in sfc.items()
+                if hasattr(layer, "num_kv_cache_nan_insertions")
+            }
         return kv_caches
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(
