@@ -25,10 +25,14 @@ use crate::error::Result;
 /// DashMap-based L0 whole-string cache (inspired by `llm-tokenizer`).
 /// Leave unset or set to `0` to use the original uncached tokenizer.
 ///
-/// When enabled, an optional `VLLM_RS_TOKENIZER_CACHE_SIZE` variable
-/// controls the maximum number of cached entries (default: 10 000).
+/// Optional tuning knobs (only effective when the cache is enabled):
+/// - `VLLM_RS_TOKENIZER_CACHE_SIZE`: max entries (default 10 000)
+/// - `VLLM_RS_TOKENIZER_CACHE_MAX_KEY_BYTES`: strings longer than this
+///   bypass the cache entirely to avoid overhead on long unique prompts
+///   (default 2048).
 const ENABLE_TOKENIZER_CACHE_ENV: &str = "VLLM_RS_ENABLE_TOKENIZER_CACHE";
 const TOKENIZER_CACHE_SIZE_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_SIZE";
+const TOKENIZER_CACHE_MAX_KEY_BYTES_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_MAX_KEY_BYTES";
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
     let enable_cache = std::env::var_os(ENABLE_TOKENIZER_CACHE_ENV)
@@ -36,16 +40,22 @@ fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
         .unwrap_or(false);
 
     if enable_cache {
-        let max_entries = std::env::var(TOKENIZER_CACHE_SIZE_ENV)
+        let max_entries: usize = std::env::var(TOKENIZER_CACHE_SIZE_ENV)
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10_000);
+        let max_key_bytes: usize = std::env::var(TOKENIZER_CACHE_MAX_KEY_BYTES_ENV)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2048);
         let cache_config = CacheConfig {
             enable_l0: true,
             l0_max_entries: max_entries,
+            l0_max_key_bytes: max_key_bytes,
         };
         tracing::info!(
             max_entries,
+            max_key_bytes,
             "tokenizer encode cache enabled (set by {ENABLE_TOKENIZER_CACHE_ENV})"
         );
         match tokenizer {
