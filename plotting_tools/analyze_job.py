@@ -71,6 +71,7 @@ from plotting_tools.plots import (  # noqa: E402
     plot_time_breakdown_bar,
     plot_single_layer_breakdown,
     extract_single_layer_events,
+    format_bytes_si,
     plot_traffic_heatmap,
     plot_traffic_volume_pct,
     plot_window_cdf,
@@ -644,10 +645,12 @@ def build_nccl_log_summary_plots(
         title=f"{job_label}: NCCL-log rank traffic estimate",
         xlabel="Destination rank",
         ylabel="Source rank",
-        colorbar_label="Estimated algorithmic bytes from NCCL log op sizes",
+        colorbar_label="Estimated algorithmic bytes",
         tp=tp,
         pp=pp,
         rank_node_names=rank_node_names,
+        value_formatter=format_bytes_si,
+        colorbar_tick_formatter=format_bytes_si,
     )
     plot_traffic_heatmap(
         logical_matrix,
@@ -655,10 +658,12 @@ def build_nccl_log_summary_plots(
         title=f"{job_label}: NCCL-log logical op bytes",
         xlabel="Destination rank",
         ylabel="Source rank",
-        colorbar_label="Logical op bytes from NCCL log, evenly split across peers",
+        colorbar_label="Logical op bytes",
         tp=tp,
         pp=pp,
         rank_node_names=rank_node_names,
+        value_formatter=format_bytes_si,
+        colorbar_tick_formatter=format_bytes_si,
     )
     plot_traffic_heatmap(
         channel_matrix,
@@ -700,10 +705,7 @@ def build_nccl_log_summary_plots(
     rank_payload = {
         "metric": "NCCL log derived rank traffic",
         "notes": [
-            (
-                "logical_bytes uses NCCL INFO 'N Bytes' operation sizes, "
-                "distributed evenly across collective peers."
-            ),
+            "logical_bytes uses NCCL INFO 'N Bytes' operation sizes.",
             (
                 "algorithmic_bytes_estimated applies collective-specific "
                 "rank transfer factors; it is not measured per-link wire bytes."

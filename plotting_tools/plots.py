@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Patch
+from matplotlib.ticker import FuncFormatter
 
 from plotting_tools.classify import (
     FABRIC_COMM_OPS,
@@ -36,6 +38,28 @@ def save_figure(fig, out_path: Path, *, bbox_tight: bool = True) -> None:
         kwargs["bbox_inches"] = "tight"
     fig.savefig(out_path, **kwargs)
     plt.close(fig)
+
+
+BYTE_UNITS_SI = ("B", "kB", "MB", "GB", "TB", "PB")
+
+
+def format_bytes_si(value: float) -> str:
+    """Format byte counts with SI units for plot labels."""
+    sign = "-" if value < 0 else ""
+    scaled = abs(float(value))
+    unit_idx = 0
+    while scaled >= 1000.0 and unit_idx < len(BYTE_UNITS_SI) - 1:
+        scaled /= 1000.0
+        unit_idx += 1
+
+    unit = BYTE_UNITS_SI[unit_idx]
+    if unit_idx == 0:
+        return f"{sign}{scaled:.0f} {unit}"
+    if scaled >= 100:
+        return f"{sign}{scaled:.0f} {unit}"
+    if scaled >= 10:
+        return f"{sign}{scaled:.1f} {unit}"
+    return f"{sign}{scaled:.2f} {unit}"
 
 
 # White (no traffic) -> green -> dark blue (heavy traffic)
@@ -1374,6 +1398,8 @@ def plot_traffic_heatmap(
     tp: int = 1,
     pp: int = 1,
     rank_node_names: dict[int, str] | None = None,
+    value_formatter: Callable[[float], str] | None = None,
+    colorbar_tick_formatter: Callable[[float], str] | None = None,
 ) -> None:
     fig, ax = plt.subplots(
         figsize=(max(6, matrix.shape[1] * 0.9),
@@ -1427,7 +1453,11 @@ def plot_traffic_heatmap(
             for j in range(n1):
                 val = matrix[i, j]
                 if val > 0:
-                    txt = f"{val:.2e}" if val >= 1e4 else f"{val:.1f}"
+                    txt = (
+                        value_formatter(float(val))
+                        if value_formatter is not None
+                        else f"{val:.2e}" if val >= 1e4 else f"{val:.1f}"
+                    )
                     color = "white" if val > 0.55 * vmax else "#1a1a1a"
                     ax.text(
                         j,
@@ -1441,6 +1471,11 @@ def plot_traffic_heatmap(
                     )
 
     cbar = fig.colorbar(im, ax=ax, label=colorbar_label, fraction=0.046, pad=0.04)
+    if colorbar_tick_formatter is not None:
+        cbar.ax.yaxis.set_major_formatter(
+            FuncFormatter(lambda value, _pos: colorbar_tick_formatter(value))
+        )
+        cbar.update_ticks()
     cbar.outline.set_edgecolor("#cccccc")
     cbar.ax.set_facecolor(HEATMAP_BG)
 
