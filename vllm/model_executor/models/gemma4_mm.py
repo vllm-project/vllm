@@ -1183,6 +1183,7 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1223,7 +1224,11 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(pv_tensor, pp_tensor, pad_tensor)
+                inputs_embeds = vt.patch_embedder(
+                    pv_tensor,
+                    pp_tensor,
+                    pad_tensor,
+                ).to(target_dtype)
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1333,7 +1338,11 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(pv_chunk, pp_chunk, pad_chunk)
+            inputs_embeds = vt.patch_embedder(
+                pv_chunk,
+                pp_chunk,
+                pad_chunk,
+            ).to(target_dtype)
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
