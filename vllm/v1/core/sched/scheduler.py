@@ -998,12 +998,25 @@ class Scheduler(SchedulerInterface):
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
-    ) -> None:
+    ) -> bool:
         """
         Updates the waiting session with the next streaming update.
 
         Discards the last sampled output token from the prior input chunk.
+
+        Returns:
+            True if the update was rejected because the renewed prompt would
+            exceed max_model_len (caller is responsible for finishing the
+            request cleanly).  False if the update was applied successfully.
         """
+        # Guard: check the renewed prompt length before mutating any state.
+        # After the update, prompt = kept computed outputs + new chunk tokens.
+        # That equals num_computed_tokens + len(update tokens).
+        renewed_prompt_len = session.num_computed_tokens + len(
+            update.prompt_token_ids or ()
+        )
+        if renewed_prompt_len >= self.max_model_len:
+            return True
 
         # Current streaming input behaviour: Keep only computed output tokens
         # (discard final sampled output token).
@@ -1038,6 +1051,8 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+        return False
 
     def _make_cached_request_data(
         self,
@@ -1483,6 +1498,9 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    # Re-capture in case _handle_stopped_request changed the
+                    # status (e.g. streaming update rejected due to overflow).
+                    finish_reason = request.get_finished_reason() or finish_reason
                     kv_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
@@ -1644,7 +1662,10 @@ class Scheduler(SchedulerInterface):
             if update is None:
                 # Streaming request finished.
                 return True
-            self._update_request_as_session(request, update)
+            if self._update_request_as_session(request, update):
+                # Renewed prompt would exceed max_model_len; finish cleanly.
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -1768,7 +1789,12 @@ class Scheduler(SchedulerInterface):
                 existing.streaming_queue.append(update)
             elif update is not None:
                 # Commence next input chunk.
-                self._update_request_as_session(existing, update)
+                if self._update_request_as_session(existing, update):
+                    # Renewed prompt would exceed max_model_len; finish cleanly.
+                    self.finish_requests(
+                        existing.request_id,
+                        RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)

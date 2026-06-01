@@ -33,7 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.structured_output import StructuredOutputManager
 
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
@@ -4349,3 +4349,204 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for resumable streaming update max_model_len overflow guard
+# (fixes https://github.com/vllm-project/vllm/issues/42489)
+# ---------------------------------------------------------------------------
+
+_SMALL_MAX_MODEL_LEN = 8
+
+
+def _create_scheduler_small_ctx(max_model_len: int = _SMALL_MAX_MODEL_LEN) -> Scheduler:
+    """Create a scheduler whose max_model_len is sourced from ModelConfig."""
+    from vllm.config import (
+        CacheConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        VllmConfig,
+    )
+
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+        max_model_len=max_model_len,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=4,
+        max_num_batched_tokens=max_model_len,
+        max_model_len=max_model_len,
+        enable_chunked_prefill=True,
+        is_encoder_decoder=False,
+    )
+    cache_config = CacheConfig(
+        block_size=16,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=ParallelConfig(),
+    )
+    import torch
+
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1000,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
+    cache_config.num_gpu_blocks = 1000
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    return Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=16,
+        log_stats=False,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+
+def _make_resumable_request(req_id: str, prompt_token_ids: list[int]) -> Request:
+    """Create a minimal resumable Request for scheduler unit tests."""
+    from collections import deque
+
+    params = SamplingParams(max_tokens=16, ignore_eos=True)
+    req = Request(
+        request_id=req_id,
+        prompt_token_ids=prompt_token_ids,
+        sampling_params=params,
+        pooling_params=None,
+        resumable=True,
+    )
+    req.streaming_queue = deque()
+    return req
+
+
+def _make_streaming_update(prompt_token_ids: list[int]) -> StreamingUpdate:
+    params = SamplingParams(max_tokens=16, ignore_eos=True)
+    return StreamingUpdate(
+        mm_features=None,
+        prompt_token_ids=prompt_token_ids,
+        max_tokens=16,
+        arrival_time=0.0,
+        sampling_params=params,
+    )
+
+
+def test_streaming_update_overflow_rejected_by_update_request_as_session():
+    """_update_request_as_session returns True when renewed prompt >= max_model_len."""
+    # max_model_len=8, num_computed_tokens=5 (prompt 4 + 1 computed output).
+    # Update with 3 tokens → renewed = 5+3 = 8 >= 8  → rejected.
+    # Update with 2 tokens → renewed = 5+2 = 7 < 8   → accepted.
+    scheduler = _create_scheduler_small_ctx(max_model_len=8)
+
+    req_overflow = _make_resumable_request("req-overflow", [1, 2, 3, 4])
+    req_overflow.append_output_token_ids([5, 6])
+    req_overflow.num_computed_tokens = 5  # 4 prompt + 1 computed output
+
+    update_overflow = _make_streaming_update([7, 8, 9])  # 5+3=8 → overflow
+    assert scheduler._update_request_as_session(req_overflow, update_overflow)
+
+    # State must be untouched after rejection (no partial mutation).
+    assert req_overflow.num_prompt_tokens == 4
+    assert list(req_overflow._output_token_ids) == [5, 6]
+
+    req_ok = _make_resumable_request("req-ok", [1, 2, 3, 4])
+    req_ok.append_output_token_ids([5, 6])
+    req_ok.num_computed_tokens = 5  # same setup, smaller update
+
+    update_ok = _make_streaming_update([7, 8])  # 5+2=7 → fits
+    assert not scheduler._update_request_as_session(req_ok, update_ok)
+    # After successful application, renewed prompt should be 7 tokens.
+    assert req_ok.num_prompt_tokens == 7
+    assert req_ok.status == RequestStatus.WAITING
+
+
+def test_streaming_update_overflow_boundary():
+    """Exact boundary: renewed == max_model_len is rejected; one under is allowed."""
+    scheduler = _create_scheduler_small_ctx(max_model_len=10)
+
+    # num_computed_tokens=6, update 4 tokens → 10 == max_model_len → rejected.
+    req_at = _make_resumable_request("req-at", [1, 2, 3, 4, 5, 6])
+    req_at.num_computed_tokens = 6
+    assert scheduler._update_request_as_session(
+        req_at, _make_streaming_update([7, 8, 9, 10])
+    )
+
+    # num_computed_tokens=6, update 3 tokens → 9 < max_model_len → accepted.
+    req_under = _make_resumable_request("req-under", [1, 2, 3, 4, 5, 6])
+    req_under.num_computed_tokens = 6
+    assert not scheduler._update_request_as_session(
+        req_under, _make_streaming_update([7, 8, 9])
+    )
+
+
+def test_streaming_update_overflow_handle_stopped_request():
+    """Overflow via streaming_queue finishes the request as FINISHED_LENGTH_CAPPED."""
+    from collections import deque
+
+    scheduler = _create_scheduler_small_ctx(max_model_len=8)
+
+    req = _make_resumable_request("req-stop", [1, 2, 3, 4])
+    req.append_output_token_ids([5, 6])
+    req.num_computed_tokens = 5
+    # Pre-queue an overflow update (5+3=8 >= 8).
+    req.streaming_queue = deque([_make_streaming_update([7, 8, 9])])
+    # Simulate the request having just stopped (e.g., EOS).
+    req.status = RequestStatus.FINISHED_STOPPED
+
+    # Register with scheduler so book-keeping can find it.
+    scheduler.requests[req.request_id] = req
+
+    finished = scheduler._handle_stopped_request(req)
+
+    assert finished, "overflow must be treated as a final finish"
+    assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
+def test_streaming_update_overflow_add_request_waiting_for_streaming():
+    """Overflow in add_request (WAITING_FOR_STREAMING_REQ path) finishes cleanly."""
+
+    scheduler = _create_scheduler_small_ctx(max_model_len=8)
+
+    # Set up an existing session waiting for its next chunk.
+    existing = _make_resumable_request("req-wait", [1, 2, 3, 4])
+    existing.append_output_token_ids([5, 6])
+    existing.num_computed_tokens = 5
+    existing.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+    scheduler.num_waiting_for_streaming_input += 1
+    scheduler.requests[existing.request_id] = existing
+    scheduler.skipped_waiting.add_request(existing)
+
+    # Incoming request carries an overflow update (5+3=8 >= 8).
+    incoming = _make_resumable_request("req-wait", [7, 8, 9])
+    scheduler.add_request(incoming)
+
+    # The session must be finished (removed or flagged) with LENGTH reason.
+    assert existing.request_id not in scheduler.requests or existing.is_finished()
+    assert existing.status == RequestStatus.FINISHED_LENGTH_CAPPED
