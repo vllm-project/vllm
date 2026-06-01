@@ -438,6 +438,8 @@ __global__ void concat_and_cache_mla_kernel(
             fp8::scaled_convert<cache_t, scalar_t, kv_dt>(src[src_idx], *scale);
       }
       if constexpr (kDebug) {
+        // Seems that vLLM maps half to uint16_t. Let's account for that here.
+        // But a proper fix would be to reinterpret cast in the first place.
         if constexpr (std::is_same_v<scalar_t, uint16_t>) {
           nan_count +=
               __hisnan(*reinterpret_cast<const __half*>(&src[src_idx]));

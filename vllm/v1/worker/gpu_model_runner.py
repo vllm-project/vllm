@@ -5459,7 +5459,7 @@ class GPUModelRunner(
         """Read and reset per-layer NaN counts from MLA attention layers."""
         if not self._kv_nan_counters:
             return {}
-        counts = torch.cat(self._kv_nan_counters.values()).tolist()
+        counts = torch.cat(list(self._kv_nan_counters.values())).tolist()
         for t in self._kv_nan_counters.values():
             t.zero_()
         return {n: c for n, c in zip(self._kv_nan_counters, counts) if c > 0}
