@@ -25,6 +25,9 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    fused_allreduce_gemma_rms_norm,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
@@ -297,10 +300,14 @@ class MiniMaxM3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        # reduce_results=False: the attention all-reduce is fused with the
+        # following post_attention_layernorm (GemmaRMSNorm) in the decoder layer
+        # via fused_allreduce_gemma_rms_norm.
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -397,10 +404,14 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        # reduce_results=False: the attention all-reduce is fused with the
+        # following post_attention_layernorm (GemmaRMSNorm) in the decoder layer
+        # via fused_allreduce_gemma_rms_norm.
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=False,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -659,8 +670,9 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        # Fully Connected (dense MLP or MoE)
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = fused_allreduce_gemma_rms_norm(
+            hidden_states, residual, self.post_attention_layernorm
+        )
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
