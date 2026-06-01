@@ -30,28 +30,26 @@ class MambaBase(AttentionLayerBase):
     def kv_cache(
         self, value: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]
     ):
-        """Accept a raw int8 tensor or pre-unpacked state tuple.
+        """Accept a raw tensor or pre-unpacked state tuple.
 
-        When a raw int8 tensor is passed (from the generic KV cache
-        allocation path), unpack into per-state strided views using the
-        layer's shapes and dtypes.
+        When a single tensor is passed (from the generic KV cache
+        allocation path), reinterpret as int8 bytes and unpack into
+        per-state strided views using the layer's shapes and dtypes.
         """
-        if isinstance(value, torch.Tensor) and value.dtype == torch.int8:
+        if isinstance(value, torch.Tensor):
             from vllm.config import get_current_vllm_config
 
             spec = self.get_kv_cache_spec(get_current_vllm_config())
             assert isinstance(spec, MambaSpec)
-            if value.dim() > 1:
-                num_blocks = value.shape[0]
-                raw_1d = torch.as_strided(
-                    value,
-                    (num_blocks * spec.page_size_bytes,),
-                    (1,),
-                    value.storage_offset(),
-                )
-            else:
-                num_blocks = value.numel() // spec.page_size_bytes
-                raw_1d = value
+            byte_offset = value.storage_offset() * value.element_size()
+            total_bytes = value.numel() * value.element_size()
+            num_blocks = total_bytes // spec.page_size_bytes
+            storage_tensor = torch.tensor(
+                [], dtype=torch.int8, device=value.device
+            ).set_(value.untyped_storage())
+            raw_1d = storage_tensor[
+                byte_offset : byte_offset + num_blocks * spec.page_size_bytes
+            ]
             self._kv_cache = tuple(
                 self._unpack_states(
                     raw_1d,

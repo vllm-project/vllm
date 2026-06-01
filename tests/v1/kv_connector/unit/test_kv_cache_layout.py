@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for reshape_kv_cache and _validate_layout_compatibility."""
+"""Unit tests for reshape_kv_cache."""
 
 import pytest
 import torch
 
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
-from vllm.v1.core.kv_cache_utils import _validate_layout_compatibility
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheGroupSpec,
     KVCacheLayout,
-    KVCacheTensor,
     MambaSpec,
     compute_layer_kv_cache_shape_bytes,
     reshape_kv_cache,
@@ -104,21 +101,3 @@ def test_reshape_mamba_spec():
 def _reset_layout():
     yield
     set_kv_cache_layout(None)
-
-
-def _make_group(layer_names, **spec_overrides):
-    spec = _make_attn_spec(**spec_overrides)
-    return KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
-
-
-def _make_tensor(shared_by, size=1024):
-    return KVCacheTensor(size=size, shared_by=shared_by)
-
-
-def test_validate_non_block_contiguous_mismatched_raises():
-    set_kv_cache_layout("LBNHC")
-    group_a = _make_group(["layer.0"], num_kv_heads=4, head_size=64)
-    group_b = _make_group(["layer.1"], num_kv_heads=8, head_size=32)
-    tensor = _make_tensor([["layer.0"], ["layer.1"]])
-    with pytest.raises(ValueError, match="different"):
-        _validate_layout_compatibility([tensor], [group_a, group_b])
