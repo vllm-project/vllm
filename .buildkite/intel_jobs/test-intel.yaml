@@ -100,6 +100,5 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install av &&
-        cd tests &&
+        'cd tests &&
         pytest -v -s quantization/test_auto_round.py'
