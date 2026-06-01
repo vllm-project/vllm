@@ -44,6 +44,9 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
     XferReq,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport import (
+    ZmqProducerTransport,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.utils import (
     ConsumerPeer,
     ProducerPeer,
@@ -85,6 +88,19 @@ def _ack_frames(mm_hash: str, ok: bool) -> list[bytes]:
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _patch_router_run():
+    """Replace ZmqProducerTransport._run with a sentinel that parks on
+    _stop_event so the router thread starts, stays alive, and exits cleanly
+    on stop() — without touching mocked ZMQ sockets."""
+
+    def _sentinel(self):
+        self._stop_event.wait()
+
+    with patch.object(ZmqProducerTransport, "_run", _sentinel):
+        yield
+
+
 @pytest.fixture
 def make_scheduler():
     regions: list[ECSharedRegion] = []
@@ -102,6 +118,14 @@ def make_scheduler():
         mock_ctx = MagicMock()
 
         with (
+            patch(
+                "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.NixlWrapper",
+                new=MagicMock(),
+            ),
+            patch(
+                "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.nixl_agent_config",
+                new=MagicMock(),
+            ),
             patch(
                 "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.nixl_engine.NixlWrapper",
                 return_value=mock_nixl,
@@ -122,7 +146,7 @@ def make_scheduler():
                 return_value="tcp://mock:5000",
             ),
             patch(
-                "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq.Context",
+                "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.zmq_transport.zmq.Context",
                 return_value=mock_ctx,
             ),
         ):

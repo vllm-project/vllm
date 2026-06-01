@@ -156,4 +156,4 @@ class ECCPUWorker:
         try:
             self._region.cleanup()
         except Exception:
-            logger.debug("ec: worker region cleanup failed", exc_info=True)
+            logger.debug("EC: worker region cleanup failed", exc_info=True)

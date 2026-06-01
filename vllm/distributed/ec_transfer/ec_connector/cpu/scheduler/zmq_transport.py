@@ -38,12 +38,12 @@ class ZmqProducerTransport:
 
     def __init__(
         self,
-        ctx: zmq.Context,
         host: str,
         port: int,
     ) -> None:
+        self._ctx = zmq.Context()
         self._router = make_zmq_socket(
-            ctx=ctx,
+            ctx=self._ctx,
             path=make_zmq_path(scheme="tcp", host=host, port=port),
             socket_type=zmq.ROUTER,
             bind=True,
@@ -78,6 +78,10 @@ class ZmqProducerTransport:
             self._router.close(linger=0)
         except Exception:
             logger.debug("ec: router close failed", exc_info=True)
+        try:
+            self._ctx.destroy(linger=0)
+        except Exception:
+            logger.debug("ec: zmq context destroy failed", exc_info=True)
 
     def _run(self) -> None:
         assert self._on_xfer_req is not None
@@ -132,8 +136,8 @@ class ZmqProducerTransport:
 class ZmqConsumerTransport:
     """Lazy DEALER pool for consumer-side ZMQ communication."""
 
-    def __init__(self, ctx: zmq.Context, engine: Any) -> None:
-        self._ctx = ctx
+    def __init__(self, engine: Any) -> None:
+        self._ctx = zmq.Context()
         self._engine = engine
         self._peer_pool: dict[PeerAddr, ConsumerPeer] = {}
         self._encoder = msgspec.msgpack.Encoder()
@@ -265,3 +269,10 @@ class ZmqConsumerTransport:
                 except (msgspec.DecodeError, msgspec.ValidationError):
                     logger.warning("ec: dropped malformed XferAck")
         return acks
+
+    def shutdown(self) -> None:
+        """Destroy the ZMQ context. Call only after all sockets are closed."""
+        try:
+            self._ctx.destroy(linger=0)
+        except Exception:
+            logger.debug("ec: zmq context destroy failed", exc_info=True)

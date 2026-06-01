@@ -28,27 +28,29 @@ class NixlEngine:
             agent_name,
             nixl_agent_config(num_threads=num_threads, capture_telemetry=True),
         )
+        self._reg_descs: Any = None
 
     def register_region(
         self,
         block_descs: list,
         base_ptr: int,
         total_size_bytes: int,
-    ) -> tuple[Any, int]:
-        """Register mmap region; return (reg_descs, local_xfer_handle)."""
+    ) -> int:
+        """Register mmap region; return local_xfer_handle."""
         reg_descs = self._nixl.get_reg_descs(
             [(base_ptr, total_size_bytes, 0, "")], _NIXL_DRAM
         )
         self._nixl.register_memory(reg_descs, backends=["UCX"])
+        self._reg_descs = reg_descs
         xfer_descs = self._nixl.get_xfer_descs(block_descs, _NIXL_DRAM)
         local_xfer_handle = self._nixl.prep_xfer_dlist("NIXL_INIT_AGENT", xfer_descs)
-        return reg_descs, local_xfer_handle
+        return local_xfer_handle
 
-    def deregister_memory(self, reg_descs: Any) -> None:
+    def deregister_memory(self) -> None:
         try:
-            self._nixl.deregister_memory(reg_descs)
+            self._nixl.deregister_memory(self._reg_descs)
         except Exception:
-            logger.debug("ec: deregister_memory failed", exc_info=True)
+            logger.warning("EC: deregister_memory failed", exc_info=True)
 
     def get_agent_metadata(self) -> bytes:
         return self._nixl.get_agent_metadata()
@@ -74,7 +76,7 @@ class NixlEngine:
             self._nixl.remove_remote_agent(agent_name)
         except Exception:
             logger.warning(
-                "ec: remove_remote_agent failed for %s", agent_name, exc_info=True
+                "EC: remove_remote_agent failed for %s", agent_name, exc_info=True
             )
 
     def post_write(
@@ -86,7 +88,7 @@ class NixlEngine:
     ) -> Any:
         if len(local_indices) != len(remote_indices):
             raise ValueError(
-                f"ec: local/remote block count mismatch "
+                f"EC: local/remote block count mismatch "
                 f"({len(local_indices)} vs {len(remote_indices)})"
             )
         handle = self._nixl.make_prepped_xfer(
@@ -108,4 +110,4 @@ class NixlEngine:
         try:
             self._nixl.release_xfer_handle(handle)
         except Exception:
-            logger.exception("ec: release_xfer_handle failed")
+            logger.warning("EC: release_xfer_handle failed")

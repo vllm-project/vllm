@@ -4,8 +4,6 @@
 
 from typing import TYPE_CHECKING, Any
 
-import zmq
-
 from vllm import envs
 from vllm.distributed.ec_transfer.ec_connector.cpu.metadata import (
     ECCPUConnectorMetadata,
@@ -45,8 +43,7 @@ class ECCPUScheduler:
     """Scheduler delegate for the ECCPUConnector.
 
     Composes ECCPUProducer and/or ECCPUConsumer with a NixlEngine and ZMQ
-    transports. The role (producer/consumer/both) determines which objects
-    are instantiated.
+    transports.
     """
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
@@ -80,10 +77,9 @@ class ECCPUScheduler:
             self._block_size_bytes,
             device_id=0,
         )
-        reg_descs, local_xfer_handle = engine.register_region(
+        local_xfer_handle = engine.register_region(
             block_descs, self._region.base_ptr, self._region.total_size_bytes
         )
-        self._reg_descs = reg_descs
         self._agent_metadata: bytes = engine.get_agent_metadata()
         self._mem_descriptor_bytes: bytes = serialize_mem_descriptor(block_descs)
         self._compat_hash: str = compute_ec_compatibility_hash(
@@ -93,7 +89,6 @@ class ECCPUScheduler:
             block_size_bytes=self._block_size_bytes,
         )
 
-        self._zmq_ctx = zmq.Context()
         self._engine = engine
         self._producer: ECCPUProducer | None = None
         self._consumer: ECCPUConsumer | None = None
@@ -104,7 +99,6 @@ class ECCPUScheduler:
             self._peer_port = envs.VLLM_EC_SIDE_CHANNEL_PORT
 
             self._producer_transport = ZmqProducerTransport(
-                ctx=self._zmq_ctx,
                 host=self._peer_host,
                 port=self._peer_port,
             )
@@ -128,7 +122,6 @@ class ECCPUScheduler:
 
         if self._is_consumer:
             consumer_transport = ZmqConsumerTransport(
-                ctx=self._zmq_ctx,
                 engine=engine,
             )
             self._consumer = ECCPUConsumer(
@@ -196,7 +189,7 @@ class ECCPUScheduler:
             self._consumer.shutdown()
 
         try:
-            self._engine.deregister_memory(self._reg_descs)
+            self._engine.deregister_memory()
         except Exception:
             logger.debug("ec: deregister failed", exc_info=True)
 
@@ -204,8 +197,3 @@ class ECCPUScheduler:
             self._region.cleanup()
         except Exception:
             logger.debug("ec: region cleanup failed", exc_info=True)
-
-        try:
-            self._zmq_ctx.destroy(linger=0)
-        except Exception:
-            logger.debug("ec: zmq context destroy failed", exc_info=True)

@@ -82,7 +82,7 @@ class ECCPUProducer:
     def handle_xfer_req(self, identity: bytes, req: XferReq) -> None:
         if req.connector_version != EC_CONNECTOR_VERSION:
             logger.warning(
-                "ec: version mismatch req=%d local=%d, NACKing",
+                "EC: version mismatch req=%d local=%d, NACKing",
                 req.connector_version,
                 EC_CONNECTOR_VERSION,
             )
@@ -102,6 +102,12 @@ class ECCPUProducer:
                 return
             self._region.pin(block_indices)
 
+        logger.debug(
+            "EC: transfer requested mm_hash=%s consumer=%s n_blocks=%d",
+            req.mm_hash,
+            req.consumer_agent_name,
+            len(block_indices),
+        )
         try:
             peer = self._ensure_remote_peer(req)
             handle = self._engine.post_write(
@@ -112,7 +118,7 @@ class ECCPUProducer:
             )
         except Exception:
             logger.exception(
-                "ec: failed to post NIXL WRITE for mm_hash=%s", req.mm_hash
+                "EC: failed to post NIXL WRITE for mm_hash=%s", req.mm_hash
             )
             self._region.unpin(block_indices)
             with self._lock:
@@ -124,6 +130,14 @@ class ECCPUProducer:
             self._in_flight[xfer_id] = (identity, req.mm_hash, handle)
 
     def _ensure_remote_peer(self, req: XferReq) -> ProducerPeer:
+        """Look up (or create) the producer-side NIXL state for this consumer.
+
+        Keyed by `consumer_agent_name` — the consumer's NIXL-level UUID.
+        If the consumer was seen before with the same metadata we reuse
+        the prepared remote dlist; if the metadata changed we tear down
+        the old entry (the consumer restarted or re-initialized).
+
+        """
         existing = self._remote_peers.get(req.consumer_agent_name)
         if (
             existing is not None
@@ -161,7 +175,7 @@ class ECCPUProducer:
                 state = self._engine.check_xfer_state(handle)
             except Exception:
                 logger.exception(
-                    "ec: check_xfer_state raised for xfer_id=%s; treating as failure",
+                    "EC: check_xfer_state raised for xfer_id=%s; treating as failure",
                     xfer_id,
                 )
                 outcomes[xfer_id] = False
@@ -170,11 +184,12 @@ class ECCPUProducer:
             if state == "DONE":
                 outcomes[xfer_id] = True
                 self._engine.release_xfer_handle(handle)
+                logger.debug("EC: transfer complete xfer_id=%s", xfer_id)
             elif state == "PROC":
                 continue
             else:
                 logger.warning(
-                    "ec: NIXL xfer in unexpected state %r for xfer_id=%s; "
+                    "EC: NIXL xfer in unexpected state %r for xfer_id=%s; "
                     "treating as failure",
                     state,
                     xfer_id,
@@ -220,6 +235,7 @@ class ECCPUProducer:
                 return
         size_bytes = feature.mm_position.length * self._hidden_dim * self._element_size
         self._pending_new_encodings[mm_hash] = size_bytes
+        logger.debug("EC: save scheduled mm_hash=%s size_bytes=%d", mm_hash, size_bytes)
 
     def request_finished(self, request: "Request") -> dict[str, Any] | None:
         params: dict[str, dict[str, Any]] = {}
@@ -278,6 +294,11 @@ class ECCPUProducer:
             indices = self._fifo_alloc(n_blocks)
             self._pending_save[mm_hash] = indices
             saves[mm_hash] = indices
+            logger.debug(
+                "EC: save allocated mm_hash=%s n_blocks=%d",
+                mm_hash,
+                n_blocks,
+            )
         return saves
 
     def shutdown(self) -> None:
@@ -287,7 +308,7 @@ class ECCPUProducer:
                     self._engine.release_xfer_handle(handle)
             self._in_flight.clear()
         except Exception:
-            logger.debug("ec: release in_flight failed", exc_info=True)
+            logger.debug("EC: release in_flight failed", exc_info=True)
 
         for peer in list(self._remote_peers.values()):
             self._engine.remove_remote_agent(peer.nixl_agent_name)
