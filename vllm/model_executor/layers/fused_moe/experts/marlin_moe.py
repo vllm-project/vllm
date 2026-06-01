@@ -381,6 +381,34 @@ def fused_marlin_moe(
         return moe_sum(moe_output, output)
 
 
+def _select_batched_marlin_moe_block_size(
+    max_tokens_per_batch: int,
+    num_experts: int,
+    input_dtype: torch.dtype | None,
+    expert_num_tokens_cpu: torch.Tensor | None = None,
+) -> int:
+    # Batched expert tensors reserve max_tokens_per_batch for every expert.
+    # Decode usually distributes one rank's small token budget across many
+    # local experts, so using the full capacity here over-pads tiny-M GEMMs.
+    has_cpu_metadata = expert_num_tokens_cpu is not None
+    if expert_num_tokens_cpu is not None:
+        effective_tokens_per_expert = int(expert_num_tokens_cpu.max().item())
+    else:
+        effective_tokens_per_expert = max_tokens_per_batch / max(num_experts, 1)
+    block_size_m = 64
+    for b_m in [8, 16, 32, 48, 64]:
+        if effective_tokens_per_expert / b_m < 0.9:
+            block_size_m = b_m
+            break
+
+    if input_dtype is not None and input_dtype.itemsize == 1:
+        block_size_m = max(block_size_m, 16)
+    if not has_cpu_metadata:
+        block_size_m = max(block_size_m, 32)
+
+    return block_size_m
+
+
 def batched_fused_marlin_moe(
     hidden_states: torch.Tensor,
     expert_num_tokens: torch.Tensor,
@@ -414,6 +442,7 @@ def batched_fused_marlin_moe(
     clamp_limit: float | None = None,
     gemm1_alpha: float = 1.0,
     gemm1_beta: float = 0.0,
+    expert_num_tokens_cpu: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -484,17 +513,12 @@ def batched_fused_marlin_moe(
     # [B * MAX_TOKENS, K] and top_k can be interpreted as just 1.
     topk = 1
 
-    # TODO(varun) : Choose a decent block size like in fused_marlin_moe
-    # Tune block_size_m based on expert capacity to reduce padding overhead.
-    block_size_m = 64
-    for b_m in [8, 16, 32, 48, 64]:
-        if BATCH_TOKENS_MAX / b_m < 0.9:
-            block_size_m = b_m
-            break
-
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        block_size_m = max(block_size_m, 16)
-
+    block_size_m = _select_batched_marlin_moe_block_size(
+        BATCH_TOKENS_MAX,
+        E,
+        input_dtype,
+        expert_num_tokens_cpu,
+    )
     sorted_token_ids, expert_ids, num_tokens_post_padded = batched_moe_align_block_size(
         max_tokens_per_batch=BATCH_TOKENS_MAX,
         block_size=block_size_m,
@@ -1024,4 +1048,5 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             clamp_limit=self.gemm1_clamp_limit,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
+            expert_num_tokens_cpu=expert_tokens_meta.expert_num_tokens_cpu,
         )
