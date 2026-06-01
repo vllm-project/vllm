@@ -2122,3 +2122,156 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+@pytest.mark.asyncio
+async def test_mistral_grammar_path_uses_per_choice_reasoning_parser():
+    """In the Mistral-grammar streaming branch with n>=2, each choice must
+    receive its own reasoning_parser; otherwise stateful methods called
+    inside ``extract_maybe_reasoning_and_tool_streaming`` bleed across
+    choices.
+    """
+    from vllm.tool_parsers.mistral_tool_parser import (
+        MistralStreamingResult,
+        MistralToolParser,
+    )
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+
+    serving_chat = OpenAIServingChat(
+        mock_engine,
+        models,
+        response_role="assistant",
+        openai_serving_render=openai_serving_render,
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        request_logger=None,
+    )
+
+    # Track every reasoning_parser instance that the Mistral-grammar branch
+    # forwards into ``extract_maybe_reasoning_and_tool_streaming``.
+    captured_reasoning_parser_ids: list[int] = []
+
+    def make_mock_parser(*args, **kwargs):
+        per_choice_reasoning_parser = MagicMock()
+
+        tool_parser_mock = MagicMock(spec=MistralToolParser)
+
+        def fake_extract(
+            *,
+            reasoning_parser,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            output_token_ids,
+            reasoning_ended,
+            prompt_is_reasoning_end,
+            request,
+        ):
+            captured_reasoning_parser_ids.append(id(reasoning_parser))
+            return MistralStreamingResult(
+                delta_message=None,
+                reasoning_ended=True,
+                tools_called=False,
+                current_text=current_text,
+                current_token_ids=list(current_token_ids),
+            )
+
+        tool_parser_mock.extract_maybe_reasoning_and_tool_streaming = fake_extract
+
+        parser_mock = MagicMock()
+        parser_mock.tool_parser = tool_parser_mock
+        parser_mock.reasoning_parser = per_choice_reasoning_parser
+        return parser_mock
+
+    serving_chat.parser_cls = make_mock_parser
+
+    num_choices = 2
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hi"}],
+        n=num_choices,
+        stream=True,
+    )
+    # Force the Mistral-grammar streaming branch without having to
+    # construct a real MistralToolParser (which requires a Mistral
+    # tokenizer with [TOOL_CALLS] in its vocab).
+    request._grammar_from_tool_parser = True
+
+    async def result_generator():
+        # One delta per choice, then a finishing chunk.
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="hi",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=i,
+                    text="x",
+                    token_ids=[10],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+                for i in range(num_choices)
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="hi",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=i,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+                for i in range(num_choices)
+            ],
+            finished=True,
+        )
+
+    tokenizer = get_tokenizer(MODEL_NAME)
+
+    async for _ in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        pass
+
+    # With the bug, every call would see the single shared external
+    # ``reasoning_parser`` -> only one unique id.  With the fix, each
+    # choice owns its parser -> at least num_choices unique ids.
+    assert len(captured_reasoning_parser_ids) >= num_choices, (
+        "Mistral-grammar streaming branch was not exercised: "
+        f"only {len(captured_reasoning_parser_ids)} call(s) recorded"
+    )
+    assert len(set(captured_reasoning_parser_ids)) >= num_choices, (
+        "All Mistral-grammar calls received the SAME reasoning_parser "
+        "instance (shared-reference bug). Expected one instance per choice."
+    )

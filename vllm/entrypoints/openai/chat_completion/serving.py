@@ -689,9 +689,12 @@ class OpenAIServingChat(OpenAIServing):
                         assert tool_parser is not None
                         assert isinstance(tool_parser, MistralToolParser)
                         assert reasoning_end_arr is not None
+                        assert parser is not None
                         output_token_ids = as_list(output.token_ids)
+                        # Per-choice reasoning_parser: the outer one is shared
+                        # across choices and would leak state when n >= 2.
                         result = tool_parser.extract_maybe_reasoning_and_tool_streaming(
-                            reasoning_parser=reasoning_parser,
+                            reasoning_parser=parser.reasoning_parser,
                             previous_text=previous_text,
                             current_text=current_text,
                             delta_text=delta_text,
