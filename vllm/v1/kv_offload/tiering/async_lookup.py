@@ -21,10 +21,6 @@ logger = init_logger(__name__)
 # Sentinel for a slot that is queued or currently being looked up.
 _IN_FLIGHT = object()
 
-# Sentinel placed in the queue by notify_end_of_step() to guarantee the
-# worker wakes and drains any trailing keys added late in a step.
-_END_OF_STEP = object()
-
 # Result constants stored in _async_results.
 NOT_FOUND: int = -1
 FOUND: int = 1
@@ -46,11 +42,9 @@ class AsyncLookupWorker:
     asynchronously, keeping the scheduler thread non-blocking.
 
     The scheduler thread calls query() which either returns a cached result
-    or queues the key and returns None.  The worker is triggered once per
-    engine step by notify_end_of_step() (called from take_events()), at
-    which point all keys for that step are already queued.  The worker
-    drains the queue, groups keys by req_id, and calls
-    tier.batch_lookup() on each tier in order.
+    or queues the key and returns None.  The worker drains the queue
+    continuously, groups keys by req_id, and calls tier.batch_lookup()
+    on each tier in order.
 
     Results are stored in a bounded FIFO OrderedDict.  On store completion,
     update_cached_exists() proactively populates the cache so subsequent
@@ -102,22 +96,13 @@ class AsyncLookupWorker:
             self._queue.put_nowait((key, req_context))
         return None
 
-    def notify_end_of_step(self) -> None:
-        """Signal that all lookup() calls for this engine step are done.
-
-        Called from TieringOffloadingManager.take_events().  Places a
-        sentinel in the queue so the worker wakes and drains any trailing
-        keys that arrived late in the step.
-        """
-        self._queue.put_nowait(_END_OF_STEP)
-
     def update_cached_exists(
         self, keys: Collection[OffloadKey], tier_idx: int
     ) -> None:
         """Populate the cache for keys confirmed present by a completed store.
 
         Called from TieringOffloadingManager._process_finished_jobs() when a
-        primary→secondary store job completes.  Overwrites _IN_FLIGHT or
+        primary -> secondary store job completes.  Overwrites _IN_FLIGHT or
         NOT_FOUND entries; leaves existing FOUND entries untouched.
         """
         with self._lock:
@@ -137,7 +122,6 @@ class AsyncLookupWorker:
     def shutdown(self) -> None:
         """Stop the worker thread."""
         self._shutdown_event.set()
-        self._queue.put_nowait(_END_OF_STEP)  # unblock queue.get() if sleeping
         self._thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
@@ -174,7 +158,7 @@ class AsyncLookupWorker:
 
     def _worker(self) -> None:
         while not self._shutdown_event.is_set():
-            # Block until the first item arrives (key or end-of-step sentinel).
+            # Block until the first key arrives.
             try:
                 item = self._queue.get(timeout=1.0)
             except queue.Empty:
@@ -184,16 +168,14 @@ class AsyncLookupWorker:
                 break
 
             # Drain the rest of the queue and group keys by req_id.
-            # Sentinels (_END_OF_STEP) are discarded.
             batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
 
             def _add(item: object) -> None:
-                if item is not _END_OF_STEP:
-                    key, req_context = item  # type: ignore[misc]
-                    req_id = req_context.req_id
-                    if req_id not in batches:
-                        batches[req_id] = (req_context, [])
-                    batches[req_id][1].append(key)
+                key, req_context = item  # type: ignore[misc]
+                req_id = req_context.req_id
+                if req_id not in batches:
+                    batches[req_id] = (req_context, [])
+                batches[req_id][1].append(key)
 
             _add(item)
             while True:

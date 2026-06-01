@@ -607,9 +607,6 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._flush_pending_promotions()
 
-        if self._async_lookup:
-            self._async_lookup.notify_end_of_step()
-
         # Reset the per-step gate so next step's first call does real work.
         self._processed_jobs_this_step = False
 
