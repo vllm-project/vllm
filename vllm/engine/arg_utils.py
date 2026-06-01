@@ -574,6 +574,7 @@ class EngineArgs:
     )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
+    tokenizer_batch_wait_timeout_s: float = ModelConfig.tokenizer_batch_wait_timeout_s
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
@@ -865,6 +866,10 @@ class EngineArgs:
         model_group.add_argument(
             "--renderer-num-workers",
             **model_kwargs["renderer_num_workers"],
+        )
+        model_group.add_argument(
+            "--tokenizer-batch-wait-timeout-s",
+            **model_kwargs["tokenizer_batch_wait_timeout_s"],
         )
 
         # Model loading arguments
@@ -1624,6 +1629,7 @@ class EngineArgs:
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
+            tokenizer_batch_wait_timeout_s=self.tokenizer_batch_wait_timeout_s,
         )
 
     def validate_tensorizer_args(self):

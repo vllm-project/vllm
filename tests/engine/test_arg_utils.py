@@ -232,6 +232,14 @@ def test_hf_token_cli_arg(cli_args, expected):
     assert args.hf_token == expected
 
 
+def test_tokenizer_batch_wait_timeout_cli_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(["--tokenizer-batch-wait-timeout-s", "0"])
+
+    assert args.tokenizer_batch_wait_timeout_s == 0
+
+
 @pytest.mark.parametrize(
     ("arg", "expected"),
     [
