@@ -474,6 +474,10 @@ class GPUModelRunner(
             and len(get_pp_group().ranks) > 1
         )
 
+        # Decode fast path: persistent GPU state for steady-state decode.
+        self._persistent_decode_active = False
+        self._persistent_num_reqs = 0
+
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.inputs_embeds_size = model_config.get_inputs_embeds_size()
@@ -1127,6 +1131,66 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # Fast path: when the batch is completely stable (no requests
+        # added, removed, resumed, or finished), only update the
+        # per-request computed token counts and block table.
+        if (
+            not scheduler_output.finished_req_ids
+            and not scheduler_output.scheduled_new_reqs
+            and not scheduler_output.scheduled_cached_reqs.resumed_req_ids
+            and not scheduler_output.new_block_ids_to_zero
+            and not scheduler_output.free_encoder_mm_hashes
+        ):
+            req_data = scheduler_output.scheduled_cached_reqs
+            all_in_batch = True
+            for req_id in req_data.req_ids:
+                if req_id not in self.input_batch.req_id_to_index:
+                    all_in_batch = False
+                    break
+            if all_in_batch:
+                is_last_rank = get_pp_group().is_last_rank
+                scheduled_spec_tokens = (
+                    scheduler_output.scheduled_spec_decode_tokens)
+                for i, req_id in enumerate(req_data.req_ids):
+                    req_state = self.requests[req_id]
+                    num_computed_tokens = req_data.num_computed_tokens[i]
+                    new_block_ids = req_data.new_block_ids[i]
+                    num_output_tokens = req_data.num_output_tokens[i]
+
+                    req_state.num_computed_tokens = num_computed_tokens
+                    req_index = self.input_batch.req_id_to_index[req_id]
+                    self.input_batch.num_computed_tokens_cpu[
+                        req_index] = num_computed_tokens
+
+                    # Handle output_token_ids truncation (last rank path).
+                    if is_last_rank:
+                        if num_output_tokens < len(req_state.output_token_ids):
+                            del req_state.output_token_ids[num_output_tokens:]
+                            end_idx = (
+                                self.input_batch.num_prompt_tokens[req_index]
+                                + num_output_tokens
+                            )
+                            self.input_batch.num_tokens_no_spec[
+                                req_index] = end_idx
+
+                    if new_block_ids is not None:
+                        for block_ids, new_ids in zip(
+                                req_state.block_ids, new_block_ids):
+                            block_ids.extend(new_ids)
+                        self.input_batch.block_table.append_row(
+                            new_block_ids, req_index)
+
+                    self.input_batch.update_req_spec_token_ids(
+                        req_state, scheduled_spec_tokens)
+
+                self.input_batch.condense()
+                self._may_reorder_batch(scheduler_output)
+                self.input_batch.refresh_metadata()
+                return None
+
+        # Batch changed — reset persistent decode state.
+        self._persistent_decode_active = False
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -1863,6 +1927,178 @@ class GPUModelRunner(
         encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
 
         return encoder_seq_lens, encoder_seq_lens_cpu
+
+    def _prepare_inputs_persistent_decode(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[torch.Tensor, "SpecDecodeMetadata | None"]:
+        """Ultra-fast decode path: GPU-only state increments.
+
+        After the first decode step initializes all GPU buffers via
+        ``_prepare_inputs_decode_only``, subsequent steps only need
+        GPU ``add_(1)`` on positions/seq_lens/num_computed_tokens,
+        a Triton slot_mapping kernel, and a 1-token input_ids copy.
+        This eliminates 6 of 7 ``copy_to_gpu()`` calls and all numpy
+        operations from the decode hot path.
+        """
+        num_reqs = self.input_batch.num_reqs
+
+        # 1. Async block table copy (new KV cache blocks from scheduler).
+        self.input_batch.block_table.commit_block_table(num_reqs)
+
+        # 2. GPU-only state increments — NO copy_to_gpu()!
+        self.num_computed_tokens[:num_reqs].add_(1)
+        self.positions[:num_reqs].add_(1)
+        self.seq_lens[:num_reqs].add_(1)
+
+        # 3. M-RoPE positions: for text-only models, all dims increment.
+        if self.uses_mrope:
+            self.mrope_positions.gpu[:, :num_reqs].add_(1)
+
+        # 4. Slot mapping via Triton kernel (uses GPU-resident positions).
+        self.input_batch.block_table.compute_slot_mapping(
+            num_reqs,
+            self.query_start_loc.gpu[:num_reqs + 1],
+            self.positions[:num_reqs],
+        )
+
+        # 5. Input IDs: 1 token per request from CPU token buffer.
+        cu_num_tokens = self.arange_np[1:num_reqs + 1].astype(np.int32)
+        self._prepare_input_ids(
+            scheduler_output, num_reqs, num_reqs, cu_num_tokens)
+
+        # 6. CPU state sync (for attention metadata consistency).
+        self.optimistic_seq_lens_cpu[:num_reqs].add_(1)
+
+        # 7. Logits indices — constant across decode steps.
+        logits_indices = self.query_start_loc.gpu[1:num_reqs + 1] - 1
+        return logits_indices, None
+
+    def _prepare_inputs_decode_only(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+    ) -> tuple[torch.Tensor, "SpecDecodeMetadata | None"]:
+        """Fast path for pure decode: each request has exactly 1 token.
+
+        Skips ``np.repeat``, ``_get_cumsum_and_arange``,
+        ``torch.index_select``, and most numpy overhead that the full
+        ``_prepare_inputs`` performs.  Initializes all GPU buffers so
+        that subsequent steps can use ``_prepare_inputs_persistent_decode``.
+        """
+        num_reqs = self.input_batch.num_reqs
+        total = num_reqs  # 1 token per request
+
+        # 1. Start async block table copy.
+        self.input_batch.block_table.commit_block_table(num_reqs)
+
+        # 2. M-RoPE positions (Qwen3.5 uses this).
+        if self.uses_mrope:
+            self._calc_mrope_positions(scheduler_output)
+
+        # 3. query_start_loc = [0, 1, 2, ..., num_reqs].
+        # NOTE: must always rewrite — original _prepare_inputs overwrites
+        # this buffer during prefill, so cached values become stale.
+        self.query_start_loc.np[:num_reqs + 1] = (
+            self.arange_np[:num_reqs + 1])
+        self.query_start_loc.np[num_reqs + 1:].fill(num_reqs)
+        self.query_start_loc.copy_to_gpu()
+        query_start_loc = self.query_start_loc.gpu[:num_reqs + 1]
+
+        # 4. optimistic_seq_lens_cpu = num_computed_tokens_cpu + 1.
+        torch.add(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            1,
+            out=self.optimistic_seq_lens_cpu[:num_reqs],
+        )
+        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+
+        # 5. prev_positions mapping (needed for async scheduling).
+        self._compute_prev_positions(num_reqs)
+
+        # 6. discard_request_mask: all False for pure decode.
+        self.discard_request_mask.np[:num_reqs] = False
+        self.discard_request_mask.copy_to_gpu(num_reqs)
+
+        # 7. num_accepted_tokens.
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[
+                        np.where(new_mask, 0, prev_idx)])
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                    self.num_accepted_tokens.np[:num_reqs])
+            else:
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs])
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+
+        # 8. num_computed_tokens to GPU.
+        self.num_computed_tokens[:num_reqs].copy_(
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+            non_blocking=True,
+        )
+
+        # 9. req_indices and query_pos to GPU.
+        self.req_indices.np[:total] = self.arange_np[:num_reqs]
+        self.req_indices.copy_to_gpu(total)
+        req_indices_gpu = self.req_indices.gpu[:total]
+
+        self.query_pos.np[:total] = 0
+        self.query_pos.copy_to_gpu(total)
+
+        # 10. num_scheduled_tokens to GPU.
+        self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
+        self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
+
+        # 11. positions[i] = num_computed_tokens[i] (GPU).
+        self.positions[:total] = (
+            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+        )
+
+        # 12. seq_lens = num_computed_tokens + num_scheduled_tokens (GPU).
+        self.seq_lens[:num_reqs] = (
+            self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu)
+        self.seq_lens[num_reqs:].fill_(0)
+
+        # 13. compute_slot_mapping via Triton kernel.
+        self.input_batch.block_table.compute_slot_mapping(
+            num_reqs,
+            query_start_loc,
+            self.positions[:total],
+        )
+
+        # 14. Input IDs via _prepare_input_ids.
+        cu_num_tokens = self.arange_np[1:num_reqs + 1].astype(np.int32)
+        self._prepare_input_ids(
+            scheduler_output, num_reqs, total, cu_num_tokens)
+
+        # 15. M-RoPE/XD-RoPE positions to GPU.
+        if self.uses_mrope:
+            self.mrope_positions.gpu[:, :total].copy_(
+                self.mrope_positions.cpu[:, :total],
+                non_blocking=True,
+            )
+        elif self.uses_xdrope_dim > 0:
+            self.xdrope_positions.gpu[:, :total].copy_(
+                self.xdrope_positions.cpu[:, :total],
+                non_blocking=True,
+            )
+
+        # 16. logits_indices — for decode, each req has 1 token.
+        logits_indices = query_start_loc[1:] - 1
+
+        return logits_indices, None
 
     def _prepare_inputs(
         self,
@@ -4044,10 +4280,42 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+            # Decode fast path: skip heavy numpy/CPU work when every
+            # request schedules exactly 1 token (pure decode, no spec).
+            _use_decode_fast = (
+                max_num_scheduled_tokens == 1
+                and not getattr(self, 'enable_prompt_embeds', False)
+                and not self.lora_config
+                and not scheduler_output.scheduled_spec_decode_tokens
+                and not self.use_async_spec_decode
             )
+            if _use_decode_fast:
+                if (self._persistent_decode_active
+                        and self._persistent_num_reqs
+                        == self.input_batch.num_reqs):
+                    # Persistent path: GPU-only increments (subsequent
+                    # decode steps with unchanged batch).
+                    logits_indices, spec_decode_metadata = (
+                        self._prepare_inputs_persistent_decode(
+                            scheduler_output,
+                        )
+                    )
+                else:
+                    # First decode step: full init of GPU buffers.
+                    logits_indices, spec_decode_metadata = (
+                        self._prepare_inputs_decode_only(
+                            scheduler_output,
+                            num_scheduled_tokens_np,
+                        )
+                    )
+                    self._persistent_decode_active = True
+                    self._persistent_num_reqs = self.input_batch.num_reqs
+            else:
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
+                self._persistent_decode_active = False
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)

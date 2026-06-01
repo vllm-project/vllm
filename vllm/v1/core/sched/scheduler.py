@@ -281,6 +281,10 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # Cached state for decode-only fast path.
+        self._cached_common_prefix_blocks: list[int] = (
+            [0] * len(self.kv_cache_config.kv_cache_groups))
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -331,7 +335,134 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _can_use_decode_fast_path(self) -> bool:
+        """Check if the steady-state decode fast path can be used.
+
+        The fast path skips the full scheduling logic when all requests
+        are in pure decode mode (no new, waiting, finished, or paused
+        requests). This eliminates ~0.15ms of Python overhead per step.
+        """
+        return (
+            len(self.finished_req_ids) == 0
+            and len(self.waiting) == 0
+            and len(self.skipped_waiting) == 0
+            and self._pause_state == PauseState.UNPAUSED
+            and len(self.running) > 0
+            and len(self.running) == len(self.prev_step_scheduled_req_ids)
+            and all(r.request_id in self.prev_step_scheduled_req_ids
+                    for r in self.running)
+            and all(r.num_computed_tokens >= r.num_tokens
+                    for r in self.running)
+            and self.connector is None
+            and self.ec_connector is None
+            and not self.lora_config
+            and not self.use_v2_model_runner
+        )
+
+    def _schedule_decode_only(self) -> SchedulerOutput:
+        """Fast path for pure decode steps with an unchanged request set.
+
+        Allocates KV cache blocks and builds SchedulerOutput without
+        the overhead of the full scheduling loop (priority sorting,
+        budget tracking, waiting queue scanning, etc.).
+        """
+        self.kv_cache_manager.new_step_starts()
+
+        num_scheduled_tokens: dict[str, int] = {}
+        req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        total_num_scheduled_tokens = 0
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        scheduled_running_reqs: list[Request] = []
+
+        for request in self.running:
+            num_new_tokens = (
+                request.num_tokens_with_spec
+                + request.num_output_placeholders
+                - request.num_computed_tokens
+            )
+            if num_new_tokens <= 0:
+                continue
+            num_new_tokens = min(
+                num_new_tokens,
+                self.max_model_len - 1 - request.num_computed_tokens,
+            )
+
+            new_blocks = self.kv_cache_manager.allocate_slots(
+                request, num_new_tokens,
+                num_lookahead_tokens=self.num_lookahead_tokens,
+            )
+            if new_blocks is None:
+                logger.warning(
+                    "Decode fast path: allocation failed for %s",
+                    request.request_id)
+                break
+
+            scheduled_running_reqs.append(request)
+            req_id = request.request_id
+            req_to_new_blocks[req_id] = new_blocks
+            num_scheduled_tokens[req_id] = num_new_tokens
+            total_num_scheduled_tokens += num_new_tokens
+
+            if request.spec_token_ids:
+                num_sched_spec = (
+                    num_new_tokens + request.num_computed_tokens
+                    - request.num_tokens - request.num_output_placeholders
+                )
+                if num_sched_spec > 0:
+                    spec_ids = request.spec_token_ids[:num_sched_spec]
+                    scheduled_spec_decode_tokens[req_id] = spec_ids
+                request.spec_token_ids = []
+
+        req_ids = []
+        new_block_ids = []
+        num_computed_tokens = []
+        num_output_tokens = []
+        for req in scheduled_running_reqs:
+            rid = req.request_id
+            req_ids.append(rid)
+            new_block_ids.append(
+                req_to_new_blocks[rid].get_block_ids(allow_none=True))
+            num_computed_tokens.append(req.num_computed_tokens)
+            num_output_tokens.append(
+                req.num_output_tokens + req.num_output_placeholders)
+
+        cached_reqs_data = CachedRequestData(
+            req_ids=req_ids, resumed_req_ids=set(),
+            new_token_ids=[], all_token_ids={},
+            new_block_ids=new_block_ids,
+            num_computed_tokens=num_computed_tokens,
+            num_output_tokens=num_output_tokens,
+        )
+
+        new_block_ids_to_zero = (
+            (self.kv_cache_manager.take_new_block_ids() or None)
+            if self.needs_kv_cache_zeroing else None
+        )
+
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=cached_reqs_data,
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=self._cached_common_prefix_blocks,
+            preempted_req_ids=set(),
+            finished_req_ids=self.finished_req_ids,
+            free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=new_block_ids_to_zero,
+        )
+
+        self.prev_step_scheduled_req_ids.clear()
+        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        self._update_after_schedule(scheduler_output)
+        return scheduler_output
+
     def schedule(self) -> SchedulerOutput:
+        # Fast path for steady-state decode steps.
+        if self._can_use_decode_fast_path():
+            return self._schedule_decode_only()
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -850,6 +981,8 @@ class Scheduler(SchedulerInterface):
                 num_common_prefix_blocks = (
                     self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
                 )
+        # Cache for reuse in decode-only fast path.
+        self._cached_common_prefix_blocks = num_common_prefix_blocks
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
