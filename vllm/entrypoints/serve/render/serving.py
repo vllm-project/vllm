@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -58,6 +58,28 @@ from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+_DEEPSEEK_V4_FIM_BEGIN = "<｜fim▁begin｜>"
+_DEEPSEEK_V4_FIM_HOLE = "<｜fim▁hole｜>"
+_DEEPSEEK_V4_FIM_END = "<｜fim▁end｜>"
+
+
+def _build_deepseek_v4_fim_prompt(prompt: str, suffix: str) -> str:
+    return (
+        f"{_DEEPSEEK_V4_FIM_BEGIN}{prompt}"
+        f"{_DEEPSEEK_V4_FIM_HOLE}{suffix}{_DEEPSEEK_V4_FIM_END}"
+    )
+
+
+_COMPLETION_SUFFIX_RENDERERS: dict[str, Callable[[str, str], str]] = {
+    "deepseek_v4": _build_deepseek_v4_fim_prompt,
+}
+
+
+def _get_completion_suffix_renderer(
+    model_type: str,
+) -> Callable[[str, str], str] | None:
+    return _COMPLETION_SUFFIX_RENDERERS.get(model_type)
 
 
 class OpenAIServingRender:
@@ -332,9 +354,34 @@ class OpenAIServingRender:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
-        # Return error for unsupported features.
+        prompt_input = request.prompt
         if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
+            suffix_renderer = _get_completion_suffix_renderer(
+                self.model_config.hf_config.model_type
+            )
+            if suffix_renderer is None:
+                return self.create_error_response(
+                    "suffix is only supported for models with FIM completion rendering"
+                )
+
+            if request.prompt_embeds is not None:
+                return self.create_error_response(
+                    "suffix is not supported with prompt_embeds"
+                )
+
+            if isinstance(request.prompt, str):
+                prompt_input = suffix_renderer(request.prompt, request.suffix)
+            elif isinstance(request.prompt, list) and all(
+                isinstance(prompt, str) for prompt in request.prompt
+            ):
+                prompt_input = [
+                    suffix_renderer(prompt, request.suffix)
+                    for prompt in cast(list[str], request.prompt)
+                ]
+            else:
+                return self.create_error_response(
+                    "suffix requires text prompt input for FIM completion rendering"
+                )
 
         if request.echo and request.prompt_embeds is not None:
             return self.create_error_response("Echo is unsupported with prompt embeds.")
@@ -346,7 +393,7 @@ class OpenAIServingRender:
 
         engine_inputs = await self.preprocess_completion(
             request,
-            prompt_input=request.prompt,
+            prompt_input=prompt_input,
             prompt_embeds=request.prompt_embeds,
             skip_mm_cache=skip_mm_cache,
         )

@@ -11,10 +11,13 @@ from pydantic import ValidationError
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.render.serving import (
+    OpenAIServingRender,
+    _build_deepseek_v4_fim_prompt,
+)
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -98,6 +101,111 @@ def _build_renderer(model_config: MockModelConfig):
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         cached_tokenizer_from_config(model_config),
     )
+
+
+def _build_serving_render_for_completion(
+    model_config: MockModelConfig,
+) -> OpenAIServingRender:
+    renderer = MagicMock()
+    return OpenAIServingRender(
+        model_config=model_config,
+        renderer=renderer,
+        model_registry=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_deepseek_v4_completion_suffix_renders_fim_prompt():
+    model_config = MockModelConfig()
+    model_config.hf_config = MockHFConfig(model_type="deepseek_v4")
+    serving_render = _build_serving_render_for_completion(model_config)
+    serving_render.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="def fib(n):\n    return ",
+        suffix="\n\nprint(fib(10))",
+        max_tokens=64,
+    )
+
+    result = await serving_render.render_completion(request)
+
+    assert result == [{"ok": True}]
+    serving_render.preprocess_completion.assert_awaited_once()
+    assert serving_render.preprocess_completion.call_args.kwargs[
+        "prompt_input"
+    ] == _build_deepseek_v4_fim_prompt(
+        "def fib(n):\n    return ",
+        "\n\nprint(fib(10))",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_deepseek_v4_completion_suffix_supports_text_prompt_list():
+    model_config = MockModelConfig()
+    model_config.hf_config = MockHFConfig(model_type="deepseek_v4")
+    serving_render = _build_serving_render_for_completion(model_config)
+    serving_render.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["prefix A", "prefix B"],
+        suffix=" suffix",
+    )
+
+    result = await serving_render.render_completion(request)
+
+    assert result == [{"ok": True}]
+    assert serving_render.preprocess_completion.call_args.kwargs["prompt_input"] == [
+        _build_deepseek_v4_fim_prompt("prefix A", " suffix"),
+        _build_deepseek_v4_fim_prompt("prefix B", " suffix"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_non_deepseek_v4():
+    model_config = MockModelConfig()
+    serving_render = _build_serving_render_for_completion(model_config)
+    serving_render.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+    )
+
+    result = await serving_render.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "FIM completion rendering" in result.error.message
+    serving_render.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_deepseek_v4_completion_suffix_rejects_token_prompt():
+    model_config = MockModelConfig()
+    model_config.hf_config = MockHFConfig(model_type="deepseek_v4")
+    serving_render = _build_serving_render_for_completion(model_config)
+    serving_render.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=[1, 2, 3],
+        suffix="suffix",
+    )
+
+    result = await serving_render.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "requires text prompt input" in result.error.message
+    serving_render.preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
