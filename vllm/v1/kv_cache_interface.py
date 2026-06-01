@@ -286,11 +286,6 @@ def allocate_kv_cache(
     return reshape_kv_cache(buf, spec, num_blocks, num_layer_slots, layout)
 
 
-# ---------------------------------------------------------------------------
-# Generic connector utilities (RFC #42082)
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
@@ -304,7 +299,7 @@ class AttentionSpec(KVCacheSpec):
         return 1
 
     """
-    NOTE: for instead of interleaving K and V in the content dimension, i.e.
+    NOTE: for NVFP4, instead of interleaving K and V in the content dimension, i.e.
        [L, B, H, N, 2 * head_dim] | k, v = torch.split(kv_cache, head_dim, dim=4)
     we store K and V sequentially in the head dimension, i.e.
        [L, B, 2 * H, N, head_dim] | k, v = torch.split(kv_cache, head_dim, dim=2)
