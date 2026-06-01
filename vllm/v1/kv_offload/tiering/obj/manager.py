@@ -83,7 +83,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         all_blocks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID) for i in range(len(primary_kv_view))
         ]
-        self._dram_prepped_handle = self._agent.prep_xfer_dlist("ObjAgent", all_blocks, "DRAM")
+        # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
+        # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
+        # with the peer agent name ("ObjAgent").
+        self._dram_prepped_handle = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
