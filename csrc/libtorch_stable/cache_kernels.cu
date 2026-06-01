@@ -439,7 +439,8 @@ __global__ void concat_and_cache_mla_kernel(
       }
       if constexpr (kDebug) {
         if constexpr (std::is_same_v<scalar_t, uint16_t>) {
-          nan_count += __hisnan(*reinterpret_cast<const __half*>(&src[src_idx]));
+          nan_count +=
+              __hisnan(*reinterpret_cast<const __half*>(&src[src_idx]));
         } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
           nan_count += __hisnan(src[src_idx]);
         } else {
@@ -845,16 +846,11 @@ void reshape_and_cache_flash(
           reinterpret_cast<const float*>(scale.data_ptr()),                   \
           nan_insertion_count_ptr);
 
-#define CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T) \
-  std::conditional_t<std::is_same_v<KV_T, uint16_t>, __half, KV_T>
-
-#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)                 \
-  if (nan_insertion_count_ptr) {                                           \
-    CALL_CONCAT_AND_CACHE_MLA_IMPL(CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T), \
-                                   CACHE_T, KV_DTYPE, true)                \
-  } else {                                                                 \
-    CALL_CONCAT_AND_CACHE_MLA_IMPL(CALL_CONCAT_AND_CACHE_MLA_SCALAR(KV_T), \
-                                   CACHE_T, KV_DTYPE, false)               \
+#define CALL_CONCAT_AND_CACHE_MLA(KV_T, CACHE_T, KV_DTYPE)         \
+  if (nan_insertion_count_ptr) {                                   \
+    CALL_CONCAT_AND_CACHE_MLA_IMPL(KV_T, CACHE_T, KV_DTYPE, true)  \
+  } else {                                                         \
+    CALL_CONCAT_AND_CACHE_MLA_IMPL(KV_T, CACHE_T, KV_DTYPE, false) \
   }
 
 // KV_T is the data type of key and value tensors.
