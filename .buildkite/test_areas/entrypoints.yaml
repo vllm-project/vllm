@@ -18,7 +18,37 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/llm
   - tests/entrypoints/offline_mode
   commands:
@@ -38,7 +68,37 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -57,7 +117,37 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   - tests/entrypoints/generate
@@ -79,7 +169,37 @@ steps:
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -99,7 +219,37 @@ steps:
   timeout_in_minutes: 130
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/rpc
   - tests/entrypoints/serve/instrumentator
   - tests/tool_use
@@ -132,7 +282,37 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -143,7 +323,37 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/
+  - vllm/_aiter_ops.py
+  - vllm/assets/
+  - vllm/beam_search.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/entrypoints/
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/logprobs.py
+  - vllm/lora/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/parser/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/tasks.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - vllm/version.py
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
