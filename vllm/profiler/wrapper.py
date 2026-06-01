@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import csv
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -156,6 +158,29 @@ TorchProfilerActivityMap = {
 }
 
 
+# Per-event fields exported when torch_profiler_export_format is set.
+# Each maps to an attribute on torch's FunctionEventAvg (read defensively
+# with getattr so a missing attribute on a given torch version yields None
+# rather than raising).
+_PROFILER_EXPORT_FIELDS = (
+    "key",
+    "count",
+    "node_id",
+    "cpu_time_total",
+    "self_cpu_time_total",
+    "cpu_time",
+    "cuda_time_total",
+    "self_cuda_time_total",
+    "cuda_time",
+    "cpu_memory_usage",
+    "self_cpu_memory_usage",
+    "cuda_memory_usage",
+    "self_cuda_memory_usage",
+    "flops",
+    "input_shapes",
+)
+
+
 class TorchProfilerWrapper(WorkerProfiler):
     def __init__(
         self,
@@ -258,6 +283,33 @@ class TorchProfilerWrapper(WorkerProfiler):
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
+    def _export_profiler_table(self, rank: int, export_format: str) -> None:
+        profiler_dir = self.profiler_config.torch_profiler_dir
+
+        # Skip file write for URI paths (gs://, s3://, etc.)
+        # as standard file I/O doesn't work with URI schemes
+        if _is_uri_path(profiler_dir):
+            return
+
+        rows = [
+            {field: getattr(event, field, None) for field in _PROFILER_EXPORT_FIELDS}
+            for event in self.profiler.key_averages()
+        ]
+
+        out_file = f"{profiler_dir}/profiler_out_{rank}.{export_format}"
+        if export_format == "json":
+            with open(out_file, "w") as f:
+                json.dump(rows, f, indent=2, default=str)
+        else:  # csv
+            for row in rows:
+                # input_shapes is a nested list; flatten to a string for CSV.
+                if row["input_shapes"] is not None:
+                    row["input_shapes"] = str(row["input_shapes"])
+            with open(out_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(_PROFILER_EXPORT_FIELDS))
+                writer.writeheader()
+                writer.writerows(rows)
+
     @override
     def _start(self) -> None:
         self.profiler.start()
@@ -285,6 +337,11 @@ class TorchProfilerWrapper(WorkerProfiler):
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
+
+        if profiler_config.torch_profiler_export_format:
+            self._export_profiler_table(
+                rank, profiler_config.torch_profiler_export_format
+            )
 
     @override
     def _profiler_step(self) -> bool:
