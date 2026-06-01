@@ -35,7 +35,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -56,6 +55,7 @@ from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLA,
 )
+from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
 
@@ -697,25 +697,12 @@ class DeepseekV4Attention(nn.Module):
         self.rope_parameters = config.rope_scaling
 
         # Initialize rotary embedding BEFORE DeepseekV4MLA (which needs it)
-        rope_parameters = config.rope_parameters
-        rope_parameters["rope_theta"] = (
-            config.compress_rope_theta if self.compress_ratio > 1 else config.rope_theta
-        )
-        if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
-            )
-        rope_parameters["mscale"] = 0  # Disable mscale
-        rope_parameters["mscale_all_dim"] = 0  # Disable mscale
-        rope_parameters["is_deepseek_v4"] = True
-        rope_parameters["rope_dim"] = self.rope_head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=False,
+        self.rotary_emb = build_deepseek_v4_rope(
+            config,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            compress_ratio=self.compress_ratio,
         )
 
         self.indexer = None
