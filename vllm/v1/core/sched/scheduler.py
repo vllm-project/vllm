@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -396,6 +397,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         scheduled_running_reqs: list[Request],
         has_waiting_requests: bool = False,
+        has_pending_decode: bool = False,
     ) -> int:
         if (
             not self.scheduler_config.enable_chunked_prefill
@@ -403,8 +405,10 @@ class Scheduler(SchedulerInterface):
         ):
             return num_new_tokens
 
-        has_scheduled_decode = self._has_scheduled_decode(scheduled_running_reqs)
-        if not has_scheduled_decode and not has_waiting_requests:
+        has_decode_pressure = (
+            self._has_scheduled_decode(scheduled_running_reqs) or has_pending_decode
+        )
+        if not has_decode_pressure and not has_waiting_requests:
             return num_new_tokens
 
         remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
@@ -418,7 +422,7 @@ class Scheduler(SchedulerInterface):
         very_long_prefill_threshold = (
             self.max_num_scheduled_tokens * very_long_prefill_steps
         )
-        if has_scheduled_decode:
+        if has_decode_pressure:
             if remaining_prefill > very_long_prefill_threshold:
                 mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 16)
             else:
@@ -453,7 +457,6 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
-
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -516,12 +519,17 @@ class Scheduler(SchedulerInterface):
                 later_request.num_computed_tokens < later_request.num_prompt_tokens
                 for later_request in self.running[req_index + 1 :]
             )
+            has_pending_running_decode = any(
+                later_request.num_computed_tokens >= later_request.num_prompt_tokens
+                for later_request in self.running[req_index + 1 :]
+            )
             num_new_tokens = self._limit_mixed_decode_prefill_chunk(
                 request,
                 num_new_tokens,
                 scheduled_running_reqs,
                 bool(self.waiting or self.skipped_waiting)
                 or has_unscheduled_running_prefill,
+                has_pending_running_decode,
             )
 
             # Make sure the input position does not exceed the max model len.
