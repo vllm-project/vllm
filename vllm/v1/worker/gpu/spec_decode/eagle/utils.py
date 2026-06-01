@@ -35,6 +35,8 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 target_embed_tokens = inner_model.embed_tokens
             elif hasattr(inner_model, "embedding"):
                 target_embed_tokens = inner_model.embedding
+            elif hasattr(inner_model, "word_embeddings"):
+                target_embed_tokens = inner_model.word_embeddings
         if target_embed_tokens is not None and hasattr(eagle_model, "model"):
             if hasattr(eagle_model.model, "embed_tokens"):
                 del eagle_model.model.embed_tokens
@@ -44,10 +46,19 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     share_lm_head = True
     if hasattr(eagle_model, "has_own_lm_head"):
         share_lm_head = not eagle_model.has_own_lm_head
-    if share_lm_head and hasattr(target_model, "lm_head"):
+    target_lm_head = getattr(target_model, "lm_head", None)
+    if target_lm_head is None:
+        target_language_model = (
+            target_model.get_language_model()
+            if hasattr(target_model, "get_language_model")
+            else target_model
+        )
+        target_lm_head = getattr(target_language_model, "lm_head", None)
+
+    if share_lm_head and target_lm_head is not None:
         if hasattr(eagle_model, "lm_head"):
             del eagle_model.lm_head
-        eagle_model.lm_head = target_model.lm_head
+        eagle_model.lm_head = target_lm_head
 
         # MTP models call compute_logits via shared_head.head (a
         # ParallelLMHead inside each MTP layer), not self.model.lm_head.
@@ -62,6 +73,6 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 sh = getattr(layer, "shared_head", None)
                 if sh is not None and hasattr(sh, "head"):
                     del sh.head
-                    sh.head = target_model.lm_head
+                    sh.head = target_lm_head
 
     return eagle_model
