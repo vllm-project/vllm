@@ -30,10 +30,11 @@ configs = list(
     itertools.product(num_tokens_range, num_experts_range, topk_range, ep_size_range)
 )
 
-# Decode-like many-expert shapes. Includes M=129 as a fallback boundary for
-# E=256, topk=8 because the fast path is guarded by numel <= 1024.
-small_batch_many_expert_configs = list(
-    itertools.product([1, 16, 64, 128, 129], [256], [8], [16, 64])
+# Decode-like many-expert shapes from real MoE models
+small_batch_many_expert_configs = (
+    list(itertools.product([1, 16, 64, 128], [256], [8], [16, 64]))
+    + list(itertools.product([1, 16, 64, 128], [384], [8], [16, 64]))
+    + list(itertools.product([1, 16, 64, 96], [512], [10], [16, 64]))
 )
 
 
