@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import bisect
 import functools
 import gc
 import itertools
@@ -104,7 +103,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.multimodal.utils import group_and_batch_mm_kwargs
+from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -3101,20 +3100,13 @@ class GPUModelRunner(
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
             mm_features = req_state.mm_features
-            # Use binary search to narrow the iteration range.
-            # lo: first feature not yet computed
-            lo = bisect.bisect_left(
+            lo, hi = get_mm_features_in_window(
                 mm_features,
-                num_computed_tokens + 1,
-                key=lambda f: f.mm_position.offset + f.mm_position.length,
+                start=num_computed_tokens,
+                end=num_computed_tokens + num_scheduled_tokens,
             )
-            # hi: first feature beyond the current step window
-            hi = bisect.bisect_left(
-                mm_features,
-                num_computed_tokens + num_scheduled_tokens,
-                key=lambda f: f.mm_position.offset,
-            )
-            for mm_feature in mm_features[lo:hi]:
+            for i in range(lo, hi):
+                mm_feature = mm_features[i]
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length

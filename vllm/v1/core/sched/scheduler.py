@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import bisect
 import itertools
 import time
 from collections import defaultdict, deque
@@ -30,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -1142,24 +1142,14 @@ class Scheduler(SchedulerInterface):
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
 
-        # Use binary search to narrow the iteration range.
-        # lo: first feature not yet computed.
-        # Assumes inputs are non-overlapping so start_pos + length is sorted.
-        # (For encoder-decoder all inputs sit at start_pos=0, so lo=0 always.)
-        if not self.is_encoder_decoder:
-            lo = bisect.bisect_left(
-                mm_features,
-                num_computed_tokens + 1,
-                key=lambda f: f.mm_position.offset + f.mm_position.length,
-            )
-        else:
-            lo = 0
-        # hi: first feature beyond the current step window
-        hi = bisect.bisect_left(
+        lo, hi = get_mm_features_in_window(
             mm_features,
-            num_computed_tokens + num_new_tokens + shift_computed_tokens,
-            key=lambda f: f.mm_position.offset,
+            start=num_computed_tokens,
+            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
         )
+        # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
+        if self.is_encoder_decoder:
+            lo = 0
 
         for i in range(lo, hi):
             mm_feature = mm_features[i]
