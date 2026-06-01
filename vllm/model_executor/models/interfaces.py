@@ -1307,8 +1307,9 @@ class LocalArgmaxMixin:
 
     def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Vocab-parallel argmax with optional D2T remapping."""
-        top = self.logits_processor.get_top_tokens(  # type: ignore[attr-defined]
-            self.lm_head, hidden_states  # type: ignore[attr-defined]
+        top = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
         )
         d2t = getattr(self, "draft_id_to_target_id", None)
         if d2t is not None:
