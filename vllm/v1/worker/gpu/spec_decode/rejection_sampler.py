@@ -147,42 +147,33 @@ class RejectionSampler:
             num_sampled=num_sampled,
         )
 
-    def forward_fast(
+    def forward_distributed(
         self,
-        logits: torch.Tensor,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        logits_indices: torch.Tensor,
-        cu_num_logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        expanded_idx_mapping: torch.Tensor,
-        expanded_local_pos: torch.Tensor,
-        temperature: torch.Tensor,
-        min_p: torch.Tensor,
-        seeds: torch.Tensor,
+        local_logits: torch.Tensor,
+        shard_vocab_start: int,
+        input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
-        shard_vocab_start: int | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
-        num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
+        num_nans = get_num_nans(local_logits) if self.sampler.compute_nans else None
 
-        draft_sampled = input_ids[logits_indices]
-        draft_positions = positions[logits_indices]
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        draft_positions = input_batch.positions[input_batch.logits_indices]
 
         # Rejection sample.
         sampled, num_sampled = rejection_sample(
-            logits,
+            local_logits,
             draft_logits,
             draft_sampled,
-            cu_num_logits,
+            input_batch.cu_num_logits,
             draft_positions,
-            idx_mapping,
-            expanded_idx_mapping,
-            expanded_local_pos,
-            temperature,
-            min_p,
-            seeds,
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.min_p.gpu,
+            self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             True,  # apply_temperature
             True,  # apply_min_p
@@ -193,7 +184,7 @@ class RejectionSampler:
 
         return SamplerOutput(
             sampled_token_ids=sampled,
-            # Output logprobs are not supported during cudagraph capture.
+            # Output logprobs are not supported for distributed rejection sampling.
             logprobs_tensors=None,
             num_nans=num_nans,
             num_sampled=num_sampled,
