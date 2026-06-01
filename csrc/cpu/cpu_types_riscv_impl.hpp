@@ -94,6 +94,10 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
       : reg(RVVI(__riscv_vle16_v_f16, LMUL_256)(
             static_cast<const _Float16*>(ptr), VEC_ELEM_NUM)) {};
 
+  explicit FP16Vec16(const c10::Half v)
+      : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_256, _f16, LMUL_256)(
+            RVVI(__riscv_vmv_v_x_u16, LMUL_256)(v.x, VEC_ELEM_NUM))) {};
+
   explicit FP16Vec16(const FP32Vec16& vec);
 
   void save(void* ptr) const {
@@ -165,6 +169,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
             reinterpret_cast<const uint16_t*>(ptr), VEC_ELEM_NUM))) {};
 
   explicit BF16Vec16(fixed_bf16x16_t data) : reg(data) {};
+  explicit BF16Vec16(const c10::BFloat16 v)
+      : reg(RVVI4(__riscv_vreinterpret_v_u16, LMUL_256, _bf16, LMUL_256)(
+            RVVI(__riscv_vmv_v_x_u16, LMUL_256)(v.x, VEC_ELEM_NUM))) {};
   explicit BF16Vec16(const FP32Vec16&);
 
   void save(void* ptr) const {
@@ -290,6 +297,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     }
     reg_fp32 = RVVI(__riscv_vle32_v_f32, LMUL_512)(tmp, 16);
   }
+  explicit BF16Vec16(const c10::BFloat16 v)
+      : reg_fp32(RVVI(__riscv_vfmv_v_f_f32, LMUL_512)(static_cast<float>(v),
+                                                      VEC_ELEM_NUM)) {}
   explicit BF16Vec16(const FP32Vec16&);
   void save(void* ptr) const {
     float tmp[16];
@@ -629,6 +639,19 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
       : reg(RVVI4(__riscv_vcreate_v_f32, LMUL_256, _f32, LMUL_512)(
             data.reg, data.reg)) {};
   explicit FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
+  explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
+    const uint64_t q_values = static_cast<uint64_t>(value);
+    auto packed = RVVI(__riscv_vmv_v_x_u64, LMUL_1024)(q_values, VEC_ELEM_NUM);
+    auto lane_ids = RVVI(__riscv_vid_v_u64, LMUL_1024)(VEC_ELEM_NUM);
+    auto shifts =
+        RVVI(__riscv_vsll_vx_u64, LMUL_1024)(lane_ids, 2, VEC_ELEM_NUM);
+    auto shifted =
+        RVVI(__riscv_vsrl_vv_u64, LMUL_1024)(packed, shifts, VEC_ELEM_NUM);
+    auto idx64 =
+        RVVI(__riscv_vand_vx_u64, LMUL_1024)(shifted, 0xF, VEC_ELEM_NUM);
+    auto idx32 = RVVI(__riscv_vnsrl_wx_u32, LMUL_512)(idx64, 0, VEC_ELEM_NUM);
+    reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx32, VEC_ELEM_NUM);
+  }
   explicit FP32Vec16(const FP16Vec16& v);
 
 #ifdef __riscv_zvfbfmin
@@ -640,6 +663,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 #else
   explicit FP32Vec16(const BF16Vec16& v) : reg(v.reg_fp32) {};
 #endif
+
+  // FP8 stub: dead code on RISC-V (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : FP32Vec16() {}
 
   FP32Vec16 operator+(const FP32Vec16& b) const {
     return FP32Vec16(
@@ -889,6 +916,30 @@ inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
 }
 inline void fma(FP32Vec16& acc, const FP32Vec16& a, const FP32Vec16& b) {
   acc = acc.fma(a, b);
+}
+
+template <typename VecT>
+static void interleave_save_16b(const VecT& vec0, const VecT& vec1, void* ptr) {
+  alignas(64) uint16_t values0[VecT::VEC_ELEM_NUM];
+  alignas(64) uint16_t values1[VecT::VEC_ELEM_NUM];
+  vec0.save(values0);
+  vec1.save(values1);
+
+  auto* packed = reinterpret_cast<uint32_t*>(ptr);
+  for (int32_t i = 0; i < VecT::VEC_ELEM_NUM; ++i) {
+    packed[i] = static_cast<uint32_t>(values0[i]) |
+                (static_cast<uint32_t>(values1[i]) << 16);
+  }
+}
+
+static void interleave_save(const FP16Vec16& vec0, const FP16Vec16& vec1,
+                            void* ptr) {
+  interleave_save_16b(vec0, vec1, ptr);
+}
+
+static void interleave_save(const BF16Vec16& vec0, const BF16Vec16& vec1,
+                            void* ptr) {
+  interleave_save_16b(vec0, vec1, ptr);
 }
 
 #ifdef __riscv_zvfbfmin
