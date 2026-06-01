@@ -35,11 +35,12 @@ class GateLinear(ReplicatedLinear):
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
-        is_hopper_or_blackwell = current_platform.is_device_capability(
-            (9, 0)
-        ) or current_platform.is_device_capability_family(100)
+        is_hopper = current_platform.is_device_capability((9, 0))
+        is_blackwell = current_platform.is_device_capability_family(100)
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and is_hopper_or_blackwell and not bias
+            current_platform.is_cuda()
+            and (is_hopper or is_blackwell)
+            and not bias
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -64,6 +65,9 @@ class GateLinear(ReplicatedLinear):
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
         )
+        # See https://github.com/vllm-project/vllm/pull/44217
+        # for more details.
+        self._dsv3_max_batch = 16 if is_hopper else 8
 
         # cuBLAS bf16→fp32 eligibility
         self.allow_cublas_router_gemm = (
@@ -95,7 +99,7 @@ class GateLinear(ReplicatedLinear):
         import vllm._custom_ops as ops
 
         # Tier 1: DSV3 specialized kernel
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 8:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= self._dsv3_max_batch:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,
