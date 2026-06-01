@@ -514,6 +514,25 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        # Bypass the HF processor and tokenize directly.  The HF
+        # processor expands multimodal placeholders (<|video|>, etc.)
+        # via get_text_with_replacements, which raises StopIteration
+        # when the prompt contains placeholders without matching data.
+        # The text-only path only needs token IDs, so the tokenizer
+        # alone is sufficient.
+        processor = self.info.get_hf_processor()
+        text_inputs = processor.tokenizer([prompt_text], **tokenization_kwargs)
+        input_ids = text_inputs["input_ids"]
+        if not isinstance(input_ids, list):
+            input_ids = input_ids.tolist()
+        (prompt_ids,) = input_ids
+        return prompt_ids
+
     def _call_hf_processor(
         self,
         prompt: str,
