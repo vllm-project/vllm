@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for FP8 PTPC online quantization.
+"""Tests for FP8 per-channel online quantization.
 
-PTPC = Per-Token activation + Per-Channel weight. bf16/fp16 checkpoints are
-quantized at load time with one fp32 scale per output channel for weights and
-one fp32 scale per token for activations (computed dynamically inside the
-kernel). Run via `pytest tests/quantization/test_fp8_ptpc.py --forked`.
+Per-output-channel weight scale + dynamic per-token activation scale.
+bf16/fp16 checkpoints are quantized at load time with one fp32 scale per
+output channel for weights and one fp32 scale per token for activations
+(computed dynamically inside the kernel). Run via
+`pytest tests/quantization/test_fp8_per_channel.py --forked`.
 """
 
 import pytest
@@ -32,13 +33,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 
-def test_fp8_ptpc_shorthand_registered() -> None:
-    """The `fp8_ptpc` CLI shorthand must resolve to a config that dispatches
-    the PTPC methods. Guards against regressions in
+def test_fp8_per_channel_shorthand_registered() -> None:
+    """The `fp8_per_channel` CLI shorthand must resolve to a config that
+    dispatches the per-channel methods. Guards against regressions in
     `_ONLINE_SHORTHANDS` / `_ONLINE_LINEAR_METHODS` / `_ONLINE_MOE_METHODS`
     drifting out of sync.
     """
-    args = _ONLINE_SHORTHANDS["fp8_ptpc"]
+    args = _ONLINE_SHORTHANDS["fp8_per_channel"]
     assert isinstance(args, QuantizationConfigArgs)
     assert args.linear is not None
     assert args.moe is not None
@@ -56,10 +57,9 @@ def test_fp8_ptpc_shorthand_registered() -> None:
     reason="FP8 is not supported on this GPU type.",
 )
 def test_scaled_fp8_quant_per_channel_shape() -> None:
-    """Verify the kernel call PTPC depends on: passing a 2D weight to
-    `ops.scaled_fp8_quant` with `use_per_token_if_dynamic=True` yields one
-    scale per output row -- a [N, 1] fp32 tensor. Sanity check for the
-    kernel-side contract PTPC relies on.
+    """Verify the kernel call per-channel quant depends on: passing a 2D
+    weight to `ops.scaled_fp8_quant` with `use_per_token_if_dynamic=True`
+    yields one scale per output row -- a [N, 1] fp32 tensor.
     """
     x = (torch.randn(size=(96, 256), device="cuda") * 13).to(torch.bfloat16)
     y, s = ops.scaled_fp8_quant(x, scale=None, use_per_token_if_dynamic=True)
@@ -73,20 +73,20 @@ def test_scaled_fp8_quant_per_channel_shape() -> None:
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
 )
-def test_fp8_ptpc_online_quantization(
+def test_fp8_per_channel_online_quantization(
     vllm_runner,
     monkeypatch,
 ) -> None:
     """End-to-end smoke: load `facebook/opt-125m` bf16 with
-    `quantization='fp8_ptpc'`, check a dense Linear is wrapped by
-    `Fp8PtpcOnlineLinearMethod`, its weights are fp8 with per-channel scales
-    (shape `[N, 1]`), and a short greedy generation works.
+    `quantization='fp8_per_channel'`, check a dense Linear is wrapped by
+    `Fp8PtpcOnlineLinearMethod`, its weights are fp8 with per-channel
+    scales (shape `[N, 1]`), and a short greedy generation works.
     """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     with vllm_runner(
         "facebook/opt-125m",
-        quantization="fp8_ptpc",
+        quantization="fp8_per_channel",
         enforce_eager=True,
     ) as llm:
 

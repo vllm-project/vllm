@@ -120,9 +120,9 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kFp8Static128BlockSym),
         moe=QuantSpec(weight=kFp8Static128BlockSym),
     ),
-    # PTPC: per-output-channel weight scale + dynamic per-token activation.
+    # Per-output-channel weight scale + dynamic per-token activation.
     # Same shape as llmcompressor's FP8_DYNAMIC recipe.
-    "fp8_ptpc": QuantizationConfigArgs(
+    "fp8_per_channel": QuantizationConfigArgs(
         linear=QuantSpec(weight=kFp8StaticChannelSym),
         moe=QuantSpec(weight=kFp8StaticChannelSym),
     ),
