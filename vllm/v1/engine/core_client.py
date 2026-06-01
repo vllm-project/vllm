@@ -371,6 +371,7 @@ class BackgroundResources:
     circular reference back to the client object."""
 
     ctx: zmq.Context
+    shutdown_timeout: int
     # If CoreEngineProcManager, it manages local engines;
     # if CoreEngineActorManager, it manages all engines.
     engine_manager: CoreEngineProcManager | CoreEngineActorManager | None = None
@@ -383,7 +384,6 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    shutdown_timeout: int | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -394,6 +394,7 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
+            self.shutdown_timeout = max(self.shutdown_timeout, 5)
             self.engine_manager.shutdown(timeout=self.shutdown_timeout)
         if self.coordinator is not None:
             self.coordinator.shutdown()
