@@ -694,6 +694,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             self.num_qo_heads, self.num_kv_heads, is_prefill=False
         )
+        capability = current_platform.get_device_capability()
+        arch = f"sm{capability.to_int()}" if capability is not None else "unknown"
+        decode_backend = "flashinfer-native"
+        if can_use_xqa_or_trtllm_gen_decode:
+            decode_backend = (
+                "xqa" if current_platform.is_device_capability(90) else "trtllm-gen"
+            )
+        logger.info_once(
+            "FlashInfer attention resolved q dtypes: arch=%s, "
+            "decode_backend=%s, kv_cache_dtype=%s, q_data_type_prefill=%s, "
+            "q_data_type_decode=%s.",
+            arch,
+            decode_backend,
+            self.cache_dtype,
+            self.q_data_type_prefill,
+            self.q_data_type_decode,
+        )
         self._init_reorder_batch_threshold(
             1, supports_spec_as_decode=can_use_xqa_or_trtllm_gen_decode
         )
