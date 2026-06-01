@@ -173,12 +173,13 @@ class EplbMetrics:
     Stores EPLB metrics.
 
     - `ep_rank`: The EP rank of the worker that produced this sample.
-    - `tokens_per_layer_per_model`: For each model, a list of per-layer
-      token counts for this rank.
+    - `token_deltas_per_model`: For each model, a per-layer increment
+      for the Prometheus counter — tokens routed since the last successful
+      ping-pong consume.
     """
 
     ep_rank: int = 0
-    tokens_per_layer_per_model: dict[str, list[float]] = field(default_factory=dict)
+    token_deltas_per_model: dict[str, list[int]] = field(default_factory=dict)
 
 
 @dataclass

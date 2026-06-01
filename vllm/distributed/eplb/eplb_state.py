@@ -88,6 +88,53 @@ class EplbStats:
 
 
 @dataclass
+class EplbMetricsState:
+    """Per-model ping-pong state for the EPLB tokens counter.
+
+    Each step adds this rank's per-layer load into ``cumulative_tokens`` on
+    device (never zeroed by the rearrangement logic), then either issues an
+    async D2H of the cumulative tensor into the pinned buffer or consumes a
+    previously-issued copy. ``delta`` is the per-layer increment for the
+    Prometheus counter on the step where a consume completes; None otherwise.
+    """
+
+    cumulative_tokens: torch.Tensor
+    pinned_buffer: torch.Tensor
+    event: "torch.cuda.Event"
+    last_pushed: list[int]
+    pending: bool = False
+    delta: list[int] | None = None
+
+    @classmethod
+    def create(cls, num_layers: int, device: torch.device) -> "EplbMetricsState":
+        return cls(
+            cumulative_tokens=torch.zeros(num_layers, dtype=torch.int64, device=device),
+            pinned_buffer=torch.zeros(num_layers, dtype=torch.int64, pin_memory=True),
+            event=torch.cuda.Event(),
+            last_pushed=[0] * num_layers,
+        )
+
+    def accumulate(self, per_layer_tokens: torch.Tensor) -> None:
+        """Add this step's per-rank load into the device cumulative tensor."""
+        self.cumulative_tokens.add_(per_layer_tokens)
+
+    def step(self) -> None:
+        """Advance the ping-pong by one step (snapshot or consume)."""
+        if not self.pending:
+            self.pinned_buffer.copy_(self.cumulative_tokens, non_blocking=True)
+            self.event.record()
+            self.pending = True
+            self.delta = None
+        elif self.event.query():
+            current = self.pinned_buffer.tolist()
+            self.delta = [c - prev for c, prev in zip(current, self.last_pushed)]
+            self.last_pushed = current
+            self.pending = False
+        else:
+            self.delta = None
+
+
+@dataclass
 class EplbModelState:
     """EPLB metrics."""
 
@@ -206,11 +253,10 @@ class EplbModelState:
     the async worker.
     """
 
-    latest_tokens_per_layer: list[float] | None = None
+    metrics_state: EplbMetricsState | None = None
     """
-    Most recent per-layer token counts for this rank,
-    one float per MoE layer, updated every log_balancedness_interval
-    steps. None until the first sample is taken.
+    Ping-pong state for the EPLB tokens counter (cumulative tensor +
+    async D2H + delta). Populated in :meth:`EplbState.add_model`.
     """
 
 
@@ -473,6 +519,10 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            metrics_state=EplbMetricsState.create(
+                num_layers=model.num_moe_layers,
+                device=self.device,
+            ),
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
@@ -512,30 +562,28 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
+        ep_size = ep_group.size()
+        rank = ep_group.rank()
+
+        # Always-on metric path: accumulate this step's per-rank load into
+        # the per-model cumulative tensor (never zeroed by the rearrangement
+        # logic), then advance the ping-pong (issue an async D2H or consume
+        # a previously-issued one). Decoupled from log_balancedness_interval.
+        for eplb_model_state in self.model_states.values():
+            assert eplb_model_state.metrics_state is not None
+            expert_load_pass = eplb_model_state.expert_load_pass
+            per_rank_per_layer = expert_load_pass.reshape(
+                expert_load_pass.shape[0], ep_size, -1
+            )[:, rank, :].sum(dim=-1)
+            eplb_model_state.metrics_state.accumulate(per_rank_per_layer)
+            eplb_model_state.metrics_state.step()
+
         if (
             log_stats
             and self.expert_rearrangement_step
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
         ):
-            ep_size = ep_group.size()
-            rank = ep_group.rank()
-
-            # Snapshot this rank's expert_load_pass statistics into a CPU tensor
-            for eplb_model_state in self.model_states.values():
-                expert_load_pass = eplb_model_state.expert_load_pass
-
-                # Slice out this rank's tokens_per_layer
-                tokens_per_layer = (
-                    expert_load_pass.reshape(expert_load_pass.shape[0], ep_size, -1)[
-                        :, rank, :
-                    ]
-                    .sum(dim=-1)
-                    .float()
-                )
-                # Transfer the tokens_per_layer tensor from GPU to CPU
-                eplb_model_state.latest_tokens_per_layer = tokens_per_layer.tolist()
-
             expert_load_pass_list = self._sync_load_pass()
             for expert_load_pass, eplb_model_state in zip(
                 expert_load_pass_list, self.model_states.values()
@@ -646,14 +694,15 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def get_latest_tokens_per_layer(self) -> dict[str, list[float]]:
-        """Return the latest per-layer token counts for this rank only,
-        keyed by model name.
+    def get_latest_metric_delta(self) -> dict[str, list[int]]:
+        """Return per-model token deltas to inc the Prometheus counter by,
+        for any model that completed a ping-pong consume this step. Empty
+        when every model is mid-snapshot or waiting on a D2H.
         """
         return {
-            state.model_name: state.latest_tokens_per_layer
+            state.model_name: state.metrics_state.delta
             for state in self.model_states.values()
-            if state.latest_tokens_per_layer is not None
+            if state.metrics_state is not None and state.metrics_state.delta is not None
         }
 
     def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]

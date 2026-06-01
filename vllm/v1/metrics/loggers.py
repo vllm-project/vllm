@@ -526,15 +526,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        # Per-(model, layer, rank) routed-token counts.
+        # Cumulative count of tokens routed per (model, layer, rank).
         # Only populated when EPLBConfig.log_balancedness=True.
-        self.gauge_eplb_tokens_per_rank = self._gauge_cls(
-            name="vllm:eplb_tokens_per_rank",
+        self.counter_eplb_tokens_per_rank = self._counter_cls(
+            name="vllm:eplb_tokens_per_rank_total",
             documentation=(
-                "Routed tokens per (model, layer, rank) from the most recent "
-                "EPLB sample. Only populated when EPLBConfig.log_balancedness=True."
+                "Cumulative tokens routed per (model, layer, rank). "
+                "Only populated when EPLBConfig.log_balancedness=True."
             ),
-            multiprocess_mode="mostrecent",
             labelnames=labelnames + ["model", "layer", "rank"],
         )
 
@@ -1125,16 +1124,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 rank = str(scheduler_stats.eplb_metrics.ep_rank)
                 for (
                     model,
-                    tokens_per_layer,
-                ) in scheduler_stats.eplb_metrics.tokens_per_layer_per_model.items():
-                    for layer_idx, tokens in enumerate(tokens_per_layer):
-                        self.gauge_eplb_tokens_per_rank.labels(
-                            model_name=model_name,
-                            engine=engine,
-                            model=model,
-                            layer=str(layer_idx),
-                            rank=rank,
-                        ).set(tokens)
+                    delta,
+                ) in scheduler_stats.eplb_metrics.token_deltas_per_model.items():
+                    for layer_idx, value in enumerate(delta):
+                        if value > 0:
+                            self.counter_eplb_tokens_per_rank.labels(
+                                model_name=model_name,
+                                engine=engine,
+                                model=model,
+                                layer=str(layer_idx),
+                                rank=rank,
+                            ).inc(value)
 
             if (
                 self.kv_cache_metrics_enabled
