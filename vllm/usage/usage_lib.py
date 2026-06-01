@@ -22,7 +22,6 @@ import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import cuda_get_device_properties
-from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -196,7 +195,7 @@ class UsageMessage:
         from vllm.platforms import current_platform
 
         if current_platform.is_cuda_alike():
-            self.gpu_count = cuda_device_count_stateless()
+            self.gpu_count = current_platform.device_count()
             self.gpu_type, self.gpu_memory_per_device = cuda_get_device_properties(
                 0, ("name", "total_memory")
             )

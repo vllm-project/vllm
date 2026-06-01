@@ -13,14 +13,8 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 
 
-def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
-    if dp_size == 1:
-        return None
-    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-
-
 def sync_cudagraph_and_dp_padding(
-    cudagraph_manager: CudaGraphManager,
+    cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
     num_tokens: int,
     num_reqs: int,
@@ -61,6 +55,10 @@ def sync_cudagraph_and_dp_padding(
             num_reqs=num_reqs,
         ), num_tokens_across_dp
 
+    assert cudagraph_manager is not None, (
+        "cudagraph_manager should only be None during profile run, "
+        "where synced_cg_mode must be NONE across all DP ranks"
+    )
     synced_num_tokens = int(num_tokens_across_dp.max().item())
     synced_uniform_token_count = uniform_token_counts_across_dp[0]
     # If ranks disagree on the uniform token count, or its 0 (means None) set to None
@@ -79,3 +77,41 @@ def sync_cudagraph_and_dp_padding(
     num_tokens_across_dp[:] = synced_desc.num_tokens
 
     return synced_desc, num_tokens_across_dp
+
+
+def dispatch_cg_and_sync_dp(
+    cudagraph_manager: CudaGraphManager | None,
+    num_reqs: int,
+    num_tokens: int,
+    uniform_token_count: int | None,
+    dp_size: int,
+    dp_rank: int,
+    need_eager: bool = False,
+) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+    if need_eager:
+        batch_desc = BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+        )
+    else:
+        assert cudagraph_manager is not None, (
+            "cudagraph_manager should only be None during profile run, "
+            "where need_eager must be True"
+        )
+        batch_desc = cudagraph_manager.dispatch(
+            num_reqs, num_tokens, uniform_token_count
+        )
+
+    if dp_size == 1:
+        return batch_desc, None
+
+    return sync_cudagraph_and_dp_padding(
+        cudagraph_manager,
+        batch_desc,
+        num_tokens,
+        num_reqs,
+        uniform_token_count,
+        dp_size,
+        dp_rank,
+    )

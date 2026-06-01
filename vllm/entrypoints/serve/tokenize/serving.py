@@ -86,12 +86,14 @@ class OpenAIServingTokenization(OpenAIServing):
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
+                skip_mm_cache=True,
             )
         else:
             engine_inputs = await self.openai_serving_render.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,
+                skip_mm_cache=True,
             )
 
         input_ids: list[int] = []

@@ -15,14 +15,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 logger = init_logger(__name__)
 
-_SUPPORTED_BACKENDS: frozenset[Fp8MoeBackend] = frozenset(
-    {
-        Fp8MoeBackend.FLASHINFER_TRTLLM,
-    }
+_SUPPORTED_BACKENDS = (
+    Fp8MoeBackend.FLASHINFER_TRTLLM,
+    Fp8MoeBackend.MARLIN,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "marlin": Fp8MoeBackend.MARLIN,
 }
 
 
@@ -61,8 +61,6 @@ def select_mxfp8_moe_backend(
     Returns:
         A tuple of (fp8_backend, experts_cls).
     """
-    if config.is_lora_enabled:
-        raise NotImplementedError("LoRA is not supported for MXFP8 MoE.")
 
     runner_backend = config.moe_backend
     if runner_backend != "auto":
@@ -81,7 +79,11 @@ def select_mxfp8_moe_backend(
 
     # Auto-select: pick the first supported backend.
     for backend in _SUPPORTED_BACKENDS:
+        try:
+            experts_cls = _select_kernel_cls(backend, config)
+        except ValueError:
+            continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
-        return backend, _select_kernel_cls(backend, config)
+        return backend, experts_cls
 
     raise ValueError("No MXFP8 MoE backends available.")

@@ -58,6 +58,7 @@ from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -358,7 +359,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         conv_out_dim = config.downsample_hidden_size * (
             (((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
         )
-        self.conv_out = nn.Linear(conv_out_dim, config.d_model, bias=False)
+        self.conv_out = ReplicatedLinear(
+            conv_out_dim,
+            config.d_model,
+            bias=False,
+            return_bias=False,
+            prefix=f"{prefix}.conv_out",
+        )
 
         # Transformer encoder layers
         self.layers = nn.ModuleList(
@@ -373,9 +380,21 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Output layers
         self.ln_post = nn.LayerNorm(config.d_model)
-        self.proj1 = nn.Linear(config.d_model, config.d_model)
+        self.proj1 = ReplicatedLinear(
+            config.d_model,
+            config.d_model,
+            bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.proj1",
+        )
         self.act = _ACTIVATION_REGISTRY[config.activation_function]
-        self.proj2 = nn.Linear(config.d_model, config.output_dim)
+        self.proj2 = ReplicatedLinear(
+            config.d_model,
+            config.output_dim,
+            bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.proj2",
+        )
 
         # Get attention backend
         self.attn_backend = get_vit_attn_backend(
@@ -1628,8 +1647,6 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -1736,6 +1753,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     )
                     for _ in range(self.deepstack_num_level)
                 ]
+                # Tracks the valid token span currently stored in the buffer.
+                # Zero means there is no active deepstack payload to consume.
+                self.deepstack_input_embeds_num_tokens = 0
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
@@ -1756,6 +1776,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
+            return None
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1787,15 +1809,19 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
             )
+        self.deepstack_input_embeds_num_tokens = num_tokens
 
     def _clear_deepstack_input_embeds(self, num_tokens: int) -> None:
         if not getattr(self, "deepstack_input_embeds", None):
+            return
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
             return
 
         # clear deepstack_input_embeds in buffer
         if num_tokens > 0:
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
+            self.deepstack_input_embeds_num_tokens = 0
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1870,8 +1896,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
-        is_video = is_multimodal & (input_ids == video_token_id)
-        is_audio = is_multimodal & (input_ids == audio_token_id)
+        input_ids_cpu = input_ids.cpu()
+        is_video = is_multimodal & (input_ids_cpu == video_token_id)
+        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 

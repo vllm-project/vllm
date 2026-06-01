@@ -35,23 +35,6 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-wait_for_clean_gpus() {
-  local timeout=${1:-300}
-  local start=$SECONDS
-  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
-  while true; do
-    if grep -q clean /opt/amdgpu/etc/gpu_state; then
-      echo "GPUs state is \"clean\""
-      return
-    fi
-    if (( SECONDS - start >= timeout )); then
-      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
-      exit 1
-    fi
-    sleep 3
-  done
-}
-
 cleanup_docker() {
   # Get Docker's root directory
   docker_root=$(docker info -f '{{.DockerRootDir}}')
@@ -365,18 +348,11 @@ apply_rocm_test_overrides() {
 ###############################################################################
 
 # --- GPU initialization ---
-echo "--- Confirming Clean Initial State"
-wait_for_clean_gpus
-
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker housekeeping ---
 cleanup_docker
-
-echo "--- Resetting GPUs"
-echo "reset" > /opt/amdgpu/etc/gpu_state
-wait_for_clean_gpus
 
 # --- Pull test image ---
 echo "--- Pulling container"
@@ -402,9 +378,11 @@ HF_MOUNT="/root/.cache/huggingface"
 # double-quotes will have been stripped by the calling shell.
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 else
   commands="$*"
+  commands_source="argv"
   if [[ -z "$commands" ]]; then
     echo "Error: No test commands provided." >&2
     echo "Usage:" >&2
@@ -421,9 +399,15 @@ fi
 
 echo "Raw commands: $commands"
 
-# Fix quoting before ROCm overrides (so overrides see correct structure)
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+# Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
+# VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
+# can corrupt embedded echo strings or otherwise well-formed shell fragments.
+if [[ "$commands_source" == "argv" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 
 commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"

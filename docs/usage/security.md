@@ -66,6 +66,10 @@ Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
 (e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
 
+This protection applies to both the online serving API (multimodal inputs) and
+the **batch runner** (`vllm run-batch`), where `file_url` values in batch
+transcription/translation requests are validated against the same allowlist.
+
 Without domain restrictions, a malicious user could supply URLs that:
 
 - **Target internal services**: Access internal network endpoints, cloud metadata
@@ -134,14 +138,22 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
+- `/v1/chat/completions/batch` - Batch chat completions
+- `/v1/chat/completions/render` - Render chat completion requests
 - `/v1/completions` - Text completions
+- `/v1/completions/render` - Render completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
 - `/v1/messages` - Anthropic-compatible messages API
-- `/v1/responses` - Response management
+- `/v1/messages/count_tokens` - Count tokens for Anthropic messages
+- `/v1/responses` - Create a response
+- `/v1/responses/{response_id}` - Retrieve a response
+- `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
+- `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -151,16 +163,23 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 - `/inference/v1/generate` - Generate completions
+- `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
 - `/score` - Scoring API (non-`/v1` variant)
 - `/rerank` - Reranking API (non-`/v1` variant)
 
-**Operational control endpoints (always enabled):**
+**Operational control endpoints (only when `"generate"` task is supported):**
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
+- `/is_paused` - Check if generation is paused
 - `/scale_elastic_ep` - Trigger scaling operations
+- `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/update_weights` - Update model weights (can alter model behavior)
+- `/get_world_size` - Get distributed world size
+- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
 
 **Utility endpoints:**
 
@@ -203,9 +222,9 @@ These endpoints are only available when profiling is enabled and should only be 
 
 An attacker who can reach the vLLM HTTP server can:
 
-1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
-3. **Access operational controls** to manipulate server state (e.g., pausing generation)
+1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
+2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
+3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
 5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
@@ -283,6 +302,36 @@ Built-in demo tools are controlled by two settings:
 To disable the Python code interpreter specifically, omit `code_interpreter` from `VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`.
 
 **Consider a custom implementation**: The GPT-OSS Python tool is a reference implementation. For production deployments, consider implementing a custom code execution sandbox with stricter isolation guarantees. See the [GPT-OSS documentation](https://github.com/openai/gpt-oss?tab=readme-ov-file#python) for guidance.
+
+## Dynamic LoRA Loading
+
+vLLM supports dynamically loading and unloading LoRA adapters at runtime via the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
+
+**Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
+
+## Cache Directory Security
+
+vLLM assumes that its cache directories are **private and trusted**. Cache contents are loaded without cryptographic integrity verification, including formats that support arbitrary code execution. If an untrusted user or process can write to vLLM's cache directories, they may be able to crash vLLM or cause it to execute arbitrary code.
+
+**Do not share vLLM cache directories with untrusted users or mount them from untrusted storage.** Treat the cache directory with the same care as the vLLM installation itself.
+
+### Cache Directory Configuration
+
+Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. When `torch.compile` caching is enabled (the default), vLLM also redirects `TRITON_CACHE_DIR` into this tree. If compile caching is disabled, Triton falls back to its own default location (`~/.triton/cache`).
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
+| *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
+| `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
+| `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
+| `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |
+
+### Recommendations
+
+- **Restrict file permissions** on `VLLM_CACHE_ROOT` (and any other cache directories used by dependencies, such as `~/.triton` if compile caching is disabled) so that only the vLLM process owner can read and write to them.
+- **Do not copy cache contents from untrusted sources.** If you distribute cache artifacts between environments, ensure they originate from a trusted build pipeline.
+- **Container deployments:** If mounting cache directories into containers, ensure the volume source is trusted.
 
 ## Reporting Security Vulnerabilities
 

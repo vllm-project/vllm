@@ -7,7 +7,7 @@ import pytest
 import requests
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
@@ -38,6 +38,15 @@ BACKEND_TOL: dict[str, float] = {
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
+# ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
+# probability even though larger scores remain well inside the relative
+# tolerance. Keep the relative tolerances tight and add only a small floor.
+BACKEND_ABS_TOL: dict[str, float] = {
+    "default": 0.0,
+    "ROCM_AITER_FA": 0.005,
+    "FLEX_ATTENTION": 0.006,
+}
+
 # ROCm: disable skinny GEMM to avoid non-deterministic results from
 # atomic reductions in wvSplitKrc kernel.
 # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
@@ -57,18 +66,23 @@ def get_tol(backend: str) -> float:
     return BACKEND_TOL.get(backend, BACKEND_TOL["default"])
 
 
+def get_abs_tol(backend: str) -> float:
+    return BACKEND_ABS_TOL.get(backend, BACKEND_ABS_TOL["default"])
+
+
 def assert_score(actual: float, expected: float, backend: str, label: str):
     tol = get_tol(backend)
+    abs_tol = get_abs_tol(backend)
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff
     print(
         f"[{backend}] {label}: actual={actual:.6f} expected={expected:.6f} "
-        f"diff={diff:.6f} rel_diff={rel_diff:.4f} tol={tol}"
+        f"diff={diff:.6f} rel_diff={rel_diff:.4f} tol={tol} abs_tol={abs_tol}"
     )
-    assert actual == pytest.approx(expected, rel=tol), (
+    assert actual == pytest.approx(expected, rel=tol, abs=abs_tol), (
         f"[{backend}] {label}: score mismatch — "
         f"actual={actual:.6f}, expected={expected:.6f}, "
-        f"rel_diff={rel_diff:.4f}, tol={tol}"
+        f"rel_diff={rel_diff:.4f}, tol={tol}, abs_tol={abs_tol}"
     )
 
 
@@ -234,7 +248,7 @@ async def test_score_api_queries_str_documents_image_url_plus_text_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.usage.prompt_tokens == 108
+    assert score.usage.prompt_tokens == 107
     assert_score(
         score.data[0].score, TEXT_VS_TEXT_PLUS_IMAGE, backend, "text_vs_text_plus_image"
     )
@@ -264,7 +278,7 @@ async def test_score_api_queries_str_documents_list(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.usage.prompt_tokens == 368
+    assert score.usage.prompt_tokens == 367
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "list[0]_text_vs_text")
     assert_score(score.data[1].score, TEXT_VS_TEXT, backend, "list[1]_text_vs_text")
     assert_score(score.data[2].score, TEXT_VS_IMAGE, backend, "list[2]_text_vs_image")
@@ -353,7 +367,7 @@ async def test_score_api_queries_list_documents_list(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.usage.prompt_tokens == 368
+    assert score.usage.prompt_tokens == 367
     assert_score(score.data[0].score, TEXT_VS_TEXT, backend, "paired[0]_text_vs_text")
     assert_score(score.data[1].score, TEXT_VS_TEXT, backend, "paired[1]_text_vs_text")
     assert_score(score.data[2].score, TEXT_VS_IMAGE, backend, "paired[2]_text_vs_image")

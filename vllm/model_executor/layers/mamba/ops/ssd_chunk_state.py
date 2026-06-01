@@ -280,7 +280,7 @@ def _chunk_state_fwd_kernel(
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(
             tl.float32
         )
-        scale = fast_exp(dA_cs_last - dA_cs_k) * dt_k
+        scale = fast_exp(tl.minimum(dA_cs_last - dA_cs_k, 0.0)) * dt_k
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)

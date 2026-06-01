@@ -66,7 +66,7 @@ from .interfaces import (
     SupportsTranscription,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-from .whisper import ISO639_1_SUPPORTED_LANGS
+from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
 
 class GlmAsrEncoderRotaryEmbedding(nn.Module):
@@ -498,6 +498,8 @@ class GlmAsrEncoder(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Custom weight loading to handle q_proj/k_proj/v_proj -> qkv_proj mapping."""
         from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
