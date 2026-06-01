@@ -2214,19 +2214,6 @@ class NixlConnectorWorker:
 
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "Transfer req=%s rank=%s: "
-                "local_blocks=%s remote_blocks=%s "
-                "local_descs=%d remote_descs=%d",
-                request_id,
-                remote_rank,
-                [len(g) for g in local_block_ids],
-                [len(g) for g in remote_block_ids],
-                len(local_block_descs_ids),
-                len(remote_block_descs_ids),
-            )
-
         # Prepare transfer with Nixl.
         handle = None
         try:
@@ -2376,11 +2363,6 @@ class NixlConnectorWorker:
                     local_block_ids[i] = local_block_ids[i][:num_blocks]
                     remote_block_ids[i] = remote_group[:num_blocks]
 
-        logger.debug(
-            "_apply_prefix_caching result: local=%s remote=%s",
-            [len(g) for g in local_block_ids],
-            [len(g) for g in remote_block_ids],
-        )
         return local_block_ids, remote_block_ids
 
     def _logical_to_remote_kernel_block_ids(

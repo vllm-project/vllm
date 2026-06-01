@@ -657,9 +657,13 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    if self.connector is not None and isinstance(
-                        self.kv_cache_manager.coordinator,
-                        HybridKVCacheCoordinator,
+                    if (
+                        self.connector is not None
+                        and self.has_mamba_layers
+                        and isinstance(
+                            self.kv_cache_manager.coordinator,
+                            HybridKVCacheCoordinator,
+                        )
                     ):
                         new_computed_blocks, per_group_hits = (
                             self._get_computed_blocks_per_group(request)
