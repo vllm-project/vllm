@@ -609,46 +609,30 @@ def get_llm_pos_ids_for_vision(
 
 
 def use_npu_vision_backend() -> bool:
-    """Check if NPU backend is enabled for vision processing.
-
-    Returns:
-        True if VLLM_VISION_NPU_BACKEND environment variable is set to
-        a supported backend (flexmlrt), False otherwise.
-    """
+    """Check if NPU vision is enabled via VLLM_VISION_NPU_CACHE."""
     import vllm.envs as envs
 
-    backend = (
-        envs.VLLM_VISION_NPU_BACKEND.lower() if envs.VLLM_VISION_NPU_BACKEND else ""
-    )
-    return backend == "flexmlrt"
+    return bool(envs.VLLM_VISION_NPU_CACHE)
 
 
 def get_npu_vision_backend():
-    """Get NPU vision backend instance if enabled.
+    """Get FlexMLRT NPU vision backend instance if VLLM_VISION_NPU_CACHE is set.
 
     Returns:
-        NPUVisionBackend instance if NPU backend is enabled, None otherwise.
+        FlexMLRTVisionBackend if NPU vision is enabled, None otherwise.
 
     Raises:
-        ValueError: If backend name is recognized but initialization fails.
+        ValueError: If VLLM_VISION_NPU_CACHE is set but initialization fails.
         ImportError: If backend dependencies are not available.
     """
     import vllm.envs as envs
 
-    backend_name = (
-        envs.VLLM_VISION_NPU_BACKEND.lower() if envs.VLLM_VISION_NPU_BACKEND else ""
-    )
+    model_cache = envs.VLLM_VISION_NPU_CACHE
+    if not model_cache:
+        return None
 
-    if backend_name == "flexmlrt":
-        model_cache = envs.VLLM_VISION_NPU_CACHE
-        if not model_cache:
-            raise ValueError(
-                "VLLM_VISION_NPU_CACHE must be set when using FlexMLRT backend"
-            )
-        device_name = envs.VLLM_VISION_NPU_DEVICE or "stx"
+    device_name = envs.VLLM_VISION_NPU_DEVICE or "stx"
 
-        from vllm.vision_npu.flexmlrt_backend import FlexMLRTVisionBackend
+    from vllm.vision_npu.flexmlrt_backend import FlexMLRTVisionBackend
 
-        return FlexMLRTVisionBackend(model_cache, device_name)
-
-    return None
+    return FlexMLRTVisionBackend(model_cache, device_name)

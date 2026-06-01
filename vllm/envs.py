@@ -212,7 +212,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
-    VLLM_VISION_NPU_BACKEND: str = ""
     VLLM_VISION_NPU_CACHE: str | None = None
     VLLM_VISION_NPU_DEVICE: str | None = None
     VLLM_NPU_TIMING: bool = False
@@ -1748,9 +1747,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
-    # NPU vision backend to use (e.g., "flexmlrt" for FlexMLRT backend)
-    "VLLM_VISION_NPU_BACKEND": lambda: os.getenv("VLLM_VISION_NPU_BACKEND", ""),
-    # Path to NPU model cache directory (required for FlexMLRT backend)
+    # Path to NPU model cache directory (enables FlexMLRT vision backend when set)
     "VLLM_VISION_NPU_CACHE": lambda: os.getenv("VLLM_VISION_NPU_CACHE"),
     # NPU device name (e.g., "stx" for Strix, "phx" for Phoenix)
     "VLLM_VISION_NPU_DEVICE": lambda: os.getenv("VLLM_VISION_NPU_DEVICE"),

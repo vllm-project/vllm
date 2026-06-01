@@ -601,7 +601,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 logger.error("[Qwen2.5VL] NPU backend init failed: %s", e)
                 raise RuntimeError(
                     f"NPU vision backend initialization failed: {e}. "
-                    "Set VLLM_VISION_NPU_BACKEND='' to use PyTorch backend."
+                    "Unset VLLM_VISION_NPU_CACHE to use PyTorch backend."
                 ) from e
 
         self.npu_backend = None

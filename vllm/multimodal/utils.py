@@ -39,10 +39,7 @@ def _is_npu_vision_backend() -> bool:
     """
     import vllm.envs as envs
 
-    backend = (
-        envs.VLLM_VISION_NPU_BACKEND.lower() if envs.VLLM_VISION_NPU_BACKEND else ""
-    )
-    return backend == "flexmlrt"
+    return bool(envs.VLLM_VISION_NPU_CACHE)
 
 
 def encode_audio_base64(
