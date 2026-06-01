@@ -86,10 +86,53 @@ async def test_passed_api_token(server: RemoteOpenAIServer):
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_not_v1_api_token(server: RemoteOpenAIServer):
-    # Authorization check is skipped for any paths that
-    # don't start with /v1 (e.g. /v1/chat/completions).
+async def test_not_v1_or_v2_path_skips_auth(server: RemoteOpenAIServer):
+    # Authorization check is skipped for paths that
+    # don't start with /v1 or /v2 (e.g. /health, /metrics).
     response = requests.get(server.url_for("health"))
+    assert response.status_code == HTTPStatus.OK
+
+
+# ---------------------------------------------------------------------------
+# /v2 path authentication tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "server",
+    [["--api-key", "test"]],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_v2_endpoint_rejects_missing_api_token(server: RemoteOpenAIServer):
+    # /v2/embed should require authentication when --api-key is set.
+    body = {
+        "model": MODEL_NAME,
+        "texts": ["hello"],
+        "embedding_types": ["float"],
+    }
+    response = requests.post(server.url_for("/v2/embed"), json=body)
+    assert response.status_code == HTTPStatus.UNAUTHORIZED
+
+
+@pytest.mark.parametrize(
+    "server",
+    [["--api-key", "test"]],
+    indirect=True,
+)
+@pytest.mark.asyncio
+async def test_v2_endpoint_accepts_valid_api_token(server: RemoteOpenAIServer):
+    # /v2/embed should accept requests with a valid API key.
+    body = {
+        "model": MODEL_NAME,
+        "texts": ["hello"],
+        "embedding_types": ["float"],
+    }
+    response = requests.post(
+        server.url_for("/v2/embed"),
+        json=body,
+        headers={"Authorization": "Bearer test"},
+    )
     assert response.status_code == HTTPStatus.OK
 
 

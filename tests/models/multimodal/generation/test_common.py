@@ -316,7 +316,15 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[large_gpu_mark(min_gb=64)],
+        marks=[
+            pytest.mark.skip(
+                reason="Aria needs to update for latest transformers, "
+                "must have a vision_processor.py."
+                "An issue has been filed:"
+                "https://huggingface.co/rhymes-ai/Aria/discussions/23"
+            ),
+            large_gpu_mark(min_gb=64),
+        ],
     ),
     "aya_vision": VLMTestInfo(
         models=["CohereLabs/aya-vision-8b"],
@@ -374,6 +382,26 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
+    ),
+    "cosmos3": VLMTestInfo(
+        models=["nvidia/Cosmos3-Nano"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        enforce_eager=False,
+        needs_video_metadata=True,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",  # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "deepseek_vl_v2": VLMTestInfo(
         models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
@@ -468,7 +496,14 @@ VLM_TEST_SETTINGS = {
         max_tokens=8,
         num_logprobs=10,
         auto_cls=AutoModelForCausalLM,
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[
+            pytest.mark.skip(
+                reason="The code for this model has a bug."
+                "Please see the issue here:"
+                "https://huggingface.co/zai-org/glm-4v-9b/discussions/46."
+            ),
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     "glm4_1v": VLMTestInfo(
         models=["zai-org/GLM-4.1V-9B-Thinking"],
@@ -513,7 +548,14 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[
+            pytest.mark.skip(
+                reason="This test fails on both AMD and NV"
+                "hardware. please see the issue:"
+                "https://github.com/vllm-project/vllm/issues/42016"
+            ),
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     "granite4_vision": VLMTestInfo(
         models=["ibm-granite/granite-vision-4.1-4b"],

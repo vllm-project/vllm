@@ -847,6 +847,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
     int64_t v_strideB,
     int64_t v_strideS,
     int64_t v_strideH,
+    int64_t state_slot_stride,
     bool use_qk_l2norm_in_kernel,
     double softplus_threshold) {
   using bVec = at::vec::Vectorized<scalar_t>;
@@ -907,7 +908,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
     data_index_init(begin, bi, batch_size, si, seq_len, ni, v_num_heads);
     for (int64_t i = begin; i < end; ++i) {
       int64_t cache_index = indices_ptr[bi];
-      int64_t state_offset = (cache_index * v_num_heads + ni) * head_dim * v_head_dim;
+      int64_t state_offset = cache_index * state_slot_stride + ni * head_dim * v_head_dim;
       float g_val = -std::exp(float(A_log_ptr[ni])) *
                     softplus(float(a_ptr[bi * v_num_heads + ni]) + float(dt_bias_ptr[ni]), softplus_threshold);
       float g_val_exp = std::exp(g_val);
@@ -1321,6 +1322,8 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
   int64_t v_strideB = v.stride(1);
   int64_t v_strideS = v.stride(0);
   int64_t v_strideH = v.stride(2);
+  // IMPORTANT: To make the kernal compatible with vLLM KV cache layout 
+  int64_t state_slot_stride = initial_state_source.stride(0);
   at::Tensor core_attn_out = at::empty({batch_size, seq_len, v_num_heads, v_head_dim}, q.options());
   at::Tensor qk_scale_buf = at::empty({2 * batch_size, seq_len, num_heads}, at::kFloat);
 
@@ -1353,6 +1356,7 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
             v_strideB,
             v_strideS,
             v_strideH,
+            state_slot_stride,
             use_qk_l2norm_in_kernel,
             softplus_threshold);
       });
