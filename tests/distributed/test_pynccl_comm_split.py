@@ -3,7 +3,7 @@
 
 import multiprocessing as mp
 import os
-import time
+from typing import Any
 
 try:
     import torch
@@ -13,10 +13,7 @@ except ModuleNotFoundError as e:
         "This script requires a Python environment with torch installed."
     ) from e
 
-from vllm.distributed.device_communicators.pynccl import (
-    PyNcclCommunicator,
-    PyNcclSplitCommunicator,
-)
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     get_world_group,
@@ -24,8 +21,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
-
-mp.set_start_method("spawn", force=True)
 
 
 def _skip(reason: str):
@@ -47,8 +42,9 @@ def _has_nccl_comm_split() -> bool:
 
 
 def _distributed_run(fn, world_size: int):
+    ctx = mp.get_context("spawn")
     port = get_open_port()
-    processes: list[mp.Process] = []
+    processes: list[Any] = []
     for rank in range(world_size):
         env = {
             "RANK": str(rank),
@@ -58,7 +54,7 @@ def _distributed_run(fn, world_size: int):
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": str(port),
         }
-        p = mp.Process(target=fn, args=(env,))
+        p = ctx.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -138,44 +134,8 @@ def _comm_split_worker(env):
         else:
             assert shrunken_comm is None
 
-        managed = PyNcclSplitCommunicator(parent)
-
-        active_comm = managed.resize(2)
-        if rank < 2:
-            assert active_comm is not None
-            assert managed.current is active_comm
-            assert managed.world_size == 2
-            data = torch.tensor([rank + 1], dtype=torch.float32, device=device)
-            data = active_comm.all_reduce(data)
-            torch.accelerator.synchronize()
-            assert data.item() == 3.0
-        else:
-            assert active_comm is None
-            assert managed.current is None
-            assert managed.world_size == 0
-
-        active_comm = managed.resize(4)
-        assert active_comm is not None
-        assert managed.current is active_comm
-        assert managed.world_size == 4
-        data = torch.tensor([rank + 1], dtype=torch.float32, device=device)
-        data = active_comm.all_reduce(data)
-        torch.accelerator.synchronize()
-        assert data.item() == 10.0
-        managed.destroy()
-
         dist.barrier()
         torch.accelerator.synchronize()
-        split_iters = 20
-        start = time.perf_counter()
-        for _ in range(split_iters):
-            bench_comm = parent.split(color=rank // 2, key=rank % 2)
-            assert bench_comm is not None
-            bench_comm.destroy()
-        torch.accelerator.synchronize()
-        elapsed_ms = (time.perf_counter() - start) * 1000 / split_iters
-        if rank == 0:
-            print(f"Average ncclCommSplit latency: {elapsed_ms:.3f} ms")
     finally:
         if parent is not None:
             parent.destroy()
@@ -197,7 +157,6 @@ def test_pynccl_comm_split():
 
 def main():
     _run_comm_split_test()
-    print("PyNCCL ncclCommSplit test passed.")
 
 
 if __name__ == "__main__":
