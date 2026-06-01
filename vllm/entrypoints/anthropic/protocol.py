@@ -8,6 +8,67 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+def _extract_system_from_messages(request_body: dict) -> dict:
+    """Extract system-role messages from the messages array.
+
+    Claude Code sends the system prompt as a message with role ``"system"``
+    inside the messages array instead of using the top-level ``system`` field.
+    Silently move such messages to ``system`` so the request succeeds.
+    """
+    messages = request_body.get("messages")
+    if not isinstance(messages, list):
+        return request_body
+
+    # Collect system-role messages (preserve original order)
+    system_msgs: list[dict] = []
+    other_msgs: list[dict] = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            other_msgs.append(msg)
+
+    if not system_msgs:
+        return request_body  # nothing to do
+
+    # Build system content blocks from extracted messages
+    extracted_blocks: list[dict[str, str]] = []
+    for msg in system_msgs:
+        content = msg.get("content")
+        if isinstance(content, str):
+            extracted_blocks.append({"type": "text", "text": content})
+        elif isinstance(content, list):
+            # Already a list of content blocks – pass through as-is
+            extracted_blocks.extend(content)
+
+    if not extracted_blocks:
+        return request_body
+
+    # Merge with any existing top-level system field
+    existing_system = request_body.get("system")
+    if existing_system is None:
+        merged_blocks = extracted_blocks
+    elif isinstance(existing_system, str):
+        merged_blocks = [
+            {"type": "text", "text": existing_system},
+            *extracted_blocks,
+        ]
+    elif isinstance(existing_system, list):
+        merged_blocks = [*existing_system, *extracted_blocks]
+    else:
+        # Unexpected type – wrap it
+        merged_blocks = [
+            {"type": "text", "text": str(existing_system)},
+            *extracted_blocks,
+        ]
+
+    return {
+        **request_body,
+        "messages": other_msgs,
+        "system": merged_blocks,
+    }
+
+
 class AnthropicError(BaseModel):
     """Error structure for Anthropic API"""
 
@@ -161,65 +222,7 @@ class AnthropicMessagesRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def extract_system_messages(cls, request_body):
-        """Extract system messages from the messages array.
-
-        Claude Code sends the system prompt as a message with role
-        ``"system"`` inside the messages array instead of using the
-        top-level ``system`` field.  Silently move such messages to
-        ``system`` so the request succeeds.
-        """
-        messages = request_body.get("messages")
-        if not isinstance(messages, list):
-            return request_body
-
-        # Collect system-role messages (preserve original order)
-        system_msgs: list[dict] = []
-        other_msgs: list[dict] = []
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                system_msgs.append(msg)
-            else:
-                other_msgs.append(msg)
-
-        if not system_msgs:
-            return request_body  # nothing to do
-
-        # Build system content blocks from extracted messages
-        extracted_blocks: list[dict[str, str]] = []
-        for msg in system_msgs:
-            content = msg.get("content")
-            if isinstance(content, str):
-                extracted_blocks.append({"type": "text", "text": content})
-            elif isinstance(content, list):
-                # Already a list of content blocks – pass through as-is
-                extracted_blocks.extend(content)
-
-        if not extracted_blocks:
-            return request_body
-
-        # Merge with any existing top-level system field
-        existing_system = request_body.get("system")
-        if existing_system is None:
-            merged_blocks = extracted_blocks
-        elif isinstance(existing_system, str):
-            merged_blocks = [
-                {"type": "text", "text": existing_system},
-                *extracted_blocks,
-            ]
-        elif isinstance(existing_system, list):
-            merged_blocks = [*existing_system, *extracted_blocks]
-        else:
-            # Unexpected type – wrap it
-            merged_blocks = [
-                {"type": "text", "text": str(existing_system)},
-                *extracted_blocks,
-            ]
-
-        return {
-            **request_body,
-            "messages": other_msgs,
-            "system": merged_blocks,
-        }
+        return _extract_system_from_messages(request_body)
 
 
 class AnthropicDelta(BaseModel):
@@ -316,6 +319,11 @@ class AnthropicCountTokensRequest(BaseModel):
         if not v:
             raise ValueError("Model is required")
         return v
+
+    @model_validator(mode="before")
+    @classmethod
+    def extract_system_messages(cls, request_body):
+        return _extract_system_from_messages(request_body)
 
 
 class AnthropicCountTokensResponse(BaseModel):

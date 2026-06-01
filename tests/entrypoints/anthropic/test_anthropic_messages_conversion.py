@@ -11,6 +11,7 @@ blocks echoed back by Anthropic clients.
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
+    AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
@@ -738,3 +739,122 @@ class TestSystemMessageExtraction:
         assert system_msg["role"] == "system"
         assert system_msg["content"] == "You are a pirate."
         assert result.messages[1]["role"] == "user"
+
+
+# ======================================================================
+# System message extraction for AnthropicCountTokensRequest
+# ======================================================================
+
+
+class TestCountTokensSystemExtraction:
+    """AnthropicCountTokensRequest should handle system messages in the
+    messages array the same way as AnthropicMessagesRequest.
+    """
+
+    def _make_count_request(
+        self,
+        messages: list[dict],
+        **kwargs,
+    ) -> AnthropicCountTokensRequest:
+        return AnthropicCountTokensRequest(
+            model="test-model",
+            messages=messages,
+            **kwargs,
+        )
+
+    def test_single_system_message_extracted(self):
+        """A single system message in messages array should be extracted."""
+        request = self._make_count_request(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="You are helpful.")
+        ]
+        assert len(request.messages) == 1
+        assert request.messages[0].role == "user"
+
+    def test_multiple_system_messages_concatenated(self):
+        """Multiple system messages should be joined as content blocks."""
+        request = self._make_count_request(
+            [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "Hello"},
+            ]
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="You are helpful."),
+            AnthropicContentBlock(type="text", text="Be concise."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_system_message_with_existing_system_field(self):
+        """System messages in array should merge with existing system."""
+        request = self._make_count_request(
+            [
+                {"role": "system", "content": "Extra instruction."},
+                {"role": "user", "content": "Hello"},
+            ],
+            system="Main system prompt.",
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="Main system prompt."),
+            AnthropicContentBlock(type="text", text="Extra instruction."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_system_message_content_blocks(self):
+        """System message with content blocks should pass through as-is."""
+        request = AnthropicCountTokensRequest(
+            model="test-model",
+            messages=[
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "First instruction."},
+                        {"type": "text", "text": "Second instruction."},
+                    ],
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="First instruction."),
+            AnthropicContentBlock(type="text", text="Second instruction."),
+        ]
+        assert len(request.messages) == 1
+
+    def test_no_system_messages_unchanged(self):
+        """Normal requests without system messages are unchanged."""
+        request = self._make_count_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ]
+        )
+        assert request.system is None
+        assert len(request.messages) == 2
+
+    def test_interleaved_system_messages_preserve_order(self):
+        """System messages interleaved with other messages should be
+        extracted while preserving the order of remaining messages."""
+        request = self._make_count_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "System instruction."},
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "system", "content": "Another instruction."},
+                {"role": "user", "content": "Continue"},
+            ]
+        )
+        assert request.system == [
+            AnthropicContentBlock(type="text", text="System instruction."),
+            AnthropicContentBlock(type="text", text="Another instruction."),
+        ]
+        assert len(request.messages) == 3
+        assert request.messages[0].role == "user"
+        assert request.messages[1].role == "assistant"
+        assert request.messages[2].role == "user"
