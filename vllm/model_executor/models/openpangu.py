@@ -45,6 +45,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -55,7 +56,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
@@ -160,7 +160,7 @@ class PanguSinkAttentionBase:
 
 
 @CustomOp.register("MomeAttention")
-class MomeAttention(MambaBase, CustomOp):
+class MomeAttention(AttentionLayerBase, CustomOp):
     """
     MoME attention layer with vLLM KV cache management.
     Handles 3-part convolution state (q, kv, o).
@@ -271,16 +271,22 @@ class MomeAttention(MambaBase, CustomOp):
 
     def forward(self, hidden_states: torch.Tensor, state_indice: int) -> torch.Tensor:
         output = torch.empty_like(hidden_states, memory_format=torch.contiguous_format)
+        if state_indice == 0:
+            conv_weight = self.qa_conv.weight
+            hidden_size = self.q_lora_rank
+        elif state_indice == 1:
+            conv_weight = self.compresskv_conv.weight
+            hidden_size = self.kv_lora_rank
+        else:
+            conv_weight = self.o_conv.weight
+            hidden_size = self.o_dim
+        conv_weight = conv_weight.view(hidden_size, self.kernel_size)
+        conv_state = self.kv_cache[state_indice]
         torch.ops.vllm.mome_attention_fused_op(
             hidden_states,
-            self.qa_conv.weight,
-            self.compresskv_conv.weight,
-            self.o_conv.weight,
-            self.q_lora_rank,
-            self.kv_lora_rank,
-            self.o_dim,
-            self.kernel_size,
-            state_indice,
+            conv_state,
+            conv_weight,
+            hidden_size,
             self.prefix,
             output,
         )
@@ -297,66 +303,21 @@ class MomeAttention(MambaBase, CustomOp):
         param_data.copy_(loaded_weight)
 
 
-def _select_mome_conv_params(
-    state_indice: int,
-    q_conv_weight: torch.Tensor,
-    compresskv_conv_weight: torch.Tensor,
-    o_conv_weight: torch.Tensor,
-    q_lora_rank: int,
-    kv_lora_rank: int,
-    o_dim: int,
-    kernel_size: int,
-) -> tuple[torch.Tensor, int]:
-    if state_indice == 0:
-        conv_weight = q_conv_weight
-        hidden_size = q_lora_rank
-    elif state_indice == 1:
-        conv_weight = compresskv_conv_weight
-        hidden_size = kv_lora_rank
-    else:
-        conv_weight = o_conv_weight
-        hidden_size = o_dim
-    return conv_weight.view(hidden_size, kernel_size), hidden_size
-
-
 def mome_attention_fused_op(
     hidden_states: torch.Tensor,
-    q_conv_weight: torch.Tensor,
-    compresskv_conv_weight: torch.Tensor,
-    o_conv_weight: torch.Tensor,
-    q_lora_rank: int,
-    kv_lora_rank: int,
-    o_dim: int,
-    kernel_size: int,
-    state_indice: int,
+    conv_state: torch.Tensor,
+    conv_weight: torch.Tensor,
+    hidden_size: int,
     layer_name: str,
     output: torch.Tensor,
 ) -> None:
     forward_context = get_forward_context()
-    layer = forward_context.no_compile_layers[layer_name]
-
-    def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
-        if state_indices.ndim > 1:
-            return state_indices[:, 0]
-        return state_indices
-
-    conv_weight, hidden_size = _select_mome_conv_params(
-        state_indice,
-        q_conv_weight,
-        compresskv_conv_weight,
-        o_conv_weight,
-        q_lora_rank,
-        kv_lora_rank,
-        o_dim,
-        kernel_size,
-    )
-    conv_weight = conv_weight.to(hidden_states.dtype)
     if forward_context.attn_metadata is None:
         output.fill_(0)
         return
 
-    conv_state = layer.kv_cache[state_indice].transpose(-1, -2)
     hidden_states = hidden_states.contiguous()
+    conv_state_ = conv_state.transpose(-1, -2)
     mome_metadata = forward_context.attn_metadata[layer_name]
     num_decode_tokens = mome_metadata.num_decode_tokens
     num_prefill_tokens = mome_metadata.num_prefill_tokens
@@ -365,36 +326,69 @@ def mome_attention_fused_op(
     num_prefills = mome_metadata.num_prefills
     if num_decodes > 0:
         decode_hidden_states = hidden_states[:num_decodes].clone()
-        decode_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor_d[:num_decodes]
+        decode_state_indices = mome_metadata.state_indices_tensor_d
+        decode_block_idx_last_scheduled_token = (
+            mome_metadata.block_idx_last_scheduled_token_d
         )
+        decode_block_idx_last_computed_token = (
+            mome_metadata.block_idx_last_computed_token_d
+        )
+        assert decode_state_indices is not None
+        assert decode_block_idx_last_scheduled_token is not None
+        assert decode_block_idx_last_computed_token is not None
         decode_output = causal_conv1d_update(
             decode_hidden_states,
-            conv_state,
+            conv_state_,
             conv_weight,
             bias=None,
             activation=None,
-            conv_state_indices=decode_state_indices,
+            conv_state_indices=decode_state_indices[:num_decodes].contiguous(),
+            block_idx_last_scheduled_token=(
+                decode_block_idx_last_scheduled_token[:num_decodes]
+            ),
+            initial_state_idx=decode_block_idx_last_computed_token[:num_decodes],
         )
         output[:num_decode_tokens] = decode_output
 
     num_prefills = mome_metadata.num_prefills
     if num_prefills > 0:
         query_start_loc = mome_metadata.query_start_loc_p
-        assert query_start_loc is not None
-        prefill_hidden_states = hidden_states[num_decode_tokens:num_actual_tokens]
-        prefill_state_indices = _get_request_state_indices(
-            mome_metadata.state_indices_tensor_p[:num_prefills]
+        prefill_state_indices = mome_metadata.state_indices_tensor_p
+        prefill_block_idx_first_scheduled_token = (
+            mome_metadata.block_idx_first_scheduled_token_p
         )
+        prefill_block_idx_last_scheduled_token = (
+            mome_metadata.block_idx_last_scheduled_token_p
+        )
+        prefill_block_idx_last_computed_token = (
+            mome_metadata.block_idx_last_computed_token_p
+        )
+        num_computed_tokens_p = mome_metadata.num_computed_tokens_p
+        assert query_start_loc is not None
+        assert prefill_state_indices is not None
+        assert prefill_block_idx_first_scheduled_token is not None
+        assert prefill_block_idx_last_scheduled_token is not None
+        assert prefill_block_idx_last_computed_token is not None
+        assert num_computed_tokens_p is not None
+        prefill_hidden_states = hidden_states[num_decode_tokens:num_actual_tokens]
         prefill_output = causal_conv1d_fn(
             prefill_hidden_states.transpose(0, 1),
             conv_weight,
             bias=None,
             activation=None,
-            conv_states=conv_state,
+            conv_states=conv_state_,
             has_initial_state=mome_metadata.has_initial_states_p,
-            cache_indices=prefill_state_indices,
+            cache_indices=prefill_state_indices[:num_prefills].contiguous(),
             query_start_loc=query_start_loc,
+            block_idx_first_scheduled_token=(
+                prefill_block_idx_first_scheduled_token[:num_prefills]
+            ),
+            block_idx_last_scheduled_token=(
+                prefill_block_idx_last_scheduled_token[:num_prefills]
+            ),
+            initial_state_idx=prefill_block_idx_last_computed_token[:num_prefills],
+            num_computed_tokens=num_computed_tokens_p[:num_prefills],
+            block_size_to_align=conv_state_.size(-1),
             metadata=mome_metadata,
             zero_initial_state_output=True,
         ).transpose(0, 1)
@@ -403,14 +397,9 @@ def mome_attention_fused_op(
 
 def mome_attention_fake(
     hidden_states: torch.Tensor,
-    q_conv_weight: torch.Tensor,
-    compresskv_conv_weight: torch.Tensor,
-    o_conv_weight: torch.Tensor,
-    q_lora_rank: int,
-    kv_lora_rank: int,
-    o_dim: int,
-    kernel_size: int,
-    state_indice: int,
+    conv_state: torch.Tensor,
+    conv_weight: torch.Tensor,
+    hidden_size: int,
     layer_name: str,
     output: torch.Tensor,
 ) -> None:
@@ -420,7 +409,7 @@ def mome_attention_fake(
 direct_register_custom_op(
     op_name="mome_attention_fused_op",
     op_func=mome_attention_fused_op,
-    mutates_args=["output"],
+    mutates_args=["conv_state", "output"],
     fake_impl=mome_attention_fake,
 )
 
