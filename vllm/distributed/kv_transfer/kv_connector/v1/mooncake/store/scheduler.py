@@ -59,10 +59,7 @@ class MooncakeStoreScheduler:
         )
         self.client = LookupKeyClient(vllm_config)
 
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        # LCM for multi-group HMA; bs * pcp * dcp for single-group. Matches
-        # the engine's own scheduler block size by construction.
+        # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
