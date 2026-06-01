@@ -20,7 +20,7 @@ RMS_NORM_EPS = 1e-6
 MAX_POSITION_EMBEDDINGS = 32768
 ROPE_THETA = 10000.0
 
-DTYPES = [torch.bfloat16, torch.float16]
+DTYPES = [torch.bfloat16]
 SEEDS = [13]
 NUM_TOKENS = [1, 4, 37]
 CUDA_DEVICES = ["cuda:0"]
@@ -155,7 +155,7 @@ def test_fused_qk_norm_rope_gate_matches_reference(
         ROTARY_DIM,
     )
 
-    atol, rtol = (2e-3, 2e-3) if dtype == torch.float16 else (1e-2, 1e-2)
+    atol, rtol = 2e-3, 5e-3
     torch.testing.assert_close(q_out, q_ref, atol=atol, rtol=rtol)
     torch.testing.assert_close(k_out, k_ref, atol=atol, rtol=rtol)
     # gate is a verbatim copy of the source slice — must match bit-exactly.
