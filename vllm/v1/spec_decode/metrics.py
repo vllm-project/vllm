@@ -115,6 +115,15 @@ class SpecDecodingLogging:
             rates_str,
             draft_acceptance_rate,
         )
+
+        if draft_acceptance_rate < 15.0:
+            logger.warning(
+                "Very low speculative decoding acceptance rate (%.1f%%). "
+                "Consider reducing num_speculative_tokens or using a "
+                "different draft model/method.",
+                draft_acceptance_rate,
+            )
+
         self.reset()
 
 
