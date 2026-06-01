@@ -1,56 +1,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Factory for creating secondary tier implementations.
-"""
-
+import importlib
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
-from vllm.v1.kv_offload.tiering.example import ExampleSecondaryTier
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
-
-SUPPORTED_TIERS: tuple[type[SecondaryTierManager], ...] = (ExampleSecondaryTier,)
-
-_TIER_REGISTRY: dict[str, type[SecondaryTierManager]] = {
-    cls.get_tier_type(): cls for cls in SUPPORTED_TIERS
-}
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 
-def create_secondary_tier(
-    tier_config: dict,
-    primary_kv_view: memoryview,
-    vllm_config: "VllmConfig",
-) -> SecondaryTierManager:
-    """
-    Create a secondary tier from configuration.
+class SecondaryTierFactory:
+    _registry: dict[str, Callable[[], type[SecondaryTierManager]]] = {}
 
-    Args:
-        tier_config: Dictionary with tier configuration containing:
-            - type (required): Type of secondary tier (e.g., "example")
-            - Additional tier-specific parameters are passed directly
-              to the tier constructor
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-        vllm_config: Global vLLM configuration.
+    @classmethod
+    def register_tier(cls, tier_type: str, module_path: str, class_name: str) -> None:
+        if tier_type in cls._registry:
+            raise ValueError(f"Tier '{tier_type}' is already registered.")
 
-    Returns:
-        SecondaryTierManager instance
+        def loader() -> type[SecondaryTierManager]:
+            module = importlib.import_module(module_path)
+            return getattr(module, class_name)
 
-    Raises:
-        ValueError: If tier type is unknown or configuration is invalid
-    """
-    config = tier_config.copy()
+        cls._registry[tier_type] = loader
 
-    tier_type = config.pop("type", None)
-    if not tier_type:
-        raise ValueError("Secondary tier configuration must include 'type'")
+    @classmethod
+    def create_secondary_tier(
+        cls,
+        tier_config: dict,
+        primary_kv_view: memoryview,
+        offloading_spec: "OffloadingSpec",
+    ) -> SecondaryTierManager:
+        config = tier_config.copy()
 
-    cls = _TIER_REGISTRY.get(tier_type)
-    if cls is None:
-        raise ValueError(
-            f"Unknown secondary tier type: {tier_type!r}. "
-            f"Supported types: {list(_TIER_REGISTRY)}"
+        tier_type = config.pop("type", None)
+        if not tier_type:
+            raise ValueError("Secondary tier configuration must include 'type'")
+
+        if tier_type not in cls._registry:
+            raise ValueError(
+                f"Unknown secondary tier type: {tier_type!r}. "
+                f"Supported types: {list(cls._registry)}"
+            )
+
+        tier_cls = cls._registry[tier_type]()
+        return tier_cls(
+            offloading_spec=offloading_spec,
+            primary_kv_view=primary_kv_view,
+            tier_type=tier_type,
+            **config,
         )
-    return cls(vllm_config=vllm_config, primary_kv_view=primary_kv_view, **config)
+
+
+SecondaryTierFactory.register_tier(
+    "example",
+    "vllm.v1.kv_offload.tiering.example.manager",
+    "ExampleSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "fs",
+    "vllm.v1.kv_offload.tiering.fs.manager",
+    "FileSystemTierManager",
+)

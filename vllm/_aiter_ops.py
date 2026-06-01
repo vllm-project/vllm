@@ -144,6 +144,7 @@ def _rocm_aiter_fused_moe_impl(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -171,6 +172,7 @@ def _rocm_aiter_fused_moe_impl(
         intermediate_pad=intermediate_pad,
         bias1=bias1,
         bias2=bias2,
+        moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
     )
 
 
@@ -194,6 +196,7 @@ def _rocm_aiter_fused_moe_fake(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1282,6 +1285,18 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
+    _MOE_DISPATCH_POLICY: int | None = None
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_dispatch_policy(cls) -> int:
+        """Cached MoE sorting dispatch policy."""
+        if cls._MOE_DISPATCH_POLICY is None:
+            import vllm.envs as envs
+
+            cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        return cls._MOE_DISPATCH_POLICY
+
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
@@ -1890,6 +1905,7 @@ class rocm_aiter_ops:
         intermediate_pad: int = 0,
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
+        moe_sorting_dispatch_policy: int = 0,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -1911,6 +1927,7 @@ class rocm_aiter_ops:
             intermediate_pad,
             bias1,
             bias2,
+            moe_sorting_dispatch_policy,
         )
 
     @staticmethod
@@ -2377,6 +2394,7 @@ class rocm_aiter_ops:
         alibi_slopes: torch.Tensor | None = None,
         return_lse: bool = False,
         out: torch.Tensor | None = None,
+        sink_ptr: torch.Tensor | None = None,
     ):
         """
         Flash attention with variable length sequences.
@@ -2405,6 +2423,7 @@ class rocm_aiter_ops:
             alibi_slopes=alibi_slopes,
             return_lse=return_lse,
             out=out,
+            sink_ptr=sink_ptr,
         )
 
     @staticmethod
