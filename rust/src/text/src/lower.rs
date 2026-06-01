@@ -235,6 +235,8 @@ fn merge_unique_token_ids(
 mod tests {
     use std::collections::BTreeSet;
 
+    use serial_test::file_serial;
+
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
@@ -386,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network access to Hugging Face"]
+    #[file_serial(hf_qwen3)]
     async fn lower_text_request_uses_real_qwen_generation_defaults() {
         let backend = HfTextBackend::from_model("Qwen/Qwen3-0.6B")
             .await
@@ -410,12 +412,8 @@ mod tests {
                 default_top_k: Some(
                     20,
                 ),
-                default_min_p: Some(
-                    0.1,
-                ),
-                default_repetition_penalty: Some(
-                    1.2,
-                ),
+                default_min_p: None,
+                default_repetition_penalty: None,
                 default_max_tokens: None,
                 max_model_len: Some(
                     40960,
@@ -439,10 +437,10 @@ mod tests {
                 min_tokens: 0,
                 logprobs: None,
                 prompt_logprobs: None,
-                min_p: 0.1,
+                min_p: 0.0,
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
-                repetition_penalty: 1.2,
+                repetition_penalty: 1.0,
                 stop_token_ids: [
                     151643,
                 ],
@@ -453,6 +451,13 @@ mod tests {
                     151643,
                     151645,
                 },
+                logit_bias: None,
+                allowed_token_ids: None,
+                bad_words_token_ids: None,
+                structured_outputs: None,
+                logprob_token_ids: None,
+                skip_reading_prefix_cache: None,
+                extra_args: None,
             }
         "#]]
         .assert_debug_eq(&params);
