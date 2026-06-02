@@ -348,7 +348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # TODO: Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
-        GPUModelRunnerV1.apply_sparse_weight_patches(self, *args, **kwargs)
+        GPUModelRunnerV1.apply_sparse_weight_patches(self, *args, **kwargs)  # type: ignore[arg-type]
 
     def update_config(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
