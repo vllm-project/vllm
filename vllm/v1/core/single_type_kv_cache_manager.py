@@ -4,7 +4,6 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
-from typing import Literal
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
@@ -27,18 +26,6 @@ from vllm.v1.kv_cache_interface import (
     TQFullAttentionSpec,
 )
 from vllm.v1.request import Request
-
-# Auto retention checkpoint schedule:
-# At powers of 2 from AUTO_RETENTION_BASE until AUTO_RETENTION_INTERVAL
-# then at every following AUTO_RETENTION_INTERVAL tokens
-# e.g., [1024, 2048, 4096, ... 32768, 65536, ...]
-AUTO_RETENTION_BASE = 1024
-AUTO_RETENTION_INTERVAL = 32768
-RetentionInterval = int | Literal["auto"]
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return cdiv(value, alignment) * alignment
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -373,36 +360,6 @@ class SingleTypeKVCacheManager(ABC):
         """
         return None
 
-    def _cache_block_range(
-        self, request: Request, start_block: int, end_block: int
-    ) -> None:
-        """Cache selected blocks in ``[start_block, end_block)``.
-
-        The normal ``cache_blocks()`` path is prefix-oriented: it processes from
-        ``num_cached_block`` up to the current full-block count. Sparse local
-        retention is range-oriented because it only keeps the local tail for
-        selected checkpoint boundaries.
-        """
-        blocks = self.req_to_blocks[request.request_id]
-        end_block = min(end_block, len(blocks))
-        if start_block >= end_block:
-            return
-        block_mask = [
-            not blocks[i].is_null and blocks[i].block_hash is None
-            for i in range(start_block, end_block)
-        ]
-        if not any(block_mask):
-            return
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=blocks,
-            num_cached_blocks=start_block,
-            num_full_blocks=end_block,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_mask=block_mask,
-        )
-
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.
@@ -518,12 +475,7 @@ class SingleTypeKVCacheManager(ABC):
         # range), so we must cap to the number of blocks that currently exist for
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
-
-        # Reuse skipped local blocks in order:
-        #   scratch blocks: no prefix-cache value, reuse first.
-        #   cached blocks: reusable prefix-cache value, reuse last.
-        removed_cached_blocks: list[KVCacheBlock] = []
-        removed_uncached_blocks: list[KVCacheBlock] = []
+        removed_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
         for i in range(num_skipped_blocks - 1, -1, -1):
@@ -532,16 +484,9 @@ class SingleTypeKVCacheManager(ABC):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
-            if blocks[i].block_hash is None:
-                removed_uncached_blocks.append(blocks[i])
-            else:
-                removed_cached_blocks.append(blocks[i])
+            removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        # `prepend=True` makes uncached scratch blocks the next allocation
-        # candidates, while cached blocks stay behind them as best-effort
-        # prefix-cache entries.
-        self.block_pool.free_blocks(removed_cached_blocks)
-        self.block_pool.free_blocks(removed_uncached_blocks, prepend=True)
+        self.block_pool.free_blocks(removed_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -626,8 +571,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._last_interval_retention_boundary: dict[str, int] = {}
-        self._latest_retention_cached: set[str] = set()
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -757,140 +700,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             i >= shift and (i - shift) % per_segment >= per_segment - need
             for i in range(start_block, num_blocks)
         ]
-
-    def cache_blocks_at_boundaries(
-        self,
-        request: Request,
-        num_tokens: int,
-        alignment_tokens: int,
-        interval_tokens: RetentionInterval,
-        latest_boundary_token: int | None,
-        extra_tokens_after_replay_boundary: int = 0,
-    ) -> None:
-        """Cache local tails at retained checkpoint boundaries.
-
-        "interval_tokens" selects regular checkpoint boundaries. "auto" uses
-        the default retention schedule, and "0" means no regular interval
-        checkpoints. "latest_boundary_token" optionally adds the prompt replay
-        boundary that exact prompt replays can hit.
-
-        "extra_tokens_after_replay_boundary" is the number of local tokens after
-        each replay boundary that must also be cached for lookup but will not
-        be returned as part of the prefix hit. EAGLE/MTP uses this to match one
-        extra local block after the replay boundary, then drops that block.
-        """
-        assert alignment_tokens % self.block_size == 0
-        assert extra_tokens_after_replay_boundary % self.block_size == 0
-        extra_tail_blocks = extra_tokens_after_replay_boundary // self.block_size
-        if isinstance(interval_tokens, int) and interval_tokens > 0:
-            interval_tokens = _align_up(interval_tokens, alignment_tokens)
-        assert (
-            interval_tokens == "auto"
-            or interval_tokens == 0
-            or interval_tokens % alignment_tokens == 0
-        )
-
-        request_id = request.request_id
-
-        max_replay_boundary = max(0, num_tokens - extra_tokens_after_replay_boundary)
-        last_boundary = self._last_interval_retention_boundary.get(request_id, 0)
-        for boundary in self._retention_boundaries(
-            last_boundary, max_replay_boundary, alignment_tokens, interval_tokens
-        ):
-            self._cache_tail_at_boundary(
-                request,
-                boundary + extra_tokens_after_replay_boundary,
-                extra_tail_blocks=extra_tail_blocks,
-            )
-            last_boundary = boundary
-        self._last_interval_retention_boundary[request_id] = last_boundary
-
-        # optionally cache the latest prompt boundary. It is fixed for the
-        # lifetime of the request (derived from num_prompt_tokens), so cache it
-        # at most once to avoid redundant tail-mask work on every decode step.
-        if (
-            latest_boundary_token is not None
-            and latest_boundary_token + extra_tokens_after_replay_boundary <= num_tokens
-            and request_id not in self._latest_retention_cached
-        ):
-            self._cache_tail_at_boundary(
-                request,
-                latest_boundary_token + extra_tokens_after_replay_boundary,
-                extra_tail_blocks=extra_tail_blocks,
-            )
-            self._latest_retention_cached.add(request_id)
-
-        # update the num_cached_block cursor
-        self.num_cached_block[request_id] = num_tokens // self.block_size
-
-    def _retention_boundaries(
-        self,
-        last_boundary: int,
-        num_tokens: int,
-        alignment_tokens: int,
-        interval_tokens: RetentionInterval,
-    ) -> list[int]:
-        boundaries: list[int] = []
-        if interval_tokens == 0:
-            return boundaries
-        if interval_tokens != "auto":
-            boundary = ((last_boundary // interval_tokens) + 1) * interval_tokens
-            while boundary <= num_tokens:
-                boundaries.append(boundary)
-                boundary += interval_tokens
-            return boundaries
-
-        interval = _align_up(AUTO_RETENTION_INTERVAL, alignment_tokens)
-        emitted: set[int] = set()
-        boundary = AUTO_RETENTION_BASE
-        while boundary <= AUTO_RETENTION_INTERVAL:
-            aligned_boundary = _align_up(boundary, alignment_tokens)
-            if (
-                aligned_boundary not in emitted
-                and last_boundary < aligned_boundary <= num_tokens
-            ):
-                emitted.add(aligned_boundary)
-                boundaries.append(aligned_boundary)
-            boundary *= 2
-
-        boundary = ((last_boundary // interval) + 1) * interval
-        while boundary <= num_tokens:
-            if boundary not in emitted:
-                boundaries.append(boundary)
-            boundary += interval
-        return boundaries
-
-    def _cache_tail_at_boundary(
-        self,
-        request: Request,
-        boundary_token: int,
-        extra_tail_blocks: int = 0,
-    ) -> None:
-        """Cache the sliding-window tail needed to reuse "boundary_token"."""
-        assert boundary_token % self.block_size == 0
-        tail_blocks = cdiv(self.sliding_window - 1, self.block_size)
-        tail_blocks += extra_tail_blocks
-        end_block = boundary_token // self.block_size
-        start_block = max(0, end_block - tail_blocks)
-        self._cache_block_range(request, start_block, end_block)
-
-    def free(self, request_id: str) -> None:
-        # similar to remove_skipped_blocks(), prepend the uncached blocks
-        # and append the cached blocks to the free queue
-        req_blocks = self.req_to_blocks.pop(request_id, [])
-        if req_blocks:
-            cached_blocks: list[KVCacheBlock] = []
-            uncached_blocks: list[KVCacheBlock] = []
-            for block in reversed(req_blocks):
-                if block.block_hash is None:
-                    uncached_blocks.append(block)
-                else:
-                    cached_blocks.append(block)
-            self.block_pool.free_blocks(cached_blocks)
-            self.block_pool.free_blocks(uncached_blocks, prepend=True)
-        self.num_cached_block.pop(request_id, None)
-        self._last_interval_retention_boundary.pop(request_id, None)
-        self._latest_retention_cached.discard(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

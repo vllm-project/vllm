@@ -2153,20 +2153,6 @@ class VllmConfig:
             )
         return self
 
-    @model_validator(mode="after")
-    def validate_prefix_cache_retention_interval(self) -> "VllmConfig":
-        if self.model_config is None:
-            return self
-        if self.cache_config.prefix_cache_retention_interval is None:
-            return self
-        if not self.cache_config.enable_prefix_caching:
-            logger.warning(
-                "--prefix-cache-retention-interval is only effective when "
-                "prefix caching is enabled. This flag is ignored."
-            )
-            self.cache_config.prefix_cache_retention_interval = None
-        return self
-
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None

@@ -36,7 +36,6 @@ CacheDType = Literal[
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
-PrefixCacheRetentionInterval = int | Literal["auto"] | None
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
@@ -108,12 +107,6 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
-    prefix_cache_retention_interval: PrefixCacheRetentionInterval = None
-    """Retain local sliding-window KV checkpoints for prefix caching.
-    "None" preserves the default dense local checkpointing behavior. "auto"
-    retains checkpoints at the default schedule. "0" retains only the latest
-    completed prompt boundary. Positive values retain checkpoints at the
-    specified interval boundaries."""
     calculate_kv_scales: bool = False
     """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
@@ -202,7 +195,6 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "hash_block_size",
             "mamba_page_size_padded",
@@ -250,17 +242,6 @@ class CacheConfig:
         if self.mamba_block_size is not None:
             self.user_specified_mamba_block_size = True
         return self
-
-    @field_validator("prefix_cache_retention_interval", mode="after")
-    @classmethod
-    def _validate_prefix_cache_retention_interval(
-        cls, value: PrefixCacheRetentionInterval
-    ) -> PrefixCacheRetentionInterval:
-        if value is None or value == "auto":
-            return value
-        if value < 0:
-            raise ValueError("prefix_cache_retention_interval must be >= 0 or 'auto'")
-        return value
 
     @field_validator("calculate_kv_scales", mode="after")
     @classmethod

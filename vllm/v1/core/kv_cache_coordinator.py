@@ -2,11 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from math import lcm
-from typing import Literal
 from typing import NamedTuple
 
-from vllm.logger import init_logger
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -16,11 +13,8 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
-    AUTO_RETENTION_BASE,
-    AUTO_RETENTION_INTERVAL,
     CrossAttentionManager,
     SingleTypeKVCacheManager,
-    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -29,8 +23,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 from vllm.v1.request import Request
-
-logger = init_logger(__name__)
 
 
 class KVCacheCoordinator(ABC):
@@ -445,7 +437,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
-        local_kv_retention_interval: int | Literal["auto"] | None = None,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -473,37 +464,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
-
-        self.local_kv_retention_interval = local_kv_retention_interval
-        if self.local_kv_retention_interval is not None:
-            has_sliding_window_group = any(
-                isinstance(manager, SlidingWindowManager)
-                for manager in self.single_type_managers
-            )
-            if has_sliding_window_group:
-                if self.local_kv_retention_interval == "auto":
-                    logger.info(
-                        "Using prefix-cache local KV retention strategy: retain "
-                        "sliding-window checkpoint tails at powers of 2 from %d to "
-                        "%d tokens, then every %d tokens, plus the latest replayable "
-                        "prompt boundary.",
-                        AUTO_RETENTION_BASE,
-                        AUTO_RETENTION_INTERVAL,
-                        AUTO_RETENTION_INTERVAL,
-                    )
-                elif self.local_kv_retention_interval == 0:
-                    logger.info(
-                        "Using prefix-cache local KV retention strategy: retain only "
-                        "the latest replayable prompt boundary."
-                    )
-                else:
-                    logger.info(
-                        "Using prefix-cache local KV retention strategy: retain "
-                        "sliding-window checkpoint tails at the configured "
-                        "%d-token interval after prefix-cache alignment, plus "
-                        "the latest replayable prompt boundary.",
-                        self.local_kv_retention_interval,
-                    )
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """
@@ -541,49 +501,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             key=lambda g: not isinstance(g.spec, FullAttentionSpec)
         )
 
-        # The LCM of the block sizes of all attention types.
-        # The cache hit length must be a multiple of the LCM of the block sizes
-        # to make sure the cache hit length is a multiple of the block size of
-        # each attention type. Requiring this because we don't support partial
-        # block cache hit yet.
-        block_sizes = [spec.block_size for spec, _, _ in attention_groups]
-        self.lcm_block_size = lcm(*block_sizes)
-
-        # Attention-group indices (into ``self.attention_groups``) that
-        # contain at least one EAGLE/MTP KV cache group.
-        self.eagle_attn_group_indices: set[int] = {
-            i
-            for i, (_, group_ids, _) in enumerate(self.attention_groups)
-            if any(gid in self.eagle_group_ids for gid in group_ids)
-        }
-        self.eagle_lookup_group_ids: set[int] = {
-            gid
-            for i, (_, group_ids, _) in enumerate(self.attention_groups)
-            if i in self.eagle_attn_group_indices
-            for gid in group_ids
-        }
-
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
-        # Cache hits in this coordinator are always a multiple of
-        # ``lcm_block_size`` tokens (see ``find_longest_cache_hit``). Within an
-        # aligned region, SWA groups only consult a subset of blocks per
-        # ``lcm_block_size``-segment so the unused blocks also stay out of the
-        # prefix-cache hash map.
-        prompt_complete = num_computed_tokens >= request.num_prompt_tokens
-        aligned_num_computed_tokens = (
-            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
-        )
-
-        # Cache the latest prompt boundary in addition to the interval boundaries.
-        latest_retention_boundary: int | None = None
-        if self.local_kv_retention_interval is not None and prompt_complete:
-            # get_computed_blocks() caps hits at prompt_length - 1 so logits
-            # can be recomputed. Use the same replayable boundary for the
-            # extra latest checkpoint.
-            retention_boundary = (
-                (request.num_prompt_tokens - 1)
-                // self.lcm_block_size
-                * self.lcm_block_size
         # Propagate the eagle bit to each manager (default to ``use_eagle=False``).
         for group in self.attention_groups:
             if group.use_eagle:
@@ -611,38 +528,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             manager.cache_blocks(
                 request, num_tokens_to_cache, alignment_tokens=self.scheduler_block_size
             )
-            latest_retention_boundary = (
-                retention_boundary if retention_boundary > 0 else None
-            )
-
-        for manager in self.single_type_managers:
-            if self.local_kv_retention_interval is not None and isinstance(
-                manager, SlidingWindowManager
-            ):
-                # MTP/EAGLE lookup matches one local block after the replay
-                # boundary and then drops it, so sparse local retention may
-                # need cacheable tokens past the aligned returned-hit boundary.
-                extra_tokens_after_replay_boundary = (
-                    manager.block_size
-                    if manager.kv_cache_group_id in self.eagle_lookup_group_ids
-                    else 0
-                )
-                manager.cache_blocks_at_boundaries(
-                    request=request,
-                    num_tokens=num_computed_tokens,
-                    alignment_tokens=self.lcm_block_size,
-                    interval_tokens=self.local_kv_retention_interval,
-                    latest_boundary_token=latest_retention_boundary,
-                    extra_tokens_after_replay_boundary=(
-                        extra_tokens_after_replay_boundary
-                    ),
-                )
-            else:
-                manager.cache_blocks(
-                    request,
-                    aligned_num_computed_tokens,
-                    alignment_tokens=self.lcm_block_size,
-                )
 
     def find_longest_cache_hit(
         self,
@@ -762,7 +647,6 @@ def get_kv_cache_coordinator(
     pcp_world_size: int,
     scheduler_block_size: int,
     hash_block_size: int,
-    local_kv_retention_interval: int | Literal["auto"] | None = None,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
@@ -803,6 +687,5 @@ def get_kv_cache_coordinator(
         pcp_world_size=pcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
-        local_kv_retention_interval=local_kv_retention_interval,
         metrics_collector=metrics_collector,
     )
