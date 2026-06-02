@@ -54,7 +54,6 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
-# Padded draft token sentinel. Must not be a valid vocab index.
 PAD_TOKEN_ID = -100
 
 logger = init_logger(__name__)
