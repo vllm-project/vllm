@@ -114,6 +114,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         self._kv_cache_events: LMCacheKVEvents | None = None
 
+    def _is_lmcache_engine_available(self) -> bool:
+        """Return False when LMCache is in degraded recompute mode."""
+        return (
+            getattr(self._lmcache_engine, "lmcache_engine", self._lmcache_engine)
+            is not None
+        )
+
     # ==============================
     # Worker-side methods
     # ==============================
@@ -148,6 +155,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             the same.
 
         """
+        if not self._is_lmcache_engine_available():
+            return
         self._lmcache_engine.start_load_kv(forward_context, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -161,6 +170,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args:
             layer_name: the name of that layer
         """
+        if not self._is_lmcache_engine_available():
+            return
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
@@ -182,6 +193,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        if not self._is_lmcache_engine_available():
+            return
         self._lmcache_engine.save_kv_layer(
             layer_name, kv_layer, attn_metadata, **kwargs
         )
@@ -194,6 +207,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        if not self._is_lmcache_engine_available():
+            return
         self._lmcache_engine.wait_for_save()
 
     def get_finished(
@@ -210,6 +225,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        if not self._is_lmcache_engine_available():
+            return None, None
         return self._lmcache_engine.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -220,6 +237,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Set of block IDs that encountered load errors.
             Empty set if no load errors occurred.
         """
+        if not self._is_lmcache_engine_available():
+            return set()
         method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
         if callable(method):
             return method()
@@ -231,6 +250,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        if not self._is_lmcache_engine_available():
+            return None
 
         events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
         if not events:
