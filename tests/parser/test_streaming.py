@@ -70,7 +70,6 @@ def make_parser(tokenizer, reasoning=False, tool=False):
 
 
 class GlmTokenizer:
-
     def get_vocab(self):
         return {
             "<think>": 154841,
@@ -107,11 +106,13 @@ def glm_tool_request_obj():
 
 
 def make_glm47_parser(request, reasoning=False):
-    _WrappedParser.reasoning_parser_cls = (
-        DeepSeekV3ReasoningWithThinkingParser if reasoning else None
-    )
-    _WrappedParser.tool_parser_cls = Glm47MoeModelToolParser
-    return _WrappedParser(GlmTokenizer(), request.tools)
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = (
+            DeepSeekV3ReasoningWithThinkingParser if reasoning else None
+        )
+        tool_parser_cls = Glm47MoeModelToolParser
+
+    return TestParser(GlmTokenizer(), request.tools)
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
