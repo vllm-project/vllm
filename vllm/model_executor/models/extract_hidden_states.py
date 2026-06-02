@@ -83,8 +83,16 @@ def basic_cache(
     kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
+    valid_slots = slot_mapping >= 0
+    if not valid_slots.any():
+        return
+
     block_size = kv_cache.shape[1]
-    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
+    valid_slot_mapping = slot_mapping[valid_slots]
+    kv_cache[
+        valid_slot_mapping // block_size,
+        valid_slot_mapping % block_size,
+    ] = to_cache[valid_slots]
 
 
 ######### CacheOnlyAttentionBackend ########
