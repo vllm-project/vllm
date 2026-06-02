@@ -136,8 +136,9 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
     serving_render = ServingRender(
         model_config=engine.model_config,
         model_registry=models.registry,
-        online_renderer=online_renderer
+        online_renderer=online_renderer,
     )
+
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_inputs
         return (
