@@ -270,16 +270,14 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
-    def get_hf_processor(self, **kwargs: object):
+    def get_hf_processor(self, **kwargs: object) -> "MiniCPMOProcessor":
         """Get vendored MiniCPMOProcessor for multimodal (image+audio) inputs.
 
-        Creates a vendored processor that:
-        - Reuses HF image processor, feature extractor, and tokenizer
-        - Applies correct audio pooling configuration
-        - Converts numpy arrays to lists for serialization compatibility
-
-        Returns:
-            MiniCPMOProcessor: Vendored processor compatible with Transformers v5
+        Creates a vendored processor that reuses the HF image processor,
+        feature extractor, and tokenizer; applies the correct audio pooling
+        configuration; and converts numpy arrays in the image processor to
+        lists for serialization compatibility. The returned processor is
+        compatible with Transformers v5.
         """
         import numpy as np
 
