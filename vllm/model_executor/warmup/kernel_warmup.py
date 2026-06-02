@@ -483,7 +483,15 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    _deepseek_v4_sparse_mla_attention_warmup(worker)
+    if envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH:
+        from vllm.models.deepseek_v4.nvidia.flashmla import (
+            _disable_sparse_mla_prefill_stats,
+        )
+
+        with _disable_sparse_mla_prefill_stats():
+            _deepseek_v4_sparse_mla_attention_warmup(worker)
+    else:
+        _deepseek_v4_sparse_mla_attention_warmup(worker)
     _deepseek_v4_request_prep_warmup(worker)
 
     enable_flashinfer_autotune = (
