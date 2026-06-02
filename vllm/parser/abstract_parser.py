@@ -44,6 +44,7 @@ from vllm.tool_parsers.streaming import (
 )
 from vllm.tool_parsers.utils import Tool
 from vllm.utils import random_uuid
+from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -314,6 +315,24 @@ class Parser:
         """
 
     @abstractmethod
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        """Parse a complete model output, extracting reasoning and tool calls.
+
+        Args:
+            model_output: The complete model-generated string.
+            request: The request object used to generate the output.
+            enable_auto_tools: Whether to enable automatic tool call parsing.
+
+        Returns:
+            A tuple of (reasoning, content, tool_calls).
+        """
+
+    @abstractmethod
     def parse_delta(
         self,
         delta_text: str,
@@ -511,6 +530,99 @@ class DelegatingParser(Parser):
         # No tool calls
         return [], content
 
+    def _extract_tool_calls(
+        self,
+        content: str | None,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+    ) -> tuple[list[FunctionCall] | None, str | None]:
+        tool_parser = self._tool_parser
+        if tool_parser is None:
+            return [], content
+
+        # When the Mistral grammar factory injected structured outputs,
+        # let the parser handle the output.
+        use_mistral_tool_parser = (
+            is_mistral_tool_parser(type(tool_parser))
+            and isinstance(request, ChatCompletionRequest)
+            and request._grammar_from_tool_parser
+        )
+
+        supports_required_and_named = tool_parser.supports_required_and_named
+        is_named_tool_choice = request.tool_choice and isinstance(
+            request.tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        )
+        is_required_tool_choice = request.tool_choice == "required"
+        is_auto_tool_choice = enable_auto_tools and (
+            request.tool_choice == "auto"
+            or request.tool_choice is None
+            or (
+                not supports_required_and_named
+                and (is_named_tool_choice or is_required_tool_choice)
+            )
+        )
+
+        tool_calls = list[FunctionCall]()
+        if (
+            is_named_tool_choice
+            and supports_required_and_named
+            and not use_mistral_tool_parser
+        ):
+            if content is None:
+                return [], None
+            tool_calls.append(
+                FunctionCall(
+                    name=self._get_function_name(request),
+                    arguments=content,
+                )
+            )
+            content = None
+        elif (
+            is_required_tool_choice
+            and supports_required_and_named
+            and not use_mistral_tool_parser
+        ):
+            # "required" with standard JSON-based parsing
+            parsed_calls = []
+            with contextlib.suppress(ValidationError):
+                content = content or ""
+                parsed_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
+                )
+            for tc in parsed_calls:
+                tool_calls.append(
+                    FunctionCall(
+                        name=tc.name,
+                        arguments=json.dumps(tc.parameters, ensure_ascii=False),
+                    )
+                )
+            content = None
+        elif is_auto_tool_choice or use_mistral_tool_parser:
+            # Automatic Tool Call Parsing (also used as fallback for
+            # required/named when supports_required_and_named=False)
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                tool_calls.extend(
+                    FunctionCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=tc.function.arguments,
+                    )
+                    for tc in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
+            else:
+                # No tool calls.
+                return None, content
+
+        return tool_calls, content
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -671,6 +783,20 @@ class DelegatingParser(Parser):
             last_tc.function.arguments = (
                 last_tc.function.arguments or ""
             ) + self._tool_parser.get_remaining_unstreamed_args()
+
+    def parse(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        enable_auto_tools: bool = False,
+    ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        reasoning, content = self.extract_reasoning(model_output, request)
+        tool_calls, content = self._extract_tool_calls(
+            content=content,
+            request=request,
+            enable_auto_tools=enable_auto_tools,
+        )
+        return reasoning, content, tool_calls
 
     def parse_delta(
         self,
