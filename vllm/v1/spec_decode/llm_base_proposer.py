@@ -54,6 +54,9 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
+# Padded draft token sentinel. Must not be a valid vocab index.
+PAD_TOKEN_ID = -100
+
 logger = init_logger(__name__)
 
 
@@ -710,13 +713,13 @@ class SpecDecodeBaseProposer:
         draft_token_ids: torch.Tensor,
         batch_size: int,
     ) -> torch.Tensor:
-        """Pad draft token ids to num_speculative_tokens with PADDING_SLOT_ID."""
+        """Pad draft token ids to num_speculative_tokens."""
         pad_len = self.num_speculative_tokens - self.current_spec_tokens
         if pad_len <= 0:
             return draft_token_ids
         padding = torch.full(
             (batch_size, pad_len),
-            PADDING_SLOT_ID,
+            PAD_TOKEN_ID,
             device=self.device,
             dtype=draft_token_ids.dtype,
         )
