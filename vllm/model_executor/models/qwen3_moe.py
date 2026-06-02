@@ -42,10 +42,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -86,43 +83,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-def _build_expert_mapping(
-    model: nn.Module,
-    num_experts: int,
-    num_redundant_experts: int,
-) -> list[tuple[str, str, int, str]]:
-    """Return the expert weight mapping consumed by FusedMoE.load_weights.
-
-    Combines the per-expert mapping (experts.<i>.{gate_proj,up_proj,down_proj})
-    with aliases for HF's fused-MoE checkpoint layout (transformers >= v5, or
-    any earlier checkpoint re-saved with save_original_format=False), which
-    packs all experts of a layer into two 3-D tensors: experts.gate_up_proj
-    (E, 2*I, H) and experts.down_proj (E, H, I). For the fused aliases the
-    expert_id field is repurposed as a shard_idx (0=gate, 1=up) that
-    FusedMoE.load_weights' dim()==3 branch uses to split into w1 and w3.
-
-    These aliases are kept local to this model rather than emitted by the
-    shared make_expert_params_mapping helper: the "experts.gate_up_proj" /
-    "experts.down_proj" substrings also match "shared_experts.*" names, so
-    emitting them globally misroutes shared-expert weights for models like
-    DeepSeek-V2. Qwen3 MoE has no shared experts, so the aliases are safe here.
-    """
-    per_expert_mapping = fused_moe_make_expert_params_mapping(
-        model,
-        ckpt_gate_proj_name="gate_proj",
-        ckpt_down_proj_name="down_proj",
-        ckpt_up_proj_name="up_proj",
-        num_experts=num_experts,
-        num_redundant_experts=num_redundant_experts,
-    )
-    fused_mapping = [
-        ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-        ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-        ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-    ]
-    return per_expert_mapping + fused_mapping
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -257,9 +217,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            expert_mapping=_build_expert_mapping(
-                self, self.n_routed_experts, self.n_redundant_experts
-            ),
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -556,11 +516,15 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # (param_name, weight_name, expert_id, shard_id). Covers both the
-        # per-expert checkpoint layout and HF's fused-MoE layout
-        # (experts.gate_up_proj / experts.down_proj).
-        return _build_expert_mapping(
-            self, self.config.num_experts, self.num_redundant_experts
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+            num_redundant_experts=self.num_redundant_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -569,8 +533,6 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
         ]
 
         # Skip loading extra parameters for GPTQ/modelopt models.
@@ -585,8 +547,6 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
-        expert_weight_substrings = {w for _, w, _, _ in expert_params_mapping}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -606,16 +566,8 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                 if name is None:
                     continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
+                # Skip non-stacked layers
                 if weight_name not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
 
@@ -642,38 +594,31 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if any(w in name for w in expert_weight_substrings):
-                    # Expert weight — delegate to the layer's FusedMoE, which
-                    # knows how to dispatch both per-expert (2-D) and HF-fused
-                    # (3-D) checkpoint layouts via its dim()==3 chunk-and-unbind
-                    # branch. FusedMoE.load_weights expects expert_name s.t.
-                    # f"{layer_name}.{expert_name}" contains a mapping's
-                    # weight_name substring; the part after ".experts." in the
-                    # iterator name is what we want (AutoWeightsLoader has
-                    # already stripped the outer "model." prefix here).
-                    # Parse the layer index by structure rather than
-                    # extract_layer_index() — per-expert names contain two
-                    # integers (layer id + expert id) which trips that helper.
+                if "mlp.experts" in name:
                     layer_idx = int(name.split(".", 2)[1])
                     fused_moe = self.layers[layer_idx].mlp.experts
                     _, _, expert_name = name.partition(".experts.")
+                    # FusedMoE.load_weights handles both:
+                    # - 2D expert weights (nn.ModuleList)
+                    # - 3D expert weights (nn.Linear)
                     for inner in fused_moe.load_weights([(expert_name, loaded_weight)]):
                         loaded_params.add(f"{fused_moe.layer_name}.{inner}")
-                    # If FusedMoE yielded nothing the expert isn't on this rank
-                    # (silent skip, matching the previous behavior).
+                    # We have already updated loaded_params, continue to the next weight
                     continue
-
-                # Skip loading extra parameters for GPTQ/modelopt models.
-                if name.endswith(ignore_suffixes) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                else:
+                    # Skip loading extra parameters for GPTQ/modelopt models.
+                    if name.endswith(ignore_suffixes) and name not in params_dict:
+                        continue
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

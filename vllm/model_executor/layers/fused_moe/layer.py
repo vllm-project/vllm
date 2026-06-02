@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
+from functools import lru_cache
 from typing import Literal, cast, overload
 
 import torch
@@ -139,6 +140,9 @@ class FusedMoE(PluggableLayer):
         apply_routed_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        ckpt_gate_proj_name: str | None = None,
+        ckpt_down_proj_name: str | None = None,
+        ckpt_up_proj_name: str | None = None,
     ):
         super().__init__()
 
@@ -182,8 +186,11 @@ class FusedMoE(PluggableLayer):
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
 
-        # Expert mapping used in self.load_weights
+        # Used in self.load_weights to generate expert mapping
         self.expert_mapping = expert_mapping
+        self.ckpt_gate_proj_name = ckpt_gate_proj_name
+        self.ckpt_down_proj_name = ckpt_down_proj_name
+        self.ckpt_up_proj_name = ckpt_up_proj_name
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -1145,6 +1152,23 @@ class FusedMoE(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
+        if all(
+            attr is not None
+            for attr in [
+                self.ckpt_gate_proj_name,
+                self.ckpt_down_proj_name,
+                self.ckpt_up_proj_name,
+            ]
+        ):
+            num_redundant_experts = self.global_num_experts - self.logical_num_experts
+            self.expert_mapping = FusedMoE.make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name=self.ckpt_gate_proj_name,
+                ckpt_down_proj_name=self.ckpt_down_proj_name,
+                ckpt_up_proj_name=self.ckpt_up_proj_name,
+                num_experts=self.logical_num_experts,
+                num_redundant_experts=num_redundant_experts,
+            )
         if (expert_mapping := self.expert_mapping) is None:
             raise ValueError(
                 "`self.expert_mapping` must be provided to "
@@ -1336,6 +1360,7 @@ class FusedMoE(PluggableLayer):
         )
 
     @classmethod
+    @lru_cache(maxsize=1)
     def make_expert_params_mapping(
         cls,
         model: torch.nn.Module,
