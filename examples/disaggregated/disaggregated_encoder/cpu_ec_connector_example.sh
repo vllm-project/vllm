@@ -89,6 +89,7 @@ echo "[setup] starting producer on GPU $GPU_E (port $PRODUCER_PORT)..."
 env "$DEVICE_AFFINITY_ENV=$GPU_E" \
     VLLM_EC_SIDE_CHANNEL_HOST=127.0.0.1 \
     VLLM_EC_SIDE_CHANNEL_PORT="$PRODUCER_SIDE_CHANNEL_PORT" \
+    VLLM_LOGGING_LEVEL=DEBUG \
     vllm serve "$MODEL" \
         --port "$PRODUCER_PORT" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_E" \
@@ -116,6 +117,7 @@ echo "[setup] starting consumer on GPU $GPU_PD (port $CONSUMER_PORT)..."
 env "$DEVICE_AFFINITY_ENV=$GPU_PD" \
     VLLM_EC_SIDE_CHANNEL_HOST=127.0.0.1 \
     VLLM_EC_SIDE_CHANNEL_PORT="$CONSUMER_SIDE_CHANNEL_PORT" \
+    VLLM_LOGGING_LEVEL=DEBUG \
     vllm serve "$MODEL" \
         --port "$CONSUMER_PORT" \
         --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_PD" \
@@ -170,6 +172,9 @@ PRODUCER_RES=$(curl -sS "http://127.0.0.1:${PRODUCER_PORT}/v1/chat/completions" 
     -H "Content-Type: application/json" \
     --data-binary "@$PRODUCER_REQ_FILE")
 
+echo "[step 1] producer response:"
+echo "$PRODUCER_RES" | jq .
+
 EC_TRANSFER_PARAMS=$(echo "$PRODUCER_RES" | jq -c '.ec_transfer_params')
 if [[ "$EC_TRANSFER_PARAMS" == "null" || -z "$EC_TRANSFER_PARAMS" ]]; then
     echo "ERROR: producer response did not include ec_transfer_params"
@@ -199,8 +204,12 @@ jq -n \
                 {type: "text", text: "Describe this image in one sentence."}
             ]
         }],
-        extra_body: {ec_transfer_params: $params}
+        ec_transfer_params: $params
     }' > "$CONSUMER_REQ_FILE"
+
+echo "[step 2] consumer request (image base64 redacted):"
+jq '(.. | objects | select(.type? == "image_url") | .image_url.url) = "BASE64_ENCODED_IMAGE"' \
+    "$CONSUMER_REQ_FILE"
 
 echo "[step 2] POST decode to consumer..."
 curl -sS "http://127.0.0.1:${CONSUMER_PORT}/v1/chat/completions" \

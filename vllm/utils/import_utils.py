@@ -416,8 +416,22 @@ def has_deep_gemm() -> bool:
 
 
 def has_nixl_ep() -> bool:
-    """Whether the optional `nixl_ep` package is available."""
-    return _has_module("nixl_ep")
+    """Whether the optional `nixl_ep` package is available and loadable.
+
+    `find_spec` only checks that the package files exist; it does not execute
+    `__init__.py` or load native extensions.  `nixl_ep_cpp` links against
+    libcudart, which may be absent even when the package is installed (e.g.
+    driver-only container images).  Attempt the real import so that a missing
+    CUDA runtime returns False rather than crashing at the call site.
+    """
+    if not _has_module("nixl_ep"):
+        return False
+    try:
+        import nixl_ep  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
 
 
 def has_triton_kernels() -> bool:

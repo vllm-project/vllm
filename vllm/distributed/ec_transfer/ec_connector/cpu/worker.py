@@ -92,6 +92,23 @@ class ECCPUWorker:
         src_bytes = src.reshape(-1).view(torch.uint8)
         total_bytes = src_bytes.numel()
 
+        allocated_bytes = len(block_indices) * self._block_size_bytes
+        if total_bytes > allocated_bytes:
+            # EC block allocation was undersized; data will be truncated and
+            # the consumer will reconstruct a wrong-shaped tensor.
+            logger.error(
+                "EC: encoder output truncated for mm_hash=%s: "
+                "%d bytes available but only %d allocated "
+                "(%d blocks × %d). shape=%s hidden_dim=%d.",
+                mm_hash,
+                total_bytes,
+                allocated_bytes,
+                len(block_indices),
+                self._block_size_bytes,
+                list(src.shape),
+                self._hidden_dim,
+            )
+
         self._ensure_copy_stream()
         assert self._copy_stream is not None
         with torch.cuda.stream(self._copy_stream):

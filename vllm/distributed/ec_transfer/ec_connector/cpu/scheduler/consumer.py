@@ -83,6 +83,11 @@ class ECCPUConsumer:
         if not params:
             return True
         logger.debug(
+            "EC: ec_transfer_params req=%s params=%s",
+            request.request_id,
+            params,
+        )
+        logger.debug(
             "EC: ensure_cache_available req=%s num_computed=%d features=%d",
             request.request_id,
             num_computed_tokens,

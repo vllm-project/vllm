@@ -40,6 +40,32 @@ class ECRegionLayout:
     num_blocks: int
 
 
+def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig") -> int:
+    """Return the per-token hidden dimension for encoder cache entries.
+
+    For most models this equals the LLM's hidden size.  Qwen3-VL (and any
+    future model with deepstack visual encoding) is an exception: the ViT
+    concatenates its own output with features from N decoder layers before
+    storing in encoder_cache, producing a tensor of width
+    ``out_hidden_size * (1 + N)`` per visual token.  Using the plain LLM
+    hidden size would under-allocate EC blocks and silently truncate the
+    transferred data, leading to a shape mismatch on the consumer.
+    """
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    vision_config = (
+        getattr(hf_config, "vision_config", None) if hf_config is not None else None
+    )
+    if vision_config is not None:
+        out_hidden_size = getattr(vision_config, "out_hidden_size", None)
+        deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
+        if out_hidden_size is not None and deepstack_indexes:
+            # Each visual token carries base features + one feature vector per
+            # deepstack level, all concatenated by the ViT.
+            return out_hidden_size * (1 + len(deepstack_indexes))
+    return model_config.get_inputs_embeds_size()
+
+
 def setup_ec_region(vllm_config: "VllmConfig") -> ECRegionLayout:
     """Build the EC mmap region and derive its layout from `vllm_config`.
 
@@ -54,7 +80,7 @@ def setup_ec_region(vllm_config: "VllmConfig") -> ECRegionLayout:
     assert ec_config.engine_id is not None, "engine_id is set by __post_init__"
 
     dtype = vllm_config.model_config.dtype
-    hidden_dim = vllm_config.model_config.get_inputs_embeds_size()
+    hidden_dim = _get_encoder_cache_hidden_dim(vllm_config)
     element_size = torch.empty(0, dtype=dtype).element_size()
     block_size_bytes = hidden_dim * element_size
     num_blocks = int(ec_config.get_from_extra_config("num_ec_blocks", 100000))
