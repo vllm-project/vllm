@@ -112,10 +112,8 @@ class OffloadingConnectorWorker:
         for kv_cache_tensor in self.spec.kv_cache_config.kv_cache_tensors:
             for slot_layers in kv_cache_tensor.shared_by:
                 # Filter to layers that were actually processed above.
-                # _get_kv_cache_config_deepseek_v4 emits KVCacheTensor entries
-                # for every (tuple_idx, page_size) slot; slots where no group
-                # has a layer at that index produce an empty shared_by
-                # (reserved memory with no corresponding model layer).
+                # Some slots may have no corresponding model layer (reserved
+                # memory with no group layer at that index).
                 tensor_layer_names = [n for n in slot_layers if n in tensors_per_block]
                 if not tensor_layer_names:
                     continue

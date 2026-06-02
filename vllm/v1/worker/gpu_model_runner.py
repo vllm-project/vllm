@@ -4541,17 +4541,16 @@ class GPUModelRunner(
         with record_function_or_nullcontext(
             "gpu_model_runner: AsyncGPUModelRunnerOutput"
         ):
-            # Async path: produce a device-side snapshot that the async
-            # copy stream can D2H later. Both tensors must be private
-            # clones because:
+            # Async path: produce a device-side snapshot that the async copy
+            # stream can D2H later. Both tensors must be private clones
+            # because:
             #   - ``routing_data`` source is the shared capturer buffer,
-            #     which is ``clear_buffer()``-ed at the start of the
-            #     next step on the default stream.
+            #     which is ``clear_buffer()``-ed at the start of the next
+            #     step on the default stream.
             #   - ``slot_mapping`` source is our own
-            #     ``routed_experts_slot_mapping_device``, which the
-            #     next ``_prepare_inputs`` overwrites on the default
-            #     stream while the D2H is still pending on the copy
-            #     stream.
+            #     ``routed_experts_slot_mapping_device``, which the next
+            #     ``_prepare_inputs`` overwrites on the default stream
+            #     while the D2H is still pending on the copy stream.
             # Without clones, the copy stream would read torn data.
             routed_experts_snapshot = None
             if self.routed_experts_initialized:
@@ -6601,10 +6600,9 @@ class GPUModelRunner(
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 # Non-Attention layer types (e.g. Mamba1, ShortConv) do not
                 # expose ``num_heads``; fall back to 0 so they cluster as
-                # before. Such layers never coexist with Attention in a
-                # single KV cache group (different KVCacheSpec), so the
-                # fallback can never spuriously merge them with attention
-                # layers.
+                # before. Such layers never coexist with Attention in a single
+                # KV cache group (different KVCacheSpec), so the fallback can
+                # never spuriously merge them with attention layers.
                 num_heads_q = getattr(layers[layer_name], "num_heads", 0)
                 key = (full_cls_name, layer_kv_cache_spec, num_heads_q)
                 attn_backends[key] = AttentionGroupKey(
@@ -7086,9 +7084,9 @@ class GPUModelRunner(
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
         self._bind_routed_experts_capturer(self.routed_experts_capturer)
 
-        # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on
-        # the sync scheduling path. Shape / dtype mirror the device
-        # capturer exactly so ``copy_`` is a straight memcpy.
+        # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on the
+        # sync scheduling path. Shape/dtype mirror the device capturer
+        # exactly so ``copy_`` is a straight memcpy.
         self.routed_experts_cpu = torch.empty(
             self.routed_experts_capturer.device_buffer.shape,
             dtype=self.routed_experts_capturer.device_buffer.dtype,
