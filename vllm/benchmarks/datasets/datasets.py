@@ -365,7 +365,7 @@ lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 def process_image(
     image: Any,
     *,
-    encode_image_media: bool = False,
+    ensure_client_side_data: bool = False,
 ) -> Mapping[str, Any]:
     """
     Process a single image input and return a multimedia content dictionary.
@@ -383,9 +383,9 @@ def process_image(
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
        - Otherwise treats as local file path and prepends "file://".
-       - If encode_image_media is True, local and HTTP(S) image references are
-         loaded and encoded as base64 image data URLs. Existing data:image URLs
-         are kept unchanged.
+       - If ensure_client_side_data is True, local and HTTP(S) image references
+         are loaded and encoded as base64 image data URLs. Existing data:image
+         URLs are kept unchanged.
        - Returns a dictionary with the image URL or base64 data.
 
     Raises:
@@ -410,7 +410,7 @@ def process_image(
             else f"file://{image}"
         )
 
-        if encode_image_media and not image_url.startswith("data:image/"):
+        if ensure_client_side_data and not image_url.startswith("data:image/"):
             try:
                 fetched_image = fetch_image(image_url)
                 image_url = encode_image_url(fetched_image)
@@ -1493,13 +1493,13 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "used only for custom dataset.",
     )
     custom_group.add_argument(
-        "--custom-image-encode-media",
+        "--custom-ensure-client-side-data",
         action="store_true",
         help=(
-            "Load image references on the benchmark client and encode them as "
-            "base64 data URLs for custom_image datasets. Applies to local "
-            "paths, file:// URLs, and HTTP(S) URLs. Existing data:image URLs "
-            "are kept unchanged."
+            "Ensure custom dataset media is sent as client-side data instead "
+            "of references. For custom_image datasets, this loads local and "
+            "HTTP(S) images on the benchmark client and encodes them as "
+            "base64 data URLs. Existing data:image URLs are kept unchanged."
         ),
     )
 
@@ -1885,7 +1885,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
-            encode_image_media=getattr(args, "custom_image_encode_media", False),
+            ensure_client_side_data=getattr(
+                args, "custom_ensure_client_side_data", False
+            ),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2434,7 +2436,7 @@ class CustomImageDataset(CustomDataset):
         cls,
         part: dict[str, Any],
         *,
-        encode_image_media: bool = False,
+        ensure_client_side_data: bool = False,
     ) -> dict[str, Any]:
         content_type = part.get("type")
         if content_type == "text":
@@ -2449,7 +2451,7 @@ class CustomImageDataset(CustomDataset):
             return dict(
                 process_image(
                     part["image"],
-                    encode_image_media=encode_image_media,
+                    ensure_client_side_data=ensure_client_side_data,
                 )
             )
 
@@ -2459,7 +2461,7 @@ class CustomImageDataset(CustomDataset):
                 return dict(
                     process_image(
                         image_url,
-                        encode_image_media=encode_image_media,
+                        ensure_client_side_data=ensure_client_side_data,
                     )
                 )
 
@@ -2473,7 +2475,7 @@ class CustomImageDataset(CustomDataset):
                 processed_part = dict(
                     process_image(
                         url,
-                        encode_image_media=encode_image_media,
+                        ensure_client_side_data=ensure_client_side_data,
                     )
                 )
                 processed_image_url = dict(processed_part["image_url"])
@@ -2498,12 +2500,12 @@ class CustomImageDataset(CustomDataset):
         cls,
         content: Any,
         *,
-        encode_image_media: bool = False,
+        ensure_client_side_data: bool = False,
     ) -> list[dict[str, Any]]:
         return [
             cls._process_content_part(
                 part,
-                encode_image_media=encode_image_media,
+                ensure_client_side_data=ensure_client_side_data,
             )
             for part in cls._validate_content_parts(content)
         ]
@@ -2516,7 +2518,7 @@ class CustomImageDataset(CustomDataset):
     def _process_image_files(
         images: Any,
         *,
-        encode_image_media: bool = False,
+        ensure_client_side_data: bool = False,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         if not isinstance(images, list) or not images:
             raise ValueError("'image_files' must be a non-empty list.")
@@ -2525,7 +2527,7 @@ class CustomImageDataset(CustomDataset):
             dict(
                 process_image(
                     image,
-                    encode_image_media=encode_image_media,
+                    ensure_client_side_data=ensure_client_side_data,
                 )
             )
             for image in images
@@ -2541,7 +2543,7 @@ class CustomImageDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
-        encode_image_media: bool = False,
+        ensure_client_side_data: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2564,7 +2566,7 @@ class CustomImageDataset(CustomDataset):
             if "content" in item:
                 content = self._process_interleaved_content(
                     item["content"],
-                    encode_image_media=encode_image_media,
+                    ensure_client_side_data=ensure_client_side_data,
                 )
                 text_prompt = self._get_text_from_content(content)
                 prompt_len = (
@@ -2593,7 +2595,7 @@ class CustomImageDataset(CustomDataset):
             prompt_len = 1 if tokenizer is None else len(tokenizer(prompt).input_ids)
             mm_content = self._process_image_files(
                 item["image_files"],
-                encode_image_media=encode_image_media,
+                ensure_client_side_data=ensure_client_side_data,
             )
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer

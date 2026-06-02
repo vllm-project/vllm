@@ -62,7 +62,7 @@ def _args_for_custom_image(dataset_path: Path) -> Namespace:
         num_prompts=2,
         custom_output_len=32,
         enable_multimodal_chat=False,
-        custom_image_encode_media=False,
+        custom_ensure_client_side_data=False,
         request_id_prefix="req-",
         no_oversample=False,
     )
@@ -292,7 +292,7 @@ def test_custom_image_dataset_encodes_image_media_when_requested(
         tokenizer=_Tokenizer(),
         num_requests=1,
         output_len=32,
-        encode_image_media=True,
+        ensure_client_side_data=True,
     )
 
     assert len(samples) == 1
@@ -338,7 +338,7 @@ def test_custom_image_dataset_encodes_interleaved_image_media(
         tokenizer=_Tokenizer(),
         num_requests=1,
         output_len=32,
-        encode_image_media=True,
+        ensure_client_side_data=True,
     )
 
     sample = samples[0]
@@ -366,7 +366,7 @@ def test_custom_image_dataset_rejects_invalid_image_media(
             tokenizer=_Tokenizer(),
             num_requests=1,
             output_len=32,
-            encode_image_media=True,
+            ensure_client_side_data=True,
         )
 
 
