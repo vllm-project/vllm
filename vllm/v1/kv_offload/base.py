@@ -257,6 +257,14 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def on_schedule_end(self) -> None:
+        """Called once at the end of each scheduler step.
+
+        Managers may override this to flush deferred work accumulated
+        during the step (e.g., batched promotions).
+        """
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
