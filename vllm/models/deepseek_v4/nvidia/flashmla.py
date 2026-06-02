@@ -22,7 +22,6 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     FlashMLASparseMetadata,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
@@ -79,19 +78,15 @@ def _merge_dcp_flashmla_output(
     dcp_group: GroupCoordinator,
     attn_sink: torch.Tensor,
     output: torch.Tensor,
-    use_a2a: bool,
 ) -> None:
     out = _squeeze_flashmla_out(out)
     lse = _squeeze_flashmla_lse(lse)
-    if use_a2a:
-        out, lse = dcp_a2a_lse_reduce(
-            out,
-            lse,
-            dcp_group,
-            return_lse=True,
-        )
-    else:
-        out, lse = cp_lse_ag_out_rs(out, lse, dcp_group, return_lse=True)
+    out, lse = dcp_a2a_lse_reduce(
+        out,
+        lse,
+        dcp_group,
+        return_lse=True,
+    )
     _copy_with_attn_sink(out, lse, attn_sink, output)
 
 
@@ -390,7 +385,6 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 dcp_group,
                 layer.attn_sink,
                 output,
-                use_a2a=True,
             )
 
     @classmethod
@@ -543,5 +537,4 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                     dcp_group,
                     layer.attn_sink,
                     output[query_start:query_end],
-                    use_a2a=False,
                 )
