@@ -81,8 +81,7 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
-        # Adaptive K: can be set per-step to generate fewer draft tokens.
-        # Defaults to num_speculative_tokens (no adaptation).
+        # Adaptive K: set per-step via current_spec_tokens.
         self.current_spec_tokens: int = self.num_speculative_tokens
 
         # We need to get the hidden size from the draft model config because
@@ -695,9 +694,7 @@ class SpecDecodeBaseProposer:
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             if self.current_spec_tokens < self.num_speculative_tokens:
-                # Adaptive K: can't cleanly pad probs to full width.
-                # Skip storing for this step; rejection sampler handles
-                # missing probs gracefully (defaults to logit-based).
+                # Cannot pad probs; fallback to logit-based rejection.
                 self._last_draft_probs = None
             else:
                 self._last_draft_probs = torch.stack(
