@@ -555,3 +555,19 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
 
     assert "AAAA" in log_holder.text
     assert "BBBBB" in log_holder.text
+
+
+def test_suppress_logging_restores_on_exception():
+    # Regression: ``suppress_logging`` previously called ``logging.disable``
+    # before ``yield`` but only restored it after, with no ``try/finally``.
+    # An exception inside the ``with`` block left ``logging.root.manager
+    # .disable`` set to the suppressed level for the rest of the process,
+    # silently dropping every subsequent log at or below that level.
+    from vllm.logger import suppress_logging
+
+    before = logging.root.manager.disable
+    with pytest.raises(RuntimeError, match="boom"), suppress_logging():
+        assert logging.root.manager.disable == logging.INFO
+        raise RuntimeError("boom")
+
+    assert logging.root.manager.disable == before
