@@ -15,7 +15,7 @@ from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
-from functools import cached_property, partial
+from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
@@ -60,6 +60,7 @@ from vllm.utils.system_utils import (
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -471,12 +472,6 @@ class MultiprocExecutor(Executor):
         self.collective_rpc("check_health", timeout=10)
         return
 
-    @cached_property
-    def max_concurrent_batches(self) -> int:
-        # PP requires PP-size concurrent batches to fill the pipeline.
-        pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
-
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
         # (the first TP worker of the last PP stage).
@@ -810,6 +805,9 @@ class WorkerProc:
         # Either SIGTERM or SIGINT will terminate the worker
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
+
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(kwargs.get("local_rank", 0), kwargs["vllm_config"])
 
         worker = None
         ready_writer = kwargs.pop("ready_pipe")

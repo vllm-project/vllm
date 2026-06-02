@@ -52,6 +52,7 @@ class EagleSpeculator:
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -63,6 +64,7 @@ class EagleSpeculator:
         self.hidden_size = self.hidden_size * hc_mult
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
+        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -106,7 +108,7 @@ class EagleSpeculator:
             )
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "gumbel":
+        if self.speculative_config.draft_sample_method == "probabilistic":
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
@@ -144,9 +146,6 @@ class EagleSpeculator:
             cudagraph_mode,
             decode_query_len=1,
         )
-        # Share a single pool between prefill and decode since they never
-        # execute concurrently.
-        self.decode_cudagraph_manager.pool = self.prefill_cudagraph_manager.pool
 
     def load_model(self, target_model: nn.Module) -> None:
         target_attn_layer_names = get_layers_from_vllm_config(
@@ -172,7 +171,7 @@ class EagleSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups, _ = init_attn_backend(
+        self.attn_groups, _, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
@@ -214,12 +213,22 @@ class EagleSpeculator:
                 )
                 inputs_embeds = self.inputs_embeds[:num_tokens]
 
-            ret_hidden_states = self.model(
+            model_inputs = dict(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
                 positions=self.input_buffers.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+            if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
+                # Draft prefill with PIECEWISE cudagraph (compiled PW or breakable),
+                # chosen inside run_pw_graph.
+                assert self.prefill_cudagraph_manager is not None
+                ret_hidden_states = self.prefill_cudagraph_manager.run_pw_graph(
+                    self.model, model_inputs
+                )
+            else:
+                # Eager (NONE): call the raw model directly.
+                ret_hidden_states = self.model(**model_inputs)
         if self.method == "mtp":
             last_hidden_states = ret_hidden_states
             hidden_states = ret_hidden_states
@@ -247,6 +256,7 @@ class EagleSpeculator:
                 apply_temperature=True,
                 output_processed_logits=draft_logits,
                 output_processed_logits_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
             )
         else:
             return logits.argmax(dim=-1)
@@ -407,7 +417,7 @@ class EagleSpeculator:
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=1,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-            max_seq_len=self.max_model_len,
+            max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -429,6 +439,8 @@ class EagleSpeculator:
         # For PIECEWISE, only the model's compiled regions are captured
         # and the rest (compute_logits, gumbel_sample) runs eagerly.
         assert self.prefill_cudagraph_manager is not None
+        if self.prefill_cudagraph_manager.use_breakable_cg:
+            self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
         self.prefill_cudagraph_manager.capture(
             self.prefill,
             attn_states,
@@ -483,6 +495,10 @@ class EagleSpeculator:
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         max_query_len = input_batch.num_scheduled_tokens.max()
+        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        self.draft_max_seq_len = min(
+            max_seq_len + self.num_speculative_steps, self.max_model_len
+        )
 
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
