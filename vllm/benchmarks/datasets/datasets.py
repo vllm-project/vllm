@@ -28,7 +28,8 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import pybase64 as base64
@@ -46,6 +47,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
@@ -383,8 +385,8 @@ def process_image(
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
        - Otherwise treats as local file path and prepends "file://".
-       - If encode_local_image_files is True, local paths and file:// URLs are
-       encoded as base64 data URLs.
+       - If encode_local_image_files is True, local paths and local file:// URLs
+         are encoded as base64 image data URLs.
        - Returns a dictionary with the image URL or base64 data.
 
     Raises:
@@ -427,44 +429,19 @@ def _local_image_path_from_url(image: str) -> Path | None:
     if parsed.scheme == "file":
         if parsed.netloc and parsed.netloc != "localhost":
             raise ValueError(f"Unsupported non-local file URL for image: {image}")
-        return Path(unquote(parsed.path))
+        return Path(url2pathname(parsed.path))
 
     return Path(image) if not parsed.scheme else None
 
 
-def _image_mime_type(path: Path) -> str:
+def _encode_local_image_file_as_data_url(path: Path) -> str:
     try:
-        with Image.open(path) as image:
-            image.verify()
-            image_format = image.format
+        image = fetch_image(path.absolute().as_uri())
+        return encode_image_url(image)
     except Exception as e:
         raise ValueError(
             f"Invalid local image file: {path}. Expected a valid image file."
         ) from e
-
-    if image_format is None or image_format not in Image.MIME:
-        raise ValueError(
-            f"Could not determine image MIME type for local image file: {path}."
-        )
-
-    mime_type = Image.MIME[image_format]
-    if not mime_type.startswith("image/"):
-        raise ValueError(
-            f"Invalid MIME type for local image file: {path}. "
-            f"Expected image/*, got {mime_type}."
-        )
-    return mime_type
-
-
-def _encode_local_image_file_as_data_url(path: Path) -> str:
-    if not path.exists():
-        raise ValueError(f"Local image path does not exist: {path}")
-    if not path.is_file():
-        raise ValueError(f"Local image path is not a file: {path}")
-
-    mime_type = _image_mime_type(path)
-    image_base64 = base64.b64encode(path.read_bytes()).decode("utf-8")
-    return f"data:{mime_type};base64,{image_base64}"
 
 
 def process_video(video: Any) -> Mapping[str, Any]:

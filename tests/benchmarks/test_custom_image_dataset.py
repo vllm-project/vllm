@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from argparse import Namespace
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,13 @@ def _write_png(path: Path, color: tuple[int, int, int] = (255, 0, 0)) -> None:
 def _decode_data_url(data_url: str) -> tuple[str, bytes]:
     prefix, image_base64 = data_url.split(",", 1)
     return prefix, base64.b64decode(image_base64)
+
+
+def _assert_png_data_url(data_url: str) -> None:
+    prefix, image_bytes = _decode_data_url(data_url)
+    assert prefix == "data:image/png;base64"
+    with Image.open(BytesIO(image_bytes)) as image:
+        image.verify()
 
 
 def _args_for_custom_image(dataset_path: Path) -> Namespace:
@@ -280,12 +288,8 @@ def test_custom_image_dataset_encodes_local_image_files_when_requested(
     assert isinstance(samples[0].multi_modal_data, list)
     image_urls = [part["image_url"]["url"] for part in samples[0].multi_modal_data]
 
-    prefix_a, bytes_a = _decode_data_url(image_urls[0])
-    prefix_b, bytes_b = _decode_data_url(image_urls[1])
-    assert prefix_a == "data:image/png;base64"
-    assert prefix_b == "data:image/png;base64"
-    assert bytes_a == image_a.read_bytes()
-    assert bytes_b == image_b.read_bytes()
+    _assert_png_data_url(image_urls[0])
+    _assert_png_data_url(image_urls[1])
     assert image_urls[2] == remote_url
     assert image_urls[3] == data_url
 
@@ -328,8 +332,8 @@ def test_custom_image_dataset_encodes_interleaved_local_image_files(
 
     sample = samples[0]
     assert isinstance(sample.prompt, list)
-    assert sample.prompt[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert sample.prompt[2]["image_url"]["url"].startswith("data:image/png;base64,")
+    _assert_png_data_url(sample.prompt[1]["image_url"]["url"])
+    _assert_png_data_url(sample.prompt[2]["image_url"]["url"])
     assert sample.prompt[2]["image_url"]["detail"] == "low"
 
 
