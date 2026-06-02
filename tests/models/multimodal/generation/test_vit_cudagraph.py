@@ -57,7 +57,7 @@ def step3_vl_chat_template(content: str) -> str:
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "internvl": VitCudagraphTestConfig(
         model="OpenGVLab/InternVL3-1B",
-        max_model_len=8192,
+        num_video_frames=8,
         image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
         video_prompt=internvl_chat_template(
             "<video>\nDescribe this video in one sentence."
