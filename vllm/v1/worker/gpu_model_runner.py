@@ -6890,14 +6890,6 @@ class GPUModelRunner(
         if layout is None:
             layout = resolve_kv_cache_layout()
 
-        layer_to_group: dict[str, AttentionGroup] = {}
-        for group in self._kv_cache_spec_attn_group_iterator():
-            if group.kv_cache_group_id >= len(kernel_block_sizes):
-                continue
-            for name in group.layer_names:
-                if name not in self.runner_only_attn_layers:
-                    layer_to_group[name] = group
-
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -6911,16 +6903,16 @@ class GPUModelRunner(
                 for layer_name in slot_layers:
                     layer_to_slot[layer_name] = slot_idx
 
-            group_layers: dict[int, list[str]] = defaultdict(list)
-            for layer_name in layer_to_slot:
-                group = layer_to_group[layer_name]
-                group_layers[group.kv_cache_group_id].append(layer_name)
-
+            tensor_layers = set(layer_to_slot)
             slot_bytes = kv_cache_tensor.size // num_layer_slots
-            for group_id, layer_names in group_layers.items():
-                group = layer_to_group[layer_names[0]]
+            for group in self._kv_cache_spec_attn_group_iterator():
+                if group.kv_cache_group_id >= len(kernel_block_sizes):
+                    continue
+                layer_names = [n for n in group.layer_names if n in tensor_layers]
+                if not layer_names:
+                    continue
                 spec = group.kv_cache_spec
-                kernel_block_size = kernel_block_sizes[group_id]
+                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
 
                 num_blocks = slot_bytes // spec.page_size_bytes
                 num_blocks_per_kv_block = spec.block_size // kernel_block_size

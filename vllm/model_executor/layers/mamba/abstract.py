@@ -20,49 +20,31 @@ class MambaBase(AttentionLayerBase):
     Inherit from this class if you implement a custom layer.
     """
 
-    _kv_cache: tuple[torch.Tensor, ...]
+    kv_cache: tuple[torch.Tensor, ...]
+    _mamba_spec: MambaSpec | None = None
 
-    @property
-    def kv_cache(self) -> tuple[torch.Tensor, ...]:
-        return self._kv_cache
-
-    @kv_cache.setter
-    def kv_cache(
-        self, value: torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]
-    ):
-        """Accept a raw tensor or pre-unpacked state tuple.
-
-        When a single tensor is passed (from the generic KV cache
-        allocation path), reinterpret as int8 bytes and unpack into
-        per-state strided views using the layer's shapes and dtypes.
-        """
-        if isinstance(value, torch.Tensor):
-            from vllm.config import get_current_vllm_config
-
-            spec = self.get_kv_cache_spec(get_current_vllm_config())
-            assert isinstance(spec, MambaSpec)
-            byte_offset = value.storage_offset() * value.element_size()
-            total_bytes = value.numel() * value.element_size()
-            num_blocks = total_bytes // spec.page_size_bytes
-            storage_tensor = torch.tensor(
-                [], dtype=torch.int8, device=value.device
-            ).set_(value.untyped_storage())
-            raw_1d = storage_tensor[
-                byte_offset : byte_offset + num_blocks * spec.page_size_bytes
-            ]
-            self._kv_cache = tuple(
-                self._unpack_states(
-                    raw_1d,
-                    spec.shapes,
-                    spec.dtypes,
-                    spec.page_size_bytes,
-                    num_blocks,
-                )
+    def set_kv_cache(self, value: torch.Tensor) -> None:
+        """Unpack a raw 4D tensor into per-state strided views."""
+        spec = self._mamba_spec
+        assert spec is not None
+        byte_offset = value.storage_offset() * value.element_size()
+        total_bytes = value.numel() * value.element_size()
+        num_blocks = total_bytes // spec.page_size_bytes
+        storage_tensor = torch.tensor([], dtype=torch.int8, device=value.device).set_(
+            value.untyped_storage()
+        )
+        raw_1d = storage_tensor[
+            byte_offset : byte_offset + num_blocks * spec.page_size_bytes
+        ]
+        self.kv_cache = tuple(
+            self._unpack_states(
+                raw_1d,
+                spec.shapes,
+                spec.dtypes,
+                spec.page_size_bytes,
+                num_blocks,
             )
-        elif isinstance(value, (tuple, list)):
-            self._kv_cache = tuple(value)
-        else:
-            self._kv_cache = (value,)
+        )
 
     @staticmethod
     def _unpack_states(
@@ -116,7 +98,7 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        return MambaSpec(
+        spec = MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
             block_size=mamba_block_size,
@@ -129,6 +111,8 @@ class MambaBase(AttentionLayerBase):
                 else 0
             ),
         )
+        self._mamba_spec = spec
+        return spec
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""

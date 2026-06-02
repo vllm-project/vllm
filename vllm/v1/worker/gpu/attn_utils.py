@@ -156,60 +156,61 @@ def _allocate_and_reshape_kv_cache(
 ) -> dict[str, Any]:
     if layout is None:
         layout = resolve_kv_cache_layout()
-    num_blocks = kv_cache_config.num_blocks
 
-    # Build layer_name -> (spec, group_id) lookup.
-    spec_for_layer: dict[str, KVCacheSpec] = {}
-    group_for_layer: dict[str, int] = {}
+    layer_to_group: dict[str, tuple[KVCacheSpec, int]] = {}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
         for layer_name in group.layer_names:
             if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec_for_layer[layer_name] = spec.kv_cache_specs[layer_name]
+                layer_to_group[layer_name] = (spec.kv_cache_specs[layer_name], group_id)
             else:
-                spec_for_layer[layer_name] = spec
-            group_for_layer[layer_name] = group_id
+                layer_to_group[layer_name] = (spec, group_id)
 
-    # Allocate, reshape by unique spec, and distribute views.
     kv_caches: dict[str, Any] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         num_layer_slots = len(kv_cache_tensor.shared_by)
-        assert num_layer_slots > 0
         buf = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
 
-        # Unique specs in this tensor (slots can mix groups/specs).
-        seen_specs: dict[int, list[torch.Tensor]] = {}
+        layer_to_slot: dict[str, int] = {}
         for slot_idx, slot_layers in enumerate(kv_cache_tensor.shared_by):
             for layer_name in slot_layers:
-                spec = spec_for_layer[layer_name]
-                key = id(spec)
-                if key not in seen_specs:
-                    kernel_block_size = None
-                    reshape_num_blocks = num_blocks
-                    if kernel_block_sizes is not None and isinstance(
-                        spec, AttentionSpec
-                    ):
-                        gid = group_for_layer[layer_name]
-                        if gid < len(kernel_block_sizes):
-                            kernel_block_size = kernel_block_sizes[gid]
-                            # Use storage_block_size: it equals block_size for
-                            # uncompressed specs but is smaller for compressed
-                            # ones (DeepSeek V4), which store block_size tokens
-                            # in block_size // compress_ratio slots.
-                            reshape_num_blocks = (
-                                num_blocks
-                                * spec.storage_block_size
-                                // kernel_block_size
-                            )
-                    seen_specs[key] = reshape_kv_cache(
-                        buf,
-                        spec,
-                        reshape_num_blocks,
-                        num_layer_slots=num_layer_slots,
-                        layout=layout,
-                        block_size=kernel_block_size,
-                    )
-                kv_caches[layer_name] = seen_specs[key][slot_idx]
+                layer_to_slot[layer_name] = slot_idx
+
+        tensor_layers = set(layer_to_slot)
+        slot_bytes = kv_cache_tensor.size // num_layer_slots
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            layer_names = [n for n in group.layer_names if n in tensor_layers]
+            if not layer_names:
+                continue
+            spec, _ = layer_to_group[layer_names[0]]
+            num_blocks = slot_bytes // spec.page_size_bytes
+
+            kernel_block_size = None
+            if (
+                kernel_block_sizes is not None
+                and isinstance(spec, AttentionSpec)
+                and group_id < len(kernel_block_sizes)
+            ):
+                kernel_block_size = kernel_block_sizes[group_id]
+                num_blocks = num_blocks * spec.storage_block_size // kernel_block_size
+
+            if kernel_block_size is None:
+                shape_block_size = None
+            elif spec.storage_block_size != spec.block_size:
+                shape_block_size = spec.storage_block_size
+            else:
+                shape_block_size = kernel_block_size
+
+            views = reshape_kv_cache(
+                buf,
+                spec,
+                num_blocks,
+                num_layer_slots=num_layer_slots,
+                layout=layout,
+                block_size=shape_block_size,
+            )
+            for layer_name in layer_names:
+                kv_caches[layer_name] = views[layer_to_slot[layer_name]]
 
     return kv_caches
 
