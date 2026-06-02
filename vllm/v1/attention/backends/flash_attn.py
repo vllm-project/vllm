@@ -694,14 +694,8 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, C) order where
-        # C = 2 * head_size (K and V interleaved on the content dim).
-        # Slice K/V as views — each (B, H, N, head_size) with stride(-1)=1.
-        # Transpose to NHC — produces strided views (no copy).
-        # All FA versions are stride-aware so this works regardless of
-        # the physical memory layout.
-        key_cache = kv_cache[..., : self.head_size].transpose(1, 2)
-        value_cache = kv_cache[..., self.head_size :].transpose(1, 2)
+        # (B, H, N, 2*head_size) -> ((B, N, H, head_size), (B, N, H, head_size))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.

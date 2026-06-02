@@ -108,6 +108,10 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "TURBOQUANT"
 
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        return "LBNHC"
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [16, 32, 64, 128]

@@ -88,6 +88,10 @@ class AttentionBackend(ABC):
         return (cls.__module__, cls.__qualname__)
 
     @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        return None
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
 

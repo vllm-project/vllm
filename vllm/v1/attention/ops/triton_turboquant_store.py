@@ -360,8 +360,6 @@ def triton_turboquant_store(
     key_fp8: bool = False,
 ):
     """Launch TQ store kernel (FP8 or MSE path)."""
-    # [B, H, N, C] -> [B, N, H, C]
-    kv_cache = kv_cache.permute(0, 2, 1, 3)
     N, H, D = key.shape
     NH = N * H
     block_size = kv_cache.shape[1]
