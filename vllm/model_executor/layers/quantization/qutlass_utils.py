@@ -157,7 +157,7 @@ def to_blocked(
         backend: "torch" (PyTorch path) or "triton" (Triton kernel)
 
     Returns:
-        Rearranged tensor of shape (32*cdiv(H,128), 16*cdiv(W,4))
+        Rearranged flattened tensor of size (32*cdiv(H,128) * 16*cdiv(W,4))
     """
     if backend == "triton":
         return triton_mx_block_rearrange(input_matrix).flatten()

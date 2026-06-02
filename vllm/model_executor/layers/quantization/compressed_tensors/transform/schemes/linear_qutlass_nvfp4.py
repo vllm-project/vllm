@@ -58,8 +58,11 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         )
 
         assert self.input_transform is not None
-        assert len(self.input_transform.weight) == 1
-        assert self.input_transform.weight[0].size(0) == layer.scheme.group_size
+        assert len(self.input_transform.weight.partitions) == 1
+        assert (
+            self.input_transform.weight.partitions[0].data.shape[0]
+            == layer.scheme.group_size
+        )
 
         return ret
 
@@ -100,7 +103,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
             x_flat, layer.hadamard_matrix, layer.fused_global_scale
         )
 
-        x_scales_blocked = to_blocked(x_scales, backend="triton")
+        x_scales_blocked = to_blocked(x_scales, backend="triton").view(x_scales.shape)
 
         out = cutlass_scaled_fp4_mm(
             x_fp4,
