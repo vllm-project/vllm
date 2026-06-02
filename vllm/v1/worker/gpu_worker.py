@@ -1050,7 +1050,7 @@ class Worker(WorkerBase):
             with (
                 set_current_vllm_config(self.vllm_config),
                 torch.device(self.device),
-            ): 
+            ):
                 if self._is_checkpoint_format:
                     if typed_update_info.update_kind != "dense":
                         raise ValueError(
