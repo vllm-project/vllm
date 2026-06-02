@@ -91,6 +91,26 @@ def init_otel_tracer(
     return tracer
 
 
+def shutdown_otel_tracer() -> None:
+    """Shut down the global TracerProvider and reset OTel state.
+
+    Call before CRIU snapshot so gRPC channels are cleanly closed
+    and the provider can be re-initialized after restore.
+    """
+    if not _IS_OTEL_AVAILABLE:
+        return
+
+    provider = trace.get_tracer_provider()
+    if hasattr(provider, "shutdown"):
+        provider.shutdown()
+
+    # Reset the global "set once" lock so set_tracer_provider() works again.
+    # This touches a private API, but there is no public alternative.
+    if hasattr(trace, "_TRACER_PROVIDER_SET_ONCE"):
+        trace._TRACER_PROVIDER_SET_ONCE = trace.Once()
+    trace._TRACER_PROVIDER = None
+
+
 def get_span_exporter(endpoint):
     protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
     if protocol == "grpc":

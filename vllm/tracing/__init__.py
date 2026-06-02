@@ -15,6 +15,7 @@ from .otel import (
     is_otel_available,
     manual_instrument_otel,
     otel_import_error_traceback,
+    shutdown_otel_tracer,
 )
 from .utils import (
     SpanAttributes,
@@ -27,6 +28,7 @@ __all__ = [
     "instrument",
     "instrument_manual",
     "init_tracer",
+    "shutdown_tracer",
     "maybe_init_worker_tracer",
     "is_tracing_available",
     "SpanAttributes",
@@ -73,6 +75,13 @@ def init_tracer(
         return init_tracer_fn(
             instrumenting_module_name, otlp_traces_endpoint, extra_attributes
         )
+
+
+def shutdown_tracer():
+    """Shut down the tracer provider and reset state for re-initialization."""
+    is_available, _, _, _, _ = _REGISTERED_TRACING_BACKENDS["otel"]
+    if is_available():
+        shutdown_otel_tracer()
 
 
 def maybe_init_worker_tracer(
