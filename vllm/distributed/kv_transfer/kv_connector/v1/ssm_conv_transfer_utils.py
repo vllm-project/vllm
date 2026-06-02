@@ -9,8 +9,8 @@ Supported model types:
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
-  - KDA (Kimi Delta Attention): 4 separate states (conv_q, conv_k, conv_v,
-    recurrent) — no sub-projection decomposition needed.
+  - KDA (Kimi Delta Attention): conv = [Q, K, V], temporal = recurrent
+    — mapped into MambaConvSplitInfo via 4-shape dispatch.
 """
 
 import math
@@ -33,6 +33,8 @@ class MambaConvSplitInfo:
     DS memory layout within one page (contiguous):
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
+      KDA:    |- Q -|- K -|-- V --|  (same layout, Q/K/V are independent conv
+               states, followed by SSM temporal = recurrent state)
     """
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
@@ -105,91 +107,19 @@ class MambaConvSplitInfo:
             ]
 
 
-@dataclass(frozen=True)
-class KDAStateSplitInfo:
-    """Per-rank byte sizes of KDA's 4 state tensors.
-
-    KDA states are already separated in memory -- no sub-projection
-    decomposition needed (unlike Mamba2/GDN's conv split).
-
-    DS memory layout within one page (contiguous in memory):
-        |--- conv_q ---|--- conv_k ---|--- conv_v ---|--- recurrent ---|
-    """
-
-    state_sizes: tuple[int, int, int, int]
-
-    @property
-    def local_conv_offsets(self) -> list[tuple[int, int]]:
-        offsets: list[tuple[int, int]] = []
-        offset = 0
-        for sz in self.state_sizes:
-            offsets.append((offset, sz))
-            offset += sz
-        return offsets
-
-    def remote_state_offsets(
-        self, local_rank_offset: int, tp_ratio: int
-    ) -> list[tuple[int, int]]:
-        """(byte_offset, byte_size) for each KDA state from remote P page.
-
-        Args:
-            local_rank_offset: which slice this D rank reads.
-            tp_ratio: signed TP ratio.
-                >= 1:  D_TP >= P_TP — P page is larger, D reads its slice.
-                < 0:   P_TP > D_TP — P pages are smaller, D reads entire
-                       P page.  Local dims are scaled down by |tp_ratio|
-                       to get P-sized offsets.
-        """
-        result: list[tuple[int, int]] = []
-        offset_acc = 0
-        if tp_ratio >= 1:
-            for sz in self.state_sizes:
-                remote_total = sz * tp_ratio
-                result.append((offset_acc + local_rank_offset * sz, sz))
-                offset_acc += remote_total
-            return result
-        else:
-            # NOTE: tp_ratio < 0 means P_TP > D_TP, so P pages
-            # are smaller than D's.  Local dims are D-sized, but we need
-            # P-sized offsets.  Scale down by |tp_ratio|.
-            abs_ratio = -tp_ratio
-            for sz in self.state_sizes:
-                remote_sz = sz // abs_ratio
-                result.append((offset_acc, remote_sz))
-                offset_acc += remote_sz
-            return result
-
-
-def derive_kda_state_split(
-    mamba_spec: MambaSpec,
-    local_tp: int,
-) -> KDAStateSplitInfo:
-    assert len(mamba_spec.shapes) == 4, (
-        f"KDA expects 4 shapes, got {len(mamba_spec.shapes)}"
-    )
-    assert is_conv_state_dim_first(), "KDA transfer requires DS conv state layout"
-    state_bytes: list[int] = []
-    for shape, dtype in zip(mamba_spec.shapes, mamba_spec.dtypes):
-        dtype_size = torch.tensor([], dtype=dtype).element_size()  # type: ignore[misc]
-        state_bytes.append(torch.Size(shape).numel() * dtype_size)
-    return KDAStateSplitInfo(
-        state_sizes=(state_bytes[0], state_bytes[1], state_bytes[2], state_bytes[3])
-    )
-
-
 def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
-) -> MambaConvSplitInfo | KDAStateSplitInfo:
+) -> MambaConvSplitInfo:
     """Derive per-rank byte sizes from a MambaSpec.
 
-    Called once at init on both P and D.  Dispatches based on the number of
-    state shapes: 4 shapes for KDA (conv_q, conv_k, conv_v, recurrent),
-    2 shapes for Mamba2/GDN (conv_state, ssm_state with sub-projection
-    decomposition).
+    Called once at init on both P and D.  Dispatches by mamba_type:
+
+    - GDN_ATTN with 4 shapes: KDA variant (conv_q, conv_k, conv_v, recurrent)
+      mapped to MambaConvSplitInfo.
+    - GDN_ATTN with 2 shapes: standard GDN (conv_state, ssm_state).
+    - MAMBA2: conv_state with sub-projection decomposition.
     """
-    if len(mamba_spec.shapes) == 4:
-        return derive_kda_state_split(mamba_spec, local_tp)
     _supported = (
         MambaAttentionBackendEnum.MAMBA2,
         MambaAttentionBackendEnum.GDN_ATTN,
@@ -200,12 +130,52 @@ def derive_mamba_conv_split(
             f"got mamba_type={mamba_spec.mamba_type!r}."
         )
 
+    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
+
+    # KDA variant of GDN: 4 separate states (conv_q, conv_k, conv_v, recurrent)
+    # mapped to MambaConvSplitInfo (first 3 → conv sub-projections, 4th → SSM).
+    if (
+        mamba_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+        and len(mamba_spec.shapes) == 4
+    ):
+        conv_rows = mamba_spec.shapes[0][1]
+        assert all(s[1] == conv_rows for s in mamba_spec.shapes[:3]), (
+            "KDA conv states must all have the same conv_rows"
+        )
+        assert all(d == mamba_spec.dtypes[0] for d in mamba_spec.dtypes[:3]), (
+            "KDA conv states must all have the same dtype"
+        )
+        local_proj_dims = (
+            mamba_spec.shapes[0][0],  # q_dim_local
+            mamba_spec.shapes[1][0],  # k_dim_local
+            mamba_spec.shapes[2][0],  # v_dim_local
+        )
+        conv_dtype_size = torch.tensor(
+            [],
+            dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
+        ).element_size()
+        conv_state_bytes = sum(
+            torch.Size(s).numel() * torch.tensor([], dtype=d).element_size()  # type: ignore[misc]
+            for s, d in zip(mamba_spec.shapes[:3], mamba_spec.dtypes[:3])
+        )
+        ssm_state_bytes = (
+            torch.Size(mamba_spec.shapes[3]).numel()
+            * torch.tensor(
+                [],
+                dtype=mamba_spec.dtypes[3],  # type: ignore[misc]
+            ).element_size()
+        )
+        return MambaConvSplitInfo(
+            conv_rows=conv_rows,
+            local_proj_dims=local_proj_dims,
+            conv_dtype_size=conv_dtype_size,
+            ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        )
+
+    # --- Standard 2-shape path (Mamba2 / GDN) ---
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
-    # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl worker __init__.  Use it directly instead of heuristic detection.
-    assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
 

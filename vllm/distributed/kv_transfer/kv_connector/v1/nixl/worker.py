@@ -56,7 +56,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    KDAStateSplitInfo,
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
@@ -247,7 +246,7 @@ class NixlConnectorWorker:
         # Conv state sub-projection decomposition (None when no Mamba).
         # The 3-read transfer requires DS (dim, state_len) conv layout so
         # that sub-projections are contiguous in memory.
-        self._conv_decomp: MambaConvSplitInfo | KDAStateSplitInfo | None = None
+        self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
             for g in kv_cache_config.kv_cache_groups
@@ -278,13 +277,9 @@ class NixlConnectorWorker:
         # Mamba2/GDN: 3 conv sub-projections + 1 SSM temporal = 4
         self._ssm_regions_per_layer: int = 0
         if self._has_mamba and self._conv_decomp is not None:
-            if isinstance(self._conv_decomp, KDAStateSplitInfo):
-                self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets)
-            else:
-                # MambaConvSplitInfo: 3 conv sub-projections + 1 SSM temporal
-                self._ssm_regions_per_layer = (
-                    len(self._conv_decomp.local_conv_offsets) + 1
-                )
+            # MambaConvSplitInfo: 3 conv sub-projections + 1 SSM temporal = 4
+            # (applies to Mamba2, GDN, and KDA)
+            self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
@@ -1055,18 +1050,18 @@ class NixlConnectorWorker:
                     result.append(
                         (base_addr + blk * page_stride + off, sz, self.device_id)
                     )
-            # Mamba2/GDN: local_conv_offsets only covers the 3 conv sub-projections.
-            # Append the SSM temporal state separately.
-            if isinstance(self._conv_decomp, MambaConvSplitInfo):
-                conv_size, ssm_size = self._mamba_ssm_size
-                for blk in range(num_blocks):
-                    result.append(
-                        (
-                            base_addr + blk * page_stride + conv_size,
-                            ssm_size,
-                            self.device_id,
-                        )
+            # Append the SSM temporal state (4th region).
+            # For Mamba2/GDN: SSM temporal (num_heads, head_dim).
+            # For KDA: recurrent state.
+            conv_size, ssm_size = self._mamba_ssm_size
+            for blk in range(num_blocks):
+                result.append(
+                    (
+                        base_addr + blk * page_stride + conv_size,
+                        ssm_size,
+                        self.device_id,
                     )
+                )
         return result
 
     def _build_mamba_remote(
@@ -1078,10 +1073,7 @@ class NixlConnectorWorker:
         """Build remote desc regions per SSM/Mamba layer for hetero-TP."""
         assert self._conv_decomp is not None
 
-        if isinstance(self._conv_decomp, KDAStateSplitInfo):
-            return self._build_kda_remote(nixl_agent_meta, tp_ratio, transfer_info)
-
-        # -- Mamba2/GDN path (3 conv sub-projections + ssm) --
+        # -- All mamba types: 3 conv sub-projections + SSM temporal --
         effective_ratio = max(tp_ratio, 1)
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
@@ -1110,31 +1102,6 @@ class NixlConnectorWorker:
                     + local_offset * ssm_read_size
                 )
                 result.append((ssm_addr, ssm_read_size, device_id))
-        return result
-
-    def _build_kda_remote(
-        self,
-        nixl_agent_meta: NixlAgentMetadata,
-        tp_ratio: int,
-        transfer_info: EngineTransferInfo,
-    ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (conv_q, conv_k, conv_v, recurrent)
-        per KDA layer for hetero-TP."""
-        assert isinstance(self._conv_decomp, KDAStateSplitInfo)
-        effective_ratio = max(tp_ratio, 1)
-        local_offset = self.tp_rank % effective_ratio
-        offsets = self._conv_decomp.remote_state_offsets(local_offset, tp_ratio)
-
-        remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
-        num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
-        device_id = nixl_agent_meta.device_id
-
-        result: list[tuple[int, int, int]] = []
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
-            for off, sz in offsets:
-                for blk in range(num_blocks):
-                    result.append((base_addr + blk * page_stride + off, sz, device_id))
         return result
 
     def _build_fa_local(

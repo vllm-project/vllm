@@ -1012,77 +1012,6 @@ def test_logical_to_remote_kernel_block_ids(
     )
 
 
-# ---- KDA (Kimi Delta Attention) state offset tests ----
-
-
-@pytest.mark.cpu_test
-def test_kda_state_split_info_local_offsets():
-    """KDAStateSplitInfo.local_conv_offsets returns cumulative offsets for
-    4 contiguous states within a page."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
-    )
-
-    info = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
-    offsets = info.local_conv_offsets
-    assert offsets == [
-        (0, 100),
-        (100, 200),
-        (300, 150),
-        (450, 512),
-    ]
-
-
-@pytest.mark.cpu_test
-def test_kda_state_split_info_remote_offsets_tp_positive():
-    """tp_ratio >= 1 (D_TP >= P_TP): D rank reads its slice from a larger
-    P page."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
-    )
-
-    # 4 states with known sizes. tp_ratio=2 means P has 2x the heads per rank.
-    info = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
-    # D rank 0 reads its slice
-    offsets_r0 = info.remote_state_offsets(local_rank_offset=0, tp_ratio=2)
-    # Each state in P page is 2x local size. D rank 0 reads from offset 0.
-    assert offsets_r0 == [
-        (0, 100),
-        (200, 200),
-        (600, 150),
-        (900, 512),
-    ]
-
-    # D rank 1 reads its slice (offset by 1 local-size within each region)
-    offsets_r1 = info.remote_state_offsets(local_rank_offset=1, tp_ratio=2)
-    assert offsets_r1 == [
-        (100, 100),
-        (400, 200),
-        (750, 150),
-        (1412, 512),
-    ]
-
-
-@pytest.mark.cpu_test
-def test_kda_state_split_info_remote_offsets_tp_negative():
-    """tp_ratio < 0 (P_TP > D_TP): P pages are smaller, D reads entire
-    P page with scaled-down sizes."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
-    )
-
-    # D has 4x the state per rank. P pages are 4x smaller.
-    info = KDAStateSplitInfo(state_sizes=(400, 800, 600, 2048))
-    offsets = info.remote_state_offsets(local_rank_offset=0, tp_ratio=-4)
-    # Each state size is divided by |tp_ratio|=4
-    assert offsets == [
-        (0, 100),
-        (100, 200),
-        (300, 150),
-        (450, 512),
-    ]
-
-
 # ---- MambaConvSplitInfo additional tests ----
 
 
@@ -1148,9 +1077,9 @@ def test_mamba_conv_split_info_remote_conv_offsets_tp_negative():
 
 @pytest.mark.cpu_test
 def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
-    """derive_mamba_conv_split returns KDAStateSplitInfo for 4 shapes."""
+    """derive_mamba_conv_split returns MambaConvSplitInfo for 4 shapes (KDA)."""
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
+        MambaConvSplitInfo,
         derive_mamba_conv_split,
     )
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -1165,10 +1094,12 @@ def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
     out = derive_mamba_conv_split(spec, local_tp=1)
-    assert isinstance(out, KDAStateSplitInfo)
-    # conv states: 100*3*2=600 each (bfloat16=2 bytes)
+    assert isinstance(out, MambaConvSplitInfo)
+    # conv states: 100*3*2=600 each (bfloat16=2 bytes), total=1800
     # recurrent: 256*4=1024 (float32=4 bytes)
-    assert out.state_sizes == (600, 600, 600, 1024)
+    assert out.ssm_sizes == (1800, 1024)
+    assert out.local_proj_dims == (100, 100, 100)
+    assert out.conv_rows == 3
 
 
 @pytest.mark.cpu_test
@@ -1176,13 +1107,13 @@ def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
     "ssm_sizes,block_len,expected_ratio",
     [
         pytest.param(
-            (600, 600, 600, 1024),
+            (1800, 1024),
             2824,
             1,
             id="kda_sum_equals_block",
         ),
         pytest.param(
-            (600, 600, 600, 1024),
+            (1800, 1024),
             1024,
             3,
             id="kda_smaller_block",
@@ -1190,7 +1121,7 @@ def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
     ],
 )
 def test_compute_physical_blocks_per_logical_kda(ssm_sizes, block_len, expected_ratio):
-    """compute_physical_blocks_per_logical works with 4-tuple (KDA) sizes."""
+    """compute_physical_blocks_per_logical works with KDA 2-tuple sizes."""
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
         compute_physical_blocks_per_logical,
     )
@@ -1203,15 +1134,21 @@ def test_compute_physical_blocks_per_logical_kda(ssm_sizes, block_len, expected_
 
 @pytest.mark.cpu_test
 def test_ssm_regions_per_layer_both_types():
-    """Both KDA and Mamba2/GDN should have 4 SSM regions per layer."""
+    """Both KDA-like and Mamba2/GDN MambaConvSplitInfo have 4 SSM regions."""
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
         MambaConvSplitInfo,
     )
 
-    # KDA: 4 states → len(local_conv_offsets) = 4
-    kda = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
-    assert len(kda.local_conv_offsets) == 4
+    # KDA-like: 3 conv sub-projections + 1 recurrent = 4
+    # conv_rows=5, local_proj_dims=(10,20,15), conv_dtype_size=2
+    # proj_bytes = (100, 200, 150), ssm_sizes = (450, 512)
+    kda_like = MambaConvSplitInfo(
+        conv_rows=5,
+        local_proj_dims=(10, 20, 15),
+        conv_dtype_size=2,
+        ssm_sizes=(450, 512),
+    )
+    assert len(kda_like.local_conv_offsets) + 1 == 4
 
     # Mamba2/GDN: 3 conv sub-projections + 1 SSM temporal = 4
     mamba = MambaConvSplitInfo(
@@ -1283,154 +1220,183 @@ def test_build_mamba_local_mamba2_includes_ssm_temporal():
     # 2 blocks * (3 conv + 1 SSM temporal) = 8 descriptors
     assert len(result) == 8, f"Expected 8 descriptors, got {len(result)}"
 
-    # Block 0: conv sub-projections
+    # Loop order: for off in offsets: for blk in blocks:
+    # page_stride = 320
+    # conv 0 (off=0, sz=60): blk 0 then blk 1
     assert result[0] == (1000, 60, 0)
-    assert result[1] == (1060, 30, 0)
-    assert result[2] == (1090, 30, 0)
-    # Block 0: SSM temporal (at conv_size=120 offset)
-    assert result[3] == (1120, 200, 0)
-
-    # Block 1: page_stride = 320
-    assert result[4] == (1320, 60, 0)
-    assert result[5] == (1380, 30, 0)
-    assert result[6] == (1410, 30, 0)
+    assert result[1] == (1320, 60, 0)
+    # conv 1 (off=60, sz=30): blk 0 then blk 1
+    assert result[2] == (1060, 30, 0)
+    assert result[3] == (1380, 30, 0)
+    # conv 2 (off=90, sz=30): blk 0 then blk 1
+    assert result[4] == (1090, 30, 0)
+    assert result[5] == (1410, 30, 0)
+    # SSM temporal (at conv_size=120): blk 0 then blk 1
+    assert result[6] == (1120, 200, 0)
     assert result[7] == (1440, 200, 0)
 
 
 @pytest.mark.cpu_test
 def test_build_mamba_local_kda():
     """_build_mamba_local for KDA produces 4 descriptors per block per layer,
-    one for each state tensor (conv_q, conv_k, conv_v, recurrent)."""
+    one for each state tensor (conv_q, conv_k, conv_v, recurrent).
+    KDA maps to MambaConvSplitInfo with ssm_sizes=(conv_total, recurrent)."""
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
+        MambaConvSplitInfo,
     )
 
-    decomp = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
+    # conv_rows=5, local_proj_dims=(10,20,15), conv_dtype_size=2
+    # proj_bytes = (100, 200, 150), conv_total = 450
+    # ssm_sizes = (450, 512)
+    decomp = MambaConvSplitInfo(
+        conv_rows=5,
+        local_proj_dims=(10, 20, 15),
+        conv_dtype_size=2,
+        ssm_sizes=(450, 512),
+    )
     worker = _make_mock_worker_for_desc_build(
         conv_decomp=decomp,
-        mamba_ssm_size=(100, 200, 150, 512),
+        mamba_ssm_size=(450, 512),
         block_len_per_layer=[962],
     )
 
     result = worker._build_mamba_local(base_addresses=[1000], block_size_ratio=1)
 
-    # 2 blocks * 4 states = 8 descriptors
+    # 2 blocks * 4 regions = 8 descriptors
     assert len(result) == 8, f"Expected 8 descriptors, got {len(result)}"
 
-    # Block 0
-    assert result[0] == (1000, 100, 0)  # conv_q
-    assert result[1] == (1100, 200, 0)  # conv_k
-    assert result[2] == (1300, 150, 0)  # conv_v
-    assert result[3] == (1450, 512, 0)  # recurrent
-
-    # Block 1: page_stride = 962
-    assert result[4] == (1962, 100, 0)
-    assert result[5] == (2062, 200, 0)
-    assert result[6] == (2262, 150, 0)
+    # Loop order: for off in offsets: for blk in blocks:
+    # page_stride = 962
+    # conv_q (off=0, sz=100): blk 0 then blk 1
+    assert result[0] == (1000, 100, 0)
+    assert result[1] == (1962, 100, 0)
+    # conv_k (off=100, sz=200): blk 0 then blk 1
+    assert result[2] == (1100, 200, 0)
+    assert result[3] == (2062, 200, 0)
+    # conv_v (off=300, sz=150): blk 0 then blk 1
+    assert result[4] == (1300, 150, 0)
+    assert result[5] == (2262, 150, 0)
+    # recurrent (off=450, sz=512): blk 0 then blk 1
+    assert result[6] == (1450, 512, 0)
     assert result[7] == (2412, 512, 0)
 
 
 @pytest.mark.cpu_test
-def test_build_kda_remote_tp_positive():
-    """_build_kda_remote with tp_ratio >= 1: D rank reads its slice from
-    a larger P page."""
+def test_build_mamba_remote_kda_tp_positive():
+    """_build_mamba_remote for KDA with tp_ratio >= 1: D rank reads its slice
+    from a larger P page. KDA maps to MambaConvSplitInfo."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
+        MambaConvSplitInfo,
     )
 
-    decomp = KDAStateSplitInfo(state_sizes=(100, 200, 150, 512))
+    # D's decomp: conv_rows=5, proj_bytes=(100,200,150), ssm_sizes=(450,512)
+    decomp = MambaConvSplitInfo(
+        conv_rows=5,
+        local_proj_dims=(10, 20, 15),
+        conv_dtype_size=2,
+        ssm_sizes=(450, 512),
+    )
     worker = _make_mock_worker_for_desc_build(
         conv_decomp=decomp,
-        mamba_ssm_size=(100, 200, 150, 512),
+        mamba_ssm_size=(450, 512),
         tp_rank=1,
     )
 
     # P has tp_ratio=2 (P page each state is 2x larger)
+    # P's ssm_sizes = (900, 1024), block_len = 1924
     meta = MagicMock(spec=NixlAgentMetadata)
     meta.kv_caches_base_addr = [5000]
     meta.num_blocks = 4  # 2 logical blocks (4 // 2)
-    meta.block_lens = [1924]  # 200+400+300+1024
+    meta.block_lens = [1924]
     meta.device_id = 7
+    meta.ssm_sizes = (900, 1024)
 
     transfer_info = MagicMock()
     transfer_info.remote_physical_blocks_per_logical = 2
 
-    result = worker._build_kda_remote(meta, tp_ratio=2, transfer_info=transfer_info)
+    result = worker._build_mamba_remote(meta, tp_ratio=2, transfer_info=transfer_info)
 
-    # 2 logical blocks * 4 states = 8 descriptors
+    # 2 logical blocks * 4 regions = 8 descriptors
     assert len(result) == 8
 
     # tp_ratio=2, effective_ratio=2, local_offset=1%2=1
-    # remote_state_offsets(1, 2):
-    #   conv_q:  (0+1*100=100, 100)
+    # remote_conv_offsets(1, 2):
+    #   conv_q:  (1*100=100, 100)
     #   conv_k:  (200+1*200=400, 200)
     #   conv_v:  (600+1*150=750, 150)
-    #   rec:     (900+1*512=1412, 512)
+    # SSM temporal: conv_size_remote=900, ssm_read_size=512, offset=900+1*512=1412
     # page_stride = 1924 * 2 = 3848
-    assert result[0] == (5100, 100, 7)
-    assert result[1] == (5400, 200, 7)
-    assert result[2] == (5750, 150, 7)
-    assert result[3] == (6412, 512, 7)
-
-    # Block 1
-    assert result[4] == (5000 + 3848 + 100, 100, 7)
-    assert result[5] == (5000 + 3848 + 400, 200, 7)
-    assert result[6] == (5000 + 3848 + 750, 150, 7)
-    assert result[7] == (5000 + 3848 + 1412, 512, 7)
+    assert result[0] == (5100, 100, 7)  # conv_q, blk 0
+    assert result[1] == (8948, 100, 7)  # conv_q, blk 1
+    assert result[2] == (5400, 200, 7)  # conv_k, blk 0
+    assert result[3] == (9248, 200, 7)  # conv_k, blk 1
+    assert result[4] == (5750, 150, 7)  # conv_v, blk 0
+    assert result[5] == (9598, 150, 7)  # conv_v, blk 1
+    assert result[6] == (6412, 512, 7)  # recurrent, blk 0
+    assert result[7] == (10260, 512, 7)  # recurrent, blk 1
 
 
 @pytest.mark.cpu_test
-def test_build_kda_remote_tp_negative():
-    """_build_kda_remote with tp_ratio < 0: P pages are smaller, D reads
-    entire P page with scaled-down sizes."""
+def test_build_mamba_remote_kda_tp_negative():
+    """_build_mamba_remote for KDA with tp_ratio < 0: P pages are smaller,
+    D reads entire P page with scaled-down sizes.
+    KDA maps to MambaConvSplitInfo."""
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlAgentMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        KDAStateSplitInfo,
+        MambaConvSplitInfo,
     )
 
-    # D has 4x state per rank
-    decomp = KDAStateSplitInfo(state_sizes=(400, 800, 600, 2048))
+    # D's decomp: conv_rows=5, proj_bytes=(400,800,600), ssm_sizes=(1800,2048)
+    decomp = MambaConvSplitInfo(
+        conv_rows=5,
+        local_proj_dims=(40, 80, 60),
+        conv_dtype_size=2,
+        ssm_sizes=(1800, 2048),
+    )
     worker = _make_mock_worker_for_desc_build(
         conv_decomp=decomp,
-        mamba_ssm_size=(400, 800, 600, 2048),
+        mamba_ssm_size=(1800, 2048),
         tp_rank=0,
     )
 
+    # P has |tp_ratio|=4 more TP ranks, each with 1/4 state
+    # P's ssm_sizes = (450, 512), block_len = 962
     meta = MagicMock(spec=NixlAgentMetadata)
     meta.kv_caches_base_addr = [5000]
     meta.num_blocks = 2
     meta.block_lens = [962]  # 100+200+150+512 (P-sized, 1/4 of D)
     meta.device_id = 7
+    meta.ssm_sizes = (450, 512)
 
     transfer_info = MagicMock()
     transfer_info.remote_physical_blocks_per_logical = 1
 
-    result = worker._build_kda_remote(meta, tp_ratio=-4, transfer_info=transfer_info)
+    result = worker._build_mamba_remote(meta, tp_ratio=-4, transfer_info=transfer_info)
 
-    # 2 blocks * 4 states = 8 descriptors
+    # 2 blocks * 4 regions = 8 descriptors
     assert len(result) == 8
 
-    # tp_ratio=-4: remote_state_offsets(0, -4) scales down by 4
-    # → (100, 200, 150, 512) with cumulative offsets
-    assert result[0] == (5000, 100, 7)
-    assert result[1] == (5100, 200, 7)
-    assert result[2] == (5300, 150, 7)
-    assert result[3] == (5450, 512, 7)
-
-    # Block 1: page_stride = 962 * 1 = 962
-    assert result[4] == (5962, 100, 7)
-    assert result[5] == (6062, 200, 7)
-    assert result[6] == (6262, 150, 7)
-    assert result[7] == (6412, 512, 7)
+    # tp_ratio=-4: remote_conv_offsets(0, -4) scales down by 4
+    # → (100, 200, 150) with cumulative offsets
+    # SSM temporal: conv_size_remote=450, ssm_read_size=512 (P's), offset=450+0*512=450
+    # page_stride = 962 * 1 = 962
+    assert result[0] == (5000, 100, 7)  # conv_q, blk 0
+    assert result[1] == (5962, 100, 7)  # conv_q, blk 1
+    assert result[2] == (5100, 200, 7)  # conv_k, blk 0
+    assert result[3] == (6062, 200, 7)  # conv_k, blk 1
+    assert result[4] == (5300, 150, 7)  # conv_v, blk 0
+    assert result[5] == (6262, 150, 7)  # conv_v, blk 1
+    assert result[6] == (5450, 512, 7)  # recurrent, blk 0
+    assert result[7] == (6412, 512, 7)  # recurrent, blk 1
 
 
 @pytest.mark.cpu_test
@@ -1474,17 +1440,20 @@ def test_build_mamba_remote_mamba2_includes_ssm_temporal():
     # 2 blocks * (3 conv + 1 SSM temporal) = 8 descriptors
     assert len(result) == 8, f"Expected 8 descriptors, got {len(result)}"
 
-    # Block 0: conv sub-projections
+    # Loop order: for off in conv_offsets: for blk in blocks:
+    # Then SSM temporal: for blk in blocks:
+    # page_stride = 320
+    # conv 0 (off=0, sz=60): blk 0 then blk 1
     assert result[0] == (1000, 60, 0)
-    assert result[1] == (1060, 30, 0)
-    assert result[2] == (1090, 30, 0)
-    # Block 0: SSM temporal
-    assert result[3] == (1120, 200, 0)
-
-    # Block 1: page_stride = 320
-    assert result[4] == (1320, 60, 0)
-    assert result[5] == (1380, 30, 0)
-    assert result[6] == (1410, 30, 0)
+    assert result[1] == (1320, 60, 0)
+    # conv 1 (off=60, sz=30): blk 0 then blk 1
+    assert result[2] == (1060, 30, 0)
+    assert result[3] == (1380, 30, 0)
+    # conv 2 (off=90, sz=30): blk 0 then blk 1
+    assert result[4] == (1090, 30, 0)
+    assert result[5] == (1410, 30, 0)
+    # SSM temporal (at conv_size=120): blk 0 then blk 1
+    assert result[6] == (1120, 200, 0)
     assert result[7] == (1440, 200, 0)
 
 
@@ -1533,14 +1502,13 @@ def test_build_mamba_remote_mamba2_tp_negative():
     # tp_ratio=-2: conv offsets scaled down by 2 → (60, 30, 30)
     # SSM: uses nixl_agent_meta.ssm_sizes[1]=200 (P-sized)
     # page_stride = 320 * 1 = 320
-    assert result[0] == (1000, 60, 0)
-    assert result[1] == (1060, 30, 0)
-    assert result[2] == (1090, 30, 0)
-    # SSM at conv_size_remote=120 offset
-    assert result[3] == (1120, 200, 0)
-
-    # Block 1
-    assert result[4] == (1320, 60, 0)
-    assert result[5] == (1380, 30, 0)
-    assert result[6] == (1410, 30, 0)
+    # Loop order: for off in conv_offsets: for blk in blocks:
+    assert result[0] == (1000, 60, 0)  # conv 0, blk 0
+    assert result[1] == (1320, 60, 0)  # conv 0, blk 1
+    assert result[2] == (1060, 30, 0)  # conv 1, blk 0
+    assert result[3] == (1380, 30, 0)  # conv 1, blk 1
+    assert result[4] == (1090, 30, 0)  # conv 2, blk 0
+    assert result[5] == (1410, 30, 0)  # conv 2, blk 1
+    # SSM at conv_size_remote=120: blk 0 then blk 1
+    assert result[6] == (1120, 200, 0)
     assert result[7] == (1440, 200, 0)
