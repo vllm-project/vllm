@@ -134,6 +134,7 @@ class SpecDecodingLogging:
             rates_str,
             draft_acceptance_rate,
         )
+
         self.reset()
 
     def _log_diffusion(
