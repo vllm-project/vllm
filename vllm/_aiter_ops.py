@@ -2011,6 +2011,7 @@ class rocm_aiter_ops:
     def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm.default  # noqa: E501
 
+    # TODO(frida-andersson): drop once vLLM pins AITER >= 0.1.14 (ROCm/aiter#2823).
     @classmethod
     def has_fused_allreduce_rmsnorm_quant_per_group(cls) -> bool:
         """True if the running AITER build exposes the per-group AR+RMS+quant
