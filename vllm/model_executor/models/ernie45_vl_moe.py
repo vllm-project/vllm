@@ -708,7 +708,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                         delta = moe_offset - vision_expert_start_idx
                         name = name.replace(
                             f".experts.{moe_offset}",
-                            f".vision_experts.{routed_experts}{delta}",
+                            f".vision_experts{routed_experts}.{delta}",
                         )
 
                 for mapping in expert_params_mapping:
