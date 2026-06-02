@@ -121,7 +121,13 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
+    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
+
+    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
+    assumes byte-identical kernel launches across TP peers, but concurrent
+    independent warmup of multiple TP subgroups lets ranks pick divergent
+    FlashInfer launch configs and deadlock.
+    """
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -134,6 +140,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
+        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
@@ -1043,6 +1050,23 @@ class VllmConfig:
                 "This is equivalent to setting -cc.mode=none"
             )
             self.compilation_config.mode = CompilationMode.NONE
+
+        # DeepSeek V4's model classes don't carry @support_torch_compile —
+        # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
+        # it unless the user has explicitly opted out via the env var.
+        if (
+            self.model_config is not None
+            and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and any(
+                a in ("DeepseekV4ForCausalLM", "DeepSeekV4MTPModel")
+                for a in self.model_config.architectures
+            )
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 for DeepSeek V4. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+            )
 
         if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
             logger.warning_once(

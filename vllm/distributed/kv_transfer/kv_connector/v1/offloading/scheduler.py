@@ -29,7 +29,9 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
+    OffloadPolicy,
     ReqContext,
+    RequestOffloadingContext,
     get_offload_block_hash,
     make_offload_key,
 )
@@ -92,6 +94,7 @@ class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     block_size_factor: int
     num_workers: int
+    offload_prompt_only: bool
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
@@ -154,6 +157,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
             block_size_factor=spec.block_size_factor,
+            offload_prompt_only=spec.offload_prompt_only,
         )
 
 
@@ -172,8 +176,11 @@ class RequestGroupState:
 class RequestOffloadState:
     config: SchedulerOffloadConfig
     req: Request
+    req_context: ReqContext
+    offloading_context: RequestOffloadingContext
     group_states: tuple[RequestGroupState, ...] = field(init=False)
-    req_context: ReqContext = field(init=False)
+    # upper bound on tokens to offload for this request; None means no cap
+    max_offload_tokens: int | None = None
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
     # In-flight job IDs. Per the connector's invariant, at any given time
@@ -184,10 +191,21 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
-        self.req_context = ReqContext(
-            req_id=self.req.request_id,
-            kv_transfer_params=self.req.kv_transfer_params,
-        )
+        params = self.req.kv_transfer_params
+
+        # NOTE: This field is experimental and subject to change in the future.
+        raw = params.get("max_offload_tokens") if params else None
+        if type(raw) is int and raw >= 0:
+            self.max_offload_tokens = raw
+            logger.debug(
+                "Request %s: max_offload_tokens set to %d",
+                self.req.request_id,
+                raw,
+            )
+        elif raw is not None:
+            logger.warning(
+                "max_offload_tokens must be a non-negative int, got %r; ignoring", raw
+            )
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -229,6 +247,13 @@ class RequestOffloadState:
             group_state.num_hit_blocks = (
                 num_cached_tokens // group_config.offloaded_block_size
             )
+
+
+def _create_req_context(req: Request) -> ReqContext:
+    return ReqContext(
+        req_id=req.request_id,
+        kv_transfer_params=req.kv_transfer_params,
+    )
 
 
 class OffloadingConnectorScheduler:
@@ -495,6 +520,18 @@ class OffloadingConnectorScheduler:
 
         return num_hit_tokens
 
+    def on_new_request(self, request: Request) -> None:
+        """Called when a new request is added to the scheduler."""
+        req_context = _create_req_context(request)
+        offloading_context = self.manager.on_new_request(req_context)
+        req_status = RequestOffloadState(
+            config=self.config,
+            req=request,
+            req_context=req_context,
+            offloading_context=offloading_context,
+        )
+        self._req_status[request.request_id] = req_status
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
@@ -517,24 +554,15 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
-        is_new_request = False
-        if req_status := self._req_status.get(request.request_id):
-            # make sure block IDs are cleared
-            for group_state in req_status.group_states:
-                group_state.block_ids.clear()
-        else:
-            is_new_request = True
-            req_status = RequestOffloadState(config=self.config, req=request)
-            self._req_status[request.request_id] = req_status
+        req_status = self._req_status[request.request_id]
+        for group_state in req_status.group_states:
+            group_state.block_ids.clear()
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
         num_hit_tokens = self._lookup(req_status)
-        if is_new_request:
-            req_status.update_num_hit_blocks(
-                num_computed_tokens + (num_hit_tokens or 0)
-            )
+        req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
 
@@ -550,9 +578,6 @@ class OffloadingConnectorScheduler:
 
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
-
-        params = req_status.req_context.kv_transfer_params
-        do_remote_decode = params is not None and params.get("do_remote_decode")
 
         keys_to_load: list[OffloadKey] = []
         dst_block_ids: list[int] = []
@@ -607,10 +632,10 @@ class OffloadingConnectorScheduler:
             group_sizes.append(num_pending_gpu_blocks)
             block_indices.append(num_locally_computed_gpu_blocks)
 
-            if not do_remote_decode:
-                # For P/D prefill requests (do_remote_decode=True), we do
-                # NOT skip saving the hit prefix, as we need to stream the
-                # entire KV cache so a remote decode node can consume it.
+            # Skip prefix-hit blocks for block-level policy; for
+            # request-level, next_stored_block_idx stays at 0 so all
+            # blocks (including hits) are offloaded.
+            if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
                 group_state.next_stored_block_idx = num_blocks
 
         # Fence dst blocks against finished-request pending stores.
@@ -683,6 +708,18 @@ class OffloadingConnectorScheduler:
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
             # with async scheduling, some tokens may be missing
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
+            max_offload_tokens = req_status.max_offload_tokens
+            if max_offload_tokens is not None:
+                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
+
+            # Skip decode-phase blocks: clamp to the prompt length so only
+            # prefill (prompt) blocks become eligible for store. next_stored_idx
+            # never advances past this boundary, so decode blocks are never
+            # queued in this or any later step.
+            if self.config.offload_prompt_only:
+                num_offloadable_tokens = min(
+                    num_offloadable_tokens, req.num_prompt_tokens
+                )
 
             # Filter out blocks skipped due to sliding window attention / SSM
             # or unreachable by the load path's alignment constraints.
@@ -930,6 +967,12 @@ class OffloadingConnectorScheduler:
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
+
+        req_context = (
+            req_status.req_context if req_status else _create_req_context(request)
+        )
+        self.manager.on_request_finished(req_context)
+
         if req_status is None:
             return False, None
         if not req_status.transfer_jobs:
