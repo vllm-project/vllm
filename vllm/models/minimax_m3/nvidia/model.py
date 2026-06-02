@@ -34,10 +34,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
+    MinimaxM3QKVParallelLinearWithIndexer,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -398,11 +397,23 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
-        self.qkv_proj = QKVParallelLinear(
+        # Sparse "index" branch dims. index_q has the same head count as the KV
+        # heads (sparse_num_index_heads == num_key_value_heads), so it shards
+        # identically -- including replication when tp_size > num_key_value_heads.
+        sparse_cfg = config.sparse_attention_config
+        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
+        self.num_idx_heads = self.num_kv_heads
+        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
+        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+
+        # Single fused projection: q, k, v, index_q, index_k in one GEMM.
+        self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
+            self.total_idx_heads,
+            self.idx_head_dim,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
@@ -431,28 +442,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 "rope_theta": config.rope_theta,
                 "partial_rotary_factor": config.partial_rotary_factor,
             },
-        )
-
-        # Sparse "index" branch. index_q_proj is column-parallel, so each rank
-        # holds total_idx_heads // tp_size index heads.
-        sparse_cfg = config.sparse_attention_config
-        self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
-        self.num_idx_heads = self.total_idx_heads // tp_size
-        self.idx_head_dim = sparse_cfg["sparse_index_dim"]
-
-        self.index_q_proj = ColumnParallelLinear(
-            self.hidden_size,
-            self.total_idx_heads * self.idx_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.index_q_proj",
-        )
-        self.index_k_proj = ReplicatedLinear(
-            self.hidden_size,
-            self.idx_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.index_k_proj",
         )
 
         self.index_q_norm = MiniMAXGemmaRMSNorm(
@@ -560,8 +549,18 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # Single fused projection: q, k, v, index_q, index_k.
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v, index_q, index_k = qkv.split(
+            [
+                self.q_size,
+                self.kv_size,
+                self.kv_size,
+                self.index_q_size,
+                self.idx_head_dim,
+            ],
+            dim=-1,
+        )
         # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
         q = self.q_norm(q.view(*q.shape[:-1], self.num_heads, self.head_dim)).view(
             q.shape
@@ -571,9 +570,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         )
         q, k = self.rotary_emb(positions, q, k)
 
-        # Lightning-indexer branch: project, per-head norm, RoPE.
-        index_q, _ = self.index_q_proj(hidden_states)
-        index_k, _ = self.index_k_proj(hidden_states)
+        # Lightning-indexer branch: per-head norm, RoPE (projection already done).
         index_q = self.index_q_norm(
             index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim)
         ).view(index_q.shape)
@@ -747,13 +744,19 @@ class MiniMaxM3Model(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # q/k/v_proj -> fused qkv_proj; gate_proj/up_proj -> fused gate_up_proj
-        # (dense MLP and shared expert). Leading dots keep `q_proj`/`k_proj`
-        # from matching the sparse `index_q_proj`/`index_k_proj` weights.
+        # (dense MLP and shared expert). On sparse layers the indexer
+        # index_q/index_k_proj fold into the same fused qkv_proj
+        # (MinimaxM3QKVParallelLinearWithIndexer); these entries simply never match on
+        # dense layers, whose checkpoints have no index_*_proj weights. Leading
+        # dots keep `q_proj`/`k_proj` from matching `index_q_proj`/`index_k_proj`
+        # (preceded by `_`, not `.`).
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
             (".qkv_proj", ".v_proj", "v"),
+            (".qkv_proj", ".index_q_proj", "index_q"),
+            (".qkv_proj", ".index_k_proj", "index_k"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
