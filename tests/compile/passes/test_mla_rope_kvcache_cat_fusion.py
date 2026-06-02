@@ -173,7 +173,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             device=self.device,
         )
 
-        self.mla_attn.kv_cache = kv_cache
+        self.mla_attn.bind_kv_cache(kv_cache)
 
         # Build attn metadata
         attn_metadata = self.builder.build(

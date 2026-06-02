@@ -157,7 +157,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-        self.mla_attn.kv_cache = kv_cache
+        self.mla_attn.bind_kv_cache(kv_cache)
 
         self.attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata

@@ -72,7 +72,7 @@ def _allocate_and_reshape_kv_caches(
     runner.kv_caches = []
 
     kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
-    return runner._allocate_kv_caches(
+    return runner._allocate_and_reshape_kv_cache(
         kv_cache_config, kernel_block_sizes, layout=KVCacheLayout.LBNHC
     )
 
