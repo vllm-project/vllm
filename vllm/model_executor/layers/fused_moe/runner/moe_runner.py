@@ -315,7 +315,14 @@ class MoERunner(MoERunnerInterface):
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
-        self.routed_experts.quant_method = quant_method
+        self.routed_experts._replace_quant_method(quant_method)
+
+    # TODO(bnell): Hack for elastic_ep. Get rid of this
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
+        self.moe_config = new_moe_config
+        self.routed_experts._set_moe_config(new_moe_config)
+        if self._shared_experts is not None:
+            self._shared_experts._set_moe_config(new_moe_config)
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.

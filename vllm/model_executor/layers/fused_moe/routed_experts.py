@@ -164,6 +164,16 @@ class RoutedExperts(PluggableLayer):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+    # TODO(bnell): Temporary hack. Get rid of this.
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        self.quant_method = quant_method
+
+    # TODO(bnell): Hack for elastic_ep. Get rid of this
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
+        self.moe_config = new_moe_config
+        self.global_num_experts = new_moe_config.num_experts
+        # local experts?
+
     def _get_quant_method(
         self,
         prefix: str,
@@ -205,9 +215,7 @@ class RoutedExperts(PluggableLayer):
     @property
     def expert_map(self) -> torch.Tensor | None:
         return (
-            self.expert_map_manager.expert_map
-            if not self.rocm_aiter_fmoe_enabled
-            else self.expert_map_manager.expert_mask
+            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
 
     def update_expert_map_info(self):

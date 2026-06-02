@@ -71,6 +71,10 @@ class SharedExperts(torch.nn.Module):
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
 
+    # TODO(bnell): Hack for elastic_ep. Get rid of this
+    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
+        self.moe_config = new_moe_config
+
     @property
     def _disable_shared_experts_overlap(self) -> bool:
         # Disable shared expert overlap if:
