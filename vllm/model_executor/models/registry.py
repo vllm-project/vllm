@@ -169,10 +169,6 @@ _TEXT_GENERATION_MODELS = {
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForCausalLM",
     ),
-    "MiniMaxM3SparseForConditionalGeneration": (
-        "vllm.models.minimax_m3",
-        "MiniMaxM3SparseForConditionalGeneration",
-    ),
     "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
@@ -485,6 +481,10 @@ _MULTIMODAL_MODELS = {
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
+    "MiniMaxM3SparseForConditionalGeneration": (
+        "vllm.models.minimax_m3",
+        "MiniMaxM3SparseForConditionalGeneration",
+    ),
     "MiniMaxVL01ForConditionalGeneration": (
         "minimax_vl_01",
         "MiniMaxVL01ForConditionalGeneration",

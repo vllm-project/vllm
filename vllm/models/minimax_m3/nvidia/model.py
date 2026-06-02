@@ -50,12 +50,23 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+)
+from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
+from vllm.models.minimax_m3.common.mm_preprocess import (
+    MiniMaxM3VLDummyInputsBuilder,
+    MiniMaxM3VLMultiModalProcessor,
+    MiniMaxM3VLProcessingInfo,
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3IndexerCache,
@@ -63,6 +74,8 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseImpl,
     MiniMaxM3SparseMetadata,
 )
+from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -883,7 +896,12 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
         return loader.load_weights(weights)
 
 
-class MiniMaxM3SparseForConditionalGeneration(nn.Module):
+@MULTIMODAL_REGISTRY.register_processor(
+    MiniMaxM3VLMultiModalProcessor,
+    info=MiniMaxM3VLProcessingInfo,
+    dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
+)
+class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal):
     """Top-level (VL) entry point for MiniMax M3.
 
     The vision tower is not modeled yet; this wrapper routes the text
@@ -891,12 +909,53 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
     ``text_config`` and delegating generation to it.
     """
 
+    # The vision tower runs replicated per rank under ``--mm-encoder-tp-mode
+    # data``; ``run_dp_sharded_mrope_vision_model`` shards the work across
+    # ranks (see ``_process_image_input`` / ``_process_video_input``).
+    supports_encoder_tp_data = True
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "multi_modal_projector.": "vision_tower.multi_modal_projector.",
+            "patch_merge_mlp.": "vision_tower.patch_merge_mlp.",
+        },
+        orig_to_new_substr={
+            ".mlp.fc1.": ".fc1.",
+            ".mlp.fc2.": ".fc2.",
+        },
+    )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality == "image":
+            return MiniMaxM3VLProcessingInfo.IMAGE_TOKEN
+        if modality == "video":
+            return MiniMaxM3VLProcessingInfo.VIDEO_TOKEN
+        raise ValueError(f"Unsupported modality: {modality!r}")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.config = config
         self.quant_config = vllm_config.quant_config
-        # TODO: vision_tower + mm_projector.
+        self.multimodal_config = vllm_config.model_config.multimodal_config
+        assert self.multimodal_config is not None
+        self.use_data_parallel = self.multimodal_config.mm_encoder_tp_mode == "data"
+
+        text_hidden_size = getattr(config.text_config, "hidden_size", None)
+        assert text_hidden_size is not None, "text_config.hidden_size is required"
+        projector_hidden_size = getattr(config, "projector_hidden_size", None)
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            vision_config = config.vision_config
+            self.vision_tower = MiniMaxVLVisionModel(
+                config=PretrainedConfig.from_dict(vision_config),
+                text_hidden_size=text_hidden_size,
+                projector_hidden_size=projector_hidden_size,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=config.text_config,
@@ -904,8 +963,109 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
             architectures=["MiniMaxM3SparseForCausalLM"],
         )
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.language_model.embed_input_ids(input_ids)
+    def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+        if pixel_values is None:
+            return None
+        return {"pixel_values": pixel_values, "image_grid_thw": image_grid_thw}
+
+    def _parse_and_validate_video_input(self, **kwargs: object) -> dict | None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+        if pixel_values_videos is None:
+            return None
+        return {
+            "pixel_values_videos": pixel_values_videos,
+            "video_grid_thw": video_grid_thw,
+        }
+
+    def _process_image_input(self, image_input: dict) -> tuple[torch.Tensor, ...]:
+        pixel_values: torch.Tensor = image_input["pixel_values"].type(
+            self.vision_tower.dtype
+        )
+        grid_thw: torch.Tensor = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+
+        if self.use_data_parallel:
+            # Already returns a per-item tuple of embeddings.
+            return run_dp_sharded_mrope_vision_model(
+                self.vision_tower,
+                pixel_values,
+                grid_thw.tolist(),
+                rope_type="rope_3d",
+            )
+
+        image_embeds = self.vision_tower(
+            pixel_values=pixel_values,
+            grid_thw=grid_thw.tolist(),
+        )
+
+        # Split the concatenated output into one tensor per image item.
+        merge_size = self.vision_tower.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
+        return image_embeds.split(sizes)
+
+    def _process_video_input(self, video_input: dict) -> tuple[torch.Tensor, ...]:
+        pixel_values: torch.Tensor = video_input["pixel_values_videos"].type(
+            self.vision_tower.dtype
+        )
+        grid_thw: torch.Tensor = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+
+        if self.use_data_parallel:
+            # Already returns a per-item tuple of embeddings.
+            return run_dp_sharded_mrope_vision_model(
+                self.vision_tower,
+                pixel_values,
+                grid_thw.tolist(),
+                rope_type="rope_3d",
+            )
+
+        video_embeds = self.vision_tower(
+            pixel_values=pixel_values,
+            grid_thw=grid_thw.tolist(),
+        )
+
+        # Split the concatenated output into one tensor per video item.
+        merge_size = self.vision_tower.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // (merge_size * merge_size)).tolist()
+        return video_embeds.split(sizes)
+
+    def _parse_and_validate_multimodal_inputs(
+        self, **kwargs: object
+    ) -> dict[str, dict]:
+        mm_input_by_modality: dict[str, dict] = {}
+        for input_key in kwargs:
+            if input_key == "pixel_values" and "image" not in mm_input_by_modality:
+                image_input = self._parse_and_validate_image_input(**kwargs)
+                if image_input is not None:
+                    mm_input_by_modality["image"] = image_input
+            if (
+                input_key == "pixel_values_videos"
+                and "video" not in mm_input_by_modality
+            ):
+                video_input = self._parse_and_validate_video_input(**kwargs)
+                if video_input is not None:
+                    mm_input_by_modality["video"] = video_input
+        return mm_input_by_modality
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not mm_input_by_modality:
+            return []
+
+        multimodal_embeddings: list[torch.Tensor] = []
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings.extend(image_embeddings)
+            if modality == "video":
+                video_embeddings = self._process_video_input(multimodal_input)
+                multimodal_embeddings.extend(video_embeddings)
+
+        return tuple(multimodal_embeddings)
 
     def forward(
         self,
@@ -923,13 +1083,5 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module):
         return self.language_model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The vision tower / multimodal projector are not modeled yet.
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=[
-                "vision_tower.",
-                "multi_modal_projector.",
-                "patch_merge_mlp.",
-            ],
-        )
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
