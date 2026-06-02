@@ -510,8 +510,8 @@ def bind_kv_cache(
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         layer = forward_context[layer_name]
-        if hasattr(layer, "set_kv_cache"):
-            layer.set_kv_cache(kv_cache)
+        if hasattr(layer, "bind_kv_cache"):
+            layer.bind_kv_cache(kv_cache)
         else:
             layer.kv_cache = kv_cache
 

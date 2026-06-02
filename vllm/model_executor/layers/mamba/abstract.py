@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
+from math import prod
 
 import torch
 
@@ -21,62 +22,18 @@ class MambaBase(AttentionLayerBase):
     """
 
     kv_cache: tuple[torch.Tensor, ...]
-    _mamba_spec: MambaSpec | None = None
 
-    def set_kv_cache(self, value: torch.Tensor) -> None:
-        """Unpack a raw 4D tensor into per-state strided views."""
-        spec = self._mamba_spec
-        assert spec is not None
-        byte_offset = value.storage_offset() * value.element_size()
-        total_bytes = value.numel() * value.element_size()
-        num_blocks = total_bytes // spec.page_size_bytes
-        storage_tensor = torch.tensor([], dtype=torch.int8, device=value.device).set_(
-            value.untyped_storage()
-        )
-        raw_1d = storage_tensor[
-            byte_offset : byte_offset + num_blocks * spec.page_size_bytes
-        ]
-        self.kv_cache = tuple(
-            self._unpack_states(
-                raw_1d,
-                spec.shapes,
-                spec.dtypes,
-                spec.page_size_bytes,
-                num_blocks,
-            )
-        )
-
-    @staticmethod
-    def _unpack_states(
-        raw: torch.Tensor,
-        shapes: tuple[tuple[int, ...], ...],
-        dtypes: tuple[torch.dtype, ...],
-        page_size_bytes: int,
-        num_blocks: int,
-    ) -> list[torch.Tensor]:
-        """Unpack a flat raw tensor into per-state strided views."""
-        state_tensors: list[torch.Tensor] = []
-        base_offset = raw.storage_offset()
-        byte_offset = 0
-        for shape, dtype in zip(shapes, dtypes):
-            dtype_size = get_dtype_size(dtype)
-            page_stride = page_size_bytes // dtype_size
-            target_shape = (num_blocks, *shape)
-            inner_strides = torch.empty(target_shape, device="meta").stride()[1:]
-            abs_offset = base_offset + byte_offset
-            assert abs_offset % dtype_size == 0
-            state_tensors.append(
-                torch.as_strided(
-                    raw.view(dtype),
-                    size=target_shape,
-                    stride=(page_stride, *inner_strides),
-                    storage_offset=abs_offset // dtype_size,
-                )
-            )
-            byte_offset += (
-                torch.empty(target_shape, device="meta").stride()[0] * dtype_size
-            )
-        return state_tensors
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Unpack a raw 4D ``[B, 1, 1, C]`` int8 view into per-state views."""
+        pages = kv_cache.squeeze(dim=(1, 2))
+        states: list[torch.Tensor] = []
+        offset = 0
+        for shape, dtype in zip(self.get_state_shape(), self.get_state_dtype()):
+            nbytes = prod(shape) * get_dtype_size(dtype)
+            state = pages[:, offset : offset + nbytes].view(dtype)
+            states.append(state.view(-1, *shape))
+            offset += nbytes
+        self.kv_cache = tuple(states)
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:
@@ -100,7 +57,7 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
-        spec = MambaSpec(
+        return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
             block_size=mamba_block_size,
@@ -113,8 +70,6 @@ class MambaBase(AttentionLayerBase):
                 else 0
             ),
         )
-        self._mamba_spec = spec
-        return spec
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
