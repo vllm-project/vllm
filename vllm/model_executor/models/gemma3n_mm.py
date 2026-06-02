@@ -54,6 +54,7 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -636,10 +637,18 @@ class Gemma3nForConditionalGeneration(
         # We handle both cases:
         # - If fewer tokens: pad with the embedding of the last vocab token
         # - If more tokens: truncate to the expected count
-        # TODO precompute and cache padding
-        audio_padding_toks = torch.tensor(
-            [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
-        )
+        # Cache the single-scalar padding-token tensor per-device to avoid a
+        # synchronous H2D tensor construction on every forward.
+        cache = getattr(self, "_audio_padding_toks_cache", None)
+        if cache is None:
+            cache = {}
+            self._audio_padding_toks_cache = cache
+        audio_padding_toks = cache.get(audio_features.device)
+        if audio_padding_toks is None:
+            audio_padding_toks = async_tensor_h2d(
+                [[self.vocab_size - 1]], dtype=torch.long, device=audio_features.device
+            )
+            cache[audio_features.device] = audio_padding_toks
         audio_padding_embs = self.embed_audio(input_ids=audio_padding_toks)
         audio_features = torch.where(
             audio_mask.unsqueeze(-1), audio_padding_embs, audio_features

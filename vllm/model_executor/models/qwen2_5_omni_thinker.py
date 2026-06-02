@@ -89,6 +89,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -960,12 +961,14 @@ class Qwen2_5OmniConditionalGenerationMixin:
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
         )
 
-        audio_outputs = self.audio_tower(
-            input_features.to(self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
-        )
-        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
+        with gpu_sync_allowed():
+            audio_outputs = self.audio_tower(
+                input_features.to(self.audio_tower.dtype),
+                feature_lens=audio_feature_lengths,
+                aftercnn_lens=audio_feat_lengths,
+            )
+            split_sizes = audio_output_lengths.tolist()
+        return audio_outputs.last_hidden_state.split(split_sizes)
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
@@ -1450,12 +1453,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        input_ids_cpu = input_ids.cpu()
-        is_video = is_multimodal & (input_ids_cpu == video_token_id)
-        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        with gpu_sync_allowed():
+            input_ids_cpu = input_ids.cpu()
+            is_video = is_multimodal & (input_ids_cpu == video_token_id)
+            is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
 
-        num_video = is_video.sum().item()
-        num_audio = is_audio.sum().item()
+            num_video = is_video.sum().item()
+            num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
             inputs_embeds = self._embed_text_input_ids(

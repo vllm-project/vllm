@@ -13,6 +13,7 @@ from tests.utils import requires_spawn_multiprocessing
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor import (
     LOGITSPROCS_GROUP,
     AdapterLogitsProcessor,
@@ -89,17 +90,24 @@ class DummyLogitsProcessor(LogitsProcessor):
         if not self.req_info:
             return logits
 
-        # Save target values before modification
-        cols = torch.tensor(
+        # Save target values before modification.
+        cols = async_tensor_h2d(
             list(self.req_info.values()), dtype=torch.long, device=logits.device
         )
-        rows = torch.tensor(
+        rows = async_tensor_h2d(
             list(self.req_info.keys()), dtype=torch.long, device=logits.device
         )
         values_to_keep = logits[rows, cols].clone()
 
-        # Mask all but target tokens
-        logits[rows] = float("-inf")
+        # Mask all but target tokens. Use an on-device fill tensor so the
+        # scatter doesn't force a synchronizing scalar H2D.
+        fill = torch.full(
+            (rows.numel(), logits.size(-1)),
+            float("-inf"),
+            dtype=logits.dtype,
+            device=logits.device,
+        )
+        logits[rows] = fill
         logits[rows, cols] = values_to_keep
 
         return logits
@@ -140,7 +148,7 @@ class DummyPerReqLogitsProcessor:
         output_ids: list[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        val_to_keep = logits[self.target_token].item()
+        val_to_keep = logits[self.target_token].clone()
         logits[:] = float("-inf")
         logits[self.target_token] = val_to_keep
         return logits

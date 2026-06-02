@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationMethods,
 )
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -340,9 +341,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             new_x = bf_x.unsqueeze(0)
 
-            out[:, current_index : current_index + output_size] = matmul(
-                new_x, qweight[offsets[i] : offsets[i + 1]], state=matmul_states[i]
-            )
+            with gpu_sync_allowed():
+                out[:, current_index : current_index + output_size] = matmul(
+                    new_x, qweight[offsets[i] : offsets[i + 1]], state=matmul_states[i]
+                )
 
             current_index += output_size
 

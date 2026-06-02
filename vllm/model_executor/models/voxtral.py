@@ -772,15 +772,11 @@ class VoxtralEncoderModel(nn.Module):
         if global_log_mel_max := self.config.global_log_mel_max:
             if not isinstance(global_log_mel_max, float):
                 raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
-            log_spec_max = torch.tensor(
-                global_log_mel_max,
-                device=log_spec.device,
-                dtype=log_spec.dtype,
-            )
+            # Use `clamp` to avoid gpu<->cpu sync.
+            log_spec = torch.clamp(log_spec, min=global_log_mel_max - 8.0)
         else:
             log_spec_max = log_spec.max()
-
-        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
+            log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

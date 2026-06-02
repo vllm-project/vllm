@@ -80,6 +80,14 @@ class ExtractHiddenStatesProposer:
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
+        )
+
     def propose(
         self,
         sampled_token_ids: torch.Tensor,
@@ -315,7 +323,6 @@ class ExtractHiddenStatesProposer:
         num_reqs = gpu_input_batch.num_reqs
 
         # Precompute backup token IDs for discarded requests.
-        num_reqs = gpu_input_batch.num_reqs
         for i in range(num_reqs):
             self.backup_next_token_ids.np[i] = requests[
                 gpu_input_batch.req_ids[i]
