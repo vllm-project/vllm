@@ -522,8 +522,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
             skip_mamba_align: When True (e.g. for PD-pull requests on the D
-                side), skip Mamba groups in the hit min-reduction. Mamba
-                states are not transferred via the KV connector, so letting
+                side), skip Mamba groups in the hit min-reduction. Mamba running/temporal
+                state is transferred via the KV connector, so letting
                 Mamba's empty hit collapse the FullAttention hit to zero
                 would defeat prefix caching on the consumer side.
 
