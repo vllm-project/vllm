@@ -203,7 +203,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),
         name_key: "name",
-        arguments_key: "parameters",
+        arguments_key: &["parameters"],
     };
 
     match tool_call_header_event(input, CONFIG)? {
