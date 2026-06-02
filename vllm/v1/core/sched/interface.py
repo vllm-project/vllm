@@ -134,6 +134,11 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_request(self, request_id: str) -> "Request | None":
+        """Get a request by its ID."""
+        raise NotImplementedError
+
+    @abstractmethod
     def finish_requests(
         self,
         request_ids: str | Iterable[str] | None,
