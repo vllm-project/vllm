@@ -489,7 +489,15 @@ def kernel_warmup(worker: "Worker"):
 
     minimax_m3_msa_warmup(worker)
 
-    _deepseek_v4_sparse_mla_attention_warmup(worker)
+    if envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH:
+        from vllm.models.deepseek_v4.nvidia.flashmla import (
+            _disable_sparse_mla_prefill_stats,
+        )
+
+        with _disable_sparse_mla_prefill_stats():
+            _deepseek_v4_sparse_mla_attention_warmup(worker)
+    else:
+        _deepseek_v4_sparse_mla_attention_warmup(worker)
     _deepseek_v4_request_prep_warmup(worker)
 
     enable_flashinfer_autotune = (
