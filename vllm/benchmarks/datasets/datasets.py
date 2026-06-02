@@ -28,8 +28,6 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import numpy as np
 import pybase64 as base64
@@ -367,7 +365,7 @@ lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 def process_image(
     image: Any,
     *,
-    encode_local_image_files: bool = False,
+    encode_image_media: bool = False,
 ) -> Mapping[str, Any]:
     """
     Process a single image input and return a multimedia content dictionary.
@@ -385,8 +383,9 @@ def process_image(
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
        - Otherwise treats as local file path and prepends "file://".
-       - If encode_local_image_files is True, local paths and local file:// URLs
-         are encoded as base64 image data URLs.
+       - If encode_image_media is True, local and HTTP(S) image references are
+         loaded and encoded as base64 image data URLs. Existing data:image URLs
+         are kept unchanged.
        - Returns a dictionary with the image URL or base64 data.
 
     Raises:
@@ -405,43 +404,24 @@ def process_image(
         }
 
     if isinstance(image, str):
-        if encode_local_image_files:
-            local_image_path = _local_image_path_from_url(image)
-            if local_image_path is not None:
-                image = _encode_local_image_file_as_data_url(local_image_path)
-
         image_url = (
             image
             if image.startswith(("http://", "https://", "file://", "data:image/"))
             else f"file://{image}"
         )
+
+        if encode_image_media and not image_url.startswith("data:image/"):
+            try:
+                fetched_image = fetch_image(image_url)
+                image_url = encode_image_url(fetched_image)
+            except Exception as e:
+                raise ValueError(f"Invalid image URL: {image_url}") from e
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
         f"Invalid image input {image}. Must be a PIL.Image.Image, "
         "str (URL, file path, or base64 data URL), or dictionary with raw image bytes."
     )
-
-
-def _local_image_path_from_url(image: str) -> Path | None:
-    parsed = urlparse(image)
-
-    if parsed.scheme == "file":
-        if parsed.netloc and parsed.netloc != "localhost":
-            raise ValueError(f"Unsupported non-local file URL for image: {image}")
-        return Path(url2pathname(parsed.path))
-
-    return Path(image) if not parsed.scheme else None
-
-
-def _encode_local_image_file_as_data_url(path: Path) -> str:
-    try:
-        image = fetch_image(path.absolute().as_uri())
-        return encode_image_url(image)
-    except Exception as e:
-        raise ValueError(
-            f"Invalid local image file: {path}. Expected a valid image file."
-        ) from e
 
 
 def process_video(video: Any) -> Mapping[str, Any]:
@@ -1513,11 +1493,13 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "used only for custom dataset.",
     )
     custom_group.add_argument(
-        "--custom-image-encode-local-files",
+        "--custom-image-encode-media",
         action="store_true",
         help=(
-            "Encode local image files as base64 data URLs for custom_image "
-            "datasets. Applies to local file paths and file:// URLs only."
+            "Load image references on the benchmark client and encode them as "
+            "base64 data URLs for custom_image datasets. Applies to local "
+            "paths, file:// URLs, and HTTP(S) URLs. Existing data:image URLs "
+            "are kept unchanged."
         ),
     )
 
@@ -1903,9 +1885,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
-            encode_local_image_files=getattr(
-                args, "custom_image_encode_local_files", False
-            ),
+            encode_image_media=getattr(args, "custom_image_encode_media", False),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2454,7 +2434,7 @@ class CustomImageDataset(CustomDataset):
         cls,
         part: dict[str, Any],
         *,
-        encode_local_image_files: bool = False,
+        encode_image_media: bool = False,
     ) -> dict[str, Any]:
         content_type = part.get("type")
         if content_type == "text":
@@ -2469,7 +2449,7 @@ class CustomImageDataset(CustomDataset):
             return dict(
                 process_image(
                     part["image"],
-                    encode_local_image_files=encode_local_image_files,
+                    encode_image_media=encode_image_media,
                 )
             )
 
@@ -2479,7 +2459,7 @@ class CustomImageDataset(CustomDataset):
                 return dict(
                     process_image(
                         image_url,
-                        encode_local_image_files=encode_local_image_files,
+                        encode_image_media=encode_image_media,
                     )
                 )
 
@@ -2493,7 +2473,7 @@ class CustomImageDataset(CustomDataset):
                 processed_part = dict(
                     process_image(
                         url,
-                        encode_local_image_files=encode_local_image_files,
+                        encode_image_media=encode_image_media,
                     )
                 )
                 processed_image_url = dict(processed_part["image_url"])
@@ -2518,12 +2498,12 @@ class CustomImageDataset(CustomDataset):
         cls,
         content: Any,
         *,
-        encode_local_image_files: bool = False,
+        encode_image_media: bool = False,
     ) -> list[dict[str, Any]]:
         return [
             cls._process_content_part(
                 part,
-                encode_local_image_files=encode_local_image_files,
+                encode_image_media=encode_image_media,
             )
             for part in cls._validate_content_parts(content)
         ]
@@ -2536,7 +2516,7 @@ class CustomImageDataset(CustomDataset):
     def _process_image_files(
         images: Any,
         *,
-        encode_local_image_files: bool = False,
+        encode_image_media: bool = False,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         if not isinstance(images, list) or not images:
             raise ValueError("'image_files' must be a non-empty list.")
@@ -2545,7 +2525,7 @@ class CustomImageDataset(CustomDataset):
             dict(
                 process_image(
                     image,
-                    encode_local_image_files=encode_local_image_files,
+                    encode_image_media=encode_image_media,
                 )
             )
             for image in images
@@ -2561,7 +2541,7 @@ class CustomImageDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
-        encode_local_image_files: bool = False,
+        encode_image_media: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2584,7 +2564,7 @@ class CustomImageDataset(CustomDataset):
             if "content" in item:
                 content = self._process_interleaved_content(
                     item["content"],
-                    encode_local_image_files=encode_local_image_files,
+                    encode_image_media=encode_image_media,
                 )
                 text_prompt = self._get_text_from_content(content)
                 prompt_len = (
@@ -2613,7 +2593,7 @@ class CustomImageDataset(CustomDataset):
             prompt_len = 1 if tokenizer is None else len(tokenizer(prompt).input_ids)
             mm_content = self._process_image_files(
                 item["image_files"],
-                encode_local_image_files=encode_local_image_files,
+                encode_image_media=encode_image_media,
             )
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer

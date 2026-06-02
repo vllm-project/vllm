@@ -246,9 +246,11 @@ Every image listed in "image_files" is added to the request in the listed order 
 
 The "image" shorthand accepts the same values as "image_files". The "image_url" field accepts either an OpenAI-style object with a "url" field or a URL string.
 
-By default, local image paths are sent as `file://` URLs and must be readable by the serving endpoint. If the benchmark client and serving endpoint run on different machines, pass `--custom-image-encode-local-files` to encode local file paths and `file://` URLs as base64 data URLs before sending the request.
+By default, image references are sent to the serving endpoint as provided, with local image paths converted to `file://` URLs.
 
-This option validates that each local file exists, is a regular file, and can be opened as an image. HTTP(S) URLs and existing `data:image/...` URLs are kept unchanged.
+If the benchmark client should load local and HTTP(S) images before sending requests, pass `--custom-image-encode-media` to encode them as base64 data URLs on the client side.
+
+Existing `data:image/...` URLs are already self-contained and are kept unchanged.
 
 ```bash
 # need a model with vision capability here
@@ -263,7 +265,7 @@ vllm bench serve --save-result --save-detailed \
   --endpoint /v1/chat/completions \
   --dataset-name custom_image \
   --dataset-path <path-to-your-image-data-jsonl> \
-  --custom-image-encode-local-files
+  --custom-image-encode-media
 ```
 
 Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.

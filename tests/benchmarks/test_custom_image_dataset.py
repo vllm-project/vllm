@@ -10,6 +10,7 @@ import pybase64 as base64
 import pytest
 from PIL import Image
 
+import vllm.benchmarks.datasets.datasets as datasets_module
 from vllm.benchmarks.datasets import CustomImageDataset, get_samples
 from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncInput,
@@ -61,7 +62,7 @@ def _args_for_custom_image(dataset_path: Path) -> Namespace:
         num_prompts=2,
         custom_output_len=32,
         enable_multimodal_chat=False,
-        custom_image_encode_local_files=False,
+        custom_image_encode_media=False,
         request_id_prefix="req-",
         no_oversample=False,
     )
@@ -251,8 +252,9 @@ def test_custom_image_dataset_wraps_interleaved_content_for_multimodal_chat(
 
 
 @pytest.mark.benchmark
-def test_custom_image_dataset_encodes_local_image_files_when_requested(
+def test_custom_image_dataset_encodes_image_media_when_requested(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     image_a = tmp_path / "chart_a.png"
     image_b = tmp_path / "chart b.png"
@@ -260,6 +262,15 @@ def test_custom_image_dataset_encodes_local_image_files_when_requested(
     _write_png(image_b, color=(0, 255, 0))
     data_url = "data:image/png;base64,Zm9v"
     remote_url = "https://example.com/chart.png"
+    original_fetch_image = datasets_module.fetch_image
+
+    def fake_fetch_image(image_url: str) -> Image.Image:
+        if image_url == remote_url:
+            return Image.new("RGB", (1, 1), color=(0, 0, 255))
+        return original_fetch_image(image_url)
+
+    monkeypatch.setattr(datasets_module, "fetch_image", fake_fetch_image)
+
     jsonl = tmp_path / "images.jsonl"
     _write_jsonl(
         jsonl,
@@ -281,7 +292,7 @@ def test_custom_image_dataset_encodes_local_image_files_when_requested(
         tokenizer=_Tokenizer(),
         num_requests=1,
         output_len=32,
-        encode_local_image_files=True,
+        encode_image_media=True,
     )
 
     assert len(samples) == 1
@@ -290,12 +301,12 @@ def test_custom_image_dataset_encodes_local_image_files_when_requested(
 
     _assert_png_data_url(image_urls[0])
     _assert_png_data_url(image_urls[1])
-    assert image_urls[2] == remote_url
+    _assert_png_data_url(image_urls[2])
     assert image_urls[3] == data_url
 
 
 @pytest.mark.benchmark
-def test_custom_image_dataset_encodes_interleaved_local_image_files(
+def test_custom_image_dataset_encodes_interleaved_image_media(
     tmp_path: Path,
 ) -> None:
     image_a = tmp_path / "chart_a.png"
@@ -327,7 +338,7 @@ def test_custom_image_dataset_encodes_interleaved_local_image_files(
         tokenizer=_Tokenizer(),
         num_requests=1,
         output_len=32,
-        encode_local_image_files=True,
+        encode_image_media=True,
     )
 
     sample = samples[0]
@@ -338,7 +349,7 @@ def test_custom_image_dataset_encodes_interleaved_local_image_files(
 
 
 @pytest.mark.benchmark
-def test_custom_image_dataset_rejects_invalid_local_image_file(
+def test_custom_image_dataset_rejects_invalid_image_media(
     tmp_path: Path,
 ) -> None:
     invalid_image = tmp_path / "not_an_image.png"
@@ -350,12 +361,12 @@ def test_custom_image_dataset_rejects_invalid_local_image_file(
     )
 
     dataset = CustomImageDataset(dataset_path=str(jsonl), disable_shuffle=True)
-    with pytest.raises(ValueError, match="Invalid local image file"):
+    with pytest.raises(ValueError, match="Invalid image URL"):
         dataset.sample(
             tokenizer=_Tokenizer(),
             num_requests=1,
             output_len=32,
-            encode_local_image_files=True,
+            encode_image_media=True,
         )
 
 
