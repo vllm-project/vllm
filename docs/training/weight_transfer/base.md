@@ -11,14 +11,23 @@ The `WeightTransferEngine` is a generic abstract class parameterized by two data
 
 ### Abstract Methods
 
-Subclasses must implement these four methods:
+Subclasses must implement these methods:
 
 | Method | Side | Description |
 | ------ | ---- | ----------- |
 | `init_transfer_engine(init_info)` | Inference | Initialize the communication channel on each inference worker |
-| `receive_weights(update_info, load_weights)` | Inference | Receive weights and call `load_weights` incrementally |
+| `start_weight_update()` | Inference | Prepare for an update (e.g. begin layerwise reload); no-op for in-place engines |
+| `finish_weight_update()` | Inference | Finalize the update (e.g. finalize layerwise reload); no-op for in-place engines |
+| `receive_weights(update_info)` | Inference | Receive weights and load them into `self.model` incrementally |
 | `shutdown()` | Inference | Clean up resources |
 | `trainer_send_weights(iterator, trainer_args)` | Trainer | Static method to send weights from the trainer process |
+
+The base class provides a concrete `update_weights(update_info_dict)` that parses
+the dict, calls `receive_weights`, and synchronizes the device — so subclasses
+only implement `receive_weights`. The session-active guard and error handling
+live in the worker, so `start_weight_update`/`finish_weight_update` must **not**
+chain to `super()`. Engines receive `config`, `vllm_config`, `device`, and
+`model` in their constructor; load weights directly into `self.model`.
 
 ### Request Classes
 
@@ -81,7 +90,7 @@ class MyUpdateInfo(WeightTransferUpdateInfo):
 ### 2. Implement the Engine
 
 ```python
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from typing import Any
 import torch
 
@@ -93,18 +102,27 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
         # Set up connection to trainer using init_info.endpoint, etc.
         ...
 
-    def receive_weights(
-        self,
-        update_info: MyUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
-        # Receive each weight and call load_weights incrementally
+    def start_weight_update(self) -> None:
+        # Checkpoint-format engines: run initialize_layerwise_reload(self.model)
+        # under set_current_vllm_config(self.vllm_config). In-place engines: no-op
+        ...
+
+    def finish_weight_update(self) -> None:
+        # Checkpoint-format engines: run finalize_layerwise_reload(...).
+        # In-place engines: no-op
+        ...
+
+    def receive_weights(self, update_info: MyUpdateInfo) -> None:
+        # Receive each weight and load it into self.model incrementally
+        from vllm.config import set_current_vllm_config
+
         for name, dtype_name, shape in zip(
             update_info.names, update_info.dtype_names, update_info.shapes
         ):
             dtype = getattr(torch, dtype_name)
             weight = self._fetch_weight(name, shape, dtype)
-            load_weights([(name, weight)])
+            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+                self.model.load_weights([(name, weight)])
 
     def shutdown(self) -> None:
         # Clean up resources
@@ -122,7 +140,7 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
 ```
 
 !!! important
-    The `load_weights` callable passed to `receive_weights` should be called **incrementally** (one or a few weights at a time) rather than accumulating all weights first. This avoids GPU out-of-memory errors with large models.
+    Load weights into `self.model` **incrementally** (one or a few weights at a time) rather than accumulating all weights first. This avoids GPU out-of-memory errors with large models. Wrap loading in `set_current_vllm_config(self.vllm_config)` so per-layer postprocessing can read the current vLLM config.
 
 ### 3. Register with the Factory
 
@@ -147,7 +165,7 @@ Once registered, users can select your backend via `WeightTransferConfig(backend
 
 ## WeightTransferEngineFactory
 
-The factory uses a registry pattern with lazy loading. Built-in engines (`nccl` and `ipc`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
+The factory uses a registry pattern with lazy loading. Built-in engines (`nccl`, `ipc`, and `sparse_nccl`) are registered at import time but their modules are only loaded when the backend is actually requested. This avoids importing heavy dependencies (like NCCL communicators) when they aren't needed.
 
 ```python
 from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
@@ -155,6 +173,8 @@ from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 # Create an engine from config
 engine = WeightTransferEngineFactory.create_engine(
     config=weight_transfer_config,
-    parallel_config=parallel_config,
+    vllm_config=vllm_config,
+    device=device,
+    model=model,
 )
 ```
