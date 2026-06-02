@@ -60,6 +60,10 @@ def _make_base_renderer_with(tokenizer):
         def get_tokenizer(self):
             return self.tokenizer
 
+        def _can_produce_offsets(self):
+            # Mirror HfRenderer: offsets only for fast tokenizers.
+            return self.tokenizer is not None and self.tokenizer.is_fast
+
         def render_messages(self, messages, params):  # pragma: no cover
             raise NotImplementedError
 
@@ -87,6 +91,34 @@ class TestTokenizePromptOffsets:
         for s, e in offsets:
             assert isinstance(s, int) and isinstance(e, int)
             assert 0 <= s <= e <= text_len
+
+    def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
+        """A renderer that does not override `_can_produce_offsets` never
+        emits offsets, even with a fast tokenizer and the flag set. This
+        locks in the base-default-False / subclass-override design."""
+        from vllm.renderers.base import BaseRenderer
+        from vllm.renderers.params import TokenizeParams
+
+        class _BareRenderer(BaseRenderer):
+            def __init__(self, tok):
+                self.tokenizer = tok
+                self._async_tokenizer = None
+                self._executor = None
+                self.mm_processor = None
+
+            def get_tokenizer(self):
+                return self.tokenizer
+
+            def render_messages(self, messages, params):  # pragma: no cover
+                raise NotImplementedError
+
+        renderer = _BareRenderer(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        result = renderer._tokenize_prompt(prompt, params)
+
+        assert "prompt_token_offsets" not in result
 
     def test_default_flag_no_offsets(self, fast_tokenizer):
         from vllm.renderers.params import TokenizeParams

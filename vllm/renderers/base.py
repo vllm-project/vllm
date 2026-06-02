@@ -398,15 +398,22 @@ class BaseRenderer(ABC, Generic[_T]):
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
+    def _can_produce_offsets(self) -> bool:
+        """Whether this renderer's tokenizer can emit char-level offsets.
+
+        Defaults to False; only renderers backed by an HF fast tokenizer
+        (see ``HfRenderer``) can produce ``offset_mapping``.
+        """
+        return False
+
     def _wants_offsets(
         self,
-        tokenizer,
         prompt: "TextPrompt",
         params: "TokenizeParams",
     ) -> bool:
         return (
             params.return_token_offsets
-            and getattr(tokenizer, "is_fast", False)
+            and self._can_produce_offsets()
             and not prompt.get("multi_modal_data")
             and not prompt.get("multi_modal_uuids")
         )
@@ -430,7 +437,7 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        if self._wants_offsets(tokenizer, prompt, params):
+        if self._wants_offsets(prompt, params):
             encoding = tokenizer(
                 prompt["prompt"],
                 **params.get_encode_kwargs(),
@@ -451,11 +458,7 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_async_tokenizer()
-        # `_wants_offsets` checks `tokenizer.is_fast`; the async wrapper
-        # forwards the attribute via its inner tokenizer reference.
-        if self._wants_offsets(
-            getattr(tokenizer, "tokenizer", tokenizer), prompt, params
-        ):
+        if self._wants_offsets(prompt, params):
             encoding = await tokenizer(
                 prompt["prompt"],
                 **params.get_encode_kwargs(),
