@@ -1238,14 +1238,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
-  - pytest -v -s tool_use
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
 
 - label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
@@ -1261,7 +1258,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
 
 - label: Entrypoints Integration (API Server openai - Part 2) # TBD
   timeout_in_minutes: 180
@@ -1275,10 +1272,14 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180
@@ -1368,7 +1369,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/offline_mode --ignore=entrypoints/openai --ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: OpenAI API correctness # TBD
   timeout_in_minutes: 180
@@ -2745,14 +2746,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
-  - pytest -v -s tool_use
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
 
 - label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
@@ -2768,7 +2766,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
 
 - label: Entrypoints Integration (API Server openai - Part 2) # TBD
   timeout_in_minutes: 180
@@ -2782,10 +2780,14 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180

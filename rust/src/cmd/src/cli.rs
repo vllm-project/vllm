@@ -165,6 +165,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    /// If specified, API server will add X-Request-Id header to responses.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub enable_request_id_headers: bool,
+
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage).
     #[arg(long)]
@@ -238,6 +247,7 @@ impl SharedRuntimeArgs {
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -278,6 +288,7 @@ impl SharedRuntimeArgs {
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
+            enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
