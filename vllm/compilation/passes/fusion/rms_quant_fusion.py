@@ -53,20 +53,24 @@ def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
     return True
 
 
+def _device() -> str:
+    return current_platform.device_type
+
+
 def empty_bf16(*args: Any, **kwargs: Any) -> torch.Tensor:
-    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device=_device())
 
 
 def empty_fp32(*args: Any, **kwargs: Any) -> torch.Tensor:
-    return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.float32, device=_device())
 
 
 def empty_i32(*args: Any, **kwargs: Any) -> torch.Tensor:
-    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device=_device())
 
 
 def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
-    return torch.empty(*args, **kwargs, dtype=torch.int64, device="cuda")
+    return torch.empty(*args, **kwargs, dtype=torch.int64, device=_device())
 
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
