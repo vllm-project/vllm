@@ -365,10 +365,6 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
-def get_stop_tokens_for_assistant_actions() -> list[int]:
-    return get_encoding().stop_tokens_for_assistant_actions()
-
-
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
 

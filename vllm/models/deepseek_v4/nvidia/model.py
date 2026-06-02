@@ -8,7 +8,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -16,7 +15,12 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import get_forward_context
+from vllm.model_executor.kernels.mhc.tilelang import (
+    hc_head_fused_kernel_tilelang,
+    mhc_fused_post_pre_tilelang,
+    mhc_post_tilelang,
+    mhc_pre_tilelang,
+)
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -30,14 +34,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mhc import (
-    HCHeadOp,
-    MHCFusedPostPreOp,
-    MHCPostOp,
-    MHCPreOp,
-)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -54,15 +51,13 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.nvidia.ops.attention import (
+from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionWrapper,
+    DeepseekV4MLA,
 )
-from vllm.platforms import current_platform
+from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
+from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
-from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class DeepseekV4MLP(nn.Module):
@@ -114,167 +109,6 @@ class DeepseekV4MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-
-@triton.jit
-def _deepseek_v4_stage_mega_moe_inputs_kernel(
-    hidden_states,
-    x_fp8,
-    x_sf,
-    topk_ids,
-    topk_weights,
-    topk_idx_out,
-    topk_weights_out,
-    hidden_stride_m: tl.constexpr,
-    hidden_stride_k: tl.constexpr,
-    x_stride_m: tl.constexpr,
-    x_stride_k: tl.constexpr,
-    x_sf_stride_m: tl.constexpr,
-    x_sf_stride_k: tl.constexpr,
-    topk_ids_stride_m: tl.constexpr,
-    topk_ids_stride_k: tl.constexpr,
-    topk_weights_stride_m: tl.constexpr,
-    topk_weights_stride_k: tl.constexpr,
-    topk_idx_stride_m: tl.constexpr,
-    topk_idx_stride_k: tl.constexpr,
-    topk_weights_out_stride_m: tl.constexpr,
-    topk_weights_out_stride_k: tl.constexpr,
-    hidden_size: tl.constexpr,
-    top_k: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    GROUP_K: tl.constexpr,
-    BLOCK_TOPK: tl.constexpr,
-) -> None:
-    token_id = tl.program_id(0)
-    k_block_id = tl.program_id(1)
-
-    k_offsets = k_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
-    k_mask = k_offsets < hidden_size
-    hidden = tl.load(
-        hidden_states + token_id * hidden_stride_m + k_offsets * hidden_stride_k,
-        mask=k_mask,
-        other=0.0,
-    ).to(tl.float32)
-
-    num_groups: tl.constexpr = BLOCK_K // GROUP_K
-    hidden_groups = tl.reshape(tl.abs(hidden), [num_groups, GROUP_K])
-    amax = tl.max(hidden_groups, axis=1)
-    amax = tl.maximum(amax, 1.0e-4)
-
-    scale = amax / 448.0
-    scale_bits = scale.to(tl.uint32, bitcast=True)
-    scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
-        tl.uint32
-    )
-    scale_exp = tl.minimum(tl.maximum(scale_exp, 1), 254)
-    rounded_scale = (scale_exp << 23).to(tl.float32, bitcast=True)
-
-    hidden_groups = tl.reshape(hidden, [num_groups, GROUP_K])
-    scaled = hidden_groups * (1.0 / rounded_scale)[:, None]
-    scaled = tl.reshape(scaled, [BLOCK_K])
-    fp8 = scaled.to(tl.float8e4nv)
-    tl.store(
-        x_fp8 + token_id * x_stride_m + k_offsets * x_stride_k,
-        fp8,
-        mask=k_mask,
-    )
-
-    scale_offsets = tl.arange(0, num_groups)
-    packed_scale = tl.sum(scale_exp << (scale_offsets * 8), axis=0).to(tl.int32)
-    tl.store(
-        x_sf + token_id * x_sf_stride_m + k_block_id * x_sf_stride_k,
-        packed_scale,
-    )
-
-    if k_block_id == 0:
-        topk_offsets = tl.arange(0, BLOCK_TOPK)
-        topk_mask = topk_offsets < top_k
-
-        ids = tl.load(
-            topk_ids + token_id * topk_ids_stride_m + topk_offsets * topk_ids_stride_k,
-            mask=topk_mask,
-            other=0,
-        ).to(tl.int64)
-        tl.store(
-            topk_idx_out
-            + token_id * topk_idx_stride_m
-            + topk_offsets * topk_idx_stride_k,
-            ids,
-            mask=topk_mask,
-        )
-
-        weights = tl.load(
-            topk_weights
-            + token_id * topk_weights_stride_m
-            + topk_offsets * topk_weights_stride_k,
-            mask=topk_mask,
-            other=0.0,
-        )
-        tl.store(
-            topk_weights_out
-            + token_id * topk_weights_out_stride_m
-            + topk_offsets * topk_weights_out_stride_k,
-            weights,
-            mask=topk_mask,
-        )
-
-
-def _stage_deepseek_v4_mega_moe_inputs(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    x_fp8: torch.Tensor,
-    x_sf: torch.Tensor,
-    topk_idx_out: torch.Tensor,
-    topk_weights_out: torch.Tensor,
-) -> None:
-    num_tokens, hidden_size = hidden_states.shape
-    if num_tokens == 0:
-        return
-    if hidden_size % 128 != 0:
-        raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires hidden_size to be "
-            "a multiple of 128."
-        )
-    top_k = topk_ids.shape[1]
-    if topk_weights.shape != topk_ids.shape:
-        raise ValueError(
-            "DeepSeek V4 MegaMoE input staging requires topk_weights and "
-            "topk_ids to have the same shape."
-        )
-
-    block_k = 128
-    grid = (num_tokens, triton.cdiv(hidden_size, block_k))
-    block_topk = triton.next_power_of_2(top_k)
-    _deepseek_v4_stage_mega_moe_inputs_kernel[grid](
-        hidden_states,
-        x_fp8,
-        x_sf,
-        topk_ids,
-        topk_weights,
-        topk_idx_out,
-        topk_weights_out,
-        hidden_states.stride(0),
-        hidden_states.stride(1),
-        x_fp8.stride(0),
-        x_fp8.stride(1),
-        x_sf.stride(0),
-        x_sf.stride(1),
-        topk_ids.stride(0),
-        topk_ids.stride(1),
-        topk_weights.stride(0),
-        topk_weights.stride(1),
-        topk_idx_out.stride(0),
-        topk_idx_out.stride(1),
-        topk_weights_out.stride(0),
-        topk_weights_out.stride(1),
-        hidden_size,
-        top_k,
-        BLOCK_K=block_k,
-        GROUP_K=32,
-        BLOCK_TOPK=block_topk,
-        num_warps=4,
-    )
 
 
 def make_deepseek_v4_expert_params_mapping(
@@ -372,13 +206,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
         self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
-        # Register in the static forward context so the custom-op wrapper
-        # can look up this module by name from within a torch.compile graph.
-        compilation_config = vllm_config.compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
     def _map_global_expert_id(self, expert_id: int) -> int:
         if expert_id < self.experts_start_idx or expert_id >= self.experts_end_idx:
             return -1
@@ -423,13 +250,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         return (sf.to(torch.int32) << 23).view(torch.float32)
 
     def _check_runtime_supported(self) -> None:
-        if not torch.cuda.is_available():
-            raise NotImplementedError("DeepSeek V4 MegaMoE requires CUDA.")
         device = self.w13_weight.device
-        if device.type != "cuda":
-            raise NotImplementedError(
-                "DeepSeek V4 MegaMoE expert weights must be loaded on CUDA."
-            )
         if torch.cuda.get_device_capability(device)[0] != 10:
             raise NotImplementedError("DeepGEMM MegaMoE requires SM100 GPUs.")
         if self.hidden_size % 128 != 0 or self.intermediate_size % 128 != 0:
@@ -518,12 +339,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        torch.ops.vllm.deepseek_v4_mega_moe_experts(
+        self._run_mega_moe(
             hidden_states,
             topk_weights,
             topk_ids,
             y,
-            self.prefix,
             activation_clamp,
             fast_math,
         )
@@ -542,7 +362,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
-        _stage_deepseek_v4_mega_moe_inputs(
+        prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
             topk_ids,
@@ -569,46 +389,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
 
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
-
-
-def _deepseek_v4_mega_moe_experts_op(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    self = get_forward_context().no_compile_layers[layer_name]
-    self._run_mega_moe(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        out,
-        activation_clamp,
-        fast_math,
-    )
-
-
-def _deepseek_v4_mega_moe_experts_op_fake(
-    hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    out: torch.Tensor,
-    layer_name: str,
-    activation_clamp: float | None,
-    fast_math: bool,
-) -> None:
-    return None
-
-
-direct_register_custom_op(
-    op_name="deepseek_v4_mega_moe_experts",
-    op_func=_deepseek_v4_mega_moe_experts_op,
-    mutates_args=["out"],
-    fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
-)
 
 
 class DeepseekV4MoE(nn.Module):
@@ -916,26 +696,13 @@ class DeepseekV4Attention(nn.Module):
 
         self.rope_parameters = config.rope_scaling
 
-        # Initialize rotary embedding BEFORE DeepseekV4MLAModules (which needs it)
-        rope_parameters = config.rope_parameters
-        rope_parameters["rope_theta"] = (
-            config.compress_rope_theta if self.compress_ratio > 1 else config.rope_theta
-        )
-        if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
-            )
-        rope_parameters["mscale"] = 0  # Disable mscale
-        rope_parameters["mscale_all_dim"] = 0  # Disable mscale
-        rope_parameters["is_deepseek_v4"] = True
-        rope_parameters["rope_dim"] = self.rope_head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=False,
+        # Initialize rotary embedding BEFORE DeepseekV4MLA (which needs it)
+        self.rotary_emb = build_deepseek_v4_rope(
+            config,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            compress_ratio=self.compress_ratio,
         )
 
         self.indexer = None
@@ -960,7 +727,17 @@ class DeepseekV4Attention(nn.Module):
                 aux_stream=indexer_aux_stream,
             )
 
-        mla_modules = DeepseekV4MLAModules(
+        self.mla_attn = DeepseekV4MLA(
+            hidden_size=self.hidden_size,
+            num_heads=self.n_local_heads,
+            head_dim=self.head_dim,
+            scale=self.softmax_scale,
+            qk_nope_head_dim=self.nope_head_dim,
+            qk_rope_head_dim=self.rope_head_dim,
+            v_head_dim=self.head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.head_dim,
+            o_lora_rank=self.o_lora_rank,
             vllm_config=vllm_config,
             fused_wqa_wkv=self.fused_wqa_wkv,
             q_norm=self.q_norm,
@@ -974,19 +751,6 @@ class DeepseekV4Attention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
-        )
-        self.mla_attn = DeepseekV4MultiHeadLatentAttentionWrapper(
-            hidden_size=self.hidden_size,
-            num_heads=self.n_local_heads,
-            head_dim=self.head_dim,
-            scale=self.softmax_scale,
-            qk_nope_head_dim=self.nope_head_dim,
-            qk_rope_head_dim=self.rope_head_dim,
-            v_head_dim=self.head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.head_dim,
-            o_lora_rank=self.o_lora_rank,
-            mla_modules=mla_modules,
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
             cache_config=vllm_config.cache_config,
@@ -1012,10 +776,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
-
-        # Lazy import to avoid top-level tilelang dependency.
-        # Registers both torch.ops.vllm.mhc_pre and mhc_post
-        import vllm.model_executor.layers.mhc  # noqa: F401
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
@@ -1079,44 +839,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
-        self.mhc_pre = MHCPreOp()
-        self.mhc_post = MHCPostOp()
-        self.mhc_fused_post_pre = MHCFusedPostPreOp()
 
-    def hc_pre(
-        self,
-        x: torch.Tensor,
-        hc_fn: torch.Tensor,
-        hc_scale: torch.Tensor,
-        hc_base: torch.Tensor,
-        norm_weight: torch.Tensor | None = None,
-        norm_eps: float = 1e-6,
-    ):
-        post_mix, res_mix, layer_input = self.mhc_pre(
-            residual=x,
-            fn=hc_fn,
-            hc_scale=hc_scale,
-            hc_base=hc_base,
-            rms_eps=self.rms_norm_eps,
-            hc_pre_eps=self.hc_eps,
-            hc_sinkhorn_eps=self.hc_eps,
-            hc_post_mult_value=self.hc_post_alpha,
-            sinkhorn_repeat=self.hc_sinkhorn_iters,
-            norm_weight=norm_weight,
-            norm_eps=norm_eps,
-        )
-        return layer_input, post_mix, res_mix
-
-    def hc_post(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        post: torch.Tensor,
-        comb: torch.Tensor,
-    ):
-        return self.mhc_post(x, residual, post, comb)
-
-    def _forward_cuda(
+    def forward(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1128,18 +852,23 @@ class DeepseekV4DecoderLayer(nn.Module):
         attn_norm_weight = self.attn_norm.weight.data
         attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
-            # Run standalone hc_pre on first layer
+            # Run standalone mhc_pre on first layer
             residual = x
-            x, post_mix, res_mix = self.hc_pre(
+            post_mix, res_mix, x = mhc_pre_tilelang(
                 x,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
         else:
-            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+            residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
                 x,
                 residual,
                 post_mix,
@@ -1158,12 +887,12 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_eps=attn_norm_eps,
             )
 
-        # attn_norm is fused into hc_pre / mhc_fused_post_pre above.
+        # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
         x = self.attn(positions, x, None)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+        residual, post_mix, res_mix, x = mhc_fused_post_pre_tilelang(
             x,
             residual,
             post_mix,
@@ -1181,59 +910,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=ffn_norm_weight,
             norm_eps=ffn_norm_eps,
         )
-        # ffn_norm is fused into mhc_fused_post_pre above; ffn() takes the
-        # already-normed activation directly.
+
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
-    def _forward_native(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor,
-        input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None = None,
-        res_mix: torch.Tensor | None = None,
-        residual: torch.Tensor | None = None,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
-    ]:
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
-        x = self.attn_norm(x)
-        x = self.attn(positions, x, None)
-        x = self.hc_post(x, residual, post, comb)
 
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
-        )
-        x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
-        x = self.hc_post(x, residual, post, comb)
-        return x, None, None, None
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        positions: torch.Tensor,
-        input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None = None,
-        res_mix: torch.Tensor | None = None,
-        residual: torch.Tensor | None = None,
-    ) -> tuple[
-        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
-    ]:
-        if current_platform.is_rocm() or current_platform.is_xpu():
-            return self._forward_native(
-                x, positions, input_ids, post_mix, res_mix, residual
-            )
-
-        return self._forward_cuda(x, positions, input_ids, post_mix, res_mix, residual)
-
-
-@support_torch_compile
 class DeepseekV4Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1257,23 +938,16 @@ class DeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
+        # DeepseekV4MLA.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        # Disable them on ROCm / XPU because of hang issues / no overlap.
-        aux_stream_list = (
-            None
-            if current_platform.is_rocm() or current_platform.is_xpu()
-            else [torch.cuda.Stream() for _ in range(3)]
-        )
+        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
 
-        self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
-            device=self.device,
         )
 
         if get_pp_group().is_first_rank:
@@ -1321,7 +995,6 @@ class DeepseekV4Model(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-        self.hc_head_op = HCHeadOp()
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
@@ -1333,7 +1006,6 @@ class DeepseekV4Model(nn.Module):
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
                 dtype=vllm_config.model_config.dtype,
-                device=self.device,
             )
         else:
             self._mtp_hidden_buffer = None
@@ -1391,8 +1063,10 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        if layer is not None and current_platform.is_cuda():
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+        if layer is not None:
+            hidden_states = mhc_post_tilelang(
+                hidden_states, residual, post_mix, res_mix
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -1401,7 +1075,7 @@ class DeepseekV4Model(nn.Module):
         num_tokens = hidden_states.shape[0]
         self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = self.hc_head_op(
+        hidden_states = hc_head_fused_kernel_tilelang(
             hidden_states,
             self.hc_head_fn,
             self.hc_head_scale,
