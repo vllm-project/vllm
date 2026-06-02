@@ -758,19 +758,6 @@ def get_model_params(config):
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
     elif architecture == "JambaForCausalLM":
-    # cohere start
-    elif config.architectures[0] == "Cohere2MoeForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        hidden_size = config.hidden_size
-    elif config.architectures[0] == "Cohere2VisionForConditionalGeneration":
-        text_config = config.get_text_config()
-        E = text_config.num_experts
-        topk = text_config.num_experts_per_tok
-        intermediate_size = text_config.intermediate_size
-        hidden_size = text_config.hidden_size
-    # cohere end
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
@@ -822,6 +809,19 @@ def get_model_params(config):
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
+    # cohere start
+    elif architecture == "Cohere2MoeForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
+        hidden_size = config.hidden_size
+    elif architecture == "Cohere2VisionForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.intermediate_size
+        hidden_size = text_config.hidden_size
+    # cohere end
     else:
         # Support for llama4
         config = config.get_text_config()

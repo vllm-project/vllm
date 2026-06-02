@@ -292,13 +292,6 @@ ARG SCCACHE_WEBDAV_TOKEN
 ARG SCCACHE_WEBDAV_KEY_PREFIX
 # cohere end
 ARG SCCACHE_DOWNLOAD_URL
-# cohere start
-# upstream also uses SCCACHE but we configure it slightly differently
-# to work with depot instead of s3 bucket
-ARG SCCACHE_WEBDAV_ENDPOINT
-ARG SCCACHE_WEBDAV_TOKEN
-ARG SCCACHE_WEBDAV_KEY_PREFIX
-# cohere end
 ARG SCCACHE_ENDPOINT
 ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
 ARG SCCACHE_REGION_NAME=us-west-2
@@ -334,15 +327,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
-        # cohere start
-        # NOTE: we need download the correct sccache binary for the arch
-        # and use a separate cache prefix
-        && case "${TARGETPLATFORM}" in \
-          linux/arm64) SCCACHE_ARCH="aarch64" ;; \
-          linux/amd64) SCCACHE_ARCH="x86_64" ;; \
-          *) echo "Unsupported TARGETPLATFORM for sccache: ${TARGETPLATFORM}" >&2; exit 1 ;; \
-        esac \
-        # cohere end
         && case "${TARGETPLATFORM}" in \
           linux/arm64) SCCACHE_ARCH="aarch64" ;; \
           linux/amd64) SCCACHE_ARCH="x86_64" ;; \
@@ -351,13 +335,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_DOWNLOAD_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
         && curl -L -o sccache.tar.gz ${SCCACHE_DOWNLOAD_URL} \
         && tar -xzf sccache.tar.gz \
-        # cohere start
-        && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-        && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
-        && export SCCACHE_WEBDAV_ENDPOINT="${SCCACHE_WEBDAV_ENDPOINT}" \
-        && export SCCACHE_WEBDAV_TOKEN="${SCCACHE_WEBDAV_TOKEN}" \
-        && export SCCACHE_WEBDAV_KEY_PREFIX="${SCCACHE_WEBDAV_KEY_PREFIX}$([ "${SCCACHE_ARCH}" = "aarch64" ] && echo "-arm64")" \
-        # cohere end
         && sudo mv sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
         && rm -rf sccache.tar.gz sccache-v0.8.1-${SCCACHE_ARCH}-unknown-linux-musl \
         # cohere start
@@ -675,16 +652,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-# cohere start (flashinfer nightly)
-# Nightly builds are served from https://flashinfer.ai/whl/nightly/
-ARG FLASHINFER_VERSION=0.6.7.dev20260406
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/nightly/ \
-    && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
-        --extra-index-url https://flashinfer.ai/whl/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && flashinfer show-config
-# cohere end
 ARG FLASHINFER_VERSION=0.6.8.post1
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
@@ -756,6 +723,13 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
         && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
+
+# cohere start
+# Keep wheel artifacts for Dockerfile.cohere overlay and CI extraction (app/cohere/dist).
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    mkdir -p /app/cohere/dist \
+    && cp -R /vllm-workspace/dist/* /app/cohere/dist/
+# cohere end
 
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \

@@ -366,8 +366,6 @@ class Sampler(nn.Module):
         )
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking_combine = holder is not None and holder.has_tracked_requests()
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking_combine = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
         if predict_bonus_token and (
@@ -394,17 +392,6 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
-        if holder is not None and holder.has_tracked_requests():
-            holder.update_state(
-                output_token_ids,
-                sampling_metadata.spec_token_ids,
-                repeat_indices=None,
-            )
-            logits = holder.apply_to_logits(
-                logits,
-                predict_bonus_token,
-                sampling_metadata.spec_token_ids,
-            )
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
                 output_token_ids,

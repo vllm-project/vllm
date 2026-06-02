@@ -3116,8 +3116,21 @@ class GPUModelRunner(
         model = self.get_model()
         if not is_pooling_model(model):
             return []
+        
+        # cohere start
+        supported_tasks = list(model.pooler.get_supported_tasks())
 
-        return list(model.pooler.get_supported_tasks())
+        if "token_classify" in supported_tasks and self.model_config.architectures[
+            0
+        ] not in [
+            "Cohere2ForRewardModel",
+            "CohereForRewardModel",
+            "Cohere2VisionForRewardModel",
+        ]:
+            supported_tasks.remove("token_classify")
+
+        return supported_tasks
+        # cohere end
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()

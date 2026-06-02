@@ -1827,6 +1827,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
+            skip_chat_template=args.skip_chat_template, # cohere
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2277,6 +2278,9 @@ class CustomMMDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
+        lora_path: str | None = None, # cohere
+        max_loras: int | None = None, # cohere
+        skip_chat_template: bool = False, # cohere
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,

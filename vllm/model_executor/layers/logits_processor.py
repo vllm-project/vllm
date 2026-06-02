@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
@@ -93,32 +94,6 @@ class LogitsProcessor(PluggableLayer):
         embedding_bias: torch.Tensor | None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
-
-        # Gather logits for TP
-        logits = self._gather_logits(logits)
-
-        # Remove paddings in vocab (if any).
-        if logits is not None:
-            logits = logits[..., : self.org_vocab_size]
-        return logits
-
-    def get_top_tokens(
-        self,
-        lm_head: VocabParallelEmbedding,
-        hidden_states: torch.Tensor,
-        embedding_bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Vocab-parallel argmax without all-gathering full logits.
-
-        Each TP rank computes local argmax, then only the (value, index) pairs
-        are gathered and reduced. Communication: O(batch * 2 * tp_size) vs
-        O(batch * vocab_size).
-        """
-        if self.scale <= 0.0 and self.scale != 1.0:
-            raise ValueError(
-                "The local argmax reduction optimization is not supported for "
-                "non-positive logit scaling factors."
         # cohere start
         if envs.VLLM_USE_LOGITS_FP32_COMPUTATION:
             if not hasattr(lm_head, "weight"):
@@ -158,6 +133,31 @@ class LogitsProcessor(PluggableLayer):
                 lm_head, hidden_states, bias=embedding_bias
             )
         # cohere end
+
+        # Gather logits for TP
+        logits = self._gather_logits(logits)
+
+        # Remove paddings in vocab (if any).
+        if logits is not None:
+            logits = logits[..., : self.org_vocab_size]
+        return logits
+
+    def get_top_tokens(
+        self,
+        lm_head: VocabParallelEmbedding,
+        hidden_states: torch.Tensor,
+        embedding_bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Vocab-parallel argmax without all-gathering full logits.
+
+        Each TP rank computes local argmax, then only the (value, index) pairs
+        are gathered and reduced. Communication: O(batch * 2 * tp_size) vs
+        O(batch * vocab_size).
+        """
+        if self.scale <= 0.0 and self.scale != 1.0:
+            raise ValueError(
+                "The local argmax reduction optimization is not supported for "
+                "non-positive logit scaling factors."
             )
         tp_size = get_tensor_model_parallel_world_size()
 

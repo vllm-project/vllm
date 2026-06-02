@@ -403,31 +403,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_symmetric
         )
 
-    # cohere start
-    # Port of vllm-project/vllm#38815 (df1e30e74); remove after this fork
-    # merges upstream past df1e30e74 (requires upstream #39187 + #39205).
-    @staticmethod
-    def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
-        if quant_args is None:
-            return False
-
-        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
-        is_symmetric = quant_args.symmetric
-        is_group_size_32 = quant_args.group_size == 32
-        is_float_type = quant_args.type == QuantizationType.FLOAT
-        is_8_bits = quant_args.num_bits == 8
-        is_mxfp8_scale_dtype = getattr(quant_args, "scale_dtype", None) == torch.uint8
-
-        return (
-            is_group_quant
-            and is_float_type
-            and is_8_bits
-            and is_group_size_32
-            and is_symmetric
-            and is_mxfp8_scale_dtype
-        )
-
-    # cohere end
     @staticmethod
     def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
@@ -652,12 +627,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A16Mxfp4()
 
-        # cohere start
-        # Port of vllm-project/vllm#38815 (df1e30e74); remove after this fork
-        # merges upstream past df1e30e74 (requires upstream #39187 + #39205).
-        if self._is_mxfp8(weight_quant):
-            return CompressedTensorsW8A8Mxfp8()
-        # cohere end
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
 

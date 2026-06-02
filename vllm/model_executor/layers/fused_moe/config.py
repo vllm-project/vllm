@@ -114,7 +114,7 @@ class RoutingMethodType(IntEnum):
     # TopK: TopK (no softmax)
     TopK = (5,)
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
-    SigmoidRenorm = (6,)
+    SigmoidRenorm = (6,) # cohere
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
     MiniMax2 = (7,)
     # Unspecified

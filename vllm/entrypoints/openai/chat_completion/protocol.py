@@ -582,14 +582,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        # cohere start
-        thinking_token_budget = self.thinking_token_budget
-        if thinking_token_budget is None:
-            thinking_token_budget = default_sampling_params.get("thinking_token_budget")
-        continue_thinking = self.continue_thinking
-        if continue_thinking is None:
-            continue_thinking = default_sampling_params.get("continue_thinking", False)
-        # cohere end
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
