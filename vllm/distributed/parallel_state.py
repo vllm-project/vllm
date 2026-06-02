@@ -335,6 +335,10 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+
+        timeout = get_cpu_distributed_timeout_or_none()
+
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
@@ -342,7 +346,9 @@ class GroupCoordinator:
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=timeout
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -472,15 +478,29 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
+        from vllm.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator)
+            assert isinstance(
+                self.device_communicator,
+                (CudaCommunicator, XpuCommunicator),
+            )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled():
+                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+                if aiter_ar is not None:
+                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -488,7 +508,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

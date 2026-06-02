@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
@@ -16,18 +15,23 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import MarlinFP8ScaledMMLinearKernel
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
+    SharedExperts,
+    UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -187,7 +191,7 @@ class Fp8Config(QuantizationConfig):
                 offline_method = Fp8LinearMethod(self)
                 offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return offline_method
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -269,6 +273,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
+        self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
@@ -310,7 +315,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         input_size_per_partition: int,
         output_partition_sizes: list[int],
         input_size: int,
@@ -362,6 +367,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 input_size_per_partition,
                 self.weight_block_size,
                 weight_loader,
+                scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
             )
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
@@ -383,7 +389,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.use_marlin:
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
@@ -434,8 +440,8 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
-        # we will use BF16 dequant when DeepGEMM is not supported.
+        # if batch invariant mode is enabled, prefer direct FP8 path
+        # we will use BF16 dequant when direct FP8 is not supported.
         if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
@@ -445,6 +451,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     bias,
                 )
             else:
+                if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+                    return self.fp8_linear.apply_weights(layer, x, bias)
+
                 # per-tensor/channel: dequant to BF16 and run GEMM
                 weight_fp8 = layer.weight.to(torch.bfloat16)
                 weight_scale = layer.weight_scale.to(torch.bfloat16)
@@ -525,7 +534,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         )
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -548,6 +557,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         else:
             weight = qweight.t()
             replace_parameter(layer, "weight", weight.data)
+            self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -566,7 +576,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+    def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
         self.weight_block_size = self.quant_config.weight_block_size
@@ -597,7 +607,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -737,7 +747,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -764,6 +774,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
+        # AITER backend requires weights to be marked as shuffled.
+        if self.fp8_backend == Fp8MoeBackend.AITER:
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
@@ -772,11 +787,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
+                routing_tables=layer._expert_routing_tables(),
             )
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -830,7 +844,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             "logic. This function should not be called."
         )
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
@@ -843,6 +857,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
         # Inject biases into the quant config if the model has them
@@ -863,9 +878,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def apply_monolithic(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -886,10 +902,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
@@ -904,6 +921,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
 
@@ -922,7 +940,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
     uses_meta_device: bool = True
 
-    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+    def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(quant_config, layer)
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
@@ -930,7 +948,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
     def create_weights(
         self,
-        layer: Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -996,7 +1014,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
         initialize_online_processing(layer)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # TODO(@ksayers): inplace fp8 quant kernel, initialize scales with ones
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return

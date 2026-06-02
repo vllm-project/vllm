@@ -70,9 +70,15 @@ class MockParallelConfig:
 
 
 @dataclass
+class MockSchedulerConfig:
+    max_num_seqs: int = 128
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -149,6 +155,9 @@ def _mock_engine() -> MagicMock:
     engine = MagicMock(spec=AsyncLLM)
     engine.errored = False
     engine.model_config = MockModelConfig()
+    engine.vllm_config = MockVllmConfig(
+        engine.model_config, parallel_config=MockParallelConfig()
+    )
     engine.input_processor = MagicMock()
     engine.renderer = _build_renderer(engine.model_config)
     return engine
