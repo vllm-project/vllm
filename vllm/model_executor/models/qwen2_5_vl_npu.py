@@ -61,16 +61,14 @@ class Qwen2_5_VisionTransformerNPU(nn.Module):
     def device(self) -> torch.device:
         return torch.device("cpu")
 
-    def split_embedding_sizes(
-        self, grid_thw: torch.Tensor, num_tokens: int
-    ) -> list[int]:
-        """Return per-image token counts for splitting concatenated embeddings."""
-        grid_thw_list = grid_thw.tolist()
-        if len(grid_thw_list) == 1:
-            return [num_tokens]
+    def split_embedding_sizes(self, grid_thw: torch.Tensor) -> list[int]:
+        from vllm.model_executor.models.qwen2_5_vl import (
+            split_qwen2_5_vision_embedding_sizes,
+        )
 
-        merge_size = self.spatial_merge_size
-        return (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return split_qwen2_5_vision_embedding_sizes(
+            grid_thw, self.spatial_merge_size
+        )
 
     def forward(
         self,
