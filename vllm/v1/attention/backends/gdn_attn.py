@@ -112,8 +112,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
-        self.is_mamba_cache_align: bool = (
+        self.use_align_src_dst: bool = (
             vllm_config.cache_config.mamba_cache_mode == "align"
+            and vllm_config.use_v2_model_runner
         )
 
         if self.speculative_config:
@@ -188,7 +189,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.non_spec_conv_src_state_indices_buf: torch.Tensor | None = None
         self.spec_conv_src_offset_buf: torch.Tensor | None = None
         self.non_spec_conv_src_offset_buf: torch.Tensor | None = None
-        if self.is_mamba_cache_align:
+        if self.use_align_src_dst:
             self.spec_src_state_indices_buf = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -243,7 +244,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # crossing, so we index m.block_table_tensor directly here. Split per
         # spec/non-spec below, mirroring the state-index tensors.
         align_src_full: torch.Tensor | None = None
-        if align_src_state_indices is not None and self.is_mamba_cache_align:
+        if align_src_state_indices is not None and self.use_align_src_dst:
             num_reqs_full = m.block_table_tensor.size(0)
             col = align_src_state_indices[:num_reqs_full].to(torch.int64)
             max_col = m.block_table_tensor.size(1) - 1
@@ -261,7 +262,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # block). The per-seq offset is carried through unchanged (batch order).
         align_conv_src_full: torch.Tensor | None = None
         align_conv_off_full: torch.Tensor | None = None
-        if align_conv_src_state_indices is not None and self.is_mamba_cache_align:
+        if align_conv_src_state_indices is not None and self.use_align_src_dst:
             num_reqs_full = m.block_table_tensor.size(0)
             ccol = align_conv_src_state_indices[:num_reqs_full].to(torch.int64)
             max_col = m.block_table_tensor.size(1) - 1
@@ -590,7 +591,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             # captured kernel bakes HAS_SRC_INDICES=True. At capture
             # spec_src_state_indices is None -> NULL-fill (kernel skips, safe);
             # at replay copy the real src in. Tail padded with NULL_BLOCK_ID.
-            if self.is_mamba_cache_align:
+            if self.use_align_src_dst:
                 assert self.spec_src_state_indices_buf is not None
                 if spec_src_state_indices is not None:
                     self.spec_src_state_indices_buf[:num_spec_decodes].copy_(
@@ -648,7 +649,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
             # SSM src (align): route through the persistent buffer so the
             # captured kernel bakes HAS_SRC_INDICES=True (see spec branch).
-            if self.is_mamba_cache_align:
+            if self.use_align_src_dst:
                 assert self.non_spec_src_state_indices_buf is not None
                 if non_spec_src_state_indices is not None:
                     self.non_spec_src_state_indices_buf[:num_decodes].copy_(
