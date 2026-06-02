@@ -6,9 +6,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
+    ChatCompletionRequest,
+)
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
@@ -443,4 +447,46 @@ def test_json_schema_response_format_missing_schema():
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
             response_format={"type": "json_schema"},
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_structural_tag_response_format_invalid(format_value):
+    """Malformed structural tags should be rejected during request validation."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("format_value", [None, {}])
+def test_batch_structural_tag_response_format_invalid(format_value):
+    """Batch chat should reject malformed structural tags at request parsing."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
+        BatchChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[[{"role": "user", "content": "hello"}]],
+            response_format={"type": "structural_tag", "format": format_value},
+        )
+
+
+@pytest.mark.parametrize("structural_tag", ["not json", ""])
+def test_structured_outputs_structural_tag_invalid(structural_tag):
+    """Malformed direct structured_outputs structural tags should be rejected."""
+    with pytest.raises(
+        ValidationError,
+        match="Invalid structured_outputs structural_tag",
+    ):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "hello"}],
+            structured_outputs={"structural_tag": structural_tag},
         )
