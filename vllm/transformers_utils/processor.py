@@ -177,7 +177,11 @@ def get_video_processor_cls_name_from_config(
     return None
 
 
-@lru_cache
+_cached_get_video_processor_cls_name = lru_cache(
+    get_video_processor_cls_name_from_config
+)
+
+
 def get_video_processor_cls_name(
     model_config: "ModelConfig",
 ) -> str | None:
@@ -192,7 +196,7 @@ def get_video_processor_cls_name(
         model = model_config.model
         revision = model_config.revision
 
-    return get_video_processor_cls_name_from_config(model, revision=revision)
+    return _cached_get_video_processor_cls_name(model, revision=revision)
 
 
 def get_processor(
