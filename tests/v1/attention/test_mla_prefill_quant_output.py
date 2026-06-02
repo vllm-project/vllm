@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for MLA prefill backend fused-quant-output capability gating.
+"""Tests for MLA prefill backend fused-quant-output support.
 
-Covers `MLAPrefillBackend.supports_quant_output`, which decides whether the
-prefill kernel writes quantized output directly (FA4 native fused FP8, see
-flash-attention#135) instead of going through the post-quant path.
+Covers two things:
+  * `MLAPrefillBackend.supports_quant_output`, the capability gate that decides
+    whether the prefill kernel writes quantized output directly (FA4 native
+    fused FP8, see flash-attention#135) instead of the post-quant path.
+  * The numerical equivalence of that fused FP8 write versus the bf16-attention
+    + standalone static-FP8-quant path it replaces (GPU-only, SM100/SM110).
 """
 
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -121,3 +125,83 @@ def test_mla_impl_forward_mha_accepts_output_scale():
     params = inspect.signature(MLAAttentionImpl.forward_mha).parameters
     assert "output_scale" in params
     assert params["output_scale"].default is None
+
+
+def _fused_fp8_skip_reason() -> str | None:
+    """FA4 fused FP8 output needs a real Blackwell SM100/SM110 GPU."""
+    if not torch.cuda.is_available():
+        return "requires CUDA"
+    major = torch.cuda.get_device_capability()[0]
+    if major not in (10, 11):
+        return f"FA4 fused FP8 output requires SM100/SM110, got SM{major}x"
+    return None
+
+
+_FUSED_FP8_SKIP = _fused_fp8_skip_reason()
+
+
+@pytest.mark.skipif(_FUSED_FP8_SKIP is not None, reason=_FUSED_FP8_SKIP or "")
+def test_fa4_fused_fp8_output_matches_post_quant(default_vllm_config):
+    """FA4's fused FP8 write (output_scale, flash-attention#135) must match the
+    bf16-attention + standalone static-FP8-quant path it replaces, since
+    production uses the same output_scale for both."""
+    from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+    from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+    from vllm.platforms import current_platform
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    fp8_dtype = current_platform.fp8_dtype()
+
+    # MLA prefill head dims (post kv_b_proj): q/k = qk_nope(128)+qk_rope(64),
+    # v = v_head_dim(128); DeepSeek-V2-Lite has 16 query heads.
+    num_heads, qk_head_dim, v_head_dim, seqlen = 16, 192, 128, 512
+    cu_seqlens = torch.tensor([0, seqlen], dtype=torch.int32, device=device)
+    q = torch.randn(seqlen, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device)
+    k = torch.randn(seqlen, num_heads, qk_head_dim, dtype=torch.bfloat16, device=device)
+    v = torch.randn(seqlen, num_heads, v_head_dim, dtype=torch.bfloat16, device=device)
+
+    fa_kwargs = dict(
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        max_seqlen_q=seqlen,
+        max_seqlen_k=seqlen,
+        causal=True,
+        fa_version=4,
+    )
+
+    # Reference: bf16 attention, then standalone static per-tensor FP8 quant.
+    out_bf16 = flash_attn_varlen_func(q=q, k=k, v=v, **fa_kwargs)
+    out_2d = out_bf16.reshape(seqlen, num_heads * v_head_dim)
+    # Scale the amax near e4m3 max so the check uses the representable range.
+    finfo = torch.finfo(fp8_dtype)
+    scale = (out_2d.abs().max() / finfo.max).to(torch.float32).reshape(1)
+    quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+    ref_fp8, _ = quant_op(out_2d, scale)
+
+    # Feature: FA4 writes e4m3 into the (tokens, heads*dim) buffer directly.
+    fused_fp8 = torch.empty(
+        seqlen, num_heads * v_head_dim, dtype=fp8_dtype, device=device
+    )
+    flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        out=fused_fp8.view(seqlen, num_heads, v_head_dim),
+        output_scale=scale,
+        **fa_kwargs,
+    )
+
+    # Non-degenerate (catches a no-op / all-zero write).
+    assert torch.isfinite(fused_fp8.float()).all()
+    assert fused_fp8.float().abs().any()
+
+    # e4m3 has 3 mantissa bits, so allow ~1 mantissa step of rounding slack.
+    ref = ref_fp8.float() * scale
+    got = fused_fp8.float() * scale
+    torch.testing.assert_close(got, ref, rtol=0.125, atol=float(scale) * 2)
+
+    # ...and most elements land in the exact same fp8 bucket.
+    exact = (fused_fp8.view(torch.uint8) == ref_fp8.view(torch.uint8)).float().mean()
+    assert exact > 0.9, f"only {exact:.1%} of fused FP8 outputs matched the baseline"
