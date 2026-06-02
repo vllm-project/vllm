@@ -4,7 +4,7 @@ import gc
 import json
 import time
 from collections import Counter
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from typing import Any
 
 import vllm.envs as envs
@@ -106,6 +106,23 @@ def freeze_gc_heap() -> None:
     gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
+
+
+@contextmanager
+def freeze_gc():
+    """Temporarily freeze GC to avoid interference during operations like
+    CUDA graph capture. Collects garbage first, then freezes unless
+    VLLM_ENABLE_CUDAGRAPH_GC is set."""
+    gc.collect()
+    should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+    if should_freeze:
+        gc.freeze()
+    try:
+        yield
+    finally:
+        if should_freeze:
+            gc.unfreeze()
+            gc.collect()
 
 
 def maybe_attach_gc_debug_callback() -> None:

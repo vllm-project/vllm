@@ -112,6 +112,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import freeze_gc
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -6256,20 +6257,6 @@ class GPUModelRunner(
 
         logger.debug("Initialized minimal KV cache for CUDA graph profiling")
 
-    @staticmethod
-    @contextmanager
-    def _freeze_gc():
-        gc.collect()
-        should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
-        if should_freeze:
-            gc.freeze()
-        try:
-            yield
-        finally:
-            if should_freeze:
-                gc.unfreeze()
-                gc.collect()
-
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
@@ -6412,7 +6399,7 @@ class GPUModelRunner(
         # because encoder graph capture is opt-in.
         try:
             set_cudagraph_capturing_enabled(True)
-            with self._freeze_gc(), graph_capture(device=self.device):
+            with freeze_gc(), graph_capture(device=self.device):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
@@ -6523,7 +6510,7 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
-        with self._freeze_gc(), graph_capture(device=self.device):
+        with freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
