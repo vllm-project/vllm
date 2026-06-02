@@ -1502,7 +1502,9 @@ def test_update_state_after_alloc_soak_24_rounds_43884(round_idx: int):
     num_external = gpu_block_size * (1 + round_idx % 3)
     hash_cap = num_hashed * gpu_block_size
     effective_local = min(stale_local, hash_cap)
-    num_gpu_blocks = (effective_local + num_external + gpu_block_size - 1) // gpu_block_size
+    num_gpu_blocks = (
+        effective_local + num_external + gpu_block_size - 1
+    ) // gpu_block_size
     num_total = max(num_gpu_blocks, num_hashed)
 
     scheduler, manager = _make_single_group_offload_scheduler(gpu_block_size)
