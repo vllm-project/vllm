@@ -539,7 +539,11 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             return
 
         # TODO(future): support block_quant in online quant path
-        assert not self.block_quant
+        if self.block_quant:
+            raise NotImplementedError(
+                "Block quantization is not yet supported in the online "
+                "quantization path. Please use a pre-quantized checkpoint."
+            )
 
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
@@ -618,7 +622,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        assert self.quant_config.is_checkpoint_fp8_serialized
+        if not self.quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "FP8 MoE with serialized weights requires a pre-quantized "
+                "FP8 checkpoint (is_checkpoint_fp8_serialized=True)."
+            )
         params_dtype = torch.float8_e4m3fn
 
         if self.block_quant:
@@ -883,8 +891,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
+        if not self.is_monolithic:
+            raise ValueError(
+                "apply_monolithic() called on a non-monolithic FP8 MoE method. "
+                "Use apply() instead."
+            )
+        if self.moe_kernel is None:
+            raise ValueError(
+                "MoE kernel is not initialized. Ensure create_weights() "
+                "was called before apply_monolithic()."
+            )
         return self.moe_kernel.apply_monolithic(
             x,
             layer.w13_weight,
@@ -909,8 +925,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        assert not self.is_monolithic
-        assert self.moe_kernel is not None
+        if self.is_monolithic:
+            raise ValueError(
+                "apply() called on a monolithic FP8 MoE method. "
+                "Use apply_monolithic() instead."
+            )
+        if self.moe_kernel is None:
+            raise ValueError(
+                "MoE kernel is not initialized. Ensure create_weights() "
+                "was called before apply()."
+            )
         return self.moe_kernel.apply(
             x,
             layer.w13_weight,
@@ -942,9 +966,21 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: RoutedExperts):
         super().__init__(quant_config, layer)
-        assert not quant_config.is_checkpoint_fp8_serialized
-        assert quant_config.activation_scheme == "dynamic"
-        assert quant_config.weight_block_size is None
+        if quant_config.is_checkpoint_fp8_serialized:
+            raise ValueError(
+                "DynamicFP8MoEMethod does not support pre-serialized FP8 "
+                "checkpoints. Use Fp8MoEMethod for serialized checkpoints."
+            )
+        if quant_config.activation_scheme != "dynamic":
+            raise ValueError(
+                f"DynamicFP8MoEMethod requires dynamic activation quantization, "
+                f"but got activation_scheme={quant_config.activation_scheme!r}."
+            )
+        if quant_config.weight_block_size is not None:
+            raise ValueError(
+                "DynamicFP8MoEMethod does not support block quantization "
+                f"(weight_block_size={quant_config.weight_block_size})."
+            )
 
     def create_weights(
         self,
