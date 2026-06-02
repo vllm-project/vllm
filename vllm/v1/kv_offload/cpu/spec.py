@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 
+from typing_extensions import override
+
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -57,6 +59,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
+    @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
@@ -88,6 +91,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             num_cpu_blocks=self.num_blocks,
         )
 
+    @override
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
