@@ -174,6 +174,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_request_id_headers: bool,
 
+    /// If provided, the server will require one of these keys to be presented
+    /// in the Authorization header.
+    #[educe(Debug(ignore))]
+    #[arg(long = "api-key", value_name = "API_KEY")]
+    #[serde(default, deserialize_with = "deserialize_api_keys")]
+    pub api_key: Vec<String>,
+
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage).
     #[arg(long)]
@@ -211,6 +218,15 @@ impl SharedRuntimeArgs {
         Duration::from_secs(self.shutdown_timeout)
     }
 
+    fn resolved_api_keys(&self) -> Vec<String> {
+        let keys = if self.api_key.is_empty() {
+            std::env::var("VLLM_API_KEY").ok().into_iter().collect::<Vec<_>>()
+        } else {
+            self.api_key.clone()
+        };
+        keys.into_iter().filter(|key| !key.is_empty()).collect()
+    }
+
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
     ///
     /// The resulting config binds the Python-supplied transport addresses and
@@ -225,6 +241,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let api_keys = self.resolved_api_keys();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -248,6 +265,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
+            api_keys,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -267,6 +285,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let api_keys = self.resolved_api_keys();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -289,6 +308,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
+            api_keys,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -298,6 +318,28 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn deserialize_api_keys<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<Value>::deserialize(deserializer)? {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(value)) => Ok(vec![value]),
+        Some(Value::Array(values)) => values
+            .into_iter()
+            .map(|value| match value {
+                Value::String(value) => Ok(value),
+                _ => Err(serde::de::Error::custom(
+                    "api_key must be a string or an array of strings",
+                )),
+            })
+            .collect(),
+        Some(_) => Err(serde::de::Error::custom(
+            "api_key must be a string or an array of strings",
+        )),
+    }
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {

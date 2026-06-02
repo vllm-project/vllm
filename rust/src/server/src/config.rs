@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -33,7 +34,7 @@ pub enum CoordinatorMode {
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Config {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
@@ -64,6 +65,9 @@ pub struct Config {
     pub enable_log_requests: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// API keys accepted as bearer tokens for guarded routes.
+    #[serde(skip_serializing)]
+    pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
@@ -108,6 +112,48 @@ impl Config {
             CoordinatorMode::External { address } => Some(EngineCoreCoordinatorMode::External {
                 address: address.clone(),
             }),
+        }
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("transport_mode", &self.transport_mode)
+            .field("coordinator_mode", &self.coordinator_mode)
+            .field("model", &self.model)
+            .field("served_model_name", &self.served_model_name)
+            .field("listener_mode", &self.listener_mode)
+            .field("tool_call_parser", &self.tool_call_parser)
+            .field("reasoning_parser", &self.reasoning_parser)
+            .field("renderer", &self.renderer)
+            .field("chat_template", &self.chat_template)
+            .field(
+                "default_chat_template_kwargs",
+                &self.default_chat_template_kwargs,
+            )
+            .field(
+                "chat_template_content_format",
+                &self.chat_template_content_format,
+            )
+            .field("enable_log_requests", &self.enable_log_requests)
+            .field("enable_request_id_headers", &self.enable_request_id_headers)
+            .field("api_keys", &RedactedApiKeys(&self.api_keys))
+            .field("disable_log_stats", &self.disable_log_stats)
+            .field("grpc_port", &self.grpc_port)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .finish()
+    }
+}
+
+struct RedactedApiKeys<'a>(&'a [String]);
+
+impl fmt::Debug for RedactedApiKeys<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.debug_list().finish()
+        } else {
+            write!(f, "[<redacted>; {}]", self.0.len())
         }
     }
 }

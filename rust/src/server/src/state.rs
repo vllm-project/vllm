@@ -27,6 +27,8 @@ pub struct AppState {
     pub enable_request_id_headers: bool,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
+    /// API keys accepted as bearer tokens for guarded routes.
+    api_keys: Vec<String>,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -53,6 +55,7 @@ impl AppState {
             enable_log_requests: false,
             enable_request_id_headers: false,
             server_info: None,
+            api_keys: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -82,6 +85,20 @@ impl AppState {
         config_format: ServerInfoConfigFormat,
     ) -> Option<Value> {
         self.server_info.as_ref().map(|server_info| server_info.response(config_format))
+    }
+
+    /// Configure API keys accepted by guarded HTTP routes.
+    pub fn with_api_keys(mut self, api_keys: Vec<String>) -> Self {
+        self.api_keys = api_keys.into_iter().filter(|key| !key.is_empty()).collect();
+        self
+    }
+
+    pub(crate) fn has_api_keys(&self) -> bool {
+        !self.api_keys.is_empty()
+    }
+
+    pub(crate) fn api_keys(&self) -> &[String] {
+        &self.api_keys
     }
 
     /// The primary model name echoed back in API responses (the first served

@@ -1,0 +1,85 @@
+use std::sync::Arc;
+
+use axum::Json;
+use axum::extract::{Request, State};
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderValue, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use serde_json::json;
+
+use crate::state::AppState;
+
+const GUARDED_PREFIXES: &[&str] = &["/v1", "/v2", "/inference"];
+
+/// Authenticate guarded HTTP routes with an OpenAI-compatible bearer token.
+///
+/// Mirrors Python `AuthenticationMiddleware`: OPTIONS requests and non-guarded
+/// helper endpoints such as `/health` are allowed through without a token.
+pub async fn authenticate_api_key(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if req.method() == Method::OPTIONS || !requires_auth(req.uri().path()) {
+        return next.run(req).await;
+    }
+
+    if verify_token(req.headers().get(AUTHORIZATION), state.api_keys()) {
+        return next.run(req).await;
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({ "error": "Unauthorized" })),
+    )
+        .into_response()
+}
+
+fn requires_auth(path: &str) -> bool {
+    GUARDED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+}
+
+fn verify_token(authorization: Option<&HeaderValue>, api_keys: &[String]) -> bool {
+    let Some(authorization) = authorization else {
+        return false;
+    };
+    let Ok(authorization) = authorization.to_str() else {
+        return false;
+    };
+    let Some((scheme, token)) = authorization.split_once(' ') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+
+    let mut token_match = false;
+    for api_key in api_keys {
+        token_match |= constant_time_eq(token.as_bytes(), api_key.as_bytes());
+    }
+    token_match
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    for index in 0..left.len().max(right.len()) {
+        let left = left.get(index).copied().unwrap_or_default();
+        let right = right.get(index).copied().unwrap_or_default();
+        diff |= usize::from(left ^ right);
+    }
+    diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_checks_content_and_length() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secrex"));
+        assert!(!constant_time_eq(b"secret", b"secret-more"));
+        assert!(!constant_time_eq(b"secret-more", b"secret"));
+    }
+}
