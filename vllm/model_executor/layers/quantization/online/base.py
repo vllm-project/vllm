@@ -33,6 +33,8 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineMoEMethod,
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
+    Fp8PtpcOnlineLinearMethod,  # cohere
+    Fp8PtpcOnlineMoEMethod,  # cohere
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
@@ -166,6 +168,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                     "weights. linear layers remain in full precision."
                 )
                 return UnquantizedLinearMethod()
+            elif linear_scheme == OnlineQuantScheme.FP8_PER_CHANNEL:  # cohere
+                return Fp8PtpcOnlineLinearMethod()  # cohere
             elif linear_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineLinearMethod()
             elif linear_scheme == OnlineQuantScheme.MXFP8:
@@ -183,6 +187,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
             moe_scheme = self.args.moe_scheme_override or self.args.global_scheme
             if moe_scheme == OnlineQuantScheme.INT8_PER_CHANNEL_WEIGHT_ONLY:
                 return Int8OnlineMoEMethod(layer=layer)
+            elif moe_scheme == OnlineQuantScheme.FP8_PER_CHANNEL:  # cohere
+                return Fp8PtpcOnlineMoEMethod(layer=layer)  # cohere
             elif moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineMoEMethod(layer=layer)
             elif moe_scheme == OnlineQuantScheme.MXFP8:

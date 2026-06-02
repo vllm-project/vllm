@@ -264,7 +264,10 @@ def test_online_quantize_reload(
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough GPU devices")
 
-    if quantization == "fp8" and not current_platform.supports_fp8():
+    if (
+        quantization in ("fp8", "fp8_per_channel")  # cohere
+        and not current_platform.supports_fp8()
+    ):
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(

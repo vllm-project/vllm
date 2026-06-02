@@ -15,6 +15,12 @@ class OnlineQuantScheme(Enum):
     # fp8, weights and activations scaled per-tensor
     FP8_PER_TENSOR = "fp8_per_tensor"
 
+    # cohere start
+    # fp8, weights scaled per-output-channel, activations scaled dynamically
+    # per-token (the standard "FP8_DYNAMIC" recipe shape)
+    FP8_PER_CHANNEL = "fp8_per_channel"
+    # cohere end
+
     # fp8, activations scaled in blocks of 1x128 elements, weights scaled in
     # blocks of 128x128 elements (popularized by DeepSeek)
     FP8_PER_BLOCK = "fp8_per_block"
