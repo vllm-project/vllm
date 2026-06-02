@@ -572,13 +572,6 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
         return out
 
 
-def split_qwen2_5_vision_embedding_sizes(
-    grid_thw: torch.Tensor, spatial_merge_size: int
-) -> list[int]:
-    """Per-image vision token counts from grid_thw (shared by GPU and NPU towers)."""
-    return (grid_thw.prod(-1) // spatial_merge_size // spatial_merge_size).tolist()
-
-
 class Qwen2_5_VisionTransformer(nn.Module):
     def __init__(
         self,
@@ -666,9 +659,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
     @property
     def device(self) -> torch.device:
         return self.patch_embed.proj.weight.device
-
-    def split_embedding_sizes(self, grid_thw: torch.Tensor) -> list[int]:
-        return split_qwen2_5_vision_embedding_sizes(grid_thw, self.spatial_merge_size)
 
     def rotary_pos_emb_thw(self, t, h, w):
         hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -1264,7 +1254,8 @@ class Qwen2_5_VLForConditionalGeneration(
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
-        sizes = self.visual.split_embedding_sizes(grid_thw)
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return image_embeds.split(sizes)
 
     def _postprocess_image_embeds_evs(
