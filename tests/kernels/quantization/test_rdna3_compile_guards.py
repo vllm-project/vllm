@@ -28,6 +28,7 @@ import pytest
 import regex as re
 import torch
 
+import vllm
 from vllm.platforms import current_platform
 
 if not current_platform.is_rocm():
@@ -63,23 +64,46 @@ def _find_repo_root() -> Path | None:
 
 REPO_ROOT = _find_repo_root()
 
+# Directory of the *installed* vllm python package. The .py guard checks read
+# from here so they verify the code that is actually imported at runtime — this
+# works even on CI images that ship the wheel instead of the python source tree
+# (where only csrc/ + CMakeLists.txt are checked out for building).
+VLLM_PKG_DIR: Path | None = (
+    Path(vllm.__file__).parent if getattr(vllm, "__file__", None) else None
+)
+
 needs_source = pytest.mark.skipif(
     REPO_ROOT is None,
-    reason="Repo source tree not available (installed package only)",
+    reason="C/CMake source tree not available (installed package only)",
 )
 
 
 def _read_source_or_skip(*relparts: str) -> str:
-    """Read a repo source file, or skip if it isn't in the source tree.
+    """Read a C/CMake source file from the repo tree, or skip if absent.
 
-    Some CI images expose only part of the tree (e.g. csrc/ + CMakeLists.txt
-    for building, but the installed wheel instead of the vllm/ python source).
-    In that case the file-level guard checks can't run — skip rather than fail.
+    Used for csrc/ and CMakeLists.txt — these only exist in a source checkout,
+    not in the installed wheel.
     """
     assert REPO_ROOT is not None  # callers are gated by @needs_source
     path = REPO_ROOT.joinpath(*relparts)
     if not path.exists():
         pytest.skip(f"{path} not present in this source tree")
+    return path.read_text()
+
+
+def _read_pkg_source_or_skip(*relparts: str) -> str:
+    """Read a python source file from the installed vllm package.
+
+    Reflects the code actually loaded at runtime, so these guard checks run in
+    CI against the wheel — no source checkout required. Only skips for an
+    exotic install layout (namespace/zipimport) where __file__ is unavailable.
+    """
+    if VLLM_PKG_DIR is None:
+        pytest.skip("vllm package directory not resolvable (zip/namespace?)")
+    assert VLLM_PKG_DIR is not None  # narrow for mypy (skip above is NoReturn)
+    path = VLLM_PKG_DIR.joinpath(*relparts)
+    if not path.exists():
+        pytest.skip(f"{path} not present in installed vllm package")
     return path.read_text()
 
 
@@ -287,13 +311,12 @@ class TestTorchBindingsGuards:
                 )
 
 
-@needs_source
 class TestCustomOpsGuards:
     """Verify _custom_ops.py gates register_fake behind hasattr checks."""
 
     @staticmethod
     def _read_custom_ops():
-        return _read_source_or_skip("vllm", "_custom_ops.py")
+        return _read_pkg_source_or_skip("_custom_ops.py")
 
     def test_register_fake_guarded_by_hasattr(self):
         """Every register_fake for an RDNA3 op must be preceded by a hasattr
@@ -451,14 +474,12 @@ class TestDenseKernelSelectionMocked:
             )
 
 
-@needs_source
 class TestCompressedTensorsMoEDispatchGuard:
     """Verify compressed_tensors_moe.py only enters rocm_moe under is_rocm()."""
 
     def test_rocm_guard_in_dispatch_source(self):
         """The rocm_moe import and call must be inside an is_rocm() check."""
-        src = _read_source_or_skip(
-            "vllm",
+        src = _read_pkg_source_or_skip(
             "model_executor",
             "layers",
             "quantization",
