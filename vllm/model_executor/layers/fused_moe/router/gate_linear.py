@@ -78,7 +78,7 @@ class GateLinear(ReplicatedLinear):
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
         self.allow_ll_bf16_gemm = False
         if can_use_specialized_kernels:
-            from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 is_available,
             )
 
@@ -108,7 +108,7 @@ class GateLinear(ReplicatedLinear):
 
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16:
-            from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 ll_bf16_gemm,
             )
 

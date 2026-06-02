@@ -13,7 +13,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def _require_sm90_and_cutedsl():
     if torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("Requires SM90+ (Hopper/Blackwell)")
-    from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         is_available,
     )
 
@@ -41,7 +41,7 @@ def _assert_close(out, ref, *, min_cos_sim=0.99, context=""):
 
 
 def _gemm(a, b):
-    from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
+    from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
         ll_bf16_gemm,
     )
 

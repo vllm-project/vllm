@@ -146,9 +146,9 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/model_executor/kernels/cute_dsl/ll_bf16.py
-  - vllm/model_executor/kernels/cute_dsl/_ll_bf16_dotprod.py
-  - vllm/model_executor/kernels/cute_dsl/_ll_bf16_splitk.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
   - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
