@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseMetadata,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
@@ -65,21 +66,32 @@ def _maybe_gather_dcp_q(q: torch.Tensor) -> tuple[torch.Tensor, GroupCoordinator
     return q, dcp_group, use_dcp
 
 
+def _squeeze_flashmla_out(out: torch.Tensor) -> torch.Tensor:
+    if out.ndim == 4 and out.shape[1] == 1:
+        return out.squeeze(1)
+    assert out.ndim == 3, f"Unexpected FlashMLA output shape: {tuple(out.shape)}"
+    return out
+
+
 def _merge_dcp_flashmla_output(
     out: torch.Tensor,
     lse: torch.Tensor,
     dcp_group: GroupCoordinator,
     attn_sink: torch.Tensor,
     output: torch.Tensor,
+    use_a2a: bool,
 ) -> None:
-    if out.ndim == 3 and out.shape[1] == 1:
-        out = out.squeeze(1)
-    out, lse = cp_lse_ag_out_rs(
-        out,
-        _squeeze_flashmla_lse(lse),
-        dcp_group,
-        return_lse=True,
-    )
+    out = _squeeze_flashmla_out(out)
+    lse = _squeeze_flashmla_lse(lse)
+    if use_a2a:
+        out, lse = dcp_a2a_lse_reduce(
+            out,
+            lse,
+            dcp_group,
+            return_lse=True,
+        )
+    else:
+        out, lse = cp_lse_ag_out_rs(out, lse, dcp_group, return_lse=True)
     _copy_with_attn_sink(out, lse, attn_sink, output)
 
 
@@ -378,6 +390,7 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 dcp_group,
                 layer.attn_sink,
                 output,
+                use_a2a=True,
             )
 
     @classmethod
@@ -530,4 +543,5 @@ class DeepseekV4FlashMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                     dcp_group,
                     layer.attn_sink,
                     output[query_start:query_end],
+                    use_a2a=False,
                 )

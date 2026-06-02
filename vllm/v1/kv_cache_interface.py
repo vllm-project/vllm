@@ -147,6 +147,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    supports_context_parallel: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -258,6 +259,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            supports_context_parallel=specs[0].supports_context_parallel,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -393,6 +395,9 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            supports_context_parallel=all(
+                spec.supports_context_parallel for spec in specs
+            ),
         )
 
 
@@ -568,6 +573,9 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            supports_context_parallel=all(
+                spec.supports_context_parallel for spec in specs
+            ),
         )
 
 

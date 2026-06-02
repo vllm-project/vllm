@@ -21,8 +21,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
 )
 from vllm.v1.request import Request
 
@@ -436,8 +434,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         assert all(
             block_size % hash_block_size == 0 for block_size in group_block_sizes
         ), "block_size must be divisible by hash_block_size"
-        assert dcp_world_size == 1 or self._supports_dcp_hybrid_mla(), (
-            "DCP only supports DeepSeekV4 hybrid MLA KV cache groups now."
+        assert dcp_world_size == 1 or self._supports_dcp_hybrid_kv_cache(), (
+            "DCP only supports hybrid KV cache groups whose specs declare "
+            "context parallel support."
         )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
@@ -445,13 +444,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
     def _effective_block_size(self, spec: KVCacheSpec) -> int:
         return spec.block_size * self.dcp_world_size * self.pcp_world_size
 
-    def _supports_dcp_hybrid_mla(self) -> bool:
+    def _supports_dcp_hybrid_kv_cache(self) -> bool:
         specs = [g.kv_cache_spec for g in self.kv_cache_config.kv_cache_groups]
-        return all(
-            isinstance(spec, MLAAttentionSpec | SlidingWindowMLASpec) for spec in specs
-        ) and any(
-            getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs
-        )
+        return all(getattr(spec, "supports_context_parallel", False) for spec in specs)
 
     def verify_and_split_kv_cache_groups(self) -> None:
         """

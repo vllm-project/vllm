@@ -596,16 +596,11 @@ def resolve_kv_cache_block_sizes(
         return bs, bs
 
     if dcp != 1 or pcp != 1:
-        hf_config = vllm_config.model_config.hf_config
-        is_deepseek_v4 = getattr(hf_config, "model_type", None) == "deepseek_v4"
-        is_mla_hybrid = all(
-            isinstance(
-                group.kv_cache_spec,
-                MLAAttentionSpec | SlidingWindowMLASpec,
-            )
+        supports_context_parallel = all(
+            getattr(group.kv_cache_spec, "supports_context_parallel", False)
             for group in groups
         )
-        if pcp != 1 or not (is_deepseek_v4 and is_mla_hybrid):
+        if pcp != 1 or not supports_context_parallel:
             raise ValueError(
                 "Hybrid KV cache groups with multiple block sizes do not "
                 "support context parallelism (dcp_world_size/pcp_world_size > 1)."
@@ -1395,6 +1390,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     alignment=spec.alignment,
                     compress_ratio=spec.compress_ratio,
                     model_version=spec.model_version,
+                    supports_context_parallel=spec.supports_context_parallel,
                 )
             elif isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(

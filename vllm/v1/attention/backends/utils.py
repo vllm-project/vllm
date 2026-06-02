@@ -36,7 +36,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.attention.backends.cp_mapping import get_cp_local_seq_lens
+from vllm.v1.attention.ops.cp_mapping import get_cp_local_seq_lens
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]

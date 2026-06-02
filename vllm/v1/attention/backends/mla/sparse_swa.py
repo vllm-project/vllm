@@ -85,6 +85,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=576,  # NOTE: FlashMLA requires 576B alignment
             model_version="deepseek_v4",
+            supports_context_parallel=True,
         )
 
     def forward(self): ...

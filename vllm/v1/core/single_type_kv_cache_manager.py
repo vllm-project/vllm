@@ -568,9 +568,9 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1 or isinstance(kv_cache_spec, SlidingWindowMLASpec), (
-            "DCP only supports sliding window MLA now."
-        )
+        assert dcp_world_size == 1 or getattr(
+            kv_cache_spec, "supports_context_parallel", False
+        ), "DCP only supports sliding window specs with context parallel support."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         block_size = kv_cache_spec.block_size

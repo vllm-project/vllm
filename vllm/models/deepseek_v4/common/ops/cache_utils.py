@@ -18,7 +18,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
-from vllm.v1.attention.backends.cp_mapping import (
+from vllm.v1.attention.ops.cp_mapping import (
     cp_global_to_local_pos,
     cp_is_local_pos,
 )

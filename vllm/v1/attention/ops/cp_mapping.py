@@ -16,10 +16,10 @@ def cp_local_to_global_indices(
     interleave_blocks = safe_indices // cp_kv_cache_interleave_size
     interleave_offsets = safe_indices % cp_kv_cache_interleave_size
     global_indices = (
-        interleave_blocks * cp_kv_cache_interleave_size * cp_world_size
+        interleave_blocks * (cp_kv_cache_interleave_size * cp_world_size)
         + cp_rank * cp_kv_cache_interleave_size
-        + interleave_offsets
     )
+    global_indices += interleave_offsets
     return torch.where(local_indices >= 0, global_indices, -1)
 
 
@@ -34,29 +34,23 @@ def get_cp_local_seq_lens(
         rank_offsets = (
             torch.arange(cp_world_size, dtype=torch.int32, device=seq_lens.device)
             .unsqueeze(0)
-            .repeat(num_requests, 1)
+            .expand(num_requests, -1)
         )
     else:
         rank_offsets = torch.tensor(
             [[cp_rank]], dtype=torch.int32, device=seq_lens.device
         )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
-    base = (
-        seq_lens_tiled
-        // cp_kv_cache_interleave_size
-        // cp_world_size
-        * cp_kv_cache_interleave_size
-    )
+    seq_lens_tiled = seq_lens.to(torch.int32).unsqueeze(-1)
+    seq_lens_tiled = seq_lens_tiled.expand(-1, rank_offsets.shape[1])
+    rank_stride = cp_world_size * cp_kv_cache_interleave_size
+    base = seq_lens_tiled // rank_stride * cp_kv_cache_interleave_size
     remainder = seq_lens_tiled - base * cp_world_size
-    remainder = torch.clip(
+    extra = torch.clip(
         remainder - rank_offsets * cp_kv_cache_interleave_size,
         0,
         cp_kv_cache_interleave_size,
     )
-    local_seq_lens = base + remainder
-    return local_seq_lens.squeeze(1)
+    return (base + extra).squeeze(1)
 
 
 @triton.jit
@@ -66,12 +60,8 @@ def cp_global_to_local_pos(
     CP_RANK: tl.constexpr,
     CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
-    base = (
-        pos
-        // CP_KV_CACHE_INTERLEAVE_SIZE
-        // CP_WORLD_SIZE
-        * CP_KV_CACHE_INTERLEAVE_SIZE
-    )
+    rank_stride = CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE
+    base = pos // rank_stride * CP_KV_CACHE_INTERLEAVE_SIZE
     remainder = pos - base * CP_WORLD_SIZE
     extra = tl.minimum(
         tl.maximum(remainder - CP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE, 0),

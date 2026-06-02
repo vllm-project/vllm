@@ -668,6 +668,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576,  # NOTE: FlashMLA requires 576B alignment
             model_version="deepseek_v4",
+            supports_context_parallel=True,
         )
 
     def forward(
@@ -713,6 +714,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=576,
+            supports_context_parallel=self.compress_ratio > 1,
         )
 
     def forward(self): ...
