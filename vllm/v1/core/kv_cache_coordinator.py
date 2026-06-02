@@ -401,7 +401,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         max_num_batched_tokens: int,
@@ -560,10 +559,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             curr_hit_length = hit_length
 
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                # PD-pull path: Mamba state is not transferred, so do not let
-                # an empty Mamba lookup shrink the hit length. We still leave
-                # an empty block list for the group so downstream allocation
-                # treats it as "no cached blocks".
+                # In PD disaggregation, Mamba running/temporal state is only transferred.
+                # If we did consider Mamba groups in reducing the hit length, then when Mamba groups have zero hit in the consumer side,
+                # it would reduce the hit length to zero and defeat prefix caching on the consumer side.
+                
+                # Skip Mamba groups in hit-length reduction.
                 if skip_mamba_align and isinstance(spec, MambaSpec):
                     if hit_blocks_by_group[group_ids[0]] is None:
                         empty_blocks: list[KVCacheBlock] = []
