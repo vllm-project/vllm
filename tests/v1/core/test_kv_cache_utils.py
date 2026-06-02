@@ -12,6 +12,14 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.kv_cache_plan.utils import (
+    is_kv_cache_spec_uniform,
+    unify_hybrid_kv_cache_specs,
+)
+from vllm.models.deepseek_v4.nvidia.kv_cache_planner_utils import (
+    get_max_concurrency_for_kv_cache_config,
+    project_kv_cache_groups_to_worker,
+)
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -29,11 +37,9 @@ from vllm.v1.core.kv_cache_utils import (
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
-    get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
-    is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,
 )
@@ -1177,16 +1183,12 @@ def test_project_kv_cache_groups_to_worker():
         KVCacheGroupSpec(["layer1", "layer2", "layer3"], spec_a),
     ]
     worker_spec = {"layer1": spec_a, "layer2": spec_a}
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
-        global_groups, worker_spec
-    )
+    projected = project_kv_cache_groups_to_worker(global_groups, worker_spec)
     assert len(projected) == 1
     assert projected[0].layer_names == ["layer1", "layer2"]
     assert projected[0].kv_cache_spec is spec_a
 
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
-        global_groups, {"layer4": spec_a}
-    )
+    projected = project_kv_cache_groups_to_worker(global_groups, {"layer4": spec_a})
     assert len(projected) == 1
     assert projected[0].layer_names == []
     assert projected[0].kv_cache_spec is spec_a
@@ -1198,7 +1200,7 @@ def test_project_kv_cache_groups_to_worker():
     global_groups_uniform = [
         KVCacheGroupSpec(["layer1", "layer2", "layer3"], uniform_spec),
     ]
-    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+    projected = project_kv_cache_groups_to_worker(
         global_groups_uniform, {"layer1": spec_a, "layer3": spec_a}
     )
     assert len(projected) == 1
@@ -2181,6 +2183,66 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
+def test_get_kv_cache_planner_resolves_model_specific_planner():
+    from vllm.model_executor.kv_cache_plan.model_kv_cache_planner import (
+        DefaultModelKVCachePlanner,
+    )
+    from vllm.models.deepseek_v4.nvidia.kv_cache_planner import (
+        DeepseekV4KVCachePlanner,
+    )
+
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    assert isinstance(
+        kv_cache_utils.get_kv_cache_planner(vllm_config),
+        DefaultModelKVCachePlanner,
+    )
+
+    vllm_config.model_config.kv_cache_planner_cls = (
+        "vllm.models.deepseek_v4.nvidia.kv_cache_planner.DeepseekV4KVCachePlanner"
+    )
+    assert isinstance(
+        kv_cache_utils.get_kv_cache_planner(vllm_config),
+        DeepseekV4KVCachePlanner,
+    )
+
+
+def test_deepseek_v4_planner_auto_fit_max_model_len():
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1
+    model_config.kv_cache_planner_cls = (
+        "vllm.models.deepseek_v4.nvidia.kv_cache_planner.DeepseekV4KVCachePlanner"
+    )
+    vllm_config = VllmConfig(model_config=model_config)
+
+    main_mla_spec = MLAAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    swa_mla_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        sliding_window=64,
+        cache_dtype_str="fp8_ds_mla",
+        model_version="deepseek_v4",
+    )
+    available_memory = main_mla_spec.page_size_bytes * 64
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        [{"layer_0.attn": main_mla_spec, "layer_0.attn.swa_cache": swa_mla_spec}],
+        [available_memory],
+    )
+
+    assert kv_cache_configs[0].num_blocks > 0
+    assert 0 < vllm_config.model_config.max_model_len <= 1024
+
+
 def test_auto_fit_max_model_len_with_hybrid():
     """Test that auto-fit works with hybrid KV cache specs."""
     # Create config with original_max_model_len=-1 to trigger auto-fit
@@ -2280,7 +2342,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
     assert kv_cache_spec["layer_1"] == expected_spec_1
@@ -2295,7 +2357,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_1": before_spec_1,
         "layer_2": before_spec_2,
     }
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(
         page_size_padded=32 * 1024, attention_chunk_size=512
@@ -2317,7 +2379,7 @@ def test_unify_hybrid_kv_cache_specs():
         "layer_2": before_spec_2,
         "layer_3": before_spec_3,
     }
-    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    unify_hybrid_kv_cache_specs(kv_cache_spec)
     expected_spec_1 = new_kv_cache_spec()
     expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
     expected_spec_3 = new_kv_cache_spec(
@@ -2334,7 +2396,7 @@ def test_unify_hybrid_kv_cache_specs():
     }
 
     with pytest.raises(ValueError):
-        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+        unify_hybrid_kv_cache_specs(kv_cache_spec)
 
 
 def test_hma_not_disabled_when_kv_events_enabled():
