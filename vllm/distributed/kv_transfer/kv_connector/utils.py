@@ -41,10 +41,7 @@ def get_kv_connector_cache_layout():
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(vllm_config)
         if required_kvcache_layout is not None:
             return required_kvcache_layout
-        logger.info_once(
-            "Connectors do not specify a kv cache layout, defaulting to LBNHC."
-        )
-    return "LBNHC"
+    return None
 
 
 class KVOutputAggregator:
