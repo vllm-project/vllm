@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -14,17 +13,6 @@ from vllm.v1.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig
-
-logger = init_logger(__name__)
-
-# Construction failures (bad ``ReasoningConfig``, wrong types, allocator/device).
-_THINKING_BUDGET_HOLDER_INIT_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    RuntimeError,
-    ValueError,
-    TypeError,
-    AttributeError,
-    OSError,
-)
 
 
 def maybe_create_thinking_budget_state_holder(
@@ -36,22 +24,9 @@ def maybe_create_thinking_budget_state_holder(
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
-    try:
-        return ThinkingBudgetStateHolder(
-            reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
-        )
-    except _THINKING_BUDGET_HOLDER_INIT_EXCEPTIONS as e:
-        # OOM / invalid device, malformed ``ReasoningConfig``, or other init failures.
-        logger.warning(
-            "Could not create thinking-budget state holder on %s "
-            "(max_num_seqs=%s, num_spec_tokens=%s); disabling "
-            "thinking_token_budget for this worker. %s",
-            device,
-            max_num_seqs,
-            num_spec_tokens,
-            e,
-        )
-        return None
+    return ThinkingBudgetStateHolder(
+        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
+    )
 
 
 class ThinkingBudgetStateHolder:
@@ -161,15 +136,7 @@ class ThinkingBudgetStateHolder:
         last_row_for_req: dict[int, int] | None = None
         if repeat_indices is not None:
             last_row_for_req = {}
-            try:
-                rpt = repeat_indices.detach().cpu().tolist()
-            except (RuntimeError, MemoryError) as e:
-                logger.warning(
-                    "repeat_indices materialization failed; skipping thinking-budget "
-                    "update_state for this step. %s",
-                    e,
-                )
-                return
+            rpt = repeat_indices.cpu().tolist()
             for batch_row, req_i in enumerate(rpt):
                 last_row_for_req[req_i] = batch_row
 

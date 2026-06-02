@@ -34,7 +34,6 @@ gguf >= 0.17.0
 mistral_common[image] >= 1.11.2
 opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
-cel-python>=0.4.0 # cohere
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
 einops # Required for Qwen2-VL.
@@ -56,4 +55,3 @@ opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0
 opentelemetry-semantic-conventions-ai >= 0.4.1
-cohere-melody == 0.9.0  # cohere

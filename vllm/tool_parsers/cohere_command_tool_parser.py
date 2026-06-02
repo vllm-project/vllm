@@ -42,10 +42,10 @@ class BaseCohereCommandToolParser(ToolParser):
         self.melody_streaming = PyFilter(streaming_opts)
         self.melody_unary = PyFilter(unary_opts)
 
-    def adjust_request(  # type: ignore[override]
+    def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        request = super().adjust_request(request)  # type: ignore[arg-type]
+        request = super().adjust_request(request)
         request.skip_special_tokens = False
         return request
 

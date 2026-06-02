@@ -8,16 +8,6 @@ def __getattr__(name: str):
     if name == "get_tokenizer":
         from vllm.tokenizers import get_tokenizer
 
-        warnings.warn(
-            "`vllm.transformers_utils.tokenizer.get_tokenizer` "
-            "has been moved to `vllm.tokenizers.get_tokenizer`. "
-            "The old name will be removed in a future version.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return get_tokenizer
-
     # cohere start
     if name == "init_tokenizer_from_configs":
         from vllm.tokenizers import cached_tokenizer_from_config
@@ -32,5 +22,14 @@ def __getattr__(name: str):
 
         return cached_tokenizer_from_config
     # cohere end
+        warnings.warn(
+            "`vllm.transformers_utils.tokenizer.get_tokenizer` "
+            "has been moved to `vllm.tokenizers.get_tokenizer`. "
+            "The old name will be removed in a future version.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return get_tokenizer
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

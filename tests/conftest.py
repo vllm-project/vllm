@@ -224,19 +224,28 @@ def init_test_http_connection():
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
-    temp_file = tempfile.mkstemp()[1]
+    # Close the fd returned by mkstemp; FileStore opens the path itself.
+    # Leaving it open leaks one FD per test and eventually exhausts the
+    # ulimit, causing FileStore's destructor to throw c10::DistStoreError
+    # ("Too many open files") during gc and abort the process.
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
 
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 @pytest.fixture
@@ -246,8 +255,9 @@ def default_vllm_config():
     """
     from vllm.config import VllmConfig, set_current_vllm_config
 
-    with set_current_vllm_config(VllmConfig()):
-        yield
+    config = VllmConfig()
+    with set_current_vllm_config(config):
+        yield config
 
 
 @pytest.fixture()
@@ -363,12 +373,15 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
     ) -> None:
@@ -382,12 +395,15 @@ class HfRunner:
             self._init(
                 model_name=model_name,
                 dtype=dtype,
+                revision=revision,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
                 is_sentence_transformer=is_sentence_transformer,
                 is_cross_encoder=is_cross_encoder,
                 skip_tokenizer_init=skip_tokenizer_init,
                 auto_cls=auto_cls,
+                tokenizer_name=tokenizer_name,
+                processor=processor,
             )
 
     def _init(
@@ -395,12 +411,15 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
@@ -436,6 +455,7 @@ class HfRunner:
 
             self.model = SentenceTransformer(
                 model_name,
+                revision=revision,
                 device=self.device,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -446,6 +466,7 @@ class HfRunner:
 
             self.model = CrossEncoder(
                 model_name,
+                revision=revision,
                 device=self.device,
                 automodel_args=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -455,6 +476,7 @@ class HfRunner:
                 nn.Module,
                 auto_cls.from_pretrained(
                     model_name,
+                    revision=revision,
                     trust_remote_code=trust_remote_code,
                     **model_kwargs,
                 ),
@@ -477,20 +499,27 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    model_name,
+                    tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
                 )
             )
 
-        # don't put this import at the top level
-        # it will call torch.accelerator.device_count()
-        from transformers import AutoProcessor
+        if processor is not None:
+            self.processor = processor
+        else:
+            # don't put this import at the top level
+            # it will call torch.accelerator.device_count()
+            from transformers import AutoProcessor
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-        )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         if skip_tokenizer_init:
+            if self.processor is None:
+                raise ValueError(
+                    "skip_tokenizer_init=True requires processor initialization."
+                )
             self.tokenizer = self.processor.tokenizer
 
     def get_inputs(
@@ -513,6 +542,12 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
+                if self.processor is None:
+                    raise RuntimeError(
+                        "HfRunner.processor is not initialized. "
+                        "Pass processor=... to HfRunner or set "
+                        "hf_model.processor before generation."
+                    )
                 # Create a copy to avoid modifying the original dict
                 processor_kwargs = (
                     tokenization_kwargs.copy()
@@ -610,6 +645,10 @@ class HfRunner:
                 use_cache=True,
                 **kwargs,
             )
+            if self.processor is None:
+                raise RuntimeError(
+                    "HfRunner.processor is not initialized; cannot decode output."
+                )
             output_str = self.processor.batch_decode(
                 output_ids,
                 skip_special_tokens=True,
@@ -966,6 +1005,8 @@ class VllmRunner:
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
             req_logprobs = []
+            if req_output.prompt_logprobs:
+                req_logprobs.extend(req_output.prompt_logprobs)
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
@@ -1176,7 +1217,7 @@ class VllmRunner:
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.reward(prompts)
+        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(
@@ -1633,6 +1674,27 @@ def enable_pickle(monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
 
+@pytest.fixture(scope="function")
+def disable_log_dedup(monkeypatch):
+    """
+    Disable log deduplication such that warning_once and info_once always print.
+    """
+
+    # Patch logger._print_warning_once to remove the lru_cache decorator
+    from vllm import logger
+
+    original_print_warning_once = logger._print_warning_once
+    original_print_info_once = logger._print_info_once
+    original_print_debug_once = logger._print_debug_once
+
+    logger._print_warning_once = original_print_warning_once.__wrapped__
+    logger._print_info_once = original_print_info_once.__wrapped__
+    logger._print_debug_once = original_print_debug_once.__wrapped__
+
+    yield
+    logger._print_warning_once = original_print_warning_once
+    logger._print_info_once = original_print_info_once
+    logger._print_debug_once = original_print_debug_once
 # cohere start
 # When run in CI, generate XML reports for visualization.
 def pytest_configure(config):

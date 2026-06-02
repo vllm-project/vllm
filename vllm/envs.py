@@ -266,9 +266,6 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
-    VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
-    VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
-
     # COHERE START
     VLLM_USE_LOGITS_FP32_COMPUTATION: bool = False
     VLLM_XGRAMMAR_RECURSION_DEPTH: int = 64000
@@ -276,6 +273,8 @@ if TYPE_CHECKING:
     VLLM_REPETITION_LIMIT: int = 0
     VLLM_REPETITION_MAX_SEQUENCE_LENGTH: int = 0
     # COHERE END
+    VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
+    VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
 
 
 def get_default_cache_root():
@@ -516,25 +515,6 @@ logger = logging.getLogger(__name__)
 
 environment_variables: dict[str, Callable[[], Any]] = {
     # ================== Installation Time Env Vars ==================
-    # COHERE START
-    "VLLM_USE_LOGITS_FP32_COMPUTATION": lambda: (
-        os.getenv("VLLM_USE_LOGITS_FP32_COMPUTATION", "0").strip().lower()
-        in ("true", "1")
-    ),
-    "VLLM_XGRAMMAR_RECURSION_DEPTH": lambda: maybe_convert_int(
-        os.getenv("VLLM_XGRAMMAR_RECURSION_DEPTH", "64000")
-    ),
-    "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE": lambda: os.environ.get(
-        "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE", "False"
-    ).lower()
-    == "true",
-    "VLLM_REPETITION_LIMIT": lambda: maybe_convert_int(
-        os.getenv("VLLM_REPETITION_LIMIT", "0")
-    ),
-    "VLLM_REPETITION_MAX_SEQUENCE_LENGTH": lambda: maybe_convert_int(
-        os.getenv("VLLM_REPETITION_MAX_SEQUENCE_LENGTH", "0")
-    ),
-    # COHERE END
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
     "VLLM_TARGET_DEVICE": lambda: os.getenv("VLLM_TARGET_DEVICE", "cuda").lower(),
@@ -1079,6 +1059,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
+    # COHERE START
+    "VLLM_USE_LOGITS_FP32_COMPUTATION": lambda: (
+        os.getenv("VLLM_USE_LOGITS_FP32_COMPUTATION", "0").strip().lower()
+        in ("true", "1")
+    ),
+    "VLLM_XGRAMMAR_RECURSION_DEPTH": lambda: maybe_convert_int(
+        os.getenv("VLLM_XGRAMMAR_RECURSION_DEPTH", "64000")
+    ),
+    "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE": lambda: os.environ.get(
+        "VLLM_ZERO_NULL_KV_BLOCK_AFTER_CUDA_GRAPH_CAPTURE", "False"
+    ).lower()
+    == "true",
+    "VLLM_REPETITION_LIMIT": lambda: maybe_convert_int(
+        os.getenv("VLLM_REPETITION_LIMIT", "0")
+    ),
+    "VLLM_REPETITION_MAX_SEQUENCE_LENGTH": lambda: maybe_convert_int(
+        os.getenv("VLLM_REPETITION_MAX_SEQUENCE_LENGTH", "0")
+    ),
+    # COHERE END
         in ("true", "1")
     ),
     # Whether to use aiter fusion shared experts ops.

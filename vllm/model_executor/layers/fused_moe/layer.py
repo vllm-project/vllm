@@ -517,7 +517,6 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
-            norm_topk_prob=self.renormalize,  # cohere
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )

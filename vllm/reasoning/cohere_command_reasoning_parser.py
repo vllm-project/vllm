@@ -415,9 +415,7 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         **kwargs,
     ):
         super().__init__(tokenizer, *args, **kwargs)
-        self.start_token_id = tokenizer.convert_tokens_to_ids("<|START_THINKING|>")
         self.end_token_id = tokenizer.convert_tokens_to_ids("<|END_THINKING|>")
-        self.chatbot_token_id = tokenizer.convert_tokens_to_ids("<|CHATBOT_TOKEN|>")
         self.unary_opts = unary_opts
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
@@ -481,21 +479,7 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return content_ids
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        chatbot = self.chatbot_token_id
-        start = self.start_token_id
-        end = self.end_token_id
-        has_end_token = False
-
-        for i in reversed(range(len(input_ids))):
-            tid = input_ids[i]
-            if tid == start:
-                return has_end_token
-            if tid == chatbot:
-                return False
-            if tid == end:
-                has_end_token = True
-
-        return has_end_token
+        return any(tid == self.end_token_id for tid in reversed(input_ids))
 
     def prepare_structured_tag(
         self, original_tag: str | None, tool_server: ToolServer | None

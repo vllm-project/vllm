@@ -81,8 +81,6 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Tarsier2Config": "vllm.transformers_utils.configs.tarsier2",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
-    # cohere - MoE models use Cohere2Config from transformers
-    "Cohere2Config": "transformers",
 }
 
 __all__ = [
@@ -148,7 +146,6 @@ __all__ = [
     "Qwen3_5MoeConfig",
     "Qwen3_5MoeTextConfig",
     "Tarsier2Config",
-    "Cohere2Config",  # cohere
 ]
 
 

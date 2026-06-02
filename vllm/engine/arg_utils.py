@@ -6,7 +6,6 @@ import copy
 import dataclasses
 import functools
 import json
-import os  # cohere
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -750,20 +749,6 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
-
-        # cohere start
-        #   apply hardware_profiles.yaml when VLLM_ENABLE_COHERE_AUTO_CONFIG is set.
-        #   read os.environ directly (not vllm.envs.VLLM_ENABLE_COHERE_AUTO_CONFIG) to
-        #   avoid triggering the vllm.envs cache which would prevent the auto-config
-        #   from setting env vars.
-        if os.environ.get("VLLM_ENABLE_COHERE_AUTO_CONFIG", "0").strip().lower() in (
-            "true",
-            "1",
-        ):
-            from vllm.cohere.auto_config import apply_cohere_auto_config
-
-            apply_cohere_auto_config(self)
-        # cohere end
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -1812,6 +1797,19 @@ class EngineArgs:
             self.data_parallel_size > 1
             and data_parallel_external_lb
             and not model_config.is_moe
+        # cohere start
+        #   apply hardware_profiles.yaml when VLLM_ENABLE_COHERE_AUTO_CONFIG is set.
+        #   read os.environ directly (not vllm.envs.VLLM_ENABLE_COHERE_AUTO_CONFIG) to
+        #   avoid triggering the vllm.envs cache which would prevent the auto-config
+        #   from setting env vars.
+        if os.environ.get("VLLM_ENABLE_COHERE_AUTO_CONFIG", "0").strip().lower() in (
+            "true",
+            "1",
+        ):
+            from vllm.cohere.auto_config import apply_cohere_auto_config
+
+            apply_cohere_auto_config(self)
+        # cohere end
         ):
             raise ValueError(
                 "Non-MoE models do not support external data parallel mode. "

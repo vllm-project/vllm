@@ -4,7 +4,7 @@
 import importlib
 import inspect
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast, get_args
+from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
     AutoFeatureExtractor,
@@ -234,42 +234,6 @@ def get_processor(
 cached_get_processor = lru_cache(get_processor)
 
 
-def _get_raw_annotations(cls: type[Any]) -> dict[str, Any]:
-    annotations: dict[str, Any] = {}
-    for base in reversed(getattr(cls, "__mro__", ())):
-        try:
-            annotations.update(inspect.get_annotations(base, eval_str=False))
-        except Exception:
-            annotations.update(getattr(base, "__annotations__", {}))
-    return annotations
-
-
-def _get_annotation_class(
-    annotation: Any,
-    *,
-    globalns: dict[str, Any],
-) -> type[Any] | None:
-    candidates = [annotation]
-
-    while candidates:
-        candidate = candidates.pop(0)
-        if isinstance(candidate, str):
-            candidate = globalns.get(candidate)
-        else:
-            forward_arg = getattr(candidate, "__forward_arg__", None)
-            if forward_arg is not None:
-                candidate = globalns.get(forward_arg)
-
-        if candidate is None:
-            continue
-        if inspect.isclass(candidate):
-            return cast(type[Any], candidate)
-
-        candidates.extend(get_args(candidate))
-
-    return None
-
-
 @lru_cache
 def get_processor_kwargs_type(
     processor: ProcessorMixin,
@@ -315,23 +279,20 @@ def get_processor_kwargs_keys(
     }
 
     try:
-        kwargs_annotations = _get_raw_annotations(kwargs_cls)
-        module = importlib.import_module(kwargs_cls.__module__)
-        module_globals = vars(module)
-
+        # get kwargs annotations in processor
+        # merge text_kwargs / images_kwargs / videos_kwargs / audio_kwargs
+        kwargs_type_annotations = get_type_hints(kwargs_cls)
         for kw_type in modality_kwargs:
-            kw_cls = _get_annotation_class(
-                kwargs_annotations.get(kw_type),
-                globalns=module_globals,
-            )
-            if kw_cls is None:
-                continue
-
-            # Read raw annotations instead of evaluating nested type hints.
-            # Newer transformers processors may refer to symbols such as
-            # PILImageResampling in nested TypedDict annotations; resolving the
-            # full hint tree is unnecessary here because we only need kw names.
-            dynamic_kwargs.update(_get_raw_annotations(kw_cls))
+            if kw_type in kwargs_type_annotations:
+                # Use __annotations__ instead of get_type_hints() to avoid
+                # NameError from unresolved forward references (e.g.
+                # PILImageResampling). We only need key names, not types.
+                kw_cls = kwargs_type_annotations[kw_type]
+                kw_annotations: dict[str, Any] = {}
+                for base in reversed(kw_cls.__mro__):
+                    kw_annotations.update(getattr(base, "__annotations__", {}))
+                for kw_name in kw_annotations:
+                    dynamic_kwargs.add(kw_name)
 
     except Exception:
         logger.exception("Failed to collect processor kwargs")

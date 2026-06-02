@@ -11,7 +11,6 @@ import urllib3
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.platforms import current_platform  # cohere
 
 MODEL_CONFIGS = [
     {
@@ -54,15 +53,6 @@ MODEL_CONFIGS = [
     #     "tensor_parallel_size": 1,
     # },
 ]
-
-# cohere start
-# COHERE start
-# temporarily disable encoder models on rocm
-if current_platform.is_rocm():
-    MODEL_CONFIGS.pop()
-# COHERE end
-
-# cohere end
 
 
 @pytest.fixture(scope="module")
@@ -125,6 +115,12 @@ def _re_import_modules():
         r".+\.image_processing_utils_fast$",
         r".+\.models\..+\.image_processing_.+_fast$",
     ]
+# cohere start
+# COHERE start
+# temporarily disable encoder models on rocm
+if current_platform.is_rocm():
+    MODEL_CONFIGS.pop()
+# COHERE end
 
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:

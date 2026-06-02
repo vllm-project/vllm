@@ -31,6 +31,8 @@ def mock_model_runner_with_req_states():
         num_speculative_steps=0,
         vocab_size=32000,
         device=torch.device("cpu"),
+        model_dtype=torch.float32,
+        cache_draft_logits=False,
     )
     runner.encoder_cache = None
     runner.model_state = Mock()

@@ -74,7 +74,7 @@ class LogitsProcessor(ABC):
 
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        """Apply LogitsProcessor to batch logits tensor. (cohere)
+        """Apply LogitsProcessor to batch logits tensor.
 
         The updated tensor must be returned but may be
         modified in-place.

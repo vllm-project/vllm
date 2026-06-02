@@ -327,6 +327,7 @@ def select_fp8_moe_backend(
                 raise ValueError(
                     f"FlashInfer MOE backend {fi_backend} does not support FP8 MoE."
                 )
+            k_cls = backend_to_kernel_cls(backend)[0]
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )

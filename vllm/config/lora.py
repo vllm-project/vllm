@@ -71,10 +71,6 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
-    # cohere start
-    lora_extra_vocab_size: int = 0
-    """Extra vocabulary slots reserved for LoRA adapters (e.g. new tokens)."""
-    # cohere end
 
     def compute_hash(self) -> str:
         """
@@ -88,6 +84,10 @@ class LoRAConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
+    # cohere start
+    lora_extra_vocab_size: int = 0
+    """Extra vocabulary slots reserved for LoRA adapters (e.g. new tokens)."""
+    # cohere end
         factors: list[Any] = []
         factors.append(self.max_lora_rank)
         factors.append(self.max_loras)
@@ -98,9 +98,6 @@ class LoRAConfig:
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None
         )
-        # cohere start
-        factors.append(self.lora_extra_vocab_size)
-        # cohere end
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -129,3 +126,6 @@ class LoRAConfig:
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):
             self.lora_dtype = getattr(torch, self.lora_dtype)
+        # cohere start
+        factors.append(self.lora_extra_vocab_size)
+        # cohere end

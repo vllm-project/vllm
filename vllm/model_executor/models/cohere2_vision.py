@@ -317,7 +317,6 @@ class Cohere2VisionMultiModalProcessor(
 class Cohere2VisionForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
-    merge_by_field_config = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_tower.": "vision_tower.",
@@ -359,18 +358,12 @@ class Cohere2VisionForConditionalGeneration(
                 architectures=config.text_config.architectures,
             )
 
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
-        )
-
     @property
     def dtype(self):
         return next(self.parameters()).dtype
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # skip_prefixes=["lm_head"] only needed for fp4
-        # TODO: investigate why lm_head exists in fp4 weights only
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _process_image_input(

@@ -151,9 +151,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_minimax_qk_norm:
                 self.passes += [MiniMaxQKNormPass(config)]
 
-            if self.pass_config.fuse_minimax_qk_norm:
-                self.passes += [MiniMaxQKNormPass(config)]
-
             if self.pass_config.fuse_norm_quant:
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [

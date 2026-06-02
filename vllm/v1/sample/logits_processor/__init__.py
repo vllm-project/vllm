@@ -196,7 +196,7 @@ def build_logitsprocs(
             " do not support logits processors."
         )
         return LogitsProcessors()
-    # COHERE START
+
     # Check if speculative decoding is enabled.
     if vllm_config.speculative_config:
         if custom_logitsprocs:
@@ -207,6 +207,7 @@ def build_logitsprocs(
         return LogitsProcessors(
             [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
         )
+
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory)
@@ -320,20 +321,14 @@ class AdapterLogitsProcessor(LogitsProcessor):
             return partial(req_lp, *args)
         return None
 
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-    ) -> None:
+    def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(
             self.req_info,
             batch_update,
             self._new_state,
         )
 
-    def apply(
-        self,
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.req_info:
             # Apply per-request logits processors to corresponding rows of
             # logits tensor

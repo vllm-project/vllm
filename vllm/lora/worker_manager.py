@@ -104,11 +104,11 @@ class WorkerLoRAManager:
             for module in supported_lora_modules:
                 if module in packed_modules_mapping:
                     expected_lora_lst.extend(packed_modules_mapping[module])
+                else:
                     # cohere start
                     # Also accept the packed module name (not only unpacked parts).
                     expected_lora_lst.append(module)
                     # cohere end
-                else:
                     expected_lora_lst.append(module)
                 if module == "experts":
                     expected_lora_lst.append(module)

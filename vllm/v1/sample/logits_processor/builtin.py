@@ -104,7 +104,7 @@ class MinPLogitsProcessor(LogitsProcessor):
                 self.min_p.copy_(self.min_p_cpu_tensor[:size], non_blocking=True)
             self.min_p.unsqueeze_(1)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:  # cohere
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if not self.min_p_count:
             return logits
 
@@ -170,7 +170,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
         ).to(device=self.device, non_blocking=True)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:  # cohere
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.biases:
             logits[self.logits_slice] += self.bias_tensor
         return logits
@@ -249,7 +249,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
         ).to(device=self.device, non_blocking=True)
 
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:  # cohere
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length
             logits.index_put_(self.logits_slice, self.neg_inf_tensor)

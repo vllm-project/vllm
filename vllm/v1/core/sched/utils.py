@@ -3,12 +3,8 @@
 import contextlib
 from collections.abc import Sequence
 
-import vllm.envs as envs  # cohere
-from vllm.logger import init_logger  # cohere
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
-
-logger = init_logger(__name__)  # cohere
 
 
 def _has_repeating_pattern(
@@ -81,20 +77,6 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     Note:
         For single item removal, this modifies the original list in-place
         and returns it. For multiple items, it creates and returns a new list.
-    """
-    if not items_to_remove:
-        return lst
-
-    if len(items_to_remove) == 1:
-        # Fast path for single item removal (most common case)
-        item = next(iter(items_to_remove))
-        with contextlib.suppress(ValueError):
-            lst.remove(item)
-        return lst
-    # For multiple items, use list comprehension
-    return [item for item in lst if item not in items_to_remove]
-
-
 # cohere start
 def _has_hit_token_repetition_limit(
     request: Request,
@@ -159,6 +141,18 @@ def _has_hit_token_repetition_limit(
 
 
 # cohere end
+    """
+    if not items_to_remove:
+        return lst
+
+    if len(items_to_remove) == 1:
+        # Fast path for single item removal (most common case)
+        item = next(iter(items_to_remove))
+        with contextlib.suppress(ValueError):
+            lst.remove(item)
+        return lst
+    # For multiple items, use list comprehension
+    return [item for item in lst if item not in items_to_remove]
 
 
 def check_stop(request: Request, max_model_len: int) -> bool:
@@ -179,7 +173,6 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
-
     # cohere start
     if (
         envs.VLLM_REPETITION_LIMIT > 0
@@ -202,7 +195,6 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_REPETITION
         return True
     # cohere end
-
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
