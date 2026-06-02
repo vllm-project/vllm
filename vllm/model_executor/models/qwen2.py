@@ -416,7 +416,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         else:
             self.norm = PPMissingLayer()
 
-    def embed_input_ids(self, input_ids: torch.Tensor, **kwargs) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(

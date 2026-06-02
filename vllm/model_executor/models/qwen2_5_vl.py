@@ -1452,6 +1452,8 @@ class Qwen2_5_VLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
+    embed_input_ids = SupportsMultiModal.embed_input_ids
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
@@ -1565,25 +1567,3 @@ class Qwen2_5_VLForConditionalGeneration(
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2
-
-    def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
-        is_multimodal: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Embed token ids and merge multimodal embeddings (V1 MM path)."""
-        inputs_embeds = self.language_model.model.embed_input_ids(input_ids)
-        if (
-            multimodal_embeddings is not None
-            and is_multimodal is not None
-            and len(multimodal_embeddings) > 0
-        ):
-            from vllm.model_executor.models.utils import _merge_multimodal_embeddings
-
-            inputs_embeds = _merge_multimodal_embeddings(
-                inputs_embeds,
-                multimodal_embeddings,
-                is_multimodal,
-            )
-        return inputs_embeds
