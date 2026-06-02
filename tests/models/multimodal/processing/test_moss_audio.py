@@ -548,6 +548,41 @@ def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):
     ])
 
 
+def test_moss_audio_encoder_out_proj_matches_hf_identity_when_dims_equal(
+    monkeypatch,
+):
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.config.device import DeviceConfig
+
+    _patch_tensor_parallel_for_linear_layers(monkeypatch)
+
+    def make_config(output_dim):
+        return MossAudioEncoderConfig(
+            d_model=8,
+            output_dim=output_dim,
+            num_mel_bins=8,
+            encoder_layers=1,
+            encoder_attention_heads=2,
+            encoder_ffn_dim=16,
+            downsample_hidden_size=2,
+            deepstack_encoder_layer_indexes=[],
+        )
+
+    with set_current_vllm_config(
+        VllmConfig(device_config=DeviceConfig(device="cpu"))
+    ):
+        identity_encoder = MossAudioEncoder(make_config(output_dim=8))
+        projected_encoder = MossAudioEncoder(make_config(output_dim=4))
+
+    identity_params = dict(identity_encoder.named_parameters())
+    projected_params = dict(projected_encoder.named_parameters())
+
+    assert isinstance(identity_encoder.out_proj, torch.nn.Identity)
+    assert "out_proj.weight" not in identity_params
+    assert not isinstance(projected_encoder.out_proj, torch.nn.Identity)
+    assert "out_proj.weight" in projected_params
+
+
 def test_moss_audio_weight_contracts():
     model = object.__new__(MossAudioModel)
     torch.nn.Module.__init__(model)

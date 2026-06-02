@@ -468,14 +468,17 @@ class MossAudioEncoder(nn.Module):
             ]
         )
         self.layer_norm = nn.LayerNorm(config.d_model, eps=config.layer_norm_eps)
-        self.out_proj = ReplicatedLinear(
-            config.d_model,
-            config.output_dim,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.out_proj",
-        )
+        if config.output_dim != config.d_model:
+            self.out_proj = ReplicatedLinear(
+                config.d_model,
+                config.output_dim,
+                bias=False,
+                quant_config=quant_config,
+                return_bias=False,
+                prefix=f"{prefix}.out_proj",
+            )
+        else:
+            self.out_proj = nn.Identity()
 
         self.deepstack_encoder_layer_indexes = list(
             config.deepstack_encoder_layer_indexes or []
