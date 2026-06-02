@@ -319,12 +319,15 @@ class MiniCPMOProcessor(ProcessorMixin):
         image_start_idx += 1
         image_end_idx = torch.where(end_cond)[0]
 
-        valid_image_nums = max(len(image_start_idx), len(image_end_idx))
+        assert len(image_start_idx) == len(image_end_idx), (
+            f"The number of image start tokens ({len(image_start_idx)}) "
+            f"and end tokens ({len(image_end_idx)}) must match."
+        )
 
         image_bounds = torch.hstack(
             [
-                image_start_idx[:valid_image_nums].unsqueeze(-1),
-                image_end_idx[:valid_image_nums].unsqueeze(-1),
+                image_start_idx.unsqueeze(-1),
+                image_end_idx.unsqueeze(-1),
             ]
         )
 
@@ -478,6 +481,9 @@ class MiniCPMOProcessor(ProcessorMixin):
         padding_value=0,
         padding_side="left",
     ):
+        if not inputs:
+            return torch.empty(0), []
+
         items = []
         if isinstance(inputs[0], list):
             assert isinstance(inputs[0][0], torch.Tensor)

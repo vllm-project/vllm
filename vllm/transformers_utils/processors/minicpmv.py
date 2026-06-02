@@ -139,6 +139,8 @@ class MiniCPMVProcessor(ProcessorMixin):
             image_inputs = self.image_processor(
                 images, do_pad=do_pad, return_tensors=return_tensors
             )
+        else:
+            image_inputs = {}
         return self._convert_images_texts_to_inputs(
             image_inputs, text, max_length=max_length
         )
@@ -237,11 +239,14 @@ class MiniCPMVProcessor(ProcessorMixin):
         image_start_tokens = torch.where(input_ids == im_start_id)[0]
         image_start_tokens += 1
         image_end_tokens = torch.where(input_ids == im_end_id)[0]
-        valid_image_nums = max(len(image_start_tokens), len(image_end_tokens))
+        assert len(image_start_tokens) == len(image_end_tokens), (
+            f"The number of image start tokens ({len(image_start_tokens)}) "
+            f"and end tokens ({len(image_end_tokens)}) must match."
+        )
         image_bounds = torch.hstack(
             [
-                image_start_tokens[:valid_image_nums].unsqueeze(-1),
-                image_end_tokens[:valid_image_nums].unsqueeze(-1),
+                image_start_tokens.unsqueeze(-1),
+                image_end_tokens.unsqueeze(-1),
             ]
         )
         return input_ids.unsqueeze(0), image_bounds
@@ -307,6 +312,9 @@ class MiniCPMVProcessor(ProcessorMixin):
         padding_value=0,
         padding_side="left",
     ):
+        if not orig_items:
+            return torch.empty(0)
+
         items = []
         if isinstance(orig_items[0][key], list):
             assert isinstance(orig_items[0][key][0], torch.Tensor)
@@ -340,15 +348,22 @@ class MiniCPMVProcessor(ProcessorMixin):
             )
 
         for i, item in enumerate(items):
+            tensor_to_pad = item[key]
+            if tensor_to_pad.shape[0] != 1:
+                raise ValueError(
+                    f"Expected leading batch size of 1 for padding, "
+                    f"but got shape {tensor_to_pad.shape}"
+                )
+            squeezed = tensor_to_pad.squeeze(0)
             if dim == 2:
                 if padding_side == "left":
-                    tensor[i, -len(item[key][0]) :] = item[key][0].clone()
+                    tensor[i, -squeezed.shape[0] :] = squeezed.clone()
                 else:
-                    tensor[i, : len(item[key][0])] = item[key][0].clone()
+                    tensor[i, : squeezed.shape[0]] = squeezed.clone()
             elif dim == 3:
                 if padding_side == "left":
-                    tensor[i, -len(item[key][0]) :, :] = item[key][0].clone()
+                    tensor[i, -squeezed.shape[0] :, :] = squeezed.clone()
                 else:
-                    tensor[i, : len(item[key][0]), :] = item[key][0].clone()
+                    tensor[i, : squeezed.shape[0], :] = squeezed.clone()
 
         return tensor
