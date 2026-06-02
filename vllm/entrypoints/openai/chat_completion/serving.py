@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final
+from typing import Any, Final
 
 import numpy as np
 import pybase64 as base64
@@ -67,13 +67,11 @@ from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -85,7 +83,7 @@ class OpenAIServingChat(OpenAIServing):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        online_renderer: OnlineRenderer,
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -108,7 +106,7 @@ class OpenAIServingChat(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -212,7 +210,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render.render_chat(request)
+        return await self.online_renderer.render_chat(request)
 
     async def create_chat_completion(
         self,

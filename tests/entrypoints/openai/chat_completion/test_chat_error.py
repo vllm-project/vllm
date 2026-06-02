@@ -13,9 +13,9 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -84,7 +84,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
         model_registry=models.registry,
@@ -96,7 +96,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=serving_render,
+        online_renderer=online_renderer,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -109,7 +109,7 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
             [{"prompt_token_ids": [1, 2, 3]}],
         )
 
-    serving_chat.openai_serving_render.preprocess_chat = AsyncMock(
+    serving_chat.online_renderer.preprocess_chat = AsyncMock(
         side_effect=_fake_preprocess_chat
     )
     return serving_chat
@@ -183,9 +183,7 @@ async def test_openai_chat_keeps_mm_cache_for_engine_execution():
 
     assert isinstance(result, tuple)
     assert (
-        serving_chat.openai_serving_render.preprocess_chat.call_args.kwargs[
-            "skip_mm_cache"
-        ]
+        serving_chat.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is False
     )
 
@@ -205,13 +203,11 @@ async def test_renderer_only_chat_request_skips_mm_cache():
         messages=[{"role": "user", "content": "Test prompt"}],
     )
 
-    result = await serving_chat.openai_serving_render.render_chat_request(request)
+    result = await serving_chat.online_renderer.render_chat_request(request)
 
     assert result.token_ids == [1, 2, 3]
     assert (
-        serving_chat.openai_serving_render.preprocess_chat.call_args.kwargs[
-            "skip_mm_cache"
-        ]
+        serving_chat.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
     )
 

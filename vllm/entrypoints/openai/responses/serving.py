@@ -92,7 +92,6 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_function_tool_names,
     extract_tool_types,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
@@ -102,6 +101,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
@@ -155,7 +155,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
-        openai_serving_render: OpenAIServingRender,
+        online_renderer: OnlineRenderer,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -177,7 +177,7 @@ class OpenAIServingResponses(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.chat_template_kwargs = default_chat_template_kwargs or {}
@@ -607,7 +607,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+        _, engine_inputs = await self.online_renderer.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
@@ -632,7 +632,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_input=messages,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+        _, engine_inputs = await self.online_renderer.preprocess_chat(
             request,
             new_messages,
             default_template=chat_template,

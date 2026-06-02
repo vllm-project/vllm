@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -18,8 +18,8 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
-def render(request: Request) -> OpenAIServingRender | None:
-    return getattr(request.app.state, "openai_serving_render", None)
+def render(request: Request) -> ServingRender | None:
+    return getattr(request.app.state, "serving_renderer", None)
 
 
 @router.post(
