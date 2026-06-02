@@ -290,13 +290,8 @@ class RejectionSampler(nn.Module):
         any_penalties_or_bad_words = (
             sampling_metadata.bad_words_token_ids or has_penalties
         )
-        # cohere start
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking = holder is not None and holder.has_tracked_requests()
-        # cohere end
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking = holder is not None and holder.has_tracked_requests()
-
         output_token_ids = sampling_metadata.output_token_ids
         if any_penalties_or_bad_words or needs_thinking:
             output_token_ids = self._combine_outputs_with_spec_tokens(
@@ -305,26 +300,6 @@ class RejectionSampler(nn.Module):
             )
 
         # Calculate indices of target logits.
-        # cohere start
-        # Calculate indices of target logits.
-        repeat_indices: torch.Tensor | None = None
-        need_repeat_indices = (
-            sampling_metadata.allowed_token_ids_mask is not None
-            or has_penalties
-            or needs_thinking
-        )
-        if need_repeat_indices:
-            num_requests = len(metadata.num_draft_tokens)
-            num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
-            original_indices = torch.arange(num_requests, device="cpu")
-            repeat_indices_cpu = original_indices.repeat_interleave(num_draft_tokens)
-            repeat_indices = repeat_indices_cpu.to(
-                device=logits.device, non_blocking=True
-            )
-            logits = self.apply_penalties(
-                logits, sampling_metadata, metadata, repeat_indices, output_token_ids
-            )
-            # cohere end
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
             sampling_metadata.allowed_token_ids_mask is not None
@@ -359,14 +334,6 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
-        # cohere start
-        if holder is not None and holder.has_tracked_requests():
-            logits = holder.apply_to_logits(
-                logits,
-                predict_bonus_token=False,
-                spec_token_ids=sampling_metadata.spec_token_ids,
-            )
-        # cohere end
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,

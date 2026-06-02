@@ -130,6 +130,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_moe="Qwen3_5MoeConfig",
+    # cohere - MoE models use Cohere2Config from transformers
+    cohere2moe="Cohere2Config",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",

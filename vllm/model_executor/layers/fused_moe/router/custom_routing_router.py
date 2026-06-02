@@ -41,12 +41,6 @@ class CustomRoutingRouter(BaseRouter):
         if self.custom_routing_function == Llama4MoE.custom_routing_function:
             return RoutingMethodType.Llama4
         # Cohere MoE uses a sigmoid -> top-k -> renormalize routing function.
-        # cohere start
-        from vllm.model_executor.models.commandr import token_choice_with_bias
-
-        if self.custom_routing_function == token_choice_with_bias:
-            return RoutingMethodType.SigmoidRenorm
-        # cohere end
         if self.custom_routing_function == token_choice_with_bias:
             return RoutingMethodType.SigmoidRenorm
         return RoutingMethodType.Custom

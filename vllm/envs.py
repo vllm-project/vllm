@@ -1059,6 +1059,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "False").lower()
+        in ("true", "1")
+    ),
     # COHERE START
     "VLLM_USE_LOGITS_FP32_COMPUTATION": lambda: (
         os.getenv("VLLM_USE_LOGITS_FP32_COMPUTATION", "0").strip().lower()
@@ -1078,8 +1080,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_REPETITION_MAX_SEQUENCE_LENGTH", "0")
     ),
     # COHERE END
-        in ("true", "1")
-    ),
     # Whether to use aiter fusion shared experts ops.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (

@@ -582,6 +582,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        # cohere start
+        thinking_token_budget = self.thinking_token_budget
+        if thinking_token_budget is None:
+            thinking_token_budget = default_sampling_params.get("thinking_token_budget")
+        continue_thinking = self.continue_thinking
+        if continue_thinking is None:
+            continue_thinking = default_sampling_params.get("continue_thinking", False)
+        # cohere end
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
@@ -608,7 +616,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
-            thinking_token_budget=self.thinking_token_budget,
+            thinking_token_budget=thinking_token_budget,
+            continue_thinking=continue_thinking,  # cohere
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
@@ -927,6 +936,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     guided_decoding_backend: str | None = None
     echo: bool = False
     return_token_ids: bool = False
+    # cohere start
+    thinking_token_budget: int | None = Field(
+        default=None,
+        description="Max thinking tokens allowed (reasoning/Cohere). -1 = unlimited.",
+    )
+    continue_thinking: bool | None = Field(
+        default=None,
+        description="Whether to allow continuing thinking (Cohere).",
+    )
+    # cohere end
 
     @model_validator(mode="before")
     @classmethod
@@ -943,21 +962,6 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Batch chat completions do not support `n > 1`. Please set `n` to 1."
             )
-    # cohere start
-    thinking_token_budget: int | None = Field(
-        default=None,
-        description="Max thinking tokens allowed (reasoning/Cohere). -1 = unlimited.",
-    )
-    continue_thinking: bool | None = Field(
-        default=None,
-        description="Whether to allow continuing thinking (Cohere).",
-    )
-
-    # cohere end
-            # cohere start
-            thinking_token_budget=thinking_token_budget,
-            continue_thinking=continue_thinking,
-            # cohere end
         return data
 
     def to_chat_completion_request(
@@ -967,11 +971,3 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
         data = self.model_dump(exclude={"messages"}, exclude_none=True)
         data["messages"] = messages
         return ChatCompletionRequest.model_validate(data)
-        # cohere start
-        thinking_token_budget = self.thinking_token_budget
-        if thinking_token_budget is None:
-            thinking_token_budget = default_sampling_params.get("thinking_token_budget")
-        continue_thinking = self.continue_thinking
-        if continue_thinking is None:
-            continue_thinking = default_sampling_params.get("continue_thinking", False)
-        # cohere end

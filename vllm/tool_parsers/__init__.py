@@ -186,16 +186,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gemma4_tool_parser",
         "Gemma4ToolParser",
     ),
-    # cohere start
-    "cohere_command3": (
-        "cohere_command_tool_parser",
-        "CohereCommand3ToolParser",
-    ),
-    "cohere_command4": (
-        "cohere_command_tool_parser",
-        "CohereCommand4ToolParser",
-    ),
-    # cohere end
 }
 
 

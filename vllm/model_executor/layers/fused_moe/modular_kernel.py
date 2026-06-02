@@ -998,6 +998,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,
     ) -> torch.Tensor:
         """
         Same as apply(), except uses router_logits as opposed
@@ -1460,6 +1461,7 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,  # cohere
     ) -> torch.Tensor:
         """
         Same as forward(), except uses router_logits as opposed
@@ -1490,6 +1492,7 @@ class FusedMoEKernelMonolithicImpl:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            norm_topk_prob=norm_topk_prob,
         )
 
         output = self.prepare_finalize.finalize(fused_out)
@@ -1599,6 +1602,7 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,  # cohere
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1614,6 +1618,7 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            norm_topk_prob=norm_topk_prob,  # cohere
         )
 
     def apply(

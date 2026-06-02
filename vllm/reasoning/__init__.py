@@ -120,16 +120,6 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3p5_reasoning_parser",
         "Step3p5ReasoningParser",
     ),
-    # cohere start
-    "cohere_command3": (
-        "cohere_command_reasoning_parser",
-        "CohereCommand3ReasoningParser",
-    ),
-    "cohere_command4": (
-        "cohere_command_reasoning_parser",
-        "CohereCommand4ReasoningParser",
-    ),
-    # cohere end
 }
 
 

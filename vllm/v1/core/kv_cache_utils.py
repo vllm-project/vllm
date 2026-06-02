@@ -1119,7 +1119,12 @@ def _get_kv_cache_groups_uniform_page_size(
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
     same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec].append(layer_name)
+        # COHERE START
+        # treat eagle_draft layers separately to avoid changing target model
+        # layers grouping
+        if "eagle_draft" not in layer_name:  # cohere
+            same_type_layers[layer_spec].append(layer_name)
+        # COHERE END
 
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.

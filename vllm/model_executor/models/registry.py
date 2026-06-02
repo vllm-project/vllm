@@ -589,7 +589,6 @@ _SPECULATIVE_DECODING_MODELS = {
     "ExtractHiddenStatesModel": ("extract_hidden_states", "ExtractHiddenStatesModel"),
     "MiMoMTPModel": ("mimo_mtp", "MiMoMTP"),
     # COHERE START
-    "EagleCohereForCausalLM": ("commandr_eagle", "EagleCohereForCausalLM"),
     "EagleCohere2ForCausalLM": ("commandr_eagle", "EagleCohereForCausalLM"),
     # COHERE END
     "MiMoV2MTPModel": ("mimo_v2_mtp", "MiMoV2MTP"),

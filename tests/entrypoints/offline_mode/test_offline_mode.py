@@ -116,11 +116,10 @@ def _re_import_modules():
         r".+\.models\..+\.image_processing_.+_fast$",
     ]
 # cohere start
-# COHERE start
 # temporarily disable encoder models on rocm
 if current_platform.is_rocm():
     MODEL_CONFIGS.pop()
-# COHERE end
+# cohere end
 
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:

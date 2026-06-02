@@ -50,13 +50,7 @@ class MinPLogitsProcessor(LogitsProcessor):
     def get_min_p_by_index(self, index: int) -> float:
         return float(self.min_p_cpu[index])
 
-    # cohere start
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-        spec_token_ids: Sequence[Sequence[int]] | None = None,
-    ) -> None:
-        # cohere end
+    def update_state(self, batch_update: BatchUpdate | None):
         if not batch_update:
             return
 
@@ -138,13 +132,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         outcome of argmax in greedy sampling."""
         return False
 
-    # cohere start
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-        spec_token_ids: Sequence[Sequence[int]] | None = None,
-    ) -> None:
-        # cohere end
+    def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.biases, batch_update, lambda params, _, __: params.logit_bias or None
         )
@@ -209,13 +197,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             return None
         return min_tokens, output_tok_ids, params.all_stop_token_ids
 
-    # cohere start
-    def update_state(
-        self,
-        batch_update: BatchUpdate | None,
-        spec_token_ids: Sequence[Sequence[int]] | None = None,
-    ) -> None:
-        # cohere end
+    def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
             self.min_toks, batch_update, self.add_request
         )

@@ -1593,7 +1593,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
         )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        self.moe_kernel.fused_experts.process_weights_after_loading(layer)  # type: ignore[attr-defined]  # cohere
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
@@ -2160,6 +2160,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             local_num_experts=layer.local_num_experts,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_method_type=layer.routing_method_type,
+            norm_topk_prob=layer.renormalize,  # cohere
             use_shuffled_weight=True,
             weight_layout=0,
             fp8_quantization_type=Fp8QuantizationType.MxFp8,

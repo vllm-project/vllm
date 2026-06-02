@@ -114,27 +114,16 @@ class RoutingMethodType(IntEnum):
     # TopK: TopK (no softmax)
     TopK = (5,)
     # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
-    # cohere start
-    # SigmoidRenorm: Sigmoid -> TopK -> Renormalize
-    # (divide by sum of top-K weights, could be disabled)
-    SigmoidRenorm = (6,)
-    # Custom
-    Custom = (7,)
-    # Simulated
-    Simulated = (8,)
-    # Unspecified
-    Unspecified = 9.0
-    # cohere end
     SigmoidRenorm = (6,)
     # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
     MiniMax2 = (7,)
     # Unspecified
-    Unspecified = (8,)
+    Unspecified = (9.0,) # cohere
     # other routing types (not passed to FlashInfer kernels)
     # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
     DeepseekV4 = (100,)
-    Custom = (101,)
-    Simulated = (102,)
+    Custom = (7,) # cohere
+    Simulated = (8,) # cohere
 
 
 def get_routing_method_type(
@@ -534,19 +523,9 @@ class FusedMoEQuantConfig:
         - a1_scale: Optional scale to be used for a1.
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
-        # cohere start
-                    Optional per-channel scales for w1 (for W4A8 FP8).
-                    Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
-        # cohere end
                      Optional per-channel scales for w1 (for W4A8 FP8).
                      Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
-        # cohere start
-                    Optional per-channel scales for w2 (for W4A8 FP8).
-                    Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
-                - a1_gscale: Optional global quantization scales for a1 (for nvfp4).
-                - a2_gscale: Optional global quantization scales for a2 (for nvfp4).
-        # cohere end
                      Optional per-channel scales for w2 (for W4A8 FP8).
                      Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
@@ -1281,6 +1260,11 @@ class FusedMoEConfig:
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
 
+    # cohere start
+    # Whether to normalize top-k probabilities (renormalize).
+    norm_topk_prob: bool = True
+    # cohere end
+    
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
@@ -1386,7 +1370,4 @@ class FusedMoEConfig:
     @property
     def needs_round_robin_routing_tables(self):
         return self.moe_parallel_config.needs_round_robin_routing_tables
-    # cohere start
-    # Whether to normalize top-k probabilities (renormalize).
-    norm_topk_prob: bool = True
-    # cohere end
+

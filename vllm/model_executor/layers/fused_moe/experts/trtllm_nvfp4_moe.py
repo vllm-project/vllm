@@ -43,6 +43,7 @@ class TrtLlmNvFp4ExpertsBase:
     ):
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.norm_topk_prob = moe_config.norm_topk_prob  # cohere
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -293,6 +294,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,
     ) -> torch.Tensor:
         import flashinfer
 
@@ -344,6 +346,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
+            norm_topk_prob=self.norm_topk_prob,  # cohere
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
         )[0]

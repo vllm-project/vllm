@@ -30,6 +30,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     ):
         super().__init__(moe_config, quant_config)
         self.routing_method_type = moe_config.routing_method
+        self.norm_topk_prob = moe_config.norm_topk_prob  # cohere
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
@@ -80,6 +81,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.SigmoidRenorm,  # cohere
         ]
 
     @staticmethod
@@ -124,6 +126,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        norm_topk_prob: bool = True,
     ) -> torch.Tensor:
         import flashinfer
 
@@ -141,4 +144,5 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routing_method_type=self.routing_method_type,
+            norm_topk_prob=norm_topk_prob,  # cohere
         )

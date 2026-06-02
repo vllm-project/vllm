@@ -571,13 +571,6 @@ class OpenAIServingRender:
             skip_mm_cache=skip_mm_cache,
         )
 
-        # Cohere Start
-        if reasoning_parser is not None:
-            tokenizer = renderer.get_tokenizer()
-            request = reasoning_parser(
-                tokenizer, model_config=self.model_config
-            ).adjust_request(request=request)
-        # Cohere End
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
             request = reasoning_parser(

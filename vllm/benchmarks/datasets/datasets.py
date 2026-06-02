@@ -2296,6 +2296,10 @@ class CustomMMDataset(CustomDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
+            # cohere start
+            if not skip_chat_template:
+                prompt = self.apply_chat_transformation(prompt)
+            # cohere end
 
             prompt_len = len(tokenizer(prompt).input_ids)
             images = item["image_files"]

@@ -364,10 +364,8 @@ class Sampler(nn.Module):
         any_penalties_or_bad_words = (
             bool(bad_words_token_ids) or not sampling_metadata.no_penalties
         )
-        # cohere start
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking_combine = holder is not None and holder.has_tracked_requests()
-        # cohere end
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking_combine = holder is not None and holder.has_tracked_requests()
 
@@ -396,7 +394,6 @@ class Sampler(nn.Module):
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
-        # cohere start
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
                 output_token_ids,
@@ -408,7 +405,6 @@ class Sampler(nn.Module):
                 predict_bonus_token,
                 sampling_metadata.spec_token_ids,
             )
-        # cohere end
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
                 output_token_ids,

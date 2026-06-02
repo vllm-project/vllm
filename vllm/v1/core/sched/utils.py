@@ -3,8 +3,12 @@
 import contextlib
 from collections.abc import Sequence
 
+import vllm.envs as envs  # cohere
+from vllm.logger import init_logger  # cohere
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
+
+logger = init_logger(__name__)  # cohere
 
 
 def _has_repeating_pattern(
@@ -59,24 +63,6 @@ def check_sequence_repetition(
     return False
 
 
-def remove_all(lst: list, items_to_remove: set) -> list:
-    """Remove all items from a list that are in the items_to_remove set.
-
-    This method optimizes for the common case of removing a single item,
-    falling back to list comprehension for multiple items.
-
-    Args:
-        lst: The list to remove items from
-        items_to_remove: Set of items to remove
-
-    Returns:
-        Either the modified original list (for single item removal) or
-        a new list (for multiple item removal). Callers should use the
-        returned value.
-
-    Note:
-        For single item removal, this modifies the original list in-place
-        and returns it. For multiple items, it creates and returns a new list.
 # cohere start
 def _has_hit_token_repetition_limit(
     request: Request,
@@ -141,6 +127,26 @@ def _has_hit_token_repetition_limit(
 
 
 # cohere end
+
+
+def remove_all(lst: list, items_to_remove: set) -> list:
+    """Remove all items from a list that are in the items_to_remove set.
+
+    This method optimizes for the common case of removing a single item,
+    falling back to list comprehension for multiple items.
+
+    Args:
+        lst: The list to remove items from
+        items_to_remove: Set of items to remove
+
+    Returns:
+        Either the modified original list (for single item removal) or
+        a new list (for multiple item removal). Callers should use the
+        returned value.
+
+    Note:
+        For single item removal, this modifies the original list in-place
+        and returns it. For multiple items, it creates and returns a new list.
     """
     if not items_to_remove:
         return lst

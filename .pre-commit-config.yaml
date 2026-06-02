@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'vllm/third_party/.*'
+exclude: '(vllm/third_party/.*|tests/cohere/bee_eval_data/.*)' # cohere
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -30,7 +30,7 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--fix]
-    exclude: ^CLAUDE\.md$
+    exclude: '(.*\.inc\.md|^\.cursor/|^CLAUDE\.md$)' # cohere
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:

@@ -107,16 +107,6 @@ class InputBatch:
         cp_kv_cache_interleave_size: int = 1,
         reasoning_config: ReasoningConfig | None = None,
     ):
-        # cohere start
-        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
-            reasoning_config,
-            max_num_reqs,
-            num_spec_tokens,
-            device,
-            pin_memory,
-        )
-        self.thinking_token_budget_reqs: set[str] = set()
-        # cohere end
         self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
             reasoning_config,
             max_num_reqs,
@@ -831,10 +821,6 @@ class InputBatch:
         # reset batch update tracking.
         # Update sampling metadata if batch state is changed.
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
-        # cohere start
-        if self.thinking_budget_state_holder is not None and batch_update:
-            self.thinking_budget_state_holder.sync_batch(batch_update)
-        # cohere end
         if self.thinking_budget_state_holder is not None and batch_update:
             self.thinking_budget_state_holder.sync_batch(batch_update)
         for logit_proc in self.logitsprocs.all:
@@ -890,14 +876,6 @@ class InputBatch:
 
         # Only set output_token_ids if required by the current requests'
         # sampling parameters.
-        # cohere start
-        # Only set output_token_ids if required by the current requests'
-        # sampling parameters.
-        holder = self.thinking_budget_state_holder
-        thinking_budget_tracks_reqs = (
-            holder is not None and holder.has_tracked_requests()
-        )
-        # cohere end
         holder = self.thinking_budget_state_holder
         thinking_budget_tracks_reqs = (
             holder is not None and holder.has_tracked_requests()
@@ -1127,15 +1105,6 @@ class InputBatch:
             and len(self.repetition_penalties_reqs) == 0
         )
 
-    # cohere start
-    @property
-    def no_thinking_budget(self) -> bool:
-        return (
-            self.thinking_budget_state_holder is None
-            or len(self.thinking_token_budget_reqs) == 0
-        )
-
-    # cohere end
     @property
     def no_thinking_budget(self) -> bool:
         return (

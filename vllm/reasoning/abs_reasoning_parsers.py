@@ -168,14 +168,6 @@ class ReasoningParser:
         previously been parsed and extracted (see constructor)
         """
 
-    # COHERE START
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Adjust request parameters; override in subclasses as needed."""
-        return request
-
-    # COHERE END
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
