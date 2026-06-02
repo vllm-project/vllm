@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
 )
 from vllm.v1.request import Request
 
@@ -264,6 +265,7 @@ class KVCacheCoordinator(ABC):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_mamba_align: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
@@ -314,6 +316,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_mamba_align: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(self.num_single_type_manager)
@@ -374,6 +377,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_mamba_align: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
@@ -504,6 +508,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         self,
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
+        skip_mamba_align: bool = False,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Find the longest cache hit using an iterative fixed-point algorithm.
@@ -516,6 +521,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
+            skip_mamba_align: When True (e.g. for PD-pull requests on the D
+                side), skip Mamba groups in the hit min-reduction. Mamba running/temporal
+                state is transferred via the KV connector, so letting
+                Mamba's empty hit collapse the FullAttention hit to zero
+                would defeat prefix caching on the consumer side.
 
         Returns:
             A tuple containing:
@@ -549,6 +559,18 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             curr_hit_length = hit_length
 
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
+                # In PD disaggregation, Mamba running/temporal state is only transferred.
+                # If we did consider Mamba groups in reducing the hit length, then when Mamba groups have zero hit in the consumer side,
+                # it would reduce the hit length to zero and defeat prefix caching on the consumer side.
+                
+                # Skip Mamba groups in hit-length reduction.
+                if skip_mamba_align and isinstance(spec, MambaSpec):
+                    if hit_blocks_by_group[group_ids[0]] is None:
+                        empty_blocks: list[KVCacheBlock] = []
+                        for group_id in group_ids:
+                            hit_blocks_by_group[group_id] = empty_blocks
+                    continue
+
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
