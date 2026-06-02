@@ -80,6 +80,11 @@ class KVCacheSpecRegistry:
         assert manager_class is not None, "manager_class is required"
         if uniform_type_base_spec is None:
             uniform_type_base_spec = kvcache_spec_cls
+        assert issubclass(kvcache_spec_cls, uniform_type_base_spec), (
+            f"{kvcache_spec_cls.__name__} must inherit from its declared "
+            f"uniform_type_base_spec {uniform_type_base_spec.__name__}."
+        )
+
         if kvcache_spec_cls in _REGISTRY_KVCACHESPEC_LIST:
             registered_spec = _REGISTRY_KVCACHESPEC_LIST[kvcache_spec_cls]
             is_same_registration = (
