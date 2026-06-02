@@ -10,6 +10,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
@@ -153,9 +154,12 @@ def _allocate_and_reshape_kv_cache(
     device: torch.device,
     layout: KVCacheLayout | None = None,
     kernel_block_sizes: list[int] | None = None,
+    attn_backends: tuple[type[AttentionBackend], ...] | None = None,
 ) -> dict[str, Any]:
     if layout is None:
-        layout = resolve_kv_cache_layout()
+        layout = resolve_kv_cache_layout(
+            tuple(attn_backends) if attn_backends else None
+        )
 
     layer_to_group: dict[str, tuple[KVCacheSpec, int]] = {}
     for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
@@ -224,6 +228,9 @@ def init_kv_cache(
         device,
         layout=layout,
         kernel_block_sizes=kernel_block_sizes,
+        attn_backends=tuple(
+            group.backend for groups in attn_groups for group in groups
+        ),
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches

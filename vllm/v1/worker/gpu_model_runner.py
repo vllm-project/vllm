@@ -6992,12 +6992,9 @@ class GPUModelRunner(
         Returns: a dict mapping layer-name -> view of the backing tensor.
         """
         if layout is None:
-            layout = resolve_kv_cache_layout()
-            for group in self._kv_cache_spec_attn_group_iterator():
-                required = group.backend.get_required_kv_cache_layout()
-                if required is not None:
-                    layout = KVCacheLayout[required]
-                    break
+            layout = resolve_kv_cache_layout(
+                tuple(g.backend for g in self._attn_group_iterator())
+            )
 
         kv_caches: dict[str, torch.Tensor] = {}
 

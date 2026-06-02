@@ -355,6 +355,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         k = key[:N].view(N, self.num_kv_heads, self.head_size)
         v = value[:N].view(N, self.num_kv_heads, self.head_size)
+        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
+        kv_cache = kv_cache.transpose(1, 2)
         self._store_kv(k, v, kv_cache, slot_mapping, layer)
 
     def forward(
@@ -381,6 +383,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         if attn_metadata is None:
             return output.fill_(0)
+
+        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
+        kv_cache = kv_cache.transpose(1, 2)
 
         # Slice to actual tokens
         N = attn_metadata.num_actual_tokens

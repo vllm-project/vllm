@@ -77,7 +77,9 @@ def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
 
 
 @functools.lru_cache
-def resolve_kv_cache_layout() -> KVCacheLayout:
+def resolve_kv_cache_layout(
+    attn_backends: tuple[type[AttentionBackend], ...] | None = None,
+) -> KVCacheLayout:
     """Resolve the physical KV cache layout from the config priority chain.
 
     Priority:
@@ -92,13 +94,27 @@ def resolve_kv_cache_layout() -> KVCacheLayout:
         layout_name = _KV_CACHE_LAYOUT_OVERRIDE
     else:
         layout_name = envs.VLLM_KV_CACHE_LAYOUT
+
+        if layout_name is None and attn_backends is not None:
+            required_layouts = set(
+                backend.get_required_kv_cache_layout() for backend in attn_backends
+            )
+            required_layouts.discard(None)
+            if len(required_layouts) > 1:
+                raise ValueError(
+                    f"Multiple required KV cache layouts: {required_layouts}. "
+                    f"All backends must use the same layout."
+                )
+            if len(required_layouts) == 1:
+                layout_name = required_layouts.pop()
+
         if layout_name is None:
             try:
                 layout_name = get_kv_connector_cache_layout()
             except (AssertionError, RuntimeError):
                 layout_name = None
-        if layout_name is None:
-            layout_name = "LBHNC"
+
+        layout_name = layout_name or "LBHNC"
     layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
     try:
         layout = KVCacheLayout[layout_name]
