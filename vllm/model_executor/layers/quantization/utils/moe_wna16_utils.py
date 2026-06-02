@@ -12,6 +12,7 @@ def repack_int4_to_int32(w: torch.Tensor) -> torch.Tensor:
             [0,4,...,28]).
     """
     E, N, K_half = w.shape
+    assert N % 8 == 0, f"N must be divisible by 8 for int4 packing, got N={N}"
     K = K_half * 2
     lo = (w & 0xF).to(torch.int32)
     hi = ((w >> 4) & 0xF).to(torch.int32)

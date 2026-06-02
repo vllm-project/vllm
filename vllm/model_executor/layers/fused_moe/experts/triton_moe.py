@@ -439,7 +439,7 @@ class TritonWNA16Experts(TritonExperts):
         apply_router_weight_on_input: bool,
     ):
         # Check constraints.
-        _interleave = self.quant_config.use_int4_w4a16 and w1.dtype == torch.int32
+        _interleave = self.quant_config.is_int4_w4a16_interleaved(w1)
         if _interleave:
             assert hidden_states.size(-1) == w1.size(1), "Hidden size mismatch"
         elif self.quant_config.use_int4_w4a16:
