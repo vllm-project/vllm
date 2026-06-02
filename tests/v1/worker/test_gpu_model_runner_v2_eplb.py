@@ -168,7 +168,7 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
         slot_mappings_by_layer=None,
         hidden_states=None,
         aux_hidden_states=None,
-        kv_connector_output=None,
+        finished_req_ids=set(),
         num_tokens_across_dp=None,
     )
     runner.postprocess = lambda *args, **kwargs: events.append("postprocess")

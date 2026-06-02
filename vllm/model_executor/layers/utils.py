@@ -200,6 +200,7 @@ def rocm_unquantized_gemm_impl(
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
+        and x.dim() == 2
         and (
             10 <= n <= 128
             and k % 8 == 0
@@ -209,6 +210,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         x_view = x.reshape(-1, x.size(-1))
         with record_function_or_nullcontext(f"wvSplitKrc {n}x{m}x{k}"):
@@ -219,13 +221,6 @@ def rocm_unquantized_gemm_impl(
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
         return gemm_a16w16(x, weight, bias)
-
-    use_skinny = (
-        envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and (on_gfx9() or on_gfx1x())
-        and x.dtype in [torch.float16, torch.bfloat16]
-        and k % 8 == 0
-    )
 
     # Tiny scalar projection (e.g. Qwen MoE shared_expert_gate): hipBLASLt
     # runs a 64x96x32 macro tile with a SplitK + post-pass even though the
@@ -256,20 +251,29 @@ def rocm_unquantized_gemm_impl(
                 out = out + bias.reshape(-1)[0]
             return out.reshape(*x.shape[:-1], 1)
 
-    if not use_skinny:
-        with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
-            return torch.nn.functional.linear(x, weight, bias)
+    use_skinny = (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and (on_gfx9() or on_gfx1x())
+        and x.dtype in [torch.float16, torch.bfloat16]
+        and k % 8 == 0
+    )
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
-            out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
-            out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 4:
+            cu_count = num_compute_units()
+            with record_function_or_nullcontext(f"wvSplitK {n}x{m}x{k}"):
+                out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            with record_function_or_nullcontext(f"LLMM1 {n}x{m}x{k}"):
+                out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
 
     with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
         return torch.nn.functional.linear(x, weight, bias)
@@ -313,6 +317,19 @@ def dispatch_cpu_unquantized_gemm(
     # skip for missing layers
     if layer.weight.is_meta:
         layer.cpu_linear = torch.nn.functional.linear
+        return
+
+    if layer.weight.ndim != 2:
+        # this is not a linear layer
+        # For now it should be a causal_conv1d op
+        if torch.cpu._is_amx_tile_supported():
+            # prepack conv weight
+            layer.weight.data = ops.causal_conv1d_weight_pack(
+                layer.weight.view(
+                    layer.weight.size(0),
+                    layer.weight.size(2),
+                )
+            )
         return
 
     N, K = layer.weight.size()

@@ -14,14 +14,14 @@ import torch.nn as nn
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import RCP_LN2, cdiv, next_power_of_2
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .cumsum import chunk_local_cumsum
 from .fused_recurrent import fused_recurrent_gated_delta_rule_fwd_kernel
 from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
-from .op import exp, log
+from .op import exp2, log
 from .solve_tril import solve_tril
 from .utils import FLA_CHUNK_SIZE, is_amd
 
@@ -594,16 +594,16 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter(
         b_gn = tl.load(g + (i_t * BT + i_i * BC) * H * K + o_k, mask=m_k, other=0)
         # [BC, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
-        b_k = tl.load(p_k, boundary_check=(0, 1)) * exp(b_g - b_gn[None, :])
+        b_k = tl.load(p_k, boundary_check=(0, 1)) * exp2(b_g - b_gn[None, :])
         # [BK, BC]
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
         b_kt = tl.load(b_kt, boundary_check=(0, 1))
         # [BC, BC]
-        b_ktg = b_kt * exp(b_gn[:, None] - b_gk)
+        b_ktg = b_kt * exp2(b_gn[:, None] - b_gk)
         b_A += tl.dot(b_k, b_ktg)
 
         b_q = tl.load(p_q, boundary_check=(0, 1))
-        b_qg = b_q * exp(b_g - b_gn[None, :]) * scale
+        b_qg = b_q * exp2(b_g - b_gn[None, :]) * scale
         b_Aqk += tl.dot(b_qg, b_ktg)
 
     b_A *= b_b[:, None]
@@ -703,7 +703,7 @@ def chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra(
     for j in range(0, min(BC, T - i_t * BT - i_i * BC)):
         b_kt = tl.load(p_kt, mask=m_k, other=0).to(tl.float32)
         b_gk = tl.load(p_gk, mask=m_k, other=0).to(tl.float32)
-        b_ktg = b_kt[None, :] * exp(b_g - b_gk[None, :])
+        b_ktg = b_kt[None, :] * exp2(b_g - b_gk[None, :])
         b_A = tl.sum(b_k * b_ktg, 1)
         b_A = tl.where(o_i > j, b_A, 0.0)
         b_Aqk = tl.sum(b_q * b_ktg, 1)
@@ -912,7 +912,7 @@ def recompute_w_u_fwd_kernel(
             (1, 0),
         )
         b_gk = tl.load(p_gk, boundary_check=(0, 1))
-        b_kb *= exp(b_gk)
+        b_kb *= exp2(b_gk)
         if STORE_QG:
             p_q = tl.make_block_ptr(
                 q + (bos * H + i_h) * K,
@@ -931,7 +931,7 @@ def recompute_w_u_fwd_kernel(
                 (1, 0),
             )
             b_q = tl.load(p_q, boundary_check=(0, 1))
-            b_qg = b_q * exp(b_gk)
+            b_qg = b_q * exp2(b_gk)
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
@@ -941,7 +941,7 @@ def recompute_w_u_fwd_kernel(
             b_gn = tl.load(
                 gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.0
             )
-            b_kg = b_k * exp(b_gn - b_gk)
+            b_kg = b_k * exp2(b_gn - b_gk)
 
             p_kg = tl.make_block_ptr(
                 kg + (bos * H + i_h) * K,
@@ -1076,10 +1076,10 @@ def chunk_gla_fwd_kernel_o(
         )
         p_h = tl.make_block_ptr(
             h + (i_tg * H + i_h) * K * V,
-            (K, V),
-            (V, 1),
-            (i_k * BK, i_v * BV),
-            (BK, BV),
+            (V, K),
+            (K, 1),
+            (i_v * BV, i_k * BK),
+            (BV, BK),
             (1, 0),
         )
 
@@ -1089,13 +1089,12 @@ def chunk_gla_fwd_kernel_o(
         # [BT, BK]
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
-        b_qg = (b_q * exp(b_g)).to(b_q.dtype)
-        # [BK, BV]
+        b_qg = (b_q * exp2(b_g)).to(b_q.dtype)
+        # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
-        # works but dkw, owing to divine benevolence
         # [BT, BV]
         if i_k >= 0:
-            b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+            b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
     p_v = tl.make_block_ptr(
         v + (bos * H + i_h) * V,
         (T, V),
@@ -1180,6 +1179,9 @@ def chunk_kda_fwd(
 ):
     chunk_size = FLA_CHUNK_SIZE
     g = chunk_local_cumsum(g, chunk_size=chunk_size, cu_seqlens=cu_seqlens)
+    # KDA evaluates cumulative gate decays with exp2. Convert from natural-log
+    # space so exp(x) is preserved as exp2(x / ln(2)).
+    g = g * RCP_LN2
     # the intra Aqk is kept in fp32
     # the computation has very marginal effect on the entire throughput
     A, Aqk = chunk_kda_scaled_dot_kkt_fwd(
@@ -1210,6 +1212,7 @@ def chunk_kda_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        use_exp2=True,
     )
     del w, u, kg
     o = chunk_gla_fwd_o_gk(

@@ -111,7 +111,7 @@ jobs:
         env:
           PYTORCH_ROCM_ARCH: ${{ env.PYTORCH_ROCM_ARCH }}
           VLLM_TARGET_DEVICE: rocm
-          MAX_JOBS: 2
+          MAX_JOBS: 1
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_IDLE_TIMEOUT: 0
         run: |

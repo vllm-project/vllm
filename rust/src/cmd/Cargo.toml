@@ -1,0 +1,39 @@
+[package]
+name = "vllm-cmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vllm-rs"
+path = "src/main.rs"
+
+[features]
+default = []
+native-tls-vendored = ["dep:native-tls-vendored"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+educe.workspace = true
+itertools.workspace = true
+native-tls-vendored = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+thiserror-ext.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+vllm-engine-core-client.workspace = true
+vllm-managed-engine.workspace = true
+vllm-server.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[lints]
+workspace = true

@@ -35,6 +35,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
@@ -49,7 +50,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -220,9 +221,21 @@ class MiniMaxM2Attention(nn.Module):
         self.q_norm = MiniMaxText01RMSNormTP(
             self.head_dim * self.total_num_heads, eps=rms_norm_eps
         )
-        self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
-        )
+        if self.total_num_kv_heads >= tp_size:
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
+            )
+        else:
+            # KV heads are replicated across TP ranks; shard k_norm weight by
+            # total_num_kv_heads rather than tp_size to avoid incorrect sharding.
+            num_kv_head_replicas = tp_size // self.total_num_kv_heads
+            self.k_norm = MiniMaxText01RMSNormTP(
+                self.head_dim * self.total_num_kv_heads,
+                eps=rms_norm_eps,
+                weight_shard_world_size=self.total_num_kv_heads,
+                weight_shard_rank=get_tensor_model_parallel_rank()
+                // num_kv_head_replicas,
+            )
 
     def forward(
         self,
@@ -230,8 +243,9 @@ class MiniMaxM2Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm, self.k_norm, q, k)
+        q, k, v = MiniMaxText01RMSNormTP.forward_qkv(
+            self.q_norm, self.k_norm, qkv, self.q_size, self.kv_size
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

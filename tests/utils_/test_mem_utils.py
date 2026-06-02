@@ -20,6 +20,13 @@ def test_memory_profiling():
     # 512 MiB allocation outside of this instance
     handle1 = lib.cudaMalloc(512 * 1024 * 1024)
 
+    # Warm up PyTorch's CUDA/ROCm context so that its internal initialization
+    # overhead (streams, cuBLAS handles, etc.) is included in the baseline and
+    # does not inflate non-torch increase which is larger on ROCm than on CUDA
+    _warmup = torch.zeros(1, device="cuda")
+    del _warmup
+    torch.accelerator.empty_cache()
+
     baseline_snapshot = MemorySnapshot()
 
     # load weights

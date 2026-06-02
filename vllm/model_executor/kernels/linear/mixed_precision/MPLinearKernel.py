@@ -50,8 +50,8 @@ class MPLinearKernel(ABC):
             assert w_zp_param_name is not None
         if c.has_g_idx:
             assert w_gidx_param_name is not None
-        self.w_zp_name = w_zp_param_name
-        self.w_gidx_name = w_gidx_param_name
+        self.w_zp_name: str | None = w_zp_param_name
+        self.w_gidx_name: str | None = w_gidx_param_name
 
     @staticmethod
     def _validate_config_invariants(
