@@ -261,10 +261,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-
-    @property
-    def tokens_per_state(self) -> int:
-        return 1
+    tokens_per_state: int = 1
 
     # NVFP4: K and V are stored as separate head groups [L, B, 2*H, N, dim]
     # rather than interleaved in content [L, B, H, N, 2*dim].
@@ -493,20 +490,13 @@ class MLAAttentionSpec(FullAttentionSpec):
     cache_dtype_str: str | None = None
     # DeepseekV4 only fields. Non-DeepseekV4 MLA models leave these at defaults.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1  # Default to 1 for no compression.
+    tokens_per_state: int = 1
     model_version: str | None = None
+    num_heads: int = 1
 
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
-
-    @property
-    def num_heads(self) -> int:
-        return 1
-
-    @property
-    def tokens_per_state(self) -> int:
-        return self.compress_ratio
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -516,7 +506,7 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @property
     def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
+        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -541,7 +531,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        compress_ratio_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
@@ -559,7 +549,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
+            tokens_per_state=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
         )
 
@@ -669,20 +659,13 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1
+    tokens_per_state: int = 1
     model_version: str | None = None
+    num_heads: int = 1
 
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
-
-    @property
-    def num_heads(self) -> int:
-        return 1
-
-    @property
-    def tokens_per_state(self) -> int:
-        return self.compress_ratio
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -692,7 +675,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
+        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -716,7 +699,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "SlidingWindowMLASpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        compress_ratio_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         assert (
@@ -737,7 +720,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
+            tokens_per_state=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
         )
 
@@ -750,14 +733,8 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
-
-    @property
-    def num_heads(self) -> int:
-        return 1
-
-    @property
-    def tokens_per_state(self) -> int:
-        return -1
+    num_heads: int = 1
+    tokens_per_state: int = -1
 
     @property
     def state_content_size_bytes(self) -> int:

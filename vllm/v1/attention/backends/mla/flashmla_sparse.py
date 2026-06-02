@@ -328,8 +328,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         self.compress_ratio = 1
         if self.is_deepseek_v4:
-            assert hasattr(self.kv_cache_spec, "compress_ratio")
-            self.compress_ratio = self.kv_cache_spec.compress_ratio
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
             # Pre-allocate compressed slot mapping buffer for CUDA graph
             # address stability when compress_ratio > 1.
             if self.compress_ratio > 1:

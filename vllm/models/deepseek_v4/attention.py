@@ -611,7 +611,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=torch.uint8,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576,  # NOTE: FlashMLA requires 576B alignment
             model_version="deepseek_v4",
@@ -654,13 +654,13 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
-        # compress_ratio=1 for V3.2, >1 for DeepseekV4; both use the same cache layout.
+        # tokens_per_state=1 for V3.2, >1 for DSV4; same cache layout.
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-            compress_ratio=self.compress_ratio,
+            tokens_per_state=self.compress_ratio,
             # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=576,

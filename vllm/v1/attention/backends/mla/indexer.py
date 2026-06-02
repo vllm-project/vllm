@@ -304,7 +304,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = 1
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
-            self.compress_ratio = self.kv_cache_spec.compress_ratio
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:

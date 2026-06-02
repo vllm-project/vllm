@@ -1341,7 +1341,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     page_size_padded=spec.page_size_padded,
                     cache_dtype_str=spec.cache_dtype_str,
                     alignment=spec.alignment,
-                    compress_ratio=spec.compress_ratio,
+                    tokens_per_state=spec.tokens_per_state,
                     model_version=spec.model_version,
                 )
             elif isinstance(spec, SlidingWindowSpec):
