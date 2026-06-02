@@ -109,10 +109,7 @@ def resolve_kv_cache_layout(
                 layout_name = required_layouts.pop()
 
         if layout_name is None:
-            try:
-                layout_name = get_kv_connector_cache_layout()
-            except (AssertionError, RuntimeError):
-                layout_name = None
+            layout_name = get_kv_connector_cache_layout()
 
         layout_name = layout_name or "LBHNC"
     layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)

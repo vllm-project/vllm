@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -32,9 +36,11 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, HNC layout is
-    # used for faster transfer.
-    vllm_config = get_current_vllm_config()
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout
+    # is used for faster transfer.
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
         connector_cls = KVConnectorFactory.get_connector_class(kv_config)
