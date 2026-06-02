@@ -34,7 +34,7 @@ configs = list(
 small_batch_many_expert_configs = (
     list(itertools.product([1, 16, 64, 128], [256], [8], [16, 64]))
     + list(itertools.product([1, 16, 64, 128], [384], [8], [16, 64]))
-    + list(itertools.product([1, 16, 64, 128], [512], [10], [16, 64]))
+    + list(itertools.product([1, 16, 64, 96], [512], [10], [16, 64]))
 )
 
 
