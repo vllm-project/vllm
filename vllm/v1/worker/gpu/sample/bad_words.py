@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -73,15 +72,10 @@ class BadWordsState:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        max_num_bad_words: int,
     ) -> None:
-        max_num_bad_words = int(self.num_bad_words.np[idx_mapping_np].max())
-        if max_num_bad_words == 0:
-            # No request uses bad words. Skip the kernel launch.
-            return
-
         apply_bad_words(
             logits,
             expanded_idx_mapping,

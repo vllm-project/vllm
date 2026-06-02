@@ -122,13 +122,8 @@ class LogitBiasState:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
     ) -> None:
-        if not np.any(self.use_logit_bias[idx_mapping_np]):
-            # No request uses logit bias. Skip the kernel launch.
-            return
-
         apply_logit_bias(
             logits,
             expanded_idx_mapping,
