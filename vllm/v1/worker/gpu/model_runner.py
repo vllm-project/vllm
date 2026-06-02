@@ -1044,7 +1044,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def postprocess_sampled(
         self,
-        idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,  # May include -1 for masked entries
         sampled_tokens: torch.Tensor,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
