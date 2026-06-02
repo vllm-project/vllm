@@ -41,6 +41,10 @@ def register_generate_api_routers(app: FastAPI):
 
     register_anthropic_api_router(app)
 
+    from .generative_scoring.api_router import register_generative_scoring_api_router
+
+    register_generative_scoring_api_router(app)
+
 
 async def init_generate_state(
     engine_client: "EngineClient",
@@ -184,4 +188,12 @@ async def init_generate_state(
         )
         if "generate" in supported_tasks
         else None
+    )
+
+    from .generative_scoring.serving import ServingGenerativeScoring
+
+    state.serving_generative_scoring = ServingGenerativeScoring(
+        engine_client,
+        state.openai_serving_models,
+        request_logger=request_logger,
     )
