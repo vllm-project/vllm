@@ -234,9 +234,8 @@ class Scheduler(SchedulerInterface):
             self._adaptive_k_ema_alpha = 0.3
             self._adaptive_k_c_draft = 0.1
             self._adaptive_k_min_tokens = 1
-        # Per-position conditional acceptance EMAs.
+        # Per-position EMA and per-step accumulators.
         self._per_position_ema: list[float] | None = None
-        # Per-step accumulators (reset each step).
         self._pos_accepted: list[int] | None = None
         self._pos_reached: list[int] | None = None
         # Cold-start prior.
@@ -1649,7 +1648,6 @@ class Scheduler(SchedulerInterface):
                     raw = self._pos_accepted[j] / self._pos_reached[j]
                     self._per_position_ema[j] += self._adaptive_k_ema_alpha * (
                         raw - self._per_position_ema[j])
-            # Reuse list allocations.
             for j in range(self.num_spec_tokens):
                 self._pos_accepted[j] = 0
                 self._pos_reached[j] = 0
@@ -1657,12 +1655,7 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _compute_adaptive_k(self) -> int:
-        """Select K maximising speedup using per-position EMA acceptance.
-
-        E_acc(K) = 1 + sum_{i=1}^K prod_{j=1}^i alpha_j  (per-position)
-        Speedup(K) = E_acc(K) / (K * c_draft + 1)
-        Enforces a cooldown between changes to prevent graph thrashing.
-        """
+        """Select K maximising speedup using per-position EMA acceptance."""
         alphas = self._per_position_ema
         if alphas is None or not self._enable_adaptive_k:
             return self.num_spec_tokens
@@ -1673,7 +1666,7 @@ class Scheduler(SchedulerInterface):
 
         prev_k = self._previous_adaptive_k
 
-        # Cooldown: skip recomputation for N steps after a change.
+        # Cooldown: skip recomputation after a change.
         if self._adaptive_k_cooldown > 0:
             self._adaptive_k_cooldown -= 1
             return prev_k
