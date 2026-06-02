@@ -3,7 +3,7 @@
 
 from fastapi import APIRouter, FastAPI, Request
 
-from vllm.entrypoints.serve.server.protocol import (
+from vllm.entrypoints.serve.devices.protocol import (
     ComputeCapability,
     DeviceInfo,
     DevicesResponse,
