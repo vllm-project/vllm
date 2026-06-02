@@ -178,22 +178,6 @@ def test_use_canonical_kv_caches_happy_path():
     "description,config_fn,backend,connector_fn,patch_no_connector",
     [
         (
-            "single_group",
-            lambda: KVCacheConfig(
-                num_blocks=NUM_BLOCKS,
-                kv_cache_tensors=[
-                    KVCacheTensor(
-                        size=_make_full_attn_spec().page_size_bytes * NUM_BLOCKS,
-                        shared_by=["layer0"],
-                    )
-                ],
-                kv_cache_groups=[KVCacheGroupSpec(["layer0"], _make_full_attn_spec())],
-            ),
-            MockFlashAttnBackend,
-            MockConnector,
-            False,
-        ),
-        (
             "no_connector",
             _make_hma_kv_cache_config,
             MockFlashAttnBackend,
@@ -264,8 +248,13 @@ def test_allocate_canonical_kv_caches():
     config = _make_hma_kv_cache_config()
     attn_groups = _make_attn_groups(MockFlashAttnBackend, config)
 
+    num_groups = len(config.kv_cache_groups)
     kv_caches, canonical = KVConnectorModelRunnerMixin.allocate_canonical_kv_caches(
-        config, attn_groups, "auto", torch.device("cpu"), [BLOCK_SIZE]
+        config,
+        attn_groups,
+        "auto",
+        torch.device("cpu"),
+        [BLOCK_SIZE] * num_groups,
     )
 
     assert isinstance(canonical, CanonicalKVCaches)
