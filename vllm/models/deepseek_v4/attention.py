@@ -4,8 +4,9 @@
 DeepseekV4 MLA Attention Layer
 """
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -23,11 +24,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.models.deepseek_v4.common.ops import (
     fused_indexer_q_rope_quant,
-    fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
 )
-from vllm.utils.deep_gemm import fp8_einsum
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -48,7 +46,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.compressor import DeepseekCompressor
-from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -64,30 +61,54 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.nvidia.flashmla import (
-        DeepseekV4SparseMLAAttentionImpl,
-    )
-
 logger = init_logger(__name__)
 
 
-def _select_v4_sparse_impl() -> "type[DeepseekV4SparseMLAAttentionImpl]":
-    """Pick the platform-specific V4 sparse MLA impl class. Sole platform check."""
-    if current_platform.is_rocm():
-        from vllm.models.deepseek_v4.amd.rocm import (
-            DeepseekV4ROCMAiterMLASparseImpl,
-        )
+class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+    """DeepseekV4 MLA attention layer.
 
-        return DeepseekV4ROCMAiterMLASparseImpl
-    from vllm.models.deepseek_v4.nvidia.flashmla import (
-        DeepseekV4FlashMLASparseImpl,
-    )
+    The platform-specific sparse-MLA forward (``forward_mqa`` /
+    ``get_padded_num_q_heads`` / ``backend_cls``) is provided by a subclass —
+    ``DeepseekV4FlashMLAAttention`` (CUDA) or ``DeepseekV4ROCMAiterMLAAttention``
+    (ROCm) — selected by the platform-specific deepseek_v4 model module
+    (see ``deepseek_v4/__init__.py``). The base is never instantiated directly.
+    """
 
-    return DeepseekV4FlashMLASparseImpl
+    # Provided by the platform subclass.
+    backend_cls: ClassVar[type[AttentionBackend]]
+    # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
+    # workspace allocated in _forward_prefill and is also read by the dummy-run
+    # path to pre-reserve that workspace.
+    PREFILL_CHUNK_SIZE: ClassVar[int] = 4
 
+    @classmethod
+    @abstractmethod
+    def get_padded_num_q_heads(cls, num_heads: int) -> int:
+        """Q head count the q/output buffers are allocated at.
 
-class DeepseekV4Attention(nn.Module, AttentionLayerBase):
+        The layer allocates the q/output buffers at
+        ``[N, get_padded_num_q_heads(n_local_heads), head_dim]``. Must
+        satisfy ``result >= num_heads``. Backends with no padding constraint
+        return ``num_heads``.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def forward_mqa(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Platform-specific sparse MLA forward; writes attention into ``output``."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
+        raise NotImplementedError
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -171,14 +192,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
             prefix=f"{prefix}.wo_b",
         )
 
-        # Pick fp8_einsum recipe based on GPU arch:
-        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
-        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        cap = current_platform.get_device_capability()
-        assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
-
         # Initialize rotary embedding before the indexer/compressor consume it.
         self.rotary_emb = build_deepseek_v4_rope(
             config,
@@ -228,11 +241,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
         )
 
-        # ---- Attention layer setup (formerly DeepseekV4MLAAttention) ----
-        self.impl_cls = _select_v4_sparse_impl()
-        self.backend_cls = self.impl_cls.backend_cls
-        # Padded Q head count is dictated by the selected impl.
-        self.padded_heads = self.impl_cls.get_padded_num_q_heads(self.n_local_heads)
+        # ---- Attention layer setup ----
+        # Padded Q head count is dictated by the platform subclass.
+        self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
 
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -299,48 +310,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
         self.attention_impl(hidden_states, positions, o_padded)
         o = o_padded[:, : self.n_local_heads, :]
 
-        # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
-            z = rocm_inv_rope_einsum(
-                self.rotary_emb,
-                o,
-                positions,
-                self.rope_head_dim,
-                self.n_local_groups,
-                self.o_lora_rank,
-                self.wo_a,
-            )
-            return self.wo_b(z.flatten(1))
-
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
-            o,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            n_groups=self.n_local_groups,
-            heads_per_group=self.n_local_heads // self.n_local_groups,
-            nope_dim=self.nope_head_dim,
-            rope_dim=self.rope_head_dim,
-            tma_aligned_scales=self._tma_aligned_scales,
-        )
-
-        wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
-
-        z = torch.empty(
-            (num_tokens, self.n_local_groups, self.o_lora_rank),
-            device=o.device,
-            dtype=torch.bfloat16,
-        )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_fp8, o_scale),
-            (wo_a_fp8, wo_a_scale),
-            z,
-            recipe=self._einsum_recipe,
-        )
-
-        return self.wo_b(z.flatten(1))
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list
@@ -489,7 +460,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase):
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.impl_cls.forward_mqa(self, q, kv, positions, out)
+        self.forward_mqa(q, kv, positions, out)
 
     def _fused_qnorm_rope_kv_insert(
         self,
