@@ -22,10 +22,9 @@ pre-class code.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 import torch
-from torch.nn import Module
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
@@ -33,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 BackendT = TypeVar("BackendT", bound=Enum)
 
@@ -72,10 +74,23 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
 
     @abstractmethod
     def select_backend(
-        self, moe_config: FusedMoEConfig
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
         """Primary entry point: choose the best supported backend for
-        the given `moe_config`."""
+        the given `moe_config`.
+
+        `weight_key` / `activation_key` carry the quantization scheme of
+        the weights and activations and are consumed by quantized oracles
+        (fp8, nvfp4, int8, ...) to disambiguate backends. The unquantized
+        oracle ignores them. Subclasses with additional selection inputs
+        (e.g. int_wna16 needs `weight_bits`, fp8 needs
+        `allow_vllm_cutlass`) widen the signature in their override; a
+        per-oracle config object is the longer-term target tracked in
+        the #37753 follow-up PRs.
+        """
 
     @abstractmethod
     def make_kernel(
@@ -92,9 +107,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     def convert_to_kernel_format(
         self,
         backend: BackendT,
-        layer: Module,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
+        is_act_and_mul: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Shuffle weights into the layout expected by `backend`.
 
@@ -102,18 +117,25 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         whose backends need weight permutation should override this
         (e.g. `UnquantizedMoEKernelOracle` handles AITER and FlashInfer
         layouts).
+
+        `is_act_and_mul` is the only piece of MoE-layer state the
+        unquantized conversion needs to avoid passing the layer into 
+        the oracle. Quantized oracles whose conversion needs
+        scales / zero-points / block shapes will override with a wider
+        signature (and ultimately a per-oracle config object — tracked
+        in the #37753 follow-up PRs).
         """
         return w13_weight, w2_weight
 
     def make_quant_config(self, *args, **kwargs) -> FusedMoEQuantConfig:
         """Build a `FusedMoEQuantConfig` for this oracle.
 
-        Quantised oracles (fp8, nvfp4, mxfp4, ...) override this with
-        the appropriate signature for their quantisation scheme.
-        Unquantised oracles inherit the default, which raises because
-        there is no quantisation-specific config to build.
+        Quantized oracles (fp8, nvfp4, mxfp4, ...) override this with
+        the appropriate signature for their quantization scheme.
+        Unquantized oracles inherit the default, which raises because
+        there is no quantization-specific config to build.
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not implement make_quant_config; "
-            "this oracle has no quantisation-specific config to build."
+            "this oracle has no quantization-specific config to build."
         )
