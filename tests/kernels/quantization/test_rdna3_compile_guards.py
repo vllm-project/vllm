@@ -69,6 +69,20 @@ needs_source = pytest.mark.skipif(
 )
 
 
+def _read_source_or_skip(*relparts: str) -> str:
+    """Read a repo source file, or skip if it isn't in the source tree.
+
+    Some CI images expose only part of the tree (e.g. csrc/ + CMakeLists.txt
+    for building, but the installed wheel instead of the vllm/ python source).
+    In that case the file-level guard checks can't run — skip rather than fail.
+    """
+    assert REPO_ROOT is not None  # callers are gated by @needs_source
+    path = REPO_ROOT.joinpath(*relparts)
+    if not path.exists():
+        pytest.skip(f"{path} not present in this source tree")
+    return path.read_text()
+
+
 # ============================================================================
 # Part A: POSITIVE — on gfx1100, ops exist and dispatch works
 # ============================================================================
@@ -175,8 +189,7 @@ class TestCMakeGuards:
 
     @staticmethod
     def _read_cmake():
-        assert REPO_ROOT is not None  # guaranteed by @needs_source
-        return (REPO_ROOT / "CMakeLists.txt").read_text()
+        return _read_source_or_skip("CMakeLists.txt")
 
     def test_rdna3_cu_files_inside_gfx1100_conditional(self):
         """All RDNA3 .cu files must be listed inside the
@@ -224,8 +237,7 @@ class TestTorchBindingsGuards:
 
     @staticmethod
     def _read_bindings():
-        assert REPO_ROOT is not None  # guaranteed by @needs_source
-        return (REPO_ROOT / "csrc" / "rocm" / "torch_bindings.cpp").read_text()
+        return _read_source_or_skip("csrc", "rocm", "torch_bindings.cpp")
 
     def test_all_rdna3_ops_inside_ifdef(self):
         """Every rdna3 op def/impl must be between #ifdef VLLM_ROCM_GFX1100
@@ -281,8 +293,7 @@ class TestCustomOpsGuards:
 
     @staticmethod
     def _read_custom_ops():
-        assert REPO_ROOT is not None  # guaranteed by @needs_source
-        return (REPO_ROOT / "vllm" / "_custom_ops.py").read_text()
+        return _read_source_or_skip("vllm", "_custom_ops.py")
 
     def test_register_fake_guarded_by_hasattr(self):
         """Every register_fake for an RDNA3 op must be preceded by a hasattr
@@ -446,18 +457,15 @@ class TestCompressedTensorsMoEDispatchGuard:
 
     def test_rocm_guard_in_dispatch_source(self):
         """The rocm_moe import and call must be inside an is_rocm() check."""
-        assert REPO_ROOT is not None  # guaranteed by @needs_source
-        src_path = (
-            REPO_ROOT
-            / "vllm"
-            / "model_executor"
-            / "layers"
-            / "quantization"
-            / "compressed_tensors"
-            / "compressed_tensors_moe"
-            / "compressed_tensors_moe.py"
+        src = _read_source_or_skip(
+            "vllm",
+            "model_executor",
+            "layers",
+            "quantization",
+            "compressed_tensors",
+            "compressed_tensors_moe",
+            "compressed_tensors_moe.py",
         )
-        src = src_path.read_text()
         lines = src.splitlines()
 
         for i, line in enumerate(lines, 1):
