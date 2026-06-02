@@ -47,6 +47,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -103,6 +104,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import KVBlockZeroer
 
 logger = init_logger(__name__)
 
@@ -128,6 +130,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype
             ]
+
+        # Lazily initialized in _init_kv_zero_meta() when the KV cache needs
+        # zeroing (e.g. hybrid models with fp8 KV cache).
+        self.kv_block_zeroer: KVBlockZeroer | None = None
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
@@ -393,7 +399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
-        self.attn_groups, attn_cg_support, kernel_block_sizes = init_attn_backend(
+        self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
         self.block_tables = BlockTables(
@@ -402,7 +408,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
-            kernel_block_sizes=kernel_block_sizes,
+            kernel_block_sizes=self.kernel_block_sizes,
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
@@ -442,9 +448,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.attn_groups,
             self.device,
             self.cache_config.cache_dtype,
-            kernel_block_sizes,
+            self.kernel_block_sizes,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def _init_kv_zero_meta(self) -> None:
+        """Build KV-block zeroing metadata; invoked from gpu_worker."""
+        self.kv_block_zeroer = KVBlockZeroer(
+            self.device,
+            is_pin_memory_available(),
+            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            kernel_block_sizes=self.kernel_block_sizes,
+            cache_dtype=self.cache_config.cache_dtype,
+            static_forward_context=self.compilation_config.static_forward_context,
+        )
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
@@ -751,6 +768,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.prefill_len.np,
             out=self.req_states.num_computed_prefill_tokens,
         )
+
+        # Zero GPU memory for freshly allocated cache blocks to prevent
+        # stale NaN/data from corrupting attention or SSM computation.
+        if scheduler_output.new_block_ids_to_zero:
+            assert self.kv_block_zeroer is not None
+            self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
