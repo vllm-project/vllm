@@ -34,7 +34,6 @@ from vllm.model_executor.layers.mhc import (
     MHCPreOp,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -52,9 +51,9 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionWrapper,
+    DeepseekV4MLA,
 )
+from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_tilelang
@@ -318,26 +317,13 @@ class DeepseekV4Attention(nn.Module):
 
         self.rope_parameters = config.rope_scaling
 
-        # Initialize rotary embedding BEFORE DeepseekV4MLAModules (which needs it)
-        rope_parameters = config.rope_parameters
-        rope_parameters["rope_theta"] = (
-            config.compress_rope_theta if self.compress_ratio > 1 else config.rope_theta
-        )
-        if config.rope_parameters["rope_type"] != "default":
-            config.rope_parameters["rope_type"] = (
-                "deepseek_yarn"
-                if config.rope_parameters.get("apply_yarn_scaling", True)
-                else "deepseek_llama_scaling"
-            )
-        rope_parameters["mscale"] = 0  # Disable mscale
-        rope_parameters["mscale_all_dim"] = 0  # Disable mscale
-        rope_parameters["is_deepseek_v4"] = True
-        rope_parameters["rope_dim"] = self.rope_head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=False,
+        # Initialize rotary embedding BEFORE DeepseekV4MLA (which needs it)
+        self.rotary_emb = build_deepseek_v4_rope(
+            config,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            max_position_embeddings=self.max_position_embeddings,
+            compress_ratio=self.compress_ratio,
         )
 
         self.indexer = None
@@ -355,7 +341,17 @@ class DeepseekV4Attention(nn.Module):
                 prefix=f"{prefix}.indexer",
             )
 
-        mla_modules = DeepseekV4MLAModules(
+        self.mla_attn = DeepseekV4MLA(
+            hidden_size=self.hidden_size,
+            num_heads=self.n_local_heads,
+            head_dim=self.head_dim,
+            scale=self.softmax_scale,
+            qk_nope_head_dim=self.nope_head_dim,
+            qk_rope_head_dim=self.rope_head_dim,
+            v_head_dim=self.head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.head_dim,
+            o_lora_rank=self.o_lora_rank,
             vllm_config=vllm_config,
             fused_wqa_wkv=self.fused_wqa_wkv,
             q_norm=self.q_norm,
@@ -369,19 +365,6 @@ class DeepseekV4Attention(nn.Module):
             indexer_rotary_emb=self.rotary_emb,
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
-        )
-        self.mla_attn = DeepseekV4MultiHeadLatentAttentionWrapper(
-            hidden_size=self.hidden_size,
-            num_heads=self.n_local_heads,
-            head_dim=self.head_dim,
-            scale=self.softmax_scale,
-            qk_nope_head_dim=self.nope_head_dim,
-            qk_rope_head_dim=self.rope_head_dim,
-            v_head_dim=self.head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.head_dim,
-            o_lora_rank=self.o_lora_rank,
-            mla_modules=mla_modules,
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
             cache_config=vllm_config.cache_config,
@@ -622,7 +605,7 @@ class DeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
+        # DeepseekV4MLA.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         # Disable them on ROCm because of hang issues.

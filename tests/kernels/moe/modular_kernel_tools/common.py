@@ -224,10 +224,6 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return info.blocked_quantization_support
 
-    def supports_expert_map(self):
-        info = expert_info(self.fused_experts_type)
-        return info.supports_expert_map
-
     def supports_apply_weight_on_input(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.supports_apply_weight_on_input
@@ -325,6 +321,15 @@ class Config:
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
             return False, "Needs MoRI, but MoRI not available."
+
+        try:
+            if not self.fused_experts_type._supports_current_device():
+                return (
+                    False,
+                    f"{self.fused_experts_type} not supported on the current device.",
+                )
+        except NotImplementedError:
+            pass
 
         return True, None
 
@@ -471,7 +476,7 @@ class RankTensors:
         topk_ids = topk_ids.to(device=device)
 
         expert_map = None
-        if config.world_size > 1 and config.supports_expert_map():
+        if config.world_size > 1:
             expert_map = torch.full(
                 (global_num_experts,), fill_value=-1, dtype=torch.int32
             )
