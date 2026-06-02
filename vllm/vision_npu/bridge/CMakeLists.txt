@@ -34,12 +34,12 @@ endif()
 message(STATUS "FlexMLRT include: ${FLEXMLRT_INCLUDE_DIR}")
 message(STATUS "FlexMLRT library: ${FLEXMLRT_LIB_DIR}")
 
-# Create pybind11 module with CPU preprocessing support
-pybind11_add_module(_vision_flexmlrt_cpu vision_flexmlrt.cpp)
-target_include_directories(_vision_flexmlrt_cpu PRIVATE ${FLEXMLRT_INCLUDE_DIR})
-target_link_directories(_vision_flexmlrt_cpu PRIVATE ${FLEXMLRT_LIB_DIR})
-target_link_libraries(_vision_flexmlrt_cpu PRIVATE flexmlrt)
-target_compile_features(_vision_flexmlrt_cpu PRIVATE cxx_std_17)
+# Create pybind11 module for FlexMLRT NPU vision inference
+pybind11_add_module(_vision_flexmlrt_npu vision_flexmlrt.cpp)
+target_include_directories(_vision_flexmlrt_npu PRIVATE ${FLEXMLRT_INCLUDE_DIR})
+target_link_directories(_vision_flexmlrt_npu PRIVATE ${FLEXMLRT_LIB_DIR})
+target_link_libraries(_vision_flexmlrt_npu PRIVATE flexmlrt)
+target_compile_features(_vision_flexmlrt_npu PRIVATE cxx_std_17)
 
 # Install to parent directory (vllm/vision_npu/)
-install(TARGETS _vision_flexmlrt_cpu LIBRARY DESTINATION ${CMAKE_SOURCE_DIR}/..)
+install(TARGETS _vision_flexmlrt_npu LIBRARY DESTINATION ${CMAKE_SOURCE_DIR}/..)

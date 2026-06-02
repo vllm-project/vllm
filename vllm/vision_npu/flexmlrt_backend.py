@@ -46,7 +46,7 @@ class FlexMLRTVisionBackend(NPUVisionBackend):
     """FlexMLRT implementation of NPU vision backend with CPU preprocessing."""
 
     def __init__(self, model_cache_path: str, device_name: str = "stx"):
-        from vllm.vision_npu._vision_flexmlrt_cpu import VisionFlexMLRTModel
+        from vllm.vision_npu._vision_flexmlrt_npu import VisionFlexMLRTModel
 
         self.model = VisionFlexMLRTModel(model_cache_path, device_name)
         self.preprocessor = get_cpu_preprocessor(model_cache_path)

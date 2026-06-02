@@ -195,8 +195,8 @@ class VisionFlexMLRTModel {
 };
 
 // pybind11 module
-PYBIND11_MODULE(_vision_flexmlrt_cpu, m) {
-  m.doc() = "FlexMLRT vision model with CPU preprocessing support";
+PYBIND11_MODULE(_vision_flexmlrt_npu, m) {
+  m.doc() = "FlexMLRT vision model for NPU inference";
 
   py::class_<VisionFlexMLRTModel>(m, "VisionFlexMLRTModel")
       .def(py::init<std::string, std::string>(), py::arg("model_cache"),
