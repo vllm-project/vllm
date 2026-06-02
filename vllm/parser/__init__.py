@@ -20,6 +20,10 @@ _PARSERS_TO_REGISTER = {
         "minimax_m2_parser",  # filename
         "MiniMaxM2Parser",  # class_name
     ),
+    "minimax_m2_sanitized": (
+        "minimax_m2_sanitized_parser",
+        "MiniMaxM2SanitizedParser",
+    ),
 }
 
 
