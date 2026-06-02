@@ -10,6 +10,10 @@
 #
 # Environment overrides:
 #   PORT=8000  MODEL=/path/to/model  GPU_MEM=0.8  NUM_FRAMES=8
+#   GOP_DROP=1   # deepstream only: decode only GOPs that contain a sampled
+#                # frame (faster on sparse samples). Default 0 = exact-N
+#                # index decode. PTS selection may return one fewer frame on
+#                # streams whose PTS don't align with idx/fps.
 # ============================================================================
 set -euo pipefail
 
@@ -21,6 +25,9 @@ MODEL="${MODEL:-/work/deepstream_9.0_vllm/Qwen2-VL-2B-Instruct}"
 PORT="${PORT:-8000}"
 GPU_MEM="${GPU_MEM:-0.8}"
 NUM_FRAMES="${NUM_FRAMES:-8}"
+# deepstream GOP-drop: 1 = decode only GOPs containing a sampled frame
+# (PTS selection), 0 = exact-N index decode (whole stream). Default off.
+GOP_DROP="${GOP_DROP:-0}"
 # export VLLM_ATTENTION_BACKEND=FLASHINFER
 # Pre-computed KV cache block count — skips the 2+ min GPU memory profiling step.
 # Calibrated at GPU_MEM=0.7 on H200 (91 GiB free → 3,412,496 tokens / 16 = 213,281 blocks).
@@ -45,10 +52,14 @@ export VLLM_MULTIMODAL_TENSOR_IPC=1
 export TRANSFORMERS_OFFLINE=1
 export CUDA_MODULE_LOADING=LAZY
 export VLLM_MEDIA_LOADING_THREAD_COUNT=16
+# Per-request DeepStream timing breakdown (probe / decode / D2H copy).
+export VLLM_DS_TIMING=${VLLM_DS_TIMING:-0}
 # H200 is SM 9.0 — vLLM's default is FLASH_ATTN (FlashAttention-3 with Hopper TMA/wgmma).
 # FlashInfer is only preferred on SM 10.0 (Blackwell). Don't override unless benchmarking.
 # export VLLM_ATTENTION_BACKEND=FLASHINFER
 export VLLM_VIDEO_LOADER_BACKEND=$BACKEND
+# deepstream-only: toggle GOP-drop (PTS selection) vs exact-N index decode.
+export VLLM_DS_GOP_DROP=$GOP_DROP
 
 # Persistent kernel caches — survives container restarts, avoids Triton JIT recompile
 export TRITON_CACHE_DIR=/work/deepstream_9.0_vllm/.triton_cache
@@ -64,6 +75,7 @@ echo "  Model          : $MODEL"
 echo "  Port           : $PORT"
 echo "  GPU mem util   : $GPU_MEM"
 echo "  Frames/video   : $NUM_FRAMES"
+echo "  GOP-drop       : $GOP_DROP (deepstream; 1=PTS GOP-drop, 0=exact-N index)"
 echo "  Server log     : $SERVER_LOG"
 echo "============================================================"
 echo ""

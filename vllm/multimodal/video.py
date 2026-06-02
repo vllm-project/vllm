@@ -640,45 +640,28 @@ class DynamicVideoBackend(VideoBackend):
         )
 
 
-_DROP_FRAME_INTERVAL: int = 0
-"""nvv4l2decoder ``drop-frame-interval`` — 0 disables hardware frame dropping;
-every decoded frame passes through the pipeline.  Frame selection is done
-entirely by PTS targets."""
+class DeepStreamVideoBackendMixin:
+    """NVIDIA DeepStream (NVDEC) GPU-decode codec utilities.
 
+    Decoding runs on a shared pool of daemon threads inside one CUDA
+    context (see the ``deepstream_decode`` package). The container bytes
+    are pushed into an ``appsrc`` GStreamer pipeline, so no local file
+    path is required — HTTP and base64 sources decode identically to
+    local files.
 
-@VIDEO_LOADER_REGISTRY.register("deepstream")
-class DeepStreamVideoBackend(VideoLoader):
-    """Video backend using NVIDIA GPU-accelerated decoding via DeepStream.
-
-    Decoding runs on N daemon threads inside a single process, all
-    sharing one CUDA context. NVMM frames are copied into a CUDA tensor
-    allocated from PyTorch's caching allocator and handed to the caller
-    directly — no D2H/H2D round-trip.
-
-    See the ``deepstream_decode`` PyPI package for the pool implementation.
+    Like the OpenCV/PyAV mixins, this provides only the codec layer.
+    Frame *selection* lives in the loader's
+    ``compute_frames_index_to_sample`` and arrives here as an explicit
+    list of frame indices.
     """
 
-    @staticmethod
-    def _probe_video_metadata(
-        filepath: str,
-    ) -> tuple[int, float, float, int, int]:
-        """``(frame_count, fps, duration_sec, width, height)``.
-
-        Delegates to the ``deepstream_decode`` wheel, which carries the
-        pymediainfo dependency. Returns ``(0, 0.0, 0.0, 0, 0)`` if the
-        file can't be parsed."""
-        from deepstream_decode import probe_metadata
-        return probe_metadata(filepath)
-
-    # ----------------------------------------------------------------
-    # Pool lifecycle (lazy)
-    # ----------------------------------------------------------------
-    _pool = None
-    _pool_lock = None
+    # Process-wide lazy decode pool, shared across all DeepStream backends.
+    _pool: ClassVar[Any] = None
+    _pool_lock: ClassVar[Any] = None
 
     @classmethod
     def _get_pool(cls):
-        """Lazy-initialize the decode pool on first use (thread-safe)."""
+        """Lazy-initialize the shared decode pool on first use."""
         if cls._pool is not None:
             return cls._pool
         if cls._pool_lock is None:
@@ -686,29 +669,108 @@ class DeepStreamVideoBackend(VideoLoader):
         with cls._pool_lock:
             if cls._pool is not None:
                 return cls._pool
-            import os as _os
+            import os
 
             from deepstream_decode import DecodePool
 
             pool_size = int(
-                _os.environ.get(
+                os.environ.get(
                     "VLLM_DS_POOL_SIZE",
-                    _os.environ.get(
-                        "VLLM_MEDIA_LOADING_THREAD_COUNT", "8")))
+                    os.environ.get("VLLM_MEDIA_LOADING_THREAD_COUNT", "8"),
+                )
+            )
             pool_size = max(1, min(pool_size, 16))
             logger.info(
-                "[DeepStream Pool] Initializing %d worker threads "
-                "(drop_interval=%d)",
-                pool_size, _DROP_FRAME_INTERVAL)
-            cls._pool = DecodePool(
-                num_workers=pool_size,
-                drop_interval=_DROP_FRAME_INTERVAL,
+                "[DeepStream] initializing decode pool with %d workers",
+                pool_size,
             )
+            cls._pool = DecodePool(num_workers=pool_size)
             return cls._pool
 
-    # ----------------------------------------------------------------
-    # File decode (entry point)
-    # ----------------------------------------------------------------
+    @classmethod
+    def decode_indices(
+        cls,
+        data: bytes,
+        frame_indices: list[int],
+        source: VideoSourceMetadata,
+        codec: str = "",
+        timeout_sec: float = 120.0,
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode the requested frame indices from raw container bytes.
+
+        The whole stream is decoded; the pool keeps exactly the frames whose
+        decode-order index is in ``frame_indices`` (1:1, frame-exact) and
+        sends EOS once the last one is matched.
+
+        ``codec`` (e.g. ``"h264"``/``"hevc"``) lets the pool keep its NVDEC
+        session warm across same-codec streams and rebuild only on a codec
+        change. Frames are returned as a CPU NHWC uint8 array so the
+        upstream multimodal parser sees the same shape as the other
+        backends.
+        """
+        if not frame_indices:
+            raise ValueError("DeepStream backend received no frame indices")
+
+        import os
+        import time
+
+        _timing = os.environ.get("VLLM_DS_TIMING", "0").strip().lower() in (
+            "1", "true", "yes", "on"
+        )
+        _t0 = time.perf_counter()
+        result = cls._get_pool().decode(
+            data,
+            target_indices=frame_indices,
+            codec=codec,
+            max_frames=len(frame_indices),
+            timeout_sec=timeout_sec,
+        )
+        _t1 = time.perf_counter()
+        if result.error:
+            raise ValueError(f"DeepStream decode failed: {result.error}")
+        if result.frames is None or result.n_kept == 0:
+            raise ValueError("DeepStream decode produced no frames")
+
+        valid = frame_indices[: result.n_kept]
+        # GPU -> CPU NHWC uint8 at the codec boundary (one PCIe copy); keeps
+        # the array shape identical to the OpenCV/PyAV backends. Copy into
+        # PINNED host memory (reused across calls by PyTorch's pinned caching
+        # allocator) so the D2H runs at full PCIe bandwidth (~13 GB/s) rather
+        # than the ~1 GB/s pageable path that plain ``.cpu()`` takes — ~12x
+        # faster for a 1080p x8 frame batch (~46ms -> ~4ms). ``numpy()`` keeps
+        # the pinned tensor alive via the array's base.
+        import torch
+
+        gpu = result.frames
+        if gpu.is_cuda:
+            host = torch.empty(gpu.shape, dtype=gpu.dtype, pin_memory=True)
+            host.copy_(gpu, non_blocking=True)
+            torch.cuda.current_stream().synchronize()
+            arr = host.numpy()
+        else:
+            arr = gpu.numpy()
+        if _timing:
+            logger.info(
+                "[ds timing] decode=%.1fms d2h_copy=%.1fms n_kept=%d",
+                (_t1 - _t0) * 1e3, (time.perf_counter() - _t1) * 1e3,
+                result.n_kept,
+            )
+        return arr, valid
+
+
+@VIDEO_LOADER_REGISTRY.register("deepstream")
+class DeepStreamVideoBackend(VideoBackend, DeepStreamVideoBackendMixin):
+    """GPU-accelerated uniform-sampling video backend (NVIDIA DeepStream).
+
+    Reuses :class:`VideoBackend`'s uniform frame sampling, probes container
+    metadata via GStreamer (in the ``deepstream_decode`` wheel — no PyAV or
+    pymediainfo), and replaces the decode step with NVDEC GPU decode.
+    Accepts the same raw ``bytes`` as every other backend — no local file
+    path is required, so remote and base64 sources work unchanged.
+    """
+
+    _sampling_suffix: ClassVar[str] = ""
+
     @classmethod
     def load_bytes(
         cls,
@@ -718,205 +780,59 @@ class DeepStreamVideoBackend(VideoLoader):
         max_duration: int = 300,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        """Decode a local video file via the DeepStream pool.
+        import os
+        import time
 
-        Requires a local file path passed as ``source_path`` in
-        ``kwargs`` — raw bytes without a path are not supported because
-        the pool builds a ``filesrc``-driven pipeline. Returns a CUDA
-        tensor ``(N, H, W, 3)`` uint8 plus metadata.
-        """
-        import os as _os
-        from pathlib import Path
-
-        source_path: str | None = kwargs.pop("source_path", None)
-        if not source_path or not _os.path.isfile(source_path):
-            raise ValueError(
-                "DeepStream backend requires a valid source_path to a "
-                "local file. Pass source_path=<path> in the call.")
-
-        abs_path = _os.path.abspath(source_path)
-        file_uri = Path(abs_path).as_uri()
-
-        total_frames_num, original_fps, duration, _w, _h = (
-            cls._probe_video_metadata(abs_path))
-        if total_frames_num == 0:
-            raise ValueError(
-                "Could not determine frame count for " + abs_path)
-        if original_fps <= 0:
-            original_fps = float(kwargs.get("original_fps", 30.0))
-        if duration <= 0:
-            duration = (total_frames_num / original_fps
-                        if original_fps > 0 else 0)
-
-        effective_frames = (total_frames_num if _DROP_FRAME_INTERVAL == 0
-                            else total_frames_num // _DROP_FRAME_INTERVAL)
-        num_to_sample = effective_frames
-        if num_frames > 0:
-            num_to_sample = min(num_frames, effective_frames)
-        if fps > 0:
-            num_to_sample = min(
-                num_to_sample, max(1, math.floor(duration * fps)))
-        num_to_sample = max(1, num_to_sample)
-
-        if num_to_sample < effective_frames:
-            target_pts_ns: list[int] | None = np.linspace(
-                0, int(duration * 1e9), num_to_sample,
-                endpoint=False, dtype=np.int64).tolist()
-        else:
-            target_pts_ns = None
-        max_keep = num_to_sample if target_pts_ns else effective_frames
-
-        result = cls._get_pool().decode(
-            file_uri,
-            target_pts_ns=target_pts_ns,
-            max_frames=max_keep,
-            timeout_sec=120.0,
+        _timing = os.environ.get("VLLM_DS_TIMING", "0").strip().lower() in (
+            "1", "true", "yes", "on"
         )
+        target = VideoTargetMetadata(
+            num_frames=num_frames, fps=fps, max_duration=max_duration
+        )
+        # Probe container metadata straight from the bytes via GStreamer
+        # (inside the deepstream_decode wheel) — no PyAV, no pymediainfo, no
+        # local path, no frame decode. The codec is returned too, which
+        # lets the pool keep its NVDEC session warm across same-codec
+        # streams. This feeds the shared frame-index sampler.
+        from deepstream_decode import probe_metadata
 
-        if result.error:
-            raise ValueError(
-                f"DeepStream decode failed: {result.error}")
-        if result.frames is None or result.n_kept == 0:
-            raise ValueError(
-                "DeepStream decode produced no frames for " + abs_path)
-
-        if result.fps > 0:
-            original_fps = result.fps
-
-        if target_pts_ns is not None:
-            frame_indices = [
-                int(round(tpts / 1e9 * original_fps))
-                for tpts in target_pts_ns
-            ]
-        else:
-            frame_indices = list(range(total_frames_num))
-
-        metadata = {
-            "total_num_frames": total_frames_num,
-            "fps": original_fps,
-            "duration": duration,
-            "video_backend": "deepstream_pool",
-            "frames_indices": frame_indices,
-            "do_sample_frames": (
-                len(frame_indices) == total_frames_num),
-        }
-        # Convert CUDA tensor → CPU NHWC uint8 numpy at the DS backend
-        # boundary so the upstream multimodal parser sees the same shape
-        # as the OpenCV/PyAV backends and no model-level overrides are
-        # needed. Pays one PCIe copy per request; keeps the PR scoped to
-        # the DS backend.
-        return result.frames.cpu().numpy(), metadata
-
-    # ----------------------------------------------------------------
-    # Chunked file decode (generator)
-    # ----------------------------------------------------------------
-    @classmethod
-    def stream_file_chunked(
-        cls,
-        file_path: str,
-        num_frames: int = 8,
-        chunk_duration_sec: float = 10.0,
-        timeout_sec: float = 120.0,
-    ):
-        """Generator: decode a local file in fixed-duration chunks.
-
-        Uses the shared decode pool and a sliding window of futures so
-        every worker is always decoding the next chunk in advance —
-        sequential decoding would leave NVDEC idle between chunks.
-        """
-        import os as _os
-        from concurrent.futures import ThreadPoolExecutor
-        from pathlib import Path
-
-        import torch as _torch
-
-        abs_path = _os.path.abspath(file_path)
-        file_uri = Path(abs_path).as_uri()
-
-        total_frames, original_fps, duration, _w, _h = (
-            cls._probe_video_metadata(abs_path))
-
-        if duration <= 0 or total_frames == 0:
-            raise ValueError(
-                "[DeepStream] Could not determine video metadata for "
-                + abs_path)
-
-        if original_fps <= 0:
-            original_fps = 30.0
-
-        pool = cls._get_pool()
-        pool_size = int(
-            _os.environ.get(
-                "VLLM_DS_POOL_SIZE",
-                _os.environ.get(
-                    "VLLM_MEDIA_LOADING_THREAD_COUNT", "8")))
-        pool_size = max(1, min(pool_size, 16))
-
-        chunks: list[tuple[int, float, float]] = []
-        t = 0.0
-        while t < duration:
-            end = min(t + chunk_duration_sec, duration)
-            chunks.append((len(chunks), t, end))
-            t = end
-
-        def _decode_one(chunk_idx: int, chunk_start: float,
-                        chunk_end: float):
-            target_pts_ns: list[int] = np.linspace(
-                int(chunk_start * 1e9),
-                int(chunk_end * 1e9),
-                num_frames,
-                endpoint=False,
-                dtype=np.int64,
-            ).tolist()
-            res = pool.decode(
-                file_uri,
-                target_pts_ns=target_pts_ns,
-                max_frames=num_frames,
-                timeout_sec=timeout_sec,
+        _t0 = time.perf_counter()
+        total_frames, original_fps, duration, _w, _h, codec = probe_metadata(
+            data
+        )
+        _t1 = time.perf_counter()
+        source = cls._prepare_source(
+            VideoSourceMetadata(
+                total_frames_num=total_frames,
+                original_fps=original_fps,
+                duration=duration,
             )
-            return chunk_idx, chunk_start, chunk_end, res
+        )
+        frame_idx = cls.compute_frames_index_to_sample(
+            source=source, target=target, **kwargs
+        )
+        _t2 = time.perf_counter()
+        frames, valid = cls.decode_indices(data, frame_idx, source, codec=codec)
+        if _timing:
+            logger.info(
+                "[ds timing] probe=%.1fms sample=%.1fms decode_total=%.1fms "
+                "load_bytes_total=%.1fms",
+                (_t1 - _t0) * 1e3, (_t2 - _t1) * 1e3,
+                (time.perf_counter() - _t2) * 1e3,
+                (time.perf_counter() - _t0) * 1e3,
+            )
 
-        detected_fps = original_fps
-        with ThreadPoolExecutor(max_workers=pool_size) as executor:
-            pending: dict[int, object] = {}
-            next_submit = 0
-            next_yield = 0
-
-            while next_submit < min(pool_size, len(chunks)):
-                ci, cs, ce = chunks[next_submit]
-                pending[next_submit] = executor.submit(
-                    _decode_one, ci, cs, ce)
-                next_submit += 1
-
-            while next_yield < len(chunks):
-                if next_submit < len(chunks):
-                    ci, cs, ce = chunks[next_submit]
-                    pending[next_submit] = executor.submit(
-                        _decode_one, ci, cs, ce)
-                    next_submit += 1
-
-                chunk_idx, chunk_start, chunk_end, res = (
-                    pending.pop(next_yield).result()
-                )
-                next_yield += 1
-
-                if res.fps > 0:
-                    detected_fps = res.fps
-
-                if (res.frames is not None
-                        and isinstance(res.frames, _torch.Tensor)
-                        and res.frames.shape[0] > 0):
-                    metadata: dict = {
-                        "total_num_frames": res.n_total,
-                        "fps": detected_fps,
-                        "duration": chunk_end - chunk_start,
-                        "chunk_index": chunk_idx,
-                        "pts_start": chunk_start,
-                        "pts_end": chunk_end,
-                        "video_backend": "deepstream_file_chunked",
-                    }
-                    # GPU → CPU NHWC uint8 at the DS boundary (see load_bytes).
-                    yield res.frames.cpu().numpy(), metadata
+        if len(valid) < len(frame_idx):
+            logger.warning(
+                "deepstream video loading: expected %d frames but got %d.",
+                len(frame_idx),
+                len(valid),
+            )
+        return frames, cls.create_hf_metadata(
+            source=source,
+            video_backend=f"deepstream{cls._sampling_suffix}",
+            valid_frame_indices=valid,
+        )
 
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")

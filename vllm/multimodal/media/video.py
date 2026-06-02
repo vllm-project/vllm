@@ -148,20 +148,10 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
-
-        # DeepStream needs the local file path so it can build a filesrc
-        # pipeline; other backends only get bytes and would reject the
-        # extra kwarg.
-        extra_kwargs: dict[str, Any] = {}
-        if self.video_loader_backend == "deepstream":
-            extra_kwargs["source_path"] = str(filepath)
-
-        return self.video_loader.load_bytes(
-            data,
-            num_frames=self.num_frames,
-            **extra_kwargs,
-            **self.kwargs,
-        )
+        # Every backend (including DeepStream, which now feeds its
+        # GStreamer pipeline from an in-memory appsrc) consumes raw bytes,
+        # so a local file path never needs to leak into the loader kwargs.
+        return self.load_bytes(data)
 
     def encode_base64(
         self,
