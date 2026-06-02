@@ -105,7 +105,7 @@ steps:
   - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore= entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   mirror:
     amd:
