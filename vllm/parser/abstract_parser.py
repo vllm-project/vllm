@@ -320,6 +320,7 @@ class Parser:
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
@@ -634,6 +635,13 @@ class DelegatingParser(Parser):
             return False
         return self._reasoning_parser.is_reasoning_end(input_ids)
 
+    def is_reasoning_end_streaming(
+        self, input_ids: list[int], delta_ids: list[int]
+    ) -> bool:
+        if self._reasoning_parser is None:
+            return False
+        return self._reasoning_parser.is_reasoning_end_streaming(input_ids, delta_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if self._reasoning_parser is None:
             return input_ids
@@ -649,12 +657,28 @@ class DelegatingParser(Parser):
             return False
         return state.reasoning_ended
 
+    def _append_unstreamed_tool_args(
+        self,
+        delta_message: DeltaMessage | None,
+    ) -> None:
+        """Append parsed-but-unstreamed tool-call arguments to *delta_message*."""
+        if (
+            self._tool_parser is not None
+            and delta_message
+            and delta_message.tool_calls
+            and (last_tc := delta_message.tool_calls[-1]).function
+        ):
+            last_tc.function.arguments = (
+                last_tc.function.arguments or ""
+            ) + self._tool_parser.get_remaining_unstreamed_args()
+
     def parse_delta(
         self,
         delta_text: str,
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         state = self._stream_state
 
@@ -679,15 +703,16 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            # Hand off remaining content to tool parser
-            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+            if self.is_reasoning_end_streaming(current_token_ids, delta_token_ids):
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
-                if delta_message and delta_message.content:
-                    current_text = delta_message.content
-                    delta_message.content = None
-                else:
-                    current_text = ""
+                current_text = (
+                    delta_message.content
+                    if delta_message and delta_message.content
+                    else ""
+                )
+                delta_text = current_text
+                delta_token_ids = current_token_ids
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
@@ -698,6 +723,9 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
+            # A boundary delta may carry both reasoning and tool call,
+            # save it before the tool parser overwrites delta_message.
+            reasoning = delta_message.reasoning if delta_message else None
             delta_message, state.function_name_returned = (
                 self._extract_tool_calls_streaming(
                     previous_text=state.previous_text,
@@ -712,6 +740,11 @@ class DelegatingParser(Parser):
                     function_name_returned=state.function_name_returned,
                 )
             )
+            if reasoning:
+                if not delta_message:
+                    delta_message = DeltaMessage()
+                delta_message.reasoning = reasoning
+
             if (
                 delta_message
                 and delta_message.tool_calls
@@ -729,6 +762,10 @@ class DelegatingParser(Parser):
 
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids
+
+        if finished:
+            self._append_unstreamed_tool_args(delta_message)
+
         return delta_message
 
 

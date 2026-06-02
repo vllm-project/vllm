@@ -382,6 +382,19 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Return a mapping of device index to PCI bus ID string.
+
+        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Subclasses should override with platform-specific discovery
+        (e.g. pynvml for CUDA).
+        """
+        raise NotImplementedError(
+            "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "
+            f"current platform ({cls.device_name})"
+        )
+
+    @classmethod
     def inference_mode(cls):
         """A device-specific wrapper of `torch.inference_mode`.
 
@@ -1015,6 +1028,13 @@ class Platform:
 
         # Native always used by default. Platforms can override this behavior.
         return IrOpPriorityConfig.with_default(["native"])
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        """
+        Does the current platform support PDL (Programmatic Dependent Launch)?
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
