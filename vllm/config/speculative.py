@@ -216,10 +216,13 @@ class SpeculativeConfig:
     low, fewer tokens are proposed to avoid wasting compute."""
     adaptive_k_ema_alpha: float = Field(
         default=0.3, ge=0.0, le=1.0)
+    """Smoothing factor for the EMA of per-position acceptance rates."""
     adaptive_k_c_draft: float = Field(
         default=0.1, gt=0.0)
+    """Estimated cost ratio of draft forward to target forward."""
     adaptive_k_min_tokens: int = Field(
         default=1, ge=1)
+    """Minimum speculative tokens to generate when adaptive K is enabled."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:

@@ -239,9 +239,9 @@ class Scheduler(SchedulerInterface):
         # Per-step accumulators (reset each step).
         self._pos_accepted: list[int] | None = None
         self._pos_reached: list[int] | None = None
-        # Cold-start prior (mid-point between greedy and high-temp).
+        # Cold-start prior.
         self._alpha_prior: float = 0.75
-        # Anti-thrashing: min steps between K changes + last value.
+        # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
         self._cooldown_steps: int = 3
         self._previous_adaptive_k: int = self.num_spec_tokens
@@ -1407,7 +1407,9 @@ class Scheduler(SchedulerInterface):
                 num_rejected = num_draft_tokens - num_accepted
                 if self._enable_adaptive_k:
                     actual_k = scheduler_output.adaptive_k_for_step or num_draft_tokens
-                    for j in range(min(actual_k, self.num_spec_tokens)):
+                    limit = min(actual_k, num_accepted + 1,
+                                self.num_spec_tokens)
+                    for j in range(limit):
                         self._pos_reached[j] += 1
                         if j < num_accepted:
                             self._pos_accepted[j] += 1
