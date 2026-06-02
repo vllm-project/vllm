@@ -9,6 +9,10 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningWithThinkingParser,
+)
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
@@ -65,6 +69,51 @@ def make_parser(tokenizer, reasoning=False, tool=False):
     return TestParser(tokenizer)
 
 
+class GlmTokenizer:
+
+    def get_vocab(self):
+        return {
+            "<think>": 154841,
+            "</think>": 154842,
+            "<tool_call>": 154843,
+            "</tool_call>": 154844,
+            "<arg_key>": 154847,
+            "</arg_key>": 154848,
+            "<arg_value>": 154849,
+            "</arg_value>": 154850,
+        }
+
+
+@pytest.fixture
+def glm_tool_request_obj():
+    return ChatCompletionRequest(
+        model="glm5",
+        messages=[{"role": "user", "content": "现在几点了？"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get the current date and time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            }
+        ],
+        tool_choice="auto",
+    )
+
+
+def make_glm47_parser(request, reasoning=False):
+    _WrappedParser.reasoning_parser_cls = (
+        DeepSeekV3ReasoningWithThinkingParser if reasoning else None
+    )
+    _WrappedParser.tool_parser_cls = Glm47MoeModelToolParser
+    return _WrappedParser(GlmTokenizer(), request.tools)
+
+
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     results: list[DeltaMessage | None] = []
@@ -87,6 +136,80 @@ def collect_fields(results):
     all_content = "".join(r.content for r in results if r and r.content)
     all_tool_calls = [tc for r in results if r and r.tool_calls for tc in r.tool_calls]
     return all_reasoning, all_content, all_tool_calls
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_delta_glm47_inline_zero_arg_tool_call(glm_tool_request_obj):
+    parser = make_glm47_parser(glm_tool_request_obj)
+    chunks = [
+        ("<tool_call>get", [154843, 455]),
+        ("_current_time</tool_call>", [11075, 3009, 154844]),
+    ]
+
+    results = []
+    prompt_token_ids: list[int] | None = []
+    for i, (delta_text, token_ids) in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                delta_text,
+                token_ids,
+                glm_tool_request_obj,
+                prompt_token_ids=prompt_token_ids,
+                finished=i == len(chunks) - 1,
+            )
+        )
+        prompt_token_ids = None
+
+    assert results[0] is None
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == ""
+    assert content == ""
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_current_time"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {}
+
+
+@pytest.mark.skip_global_cleanup
+def test_parse_delta_glm45_reasoning_glm47_inline_zero_arg_tool_call(
+    glm_tool_request_obj,
+):
+    parser = make_glm47_parser(glm_tool_request_obj, reasoning=True)
+    chunks = [
+        ("需要获取当前时间。", [2001, 2002]),
+        (
+            "</think><tool_call>get_current_time</tool_call>",
+            [154842, 154843, 455, 11075, 3009, 154844],
+        ),
+    ]
+
+    results = []
+    prompt_token_ids: list[int] | None = []
+    for i, (delta_text, token_ids) in enumerate(chunks):
+        results.append(
+            parser.parse_delta(
+                delta_text,
+                token_ids,
+                glm_tool_request_obj,
+                prompt_token_ids=prompt_token_ids,
+                finished=i == len(chunks) - 1,
+            )
+        )
+        prompt_token_ids = None
+
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "需要获取当前时间" in reasoning
+    assert content == ""
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_current_time"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {}
 
 
 def test_parse_delta_neither_parser(tokenizer, request_obj):

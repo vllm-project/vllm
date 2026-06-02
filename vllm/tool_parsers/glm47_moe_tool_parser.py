@@ -38,3 +38,16 @@ class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
             r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>",
             re.DOTALL,
         )
+
+    def _extract_tool_name_from_region(
+        self, inner_text: str, is_complete: bool = False
+    ) -> str | None:
+        tool_name = super()._extract_tool_name_from_region(inner_text, is_complete)
+        if tool_name:
+            return tool_name
+
+        if is_complete:
+            tool_name = inner_text.strip()
+            return tool_name or None
+
+        return None
