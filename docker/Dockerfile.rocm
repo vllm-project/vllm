@@ -16,12 +16,14 @@ FROM ${BASE_IMAGE} AS base
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
-# Install system dependencies
+# Install system dependencies (libpciaccess/libdrm/pkg-config/cmake: gfx1250 / ROCm tooling)
 RUN apt-get update -q -y && apt-get install -q -y \
     software-properties-common build-essential git curl sudo vim less \
-    libopenmpi-dev libpci-dev python3-venv python3-dev \
+    libopenmpi-dev libpci-dev libpciaccess0 libpciaccess-dev libdrm-dev \
+    pkg-config cmake python3-venv python3-dev \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget
+    apt-transport-https ca-certificates wget \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
@@ -74,10 +76,34 @@ WORKDIR ${COMMON_WORKDIR}
 # Ensure core build tools are installed (idempotent if base image already has them)
 RUN uv pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
 
-# ROCm SDK install + init (idempotent -- skips if already satisfied)
+# ROCm PyTorch stack + SDK from genesis gfx1250 index, then init CLI.
+# Uninstall first (no-op if missing) then install without --upgrade so torch/torchvision/torchaudio
+# stay on the same genesis build (avoids torchvision::nms / partial upgrade skew).
 ARG PIP_EXTRA_INDEX_URL=https://rocm.genesis.amd.com/whl/gfx1250/
-RUN uv pip install --index-url ${PIP_EXTRA_INDEX_URL} "rocm[devel]" \
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+RUN uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} \
+    torch torchvision torchaudio "rocm[libraries,devel]" \
     && rocm-sdk init
+
+# /opt/rocm symlinks for tools and rocprofiler (matches rocm-sdk layout)
+RUN set -eux; \
+    echo "=== setting up ROCm symlinks ===" 1>&2; \
+    mkdir -p /opt/rocm; \
+    ROCM_SDK="$(dirname "$(rocm-sdk path --bin)")"; \
+    ROCM_SDK_CORE="$(dirname "$ROCM_SDK")/_rocm_sdk_core"; \
+    ln -sf "$ROCM_SDK/bin" /opt/rocm/bin; \
+    ln -sf "$ROCM_SDK/include" /opt/rocm/include; \
+    ln -sf "$ROCM_SDK/lib" /opt/rocm/lib; \
+    ROCPROF_DIR="$ROCM_SDK_CORE/lib/rocprofiler-sdk"; \
+    mkdir -p "$ROCPROF_DIR"; \
+    if [ -f "$ROCPROF_DIR/librocprofv3-list-avail.so.1" ]; then \
+    ln -sf librocprofv3-list-avail.so.1 "$ROCPROF_DIR/librocprofv3-list-avail.so"; \
+    else \
+    echo "Note: librocprofv3-list-avail.so.1 not found under $ROCPROF_DIR, skipping symlink"; \
+    fi
+
+ENV PATH=/opt/rocm/bin:${PATH}
 
 # ROCm SDK environment setup
 ENV SITE_PACKAGES=${SITE_PACKAGES:-/opt/venv/lib/python3.12/site-packages}
@@ -101,7 +127,7 @@ ENV CMAKE_PREFIX_PATH=$SITE_PACKAGES/torch/share/cmake
 RUN if [ -d "$SITE_PACKAGES/_rocm_sdk_core/lib" ] && [ ! -e "$SITE_PACKAGES/_rocm_sdk_core/lib/libamdhip64.so" ]; then \
     ln -s libamdhip64.so.7 $SITE_PACKAGES/_rocm_sdk_core/lib/libamdhip64.so; \
     fi
-ENV LD_LIBRARY_PATH=$SITE_PACKAGES/_rocm_sdk_core/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=$SITE_PACKAGES/_rocm_sdk_core/lib:${LD_LIBRARY_PATH}:/opt/rocm/lib/rocprofiler-sdk:/opt/rocm/lib/rocm_sysdeps/lib
 
 # -----------------------
 # vLLM fetch stages
@@ -124,11 +150,11 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-# CMake required by setup.py for building extensions
-RUN apt-get update -q -y && apt-get install -q -y cmake && rm -rf /var/lib/apt/lists/*
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && pip install -r requirements/rocm.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && python setup.py clean --all  \
     && python setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
@@ -327,6 +353,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     cd /install \
     && uv pip install -r requirements/rocm.txt \
     && uv pip install -r requirements/rocm-test.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
     && uv pip install *.whl
 
@@ -411,6 +439,8 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
     && uv pip install -r requirements/rocm.txt \
+    && uv pip uninstall -y torch torchvision torchaudio || true \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
     && uv pip install *.whl
 
@@ -418,7 +448,12 @@ RUN pip install amdsmi
 
 # Install amd-aiter and Triton from repo/branch (for gfx1250; base image may not include them)
 ARG AITER_REPO="https://github.com/ROCm/aiter"
-ARG AITER_BRANCH="shared/triton-gfx12"
+ARG AITER_BRANCH="main"
+# ENABLE_CK=0 disables Composable Kernel both at wheel build time
+# Override at build time with `--build-arg AITER_ENABLE_CK=1` to re-enable CK
+# (requires a recursive aiter clone with the composable_kernel submodule).
+ARG AITER_ENABLE_CK=0
+ENV ENABLE_CK=${AITER_ENABLE_CK}
 # TODO: Triton repo requires github.amd.com authentication; re-enable once credentials are configured
 # ARG TRITON_REPO="https://github.amd.com/GFX-IP-Arch/triton"
 # ARG TRITON_BRANCH="shared/gfx1250"
