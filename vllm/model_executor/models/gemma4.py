@@ -40,6 +40,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
+    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -325,8 +326,9 @@ class Gemma4MoE(nn.Module):
         # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
         # FusedMoE's built-in fused_topk scopes softmax differently, so
         # a custom routing function is needed for numerical correctness.
-        per_expert_scale = self.per_expert_scale
-
+        # NOTE: self.per_expert_scale is read at call time (not captured into
+        # a local) so that torch.func.functional_call parameter substitution
+        # reaches the routing function correctly.
         def routing_function(
             hidden_states: torch.Tensor,
             gating_output: torch.Tensor,
@@ -335,10 +337,12 @@ class Gemma4MoE(nn.Module):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 return gemma4_fused_routing_kernel_triton(
-                    gating_output, topk, per_expert_scale
+                    gating_output, topk, self.per_expert_scale
                 )
 
-            return gemma4_routing_function_torch(gating_output, topk, per_expert_scale)
+            return gemma4_routing_function_torch(
+                gating_output, topk, self.per_expert_scale
+            )
 
         # FusedMoE experts with custom Gemma4 routing
         self.experts = FusedMoE(
@@ -1368,30 +1372,35 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
-        #
-        # Use prefix matching to handle both weights and
-        # quantization scale parameters. The param_name is a prefix ending
-        # in underscore, and weight_name ends with a dot, so that:
-        #   "experts.0.gate_proj.weight_scale" -> "experts.w13_weight_scale"
-        #   "experts.0.gate_proj.weight" -> "experts.w13_weight"
         num_experts = getattr(self.config, "num_experts", None) or 0
-        expert_params_mapping = [
-            # (param_name, weight_name, expert_id, shard_id)
+        # Strategy A: dot-separated suffix
+        # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
+        dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+        )
+        # Strategy B: underscore-separated suffix
+        # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
+        underscore_suffix_expert_params_mapping = [
             (
-                "experts.w13_"
-                if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_",
-                f"experts.{expert_id}.{proj_name}.",
+                f"{param_name}weight_",
+                f"{weight_name.rstrip('.')}_",
                 expert_id,
                 shard_id,
             )
-            for expert_id in range(num_experts)
-            for shard_id, proj_name in [
-                ("w1", "gate_proj"),
-                ("w2", "down_proj"),
-                ("w3", "up_proj"),
-            ]
+            for (
+                param_name,
+                weight_name,
+                expert_id,
+                shard_id,
+            ) in dot_suffix_expert_params_mapping
         ]
+        expert_params_mapping = (
+            dot_suffix_expert_params_mapping + underscore_suffix_expert_params_mapping
+        )
         params_dict = dict(self.named_parameters())
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))

@@ -30,9 +30,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
-        logger.warning_once(
-            "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
-        )
         return 64
 
     @classmethod
@@ -77,7 +74,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -137,6 +134,30 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
 
+    def _split_kv_cache(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.attn_type != AttentionType.ENCODER_DECODER:
+            return kv_cache.unbind(1)
+
+        # NOTE: Encoder-decoder layers can share the same raw KV allocation with
+        # ROCM_ATTN decoder layers, whose physical layout is K/V first. Keep
+        # this cross-attention path on that physical layout so block IDs do not
+        # alias different bytes across the shared allocation.
+        num_blocks, _, block_size, num_kv_heads, head_size = kv_cache.shape
+        block_stride = block_size * num_kv_heads * head_size
+        kv_cache = kv_cache.as_strided(
+            (2, num_blocks, block_size, num_kv_heads, head_size),
+            (
+                num_blocks * block_stride,
+                block_stride,
+                num_kv_heads * head_size,
+                head_size,
+                1,
+            ),
+        )
+        return kv_cache.unbind(0)
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -156,7 +177,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -197,7 +218,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         softmax_scale = self.scale
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -246,7 +267,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
 
         # Reshape the input keys and values and store them in the cache.
         ops.reshape_and_cache_flash(
@@ -279,7 +300,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = self._split_kv_cache(kv_cache)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

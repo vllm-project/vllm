@@ -63,6 +63,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
     )
+    TOKENSPEED_MLA = (
+        "vllm.v1.attention.backends.mla.tokenspeed_mla.TokenspeedMLABackend"
+    )
     FLASHINFER_MLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashinfer_mla_sparse."
         "FlashInferMLASparseBackend"
@@ -191,16 +194,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     def clear_override(self) -> None:
         """Clear any override for this backend, reverting to the default."""
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
-
-
-MAMBA_TYPE_TO_BACKEND_MAP = {
-    "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
-    "mamba2": MambaAttentionBackendEnum.MAMBA2.name,
-    "short_conv": MambaAttentionBackendEnum.SHORT_CONV.name,
-    "linear_attention": MambaAttentionBackendEnum.LINEAR.name,
-    "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
-    "custom": MambaAttentionBackendEnum.CUSTOM.name,
-}
 
 
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}

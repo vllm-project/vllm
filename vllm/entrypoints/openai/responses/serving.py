@@ -46,7 +46,6 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
-    get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
@@ -85,10 +84,12 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
+    split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
+    extract_function_tool_names,
     extract_tool_types,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -167,6 +168,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -178,6 +180,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
 
         # Set up the unified parser - either a unified parser or fall back to
@@ -218,13 +221,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
             )
-            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
-            # We need to add them to the stop token ids.
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
-            )
 
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
@@ -254,10 +250,14 @@ class OpenAIServingResponses(OpenAIServing):
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
     ) -> dict[str, Any]:
-        return request.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
-        ).chat_template_kwargs
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.chat_template_kwargs)
+            .chat_template_kwargs
+        )
 
     def _validate_generator_input(
         self,
@@ -319,6 +319,17 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         raw_request: Request | None = None,
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_responses(request, raw_request), request, raw_request
+        )
+
+    async def _create_responses(
+        self, request: ResponsesRequest, raw_request: Request | None = None
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
@@ -432,11 +443,16 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             context: ConversationContext
+            function_tool_names = extract_function_tool_names(request.tools)
             if self.use_harmony:
                 if request.stream:
-                    context = StreamingHarmonyContext(messages, available_tools)
+                    context = StreamingHarmonyContext(
+                        messages, available_tools, function_tool_names
+                    )
                 else:
-                    context = HarmonyContext(messages, available_tools)
+                    context = HarmonyContext(
+                        messages, available_tools, function_tool_names
+                    )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
                     # This is a feature in development for parsing
@@ -444,16 +460,13 @@ class OpenAIServingResponses(OpenAIServing):
                     context = ParsableContext(
                         response_messages=messages,
                         tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
+                        parser_cls=self.parser,
                         request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
                         available_tools=available_tools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
+                        enable_auto_tools=self.enable_auto_tools,
+                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
                     context = SimpleContext()
@@ -590,13 +603,13 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-
+        chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.openai_serving_render.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
             default_template_content_format=self.chat_template_content_format,
-            default_template_kwargs=None,
+            default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
             reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
@@ -615,13 +628,13 @@ class OpenAIServingResponses(OpenAIServing):
         new_messages = construct_input_messages(
             request_input=messages,
         )
-
+        chat_template_kwargs = self._effective_chat_template_kwargs(request)
         _, engine_inputs = await self.openai_serving_render.preprocess_chat(
             request,
             new_messages,
             default_template=chat_template,
             default_template_content_format=chat_template_content_format,
-            default_template_kwargs=None,
+            default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
             reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
@@ -692,7 +705,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
-                    context.tool_parser_cls,
+                    context.parser_cls.tool_parser_cls if context.parser_cls else None,
                     context.chat_template,
                     context.chat_template_content_format,
                 )
@@ -1017,7 +1030,10 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            parser = self.parser(tokenizer, request.tools)
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            parser = self.parser(
+                tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
+            )
             return parser.extract_response_outputs(
                 model_output=final_output.text,
                 model_output_token_ids=final_output.token_ids,
@@ -1053,10 +1069,11 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> list[ResponseOutputItem]:
         output_items: list[ResponseOutputItem] = []
         num_init_messages = context.num_init_messages
+        fn_names = context.function_tool_names
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(harmony_to_response_output(msg))
+            output_items.extend(harmony_to_response_output(msg, fn_names))
         # Handle the generation stopped in the middle (if any).
-        last_items = parser_state_to_response_output(context.parser)
+        last_items = parser_state_to_response_output(context.parser, fn_names)
         if last_items:
             output_items.extend(last_items)
         return output_items
@@ -1353,7 +1370,15 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = self.parser(tokenizer, request.tools) if self.parser else None
+        parser = (
+            self.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            if self.parser
+            else None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1390,18 +1415,19 @@ class OpenAIServingResponses(OpenAIServing):
             if not delta_message:
                 continue
 
-            target_state, tool_call = processor.resolve_target_state(delta_message)
-            if target_state == _StateType.NONE:
-                continue
+            for dm in split_delta(delta_message):
+                target_state, tool_call = processor.resolve_target_state(dm)
+                if target_state == _StateType.NONE:
+                    continue
 
-            if processor.needs_transition(target_state, tool_call):
-                for event in processor.close_current():
-                    yield _increment_sequence_number_and_return(event)
-                for event in processor.open(target_state, tool_call):
-                    yield _increment_sequence_number_and_return(event)
+                if processor.needs_transition(target_state, tool_call):
+                    for event in processor.close_current():
+                        yield _increment_sequence_number_and_return(event)
+                    for event in processor.open(target_state, tool_call):
+                        yield _increment_sequence_number_and_return(event)
 
-            for event in processor.emit_delta(delta_message, output, _get_logprobs):
-                yield _increment_sequence_number_and_return(event)
+                for event in processor.emit_delta(dm, output, _get_logprobs):
+                    yield _increment_sequence_number_and_return(event)
 
         for event in processor.close_current():
             yield _increment_sequence_number_and_return(event)
@@ -1431,7 +1457,9 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.is_expecting_start():
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(previous_item, state):
+                    for event in emit_previous_item_done_events(
+                        previous_item, state, ctx.function_tool_names
+                    ):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()
 
