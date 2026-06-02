@@ -39,9 +39,9 @@ _PROBE_DEV_ID: int = 0
 
 
 class TransferEntry(NamedTuple):
-    xfer_handle: nixl_xfer_handle
+    xfer_handle: "nixl_xfer_handle"
     files_desc: object
-    obj_handle: nixl_prepped_dlist_handle
+    obj_handle: "nixl_prepped_dlist_handle"
 
 
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
