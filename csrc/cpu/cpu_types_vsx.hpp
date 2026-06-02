@@ -108,7 +108,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   }
 
   void save(void* ptr, int elem_num) const {
-    int num = std::min(elem_num, VEC_ELEM_NUM);
+    int num = std::max(0, std::min(elem_num, VEC_ELEM_NUM));
     if (num <= 8) {
       vec_xst_len(reg.val[0], (signed short*)ptr, num * 2);
     } else {
