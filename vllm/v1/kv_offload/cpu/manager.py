@@ -4,6 +4,8 @@ from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from typing import Literal
 
+from typing_extensions import override
+
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -11,6 +13,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
+    RequestOffloadingContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
@@ -94,6 +97,11 @@ class CPUOffloadingManager(OffloadingManager):
 
     # --- OffloadingManager interface ---
 
+    @override
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         if self.counts is not None:
             if key in self.counts:
@@ -110,6 +118,7 @@ class CPUOffloadingManager(OffloadingManager):
             return None  # write in-flight; caller should retry
         return True
 
+    @override
     def prepare_load(
         self,
         keys: Collection[OffloadKey],
@@ -124,9 +133,11 @@ class CPUOffloadingManager(OffloadingManager):
             blocks.append(block)
         return self._get_load_store_spec(keys, blocks)
 
+    @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         self._policy.touch(keys)
 
+    @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
@@ -136,6 +147,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
             block.ref_cnt -= 1
 
+    @override
     def prepare_store(
         self,
         keys: Collection[OffloadKey],
@@ -193,6 +205,7 @@ class CPUOffloadingManager(OffloadingManager):
             evicted_keys=to_evict,
         )
 
+    @override
     def complete_store(
         self,
         keys: Collection[OffloadKey],
@@ -223,6 +236,19 @@ class CPUOffloadingManager(OffloadingManager):
                 )
             )
 
+    @override
+    def reset_cache(self) -> None:
+        # Clear ALL blocks unconditionally. The scheduler's _stale_job_threshold
+        # guarantees that complete_load / complete_store are never called for
+        # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
+        # flushes in-flight load job IDs to the workers before any new stores
+        # can begin, preventing a cross-direction data race on reused offload block IDs.
+        self._policy.clear()
+
+        self._free_list.clear()
+        self._num_allocated_blocks = 0
+
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
             yield from self.events
