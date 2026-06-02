@@ -721,9 +721,9 @@ def _run_single_benchmark(
         indexer: Optional MockIndexer for sparse backends
         output_scale: Static per-tensor FP8 scale for prefill output. None
             keeps the plain bf16 output (no quantization).
-        fuse_quant_op: With output_scale set, True lets FA4 write FP8 directly
-            (flash-attention#135); False runs bf16 attention then a standalone
-            static-FP8 quant. The delta isolates the saved post-quant kernel.
+        fuse_quant_op: With output_scale set, True lets the prefill kernel write
+            FP8 directly; False runs bf16 attention then a standalone static-FP8
+            quant. The delta isolates the saved post-quant kernel.
 
     Returns:
         BenchmarkResult with timing statistics
@@ -827,7 +827,7 @@ def _run_single_benchmark(
             num_prefill, mla_dims, query_fmt, device, torch.bfloat16
         )
 
-    # Prefill FP8 output: fused (FA4 writes e4m3) vs separate post-quant.
+    # Prefill FP8 output: fused (kernel writes e4m3) vs separate post-quant.
     prefill_fp8_output = None
     prefill_output_scale = None
     prefill_quant_op = None
@@ -1117,8 +1117,8 @@ def run_mla_benchmark(
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
         output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
-        fuse_quant_op: With output_scale set, fuse the FP8 write into FA4 vs a
-            standalone post-quant kernel. See _run_single_benchmark.
+        fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
+            kernel vs a standalone post-quant kernel. See _run_single_benchmark.
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
