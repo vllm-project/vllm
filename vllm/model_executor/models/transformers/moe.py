@@ -58,8 +58,8 @@ class TransformersFusedMoE(MoERunner):
     # --8<-- [end:transformers_fused_moe]
     def __init__(self, *args, moe_state: TransformersMoEState, **kwargs):
         super().__init__(*args, **kwargs)
-        self.moe_state = moe_state
-        self.moe_state.is_sequence_parallel = self.moe_config.is_sequence_parallel
+        self._moe_state = moe_state
+        self._moe_state.is_sequence_parallel = self.moe_config.is_sequence_parallel
 
     def forward(
         self,
@@ -71,14 +71,19 @@ class TransformersFusedMoE(MoERunner):
         """In Transformers `experts.forward` will have this signature.
 
         We discard any extra kwargs because we cannot use them here."""
+        return torch.ops.vllm.transformers_moe_forward(
+            hidden_states,
+            topk_ids.to(torch.int32),
+            topk_weights.to(torch.float32),
+            self.layer_name,
+        )
 
-        self.moe_state.topk_ids = topk_ids.to(torch.int32)
-        topk_weights = topk_weights.to(torch.float32)
-
-        # Clone hidden_states because it will be mutated in-place in FusedMoE
-        # TODO(bnell): figure out a way to avoid calling runner directly.
-        # it is a hack that the weight are being passed via logits.
-        return super().forward(hidden_states.clone(), topk_weights)
+    def _forward_super(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        return super().forward(hidden_states, topk_weights)
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
@@ -86,7 +91,6 @@ class TransformersFusedMoE(MoERunner):
         return self.routed_experts.load_weights(weights)
 
 
-# TODO(bnell): Is this still needed?  Probably broken if it is.
 def transformers_moe_forward(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -96,11 +100,8 @@ def transformers_moe_forward(
     """Store the `topk_ids` in the layer and call the actual forward."""
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._topk_ids = topk_ids
-    # Clone hidden_states because it will be mutated in-place in FusedMoE
-    # TODO(bnell): figure out a way to avoid calling runner directly.
-    # it is a hack that the weight are being passed via logits.
-    return self.runner.forward(hidden_states.clone(), topk_weights)
+    self._moe_state.topk_ids = topk_ids
+    return self._forward_super(hidden_states, topk_weights)
 
 
 def transformers_moe_forward_fake(
@@ -303,6 +304,7 @@ class MoEMixin(MixtureOfExperts):
                         `topk_ids` we stored in the layer earlier."""
                         topk_weights = gating_output
                         topk_ids = moe_state.topk_ids
+                        assert topk_ids is not None
                         # Handle all gather in expert parallel
                         if topk_ids.size(0) != hidden_states.size(0):
                             dp_metadata = get_forward_context().dp_metadata
