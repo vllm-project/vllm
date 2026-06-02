@@ -14,6 +14,7 @@ use std::{fmt, fs};
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
+use expect_test::expect;
 use futures::StreamExt as _;
 use rmpv::Value;
 use serde_json::json;
@@ -43,9 +44,176 @@ use vllm_text::{Prompt, TextBackend};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode};
+use super::{build_route_registry, build_router, build_router_with_dev_mode};
 use crate::routes::openai::chat_completions::convert::prepare_chat_request;
 use crate::state::AppState;
+
+#[test]
+fn available_routes_match_registered_public_routes() {
+    expect![[r#"
+        [
+            RouteInfo {
+                path: "/health",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/metrics",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/load",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/version",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/models",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/completions",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/chat/completions",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/inference/v1/generate",
+                methods: [
+                    "POST",
+                ],
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&build_route_registry(false).routes);
+}
+
+#[test]
+fn available_routes_include_dev_routes_when_enabled() {
+    expect![[r#"
+        [
+            RouteInfo {
+                path: "/health",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/metrics",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/load",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/version",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/models",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/completions",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/v1/chat/completions",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/inference/v1/generate",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/reset_prefix_cache",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/reset_mm_cache",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/reset_encoder_cache",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/collective_rpc",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/sleep",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/wake_up",
+                methods: [
+                    "POST",
+                ],
+            },
+            RouteInfo {
+                path: "/is_sleeping",
+                methods: [
+                    "GET",
+                    "HEAD",
+                ],
+            },
+        ]
+    "#]]
+    .assert_debug_eq(&build_route_registry(true).routes);
+}
 
 fn request_output(
     request_id: &str,

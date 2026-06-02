@@ -28,7 +28,7 @@ use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
 use crate::listener::Listener;
-use crate::routes::build_router;
+use crate::routes::{build_router_with_routes, log_available_routes};
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine
@@ -107,7 +107,6 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
     let model = state.primary_model_name().to_owned();
-    let app = build_router(state.clone());
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
@@ -131,7 +130,10 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         None
     };
 
-    info!(%bind_address, %model, "starting OpenAI server");
+    info!(%bind_address, %model, "Starting vLLM API server");
+    let app = build_router_with_routes(state.clone());
+    log_available_routes(&app);
+    let app = app.router;
 
     // Set TCP_NODELAY on accepted connections to reduce latency.
     // By `tap_io` we will do this on every accepted connection.
