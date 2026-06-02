@@ -1011,6 +1011,7 @@ class Gemma4ForConditionalGeneration(
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.model_dtype = vllm_config.model_config.dtype
 
         # Only quantize towers when the quant method supports their
         # dimensions.  BNB/torchao handle arbitrary sizes; other methods
@@ -1247,7 +1248,6 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1292,7 +1292,7 @@ class Gemma4ForConditionalGeneration(
                     pv_tensor,
                     pp_tensor,
                     pad_tensor,
-                ).to(target_dtype)
+                ).to(self.model_dtype)
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1329,12 +1329,8 @@ class Gemma4ForConditionalGeneration(
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
 
-        # Use embed_tokens dtype as compute dtype; embedding_projection.weight
-        # may be uint8 under BnB 4-bit, which would corrupt the cast.
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
-
         # Project all images in a single batched call.
-        flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
+        flat_valid_states = torch.cat(all_valid_states, dim=0).to(self.model_dtype)
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
@@ -1374,7 +1370,6 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
@@ -1406,7 +1401,7 @@ class Gemma4ForConditionalGeneration(
                 pv_chunk,
                 pp_chunk,
                 pad_chunk,
-            ).to(target_dtype)
+            ).to(self.model_dtype)
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
@@ -1441,7 +1436,9 @@ class Gemma4ForConditionalGeneration(
             frame_valid_lens.append(valid_states.shape[0])
 
         # Project all frames in a single batched call.
-        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(target_dtype)
+        flat_valid_states = torch.cat(all_frame_valid_states, dim=0).to(
+            self.model_dtype
+        )
         flat_proj_embs = self.embed_vision(
             inputs_embeds=flat_valid_states.unsqueeze(0)
         ).squeeze(0)
