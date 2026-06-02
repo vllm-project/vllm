@@ -53,10 +53,14 @@ def _get_fused_indexer_workspace(
     if need_realloc:
         new_max = max(64, 1 << max(0, num_tokens - 1).bit_length())
         _FUSED_INDEXER_Q_FP8_BUF = torch.empty(
-            (new_max, n_head, head_dim), dtype=fp8_dtype, device=device,
+            (new_max, n_head, head_dim),
+            dtype=fp8_dtype,
+            device=device,
         )
         _FUSED_INDEXER_WEIGHTS_OUT_BUF = torch.empty(
-            (new_max, n_head), dtype=torch.float32, device=device,
+            (new_max, n_head),
+            dtype=torch.float32,
+            device=device,
         )
     return (
         _FUSED_INDEXER_Q_FP8_BUF[:num_tokens],

@@ -456,9 +456,7 @@ class SparseAttnIndexer(CustomOp):
         if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
-            return self.forward_hip(
-                hidden_states, q_quant, k, weights, **fusion_kwargs
-            )
+            return self.forward_hip(hidden_states, q_quant, k, weights, **fusion_kwargs)
         else:
             raise NotImplementedError(
                 "SparseAttnIndexer native forward is only implemented for "
