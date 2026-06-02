@@ -127,13 +127,7 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
-        num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
-            vllm_config
-        )
-
-        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
-        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
-        self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
+        kv_cache_config = self._initialize_kv_caches(vllm_config)
 
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
@@ -1459,7 +1453,7 @@ class EngineCoreProc(EngineCore):
 
                     # Deserialize the request data.
                     request: Any
-                    elif request_type == EngineCoreRequestType.ADD:
+                    if request_type == EngineCoreRequestType.ADD:
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
                             request = self.preprocess_add_request(req)

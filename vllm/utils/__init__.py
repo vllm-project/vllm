@@ -38,15 +38,27 @@ def length_from_prompt_token_ids_or_embeds(
         return prompt_token_len
 
 
-def is_restore() -> str:
+def is_moe_layer(module: torch.nn.Module) -> bool:
+    # TODO(bnell): Should use isinstance but can't due to circular dependencies.
+    def _check_bases(cls):
+        if cls.__name__ == "FusedMoE":
+            return True
+
+        for b in cls.__bases__:
+            if _check_bases(b):
+                return True
+
+    return _check_bases(module.__class__)
+
+
+def is_restore() -> bool:
     return os.path.exists("/root/.grusflag")
 
-def get_local_ip():
+
+def get_local_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.settimeout(0.1)
-    # 连接到外部服务器（这里用Google的DNS）
     s.connect(("8.8.8.8", 80))
-    # 获取本地套接字的地址
     ip = s.getsockname()[0]
     s.close()
     return ip
