@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_NVFP4_MOE_MARLIN_EMPTY_CACHE_AFTER_PREPARE: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
@@ -1331,6 +1332,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
     "VLLM_MARLIN_USE_ATOMIC_ADD": lambda: (
         os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1"
+    ),
+    # Whether to call empty_cache after each NVFP4 MoE Marlin parameter
+    # replacement. This is intended as a memory-pressure mitigation for large
+    # MoE models on systems with unified CPU/GPU memory, where CUDA allocator
+    # cache retained during weight repacking can put pressure on host memory.
+    "VLLM_NVFP4_MOE_MARLIN_EMPTY_CACHE_AFTER_PREPARE": lambda: bool(
+        int(os.getenv("VLLM_NVFP4_MOE_MARLIN_EMPTY_CACHE_AFTER_PREPARE", "0"))
     ),
     # Whether to use marlin kernel in mxfp4 quantization method
     # Deprecated: use --moe-backend marlin (MoE) or --linear-backend marlin

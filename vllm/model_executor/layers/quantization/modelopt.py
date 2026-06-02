@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -62,6 +63,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
+)
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
@@ -1586,6 +1590,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
+
+        # After the replacements above, PyTorch may keep the freed
+        # checkpoint-format tensors in the CUDA caching allocator until reuse,
+        # empty_cache(), or an OOM retry. On systems with unified CPU/GPU
+        # memory, that reserved cache can put pressure on host memory while
+        # loading large MoE models, so this opt-in hook releases it eagerly.
+        if self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
+            maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(w13.device)
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import gc
+
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
@@ -21,6 +24,24 @@ from vllm.scalar_type import scalar_types
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
 logger = init_logger(__name__)
+
+
+def maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(
+    device: torch.device,
+) -> None:
+    if not envs.VLLM_NVFP4_MOE_MARLIN_EMPTY_CACHE_AFTER_PREPARE:
+        return
+    if not current_platform.is_cuda_alike() or device.type != "cuda":
+        return
+
+    logger.info_once(
+        "VLLM_NVFP4_MOE_MARLIN_EMPTY_CACHE_AFTER_PREPARE=1: calling "
+        "torch.accelerator.empty_cache() after NVFP4 MoE Marlin parameter "
+        "replacement."
+    )
+    gc.collect()
+    torch.accelerator.synchronize()
+    torch.accelerator.empty_cache()
 
 
 def is_fp4_marlin_supported():
