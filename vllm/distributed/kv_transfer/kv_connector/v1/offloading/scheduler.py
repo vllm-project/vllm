@@ -505,13 +505,20 @@ class OffloadingConnectorScheduler:
                 if sliding_window_size_in_blocks is not None:
                     offload_keys = offload_keys[-sliding_window_size_in_blocks:]
                 if any(key in self._blocks_being_loaded for key in offload_keys):
-                    # hit blocks are being loaded, delay request
+                    # The hit blocks are already being loaded by another
+                    # request. Rather than delaying this request (which
+                    # serialises all concurrent requests sharing the same
+                    # prefix through a single load job — a request convoy),
+                    # skip the CPU hit for this turn and let the request
+                    # re-prefill. The in-flight load will warm the GPU cache
+                    # for subsequent requests without blocking this one.
+                    # See: https://github.com/vllm-project/vllm/issues/44294
                     logger.debug(
-                        "Delaying request %s since some of its"
-                        " blocks are already being loaded",
+                        "Skipping CPU hit for request %s — blocks already"
+                        " loading; proceeding to avoid request convoy",
                         req_status.req.request_id,
                     )
-                    return None
+                    return 0
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
