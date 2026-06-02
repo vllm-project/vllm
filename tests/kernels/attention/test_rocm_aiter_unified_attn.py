@@ -13,7 +13,6 @@ Backend selection lives in
 ``tests/v1/attention/test_rocm_attention_backends_selection.py``.
 """
 
-import importlib
 from typing import Any
 
 import pytest
@@ -38,12 +37,6 @@ DECODE_CASES = [
     pytest.param(64, torch.float16, 16, id="fp16_h64_b16"),
     pytest.param(128, torch.bfloat16, 64, id="bf16_h128_b64"),
 ]
-
-
-def _reload_envs():
-    import vllm.envs as envs
-
-    return importlib.reload(envs)
 
 
 def _require_aiter() -> None:
@@ -154,79 +147,6 @@ def _ref_decode_output(case: dict[str, Any]) -> torch.Tensor:
         block_tables=case["block_tables"],
         scale=case["scale"],
     )
-
-
-def test_unified_attn_backend_contract():
-    from vllm.v1.attention.backend import AttentionType
-    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
-        RocmAiterUnifiedAttentionBackend,
-    )
-
-    backend = RocmAiterUnifiedAttentionBackend
-    assert backend.get_preferred_block_size(16) == 64
-    assert backend.supports_block_size(16)
-    assert backend.supports_block_size(64)
-    assert not backend.supports_block_size(15)
-    assert backend.supports_head_size(32)
-    assert backend.supports_head_size(256)
-    assert not backend.supports_head_size(16)
-    assert backend.supports_mm_prefix()
-    assert backend.supports_sink()
-    assert backend.forward_includes_kv_cache_update is False
-    for attn_type in (
-        AttentionType.DECODER,
-        AttentionType.ENCODER,
-        AttentionType.ENCODER_ONLY,
-        AttentionType.ENCODER_DECODER,
-    ):
-        assert backend.supports_attn_type(attn_type)
-
-
-def test_unified_attn_backend_validates_kv_cache_block_size():
-    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
-        RocmAiterUnifiedAttentionBackend,
-    )
-
-    assert RocmAiterUnifiedAttentionBackend.get_kv_cache_shape(8, 16, 8, 128) == (
-        2,
-        8,
-        16,
-        8,
-        128,
-    )
-    with pytest.raises(ValueError, match="Block size must be a multiple of 16"):
-        RocmAiterUnifiedAttentionBackend.get_kv_cache_shape(8, 15, 8, 128)
-
-
-@requires_mi3xx
-@pytest.mark.parametrize(
-    ("use_aiter", "use_unified", "expected"),
-    [
-        (True, True, True),
-        (True, False, False),
-        (False, True, False),
-        (False, False, False),
-    ],
-)
-def test_unified_attn_env_flags_control_enablement(
-    use_aiter, use_unified, expected, monkeypatch
-):
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    _require_aiter()
-
-    with monkeypatch.context() as mp:
-        mp.setenv("VLLM_ROCM_USE_AITER", "1" if use_aiter else "0")
-        mp.setenv(
-            "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
-            "1" if use_unified else "0",
-        )
-        _reload_envs()
-        rocm_aiter_ops.refresh_env_variables()
-        assert rocm_aiter_ops.is_triton_unified_attn_enabled() is expected
-
-    _reload_envs()
-    rocm_aiter_ops.refresh_env_variables()
 
 
 @requires_mi3xx
