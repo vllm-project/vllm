@@ -43,6 +43,13 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # Experimental streaming-eviction state. See ``Request.num_sink_tokens``
+    # / ``Request.num_tokens_evicted``. Both 0 for requests that never use
+    # eviction. Propagated to the worker so a runner subclass can drive
+    # GPU-side compensation (e.g., RoPE re-rotation).
+    num_sink_tokens: int = 0
+    num_tokens_evicted: int = 0
+
     @classmethod
     def from_request(
         cls,
@@ -62,6 +69,8 @@ class NewRequestData:
             prompt_embeds=request.prompt_embeds,
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
+            num_sink_tokens=request.num_sink_tokens,
+            num_tokens_evicted=request.num_tokens_evicted,
         )
 
     def __repr__(self) -> str:

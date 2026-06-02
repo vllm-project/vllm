@@ -457,6 +457,26 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def truncate_to_tokens(self, request_id: str, num_tokens: int) -> None:
+        """Free KV cache blocks for a request beyond ``num_tokens``.
+
+        Used by streaming sessions to shrink a session's KV cache in place
+        when the caller decides to drop a generated suffix.
+        """
+        self.coordinator.truncate_to_tokens(request_id, num_tokens)
+
+    def evict_and_compact(
+        self, request_id: str, start_token: int, end_token: int
+    ) -> None:
+        """Evict tokens ``[start_token, end_token)`` from a request's KV
+        cache and compact the block list.
+
+        Raises ``RuntimeError`` if any surviving block past the eviction
+        point is shared via prefix caching (``ref_cnt > 1``); see
+        :meth:`SingleTypeKVCacheManager.evict_and_compact`.
+        """
+        self.coordinator.evict_and_compact(request_id, start_token, end_token)
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,

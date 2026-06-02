@@ -902,6 +902,74 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def truncate_session(
+        self,
+        request_id: str,
+        target_num_tokens: int,
+    ) -> None:
+        """Shrink a streaming session's KV cache to target_num_tokens.
+
+        For use with resumable streaming sessions
+        (``RequestStatus.WAITING_FOR_STREAMING_REQ``). Frees KV cache blocks
+        beyond ``target_num_tokens`` and clears any generated output tokens
+        past that point. Surviving tokens keep their original positions, so
+        this is safe for all attention/positional-encoding schemes.
+
+        No-op if the request is not in a streaming-waiting state, or if
+        ``target_num_tokens`` is out of range.
+        """
+        await self.engine_core.truncate_request_async(request_id, target_num_tokens)
+
+    async def evict_session_token_range(
+        self,
+        request_id: str,
+        num_tokens_to_evict: int,
+        num_sink_tokens: int = 0,
+    ) -> None:
+        """Evict ``num_tokens_to_evict`` tokens starting at ``num_sink_tokens``
+        from a streaming session's KV cache (StreamingLLM-style sink + slide).
+
+        EXPERIMENTAL. Requires environment variable
+        ``VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION=1``.
+
+        After eviction, surviving suffix tokens shift to earlier positions
+        (token previously at ``p`` is now at ``p - num_tokens_to_evict``).
+        Their cached K still carries the old rotation. For RoPE-based models
+        (LLaMA / Mistral / Qwen / Gemma / DeepSeek / Phi-3 / …) this means
+        attention against post-eviction queries is numerically incorrect
+        unless a runner subclass implements
+        ``GPUModelRunner._post_add_requests`` to re-rotate the surviving K
+        by the per-token delta ``-num_tokens_evicted``. OSS vLLM does not
+        ship such a runner today; enabling the env var is an explicit
+        opt-in to that responsibility.
+
+        Multimodal contract: the eviction range must atomically cover
+        whole multimodal items. Every mm item the request holds must be
+        fully before, fully after, or fully inside
+        ``[num_sink_tokens, num_sink_tokens + num_tokens_to_evict)``.
+        A range that straddles a multimodal item raises ``ValueError``
+        (no state mutated). Items fully inside are dropped; items fully
+        after have their positions shifted back by ``num_tokens_to_evict``
+        so M-RoPE grid metadata is rebuilt correctly on the next
+        streaming resume.
+
+        No-op if the request is not in
+        ``RequestStatus.WAITING_FOR_STREAMING_REQ``. Raises
+        ``RuntimeError`` from the KV cache manager if any surviving block
+        is shared via prefix caching (the only safe response is to disable
+        prefix caching for sessions that use eviction).
+        """
+        if not envs.VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION:
+            raise RuntimeError(
+                "AsyncLLM.evict_session_token_range is experimental. "
+                "Set VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION=1 to opt in. "
+                "See the method docstring for correctness caveats on "
+                "RoPE-based models."
+            )
+        await self.engine_core.evict_token_range_async(
+            request_id, num_tokens_to_evict, num_sink_tokens
+        )
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:

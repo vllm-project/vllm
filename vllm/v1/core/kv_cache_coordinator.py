@@ -218,6 +218,18 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
+    def truncate_to_tokens(self, request_id: str, num_tokens: int) -> None:
+        """Free KV cache blocks beyond ``num_tokens`` for a request."""
+        for manager in self.single_type_managers:
+            manager.truncate_to_tokens(request_id, num_tokens)
+
+    def evict_and_compact(
+        self, request_id: str, start_token: int, end_token: int
+    ) -> None:
+        """Evict tokens ``[start_token, end_token)`` and compact blocks."""
+        for manager in self.single_type_managers:
+            manager.evict_and_compact(request_id, start_token, end_token)
+
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
         Get the number of common prefix blocks for all requests with allocated

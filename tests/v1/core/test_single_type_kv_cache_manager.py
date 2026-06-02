@@ -401,6 +401,202 @@ def test_evictable_cached_blocks_not_double_allocated():
     assert len(manager.req_to_blocks[request_id]) == 2
 
 
+def test_truncate_to_tokens():
+    """SlidingWindowManager.truncate_to_tokens frees tail blocks."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=8,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    # Allocate 5 blocks for a 20-token request.
+    blocks = [block_pool.blocks[i] for i in range(5)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+
+    # Truncate to 12 tokens -> keep ceil(12/4)=3 blocks, free 2.
+    manager.truncate_to_tokens("req", 12)
+    assert len(manager.req_to_blocks["req"]) == 3
+    assert [b.block_id for b in manager.req_to_blocks["req"]] == [0, 1, 2]
+
+    # Truncate to 5 tokens -> keep ceil(5/4)=2 blocks, free 1.
+    manager.truncate_to_tokens("req", 5)
+    assert len(manager.req_to_blocks["req"]) == 2
+
+    # Target larger than current length -> no-op.
+    manager.truncate_to_tokens("req", 100)
+    assert len(manager.req_to_blocks["req"]) == 2
+
+    # Unknown request -> no-op (no exception).
+    manager.truncate_to_tokens("nonexistent", 5)
+
+
+def test_evict_and_compact_aligned():
+    """Eviction where start and end are block-aligned."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    # 6 blocks: [0..3] [4..7] [8..11] [12..15] [16..19] [20..23]
+    blocks = [block_pool.blocks[i] for i in range(6)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+
+    # Evict tokens [4, 12) — blocks 1 and 2 are fully covered.
+    # start_block = ceil(4/4) = 1, end_block = floor(12/4) = 3.
+    # new_blocks = [0] + [3, 4, 5] = [0, 3, 4, 5].
+    manager.evict_and_compact("req", 4, 12)
+    result = [b.block_id for b in manager.req_to_blocks["req"]]
+    assert result == [0, 3, 4, 5]
+
+
+def test_evict_and_compact_non_aligned():
+    """Eviction where start is not block-aligned (boundary block stays)."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    blocks = [block_pool.blocks[i] for i in range(6)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+
+    # Evict tokens [2, 12) — start_token=2 is mid-block.
+    # start_block = ceil(2/4) = 1, end_block = floor(12/4) = 3.
+    # Blocks 1, 2 freed. Boundary block 0 (containing tokens [0, 4)) stays.
+    manager.evict_and_compact("req", 2, 12)
+    result = [b.block_id for b in manager.req_to_blocks["req"]]
+    assert result == [0, 3, 4, 5]
+
+
+def test_evict_and_compact_shared_block_guard():
+    """Surviving shared blocks (ref_cnt > 1) must raise before mutating."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    blocks = [block_pool.blocks[i] for i in range(4)]
+    for b in blocks:
+        b.ref_cnt = 1
+    # Block 3 is shared (simulates prefix caching reuse).
+    blocks[3].ref_cnt = 2
+    manager.req_to_blocks["req"] = list(blocks)
+    original = list(manager.req_to_blocks["req"])
+
+    # Block 3 survives this eviction but is shared, so must raise.
+    with pytest.raises(RuntimeError, match="shared"):
+        manager.evict_and_compact("req", 4, 8)
+    # Preflight contract: request state unchanged after a raise.
+    assert manager.req_to_blocks["req"] == original
+
+
+def test_evict_and_compact_no_op():
+    """Degenerate ranges and unknown requests are no-ops."""
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    blocks = [block_pool.blocks[i] for i in range(4)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+
+    # Range smaller than one block (start_block >= end_block) -> no-op.
+    manager.evict_and_compact("req", 1, 3)
+    assert len(manager.req_to_blocks["req"]) == 4
+
+    # Unknown request -> no-op (no exception).
+    manager.evict_and_compact("nonexistent", 0, 8)
+
+
+def test_evict_and_compact_evicts_all_blocks_from_start():
+    """Regression: evicting the entire request (start_token=0, end_token
+    block-aligned to the last block) must still free all blocks and
+    clear req_to_blocks. Previously the early-return guard on empty
+    modified_blocks skipped the cleanup, leaking blocks and leaving
+    req_to_blocks stale.
+
+    See: https://github.com/vllm-project/vllm/pull/43374#... (review
+    comment on evict_and_compact).
+    """
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=16,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=False, hash_block_size=block_size
+    )
+    manager = get_sliding_window_manager(sliding_window_spec, block_pool)
+
+    blocks = [block_pool.blocks[i] for i in range(3)]
+    for b in blocks:
+        b.ref_cnt = 1
+    manager.req_to_blocks["req"] = list(blocks)
+    manager.num_cached_block["req"] = 3
+
+    # Evict tokens [0, 12) on 3 blocks of 4 tokens each -> all blocks
+    # are in the evicted range and no surviving blocks remain at or
+    # after the eviction position.
+    manager.evict_and_compact("req", 0, 12)
+
+    # req_to_blocks must be updated to the empty list (block leak guard).
+    assert manager.req_to_blocks["req"] == []
+    # num_cached_block must be cleared so future allocations re-account.
+    assert "req" not in manager.num_cached_block
+    # Each freed block's ref_cnt was decremented back to 0.
+    for b in blocks:
+        assert b.ref_cnt == 0, f"block {b.block_id} not freed (ref_cnt={b.ref_cnt})"
+
+
 def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
     attention_spec = ChunkedLocalAttentionSpec(

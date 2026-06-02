@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -59,6 +60,53 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+
+def _reindex_mm_features(
+    mm_features: list[MultiModalFeatureSpec],
+    evict_start: int,
+    evict_end: int,
+) -> list[MultiModalFeatureSpec]:
+    """Reindex multimodal features for a token-range eviction.
+
+    Assumes atomic multimodal-item eviction: every mm item must be
+    fully before, fully after, or fully inside ``[evict_start, evict_end)``.
+    Items fully before keep their offset; items fully after shift offset
+    back by ``evict_end - evict_start``; items fully inside are dropped.
+    An item that partially overlaps the eviction range raises
+    ``ValueError`` (caller is expected to align eviction boundaries with
+    whole multimodal items, e.g., evict a whole video frame).
+
+    Pure function: returns a new list, does not mutate the input. The
+    caller assigns the result to ``request.mm_features`` only after all
+    other preflight checks pass.
+    """
+    delta = evict_end - evict_start
+    new_features: list[MultiModalFeatureSpec] = []
+    for f in mm_features:
+        start = f.mm_position.offset
+        end = start + f.mm_position.length
+        if end <= evict_start:
+            # Fully before the cut -- positions unchanged.
+            new_features.append(f)
+        elif start >= evict_end:
+            # Fully after the cut -- shift offset back by the cut width.
+            shifted_pos = replace(f.mm_position, offset=start - delta)
+            new_features.append(replace(f, mm_position=shifted_pos))
+        elif evict_start <= start and end <= evict_end:
+            # Fully inside the cut -- drop (its tokens are gone).
+            continue
+        else:
+            # Straddles a boundary -- violates atomic-item contract.
+            raise ValueError(
+                f"evict_token_range: multimodal item at "
+                f"[{start}, {end}) partially overlaps eviction range "
+                f"[{evict_start}, {evict_end}). Eviction must atomically "
+                f"remove whole multimodal items; align the eviction "
+                f"range to mm-item boundaries (e.g., evict a whole "
+                f"video frame)."
+            )
+    return new_features
 
 
 class Scheduler(SchedulerInterface):
@@ -871,6 +919,16 @@ class Scheduler(SchedulerInterface):
                 for req in scheduled_new_reqs
             ]
 
+        # Eviction state is one-shot: now that it has been serialized into
+        # NewRequestData and will reach the worker on this round, clear
+        # it on the scheduler-side Request so a future preemption + resume
+        # does not re-deliver the same delta and cause the runner to
+        # re-apply compensation (e.g., re-rotate the K cache twice).
+        for req in scheduled_new_reqs:
+            if req.num_tokens_evicted or req.num_sink_tokens:
+                req.num_tokens_evicted = 0
+                req.num_sink_tokens = 0
+
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
                 scheduled_running_reqs,
@@ -1038,6 +1096,117 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+    def truncate_request(
+        self,
+        request_id: str,
+        target_num_tokens: int,
+    ) -> None:
+        """Truncate a streaming session's token count and free KV blocks
+        beyond ``target_num_tokens``.
+
+        Only acts on requests in ``WAITING_FOR_STREAMING_REQ`` state.
+        No-op if the request is unknown, not in that state, or
+        ``target_num_tokens`` is out of range (negative or >= current
+        length).
+        """
+        request = self.requests.get(request_id)
+        if request is None or (
+            request.status != RequestStatus.WAITING_FOR_STREAMING_REQ
+        ):
+            return
+        if target_num_tokens < 0 or target_num_tokens >= request.num_tokens:
+            return
+        del request._all_token_ids[target_num_tokens:]
+        request.prompt_token_ids = request._all_token_ids.copy()
+        request._output_token_ids.clear()
+        request.num_computed_tokens = min(
+            request.num_computed_tokens, target_num_tokens
+        )
+        self.kv_cache_manager.truncate_to_tokens(request_id, target_num_tokens)
+        # Invalidate cached block hashes: freed tail blocks no longer back
+        # any hash, and the surviving boundary block may now have partial
+        # content that does not match its previously-computed hash. The
+        # scheduler will recompute hashes on the next allocation.
+        request.block_hashes = []
+
+    def evict_token_range(
+        self,
+        request_id: str,
+        num_tokens_to_evict: int,
+        num_sink_tokens: int = 0,
+    ) -> None:
+        """Evict tokens ``[num_sink_tokens, num_sink_tokens + num_tokens_to_evict)``
+        from a streaming session and compact KV cache blocks.
+
+        Preflights all checks (request state, range bounds, KV-cache block
+        sharing, multimodal-item atomicity) *before* mutating any request
+        state. If any preflight fails (e.g. a surviving KV block is shared
+        via prefix caching, or the eviction range straddles a multimodal
+        item), no request-side mutation is performed. See
+        :meth:`SingleTypeKVCacheManager.evict_and_compact` for the
+        cache-side guard and :func:`_reindex_mm_features` for the
+        multimodal-atomicity guard.
+
+        No-op for an unknown request, a request not in
+        ``WAITING_FOR_STREAMING_REQ``, or an out-of-range eviction.
+        """
+        request = self.requests.get(request_id)
+        if request is None:
+            return
+        if request.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+            return
+        if num_tokens_to_evict <= 0 or num_sink_tokens < 0:
+            return
+        evict_start = num_sink_tokens
+        evict_end = num_sink_tokens + num_tokens_to_evict
+        if evict_end > request.num_tokens:
+            return
+
+        # Preflight 1: validate multimodal-item atomicity before touching
+        # anything else. Raises ValueError if the eviction range straddles
+        # a multimodal item. Done in two phases so we can keep request
+        # state intact if it fails.
+        new_mm_features = _reindex_mm_features(
+            request.mm_features, evict_start, evict_end
+        )
+
+        # Preflight 2 + mutation: compact KV-cache blocks. If a surviving
+        # block is shared (ref_cnt > 1) this raises RuntimeError before
+        # freeing anything, and we leave request state untouched.
+        self.kv_cache_manager.evict_and_compact(request_id, evict_start, evict_end)
+
+        # All preflight checks passed; commit request bookkeeping.
+        del request._all_token_ids[evict_start:evict_end]
+        request.prompt_token_ids = request._all_token_ids.copy()
+        request._output_token_ids.clear()
+        request.num_tokens_evicted = num_tokens_to_evict
+        request.num_sink_tokens = num_sink_tokens
+        # Only adjust num_computed_tokens when the evicted range overlaps
+        # tokens that were already computed. If num_computed_tokens is
+        # already <= evict_start (sink boundary), none of the evicted
+        # tokens were computed and the surviving computed tokens keep
+        # their positions; no adjustment needed.
+        if request.num_computed_tokens > evict_start:
+            request.num_computed_tokens = max(
+                num_sink_tokens,
+                request.num_computed_tokens - num_tokens_to_evict,
+            )
+        request.mm_features = new_mm_features
+        # Invalidate block hashes; surviving block contents will be
+        # rewritten by the runner (RoPE re-rotation, cascade shift).
+        request.block_hashes = []
+
+        logger.debug(
+            "evict_token_range: req=%s evicted %d tokens [%d, %d), "
+            "num_tokens=%d num_computed=%d",
+            request_id,
+            num_tokens_to_evict,
+            evict_start,
+            evict_end,
+            request.num_tokens,
+            request.num_computed_tokens,
+        )
 
     def _make_cached_request_data(
         self,

@@ -222,6 +222,7 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
+    VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION: bool = False
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
@@ -1723,6 +1724,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))
+    ),
+    # EXPERIMENTAL. Gate for `AsyncLLM.evict_session_token_range`, which
+    # evicts a middle range of tokens from a live streaming session while
+    # preserving sink tokens at the front (StreamingLLM-style). The default
+    # OSS implementation provides only the engine plumbing; correct attention
+    # on RoPE-based models additionally requires a runner that re-rotates
+    # surviving KV (see `GPUModelRunner._post_add_requests`). Enabling this
+    # flag means the caller accepts responsibility for that.
+    "VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION", "0"))
     ),
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN": lambda: bool(

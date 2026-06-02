@@ -182,6 +182,23 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # Experimental streaming-eviction state. Set by
+        # ``Scheduler.evict_token_range`` and consumed by a runner subclass
+        # via ``GPUModelRunner._post_add_requests`` for GPU-side
+        # compensation (e.g., RoPE re-rotation on surviving KV).
+        #
+        # Lifecycle: one-shot signal from scheduler to worker.
+        # ``num_tokens_evicted`` reflects the most recent eviction call
+        # only (overwritten on each call), not a cumulative count.
+        # ``num_sink_tokens`` records the sink boundary used by that
+        # same call. The scheduler clears both back to 0 immediately
+        # after serializing them into ``NewRequestData`` so a future
+        # preemption + resume does not re-deliver the same delta and
+        # cause the runner to apply compensation twice. Both default
+        # to 0 for requests that never use eviction.
+        self.num_sink_tokens: int = 0
+        self.num_tokens_evicted: int = 0
+
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately

@@ -360,6 +360,113 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request_id, None)
 
+    def truncate_to_tokens(self, request_id: str, num_tokens: int) -> None:
+        """Free KV cache blocks for ``request_id`` beyond ``num_tokens``.
+
+        Keeps the first ``ceil(num_tokens / block_size)`` blocks and frees
+        the tail in reverse order (matching the discipline of ``free``).
+        Drops the cached block count for the request so subsequent
+        re-allocations do not stale-reuse prior accounting. No-op if the
+        request is unknown or no tail blocks would be freed.
+        """
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks:
+            return
+        num_blocks_to_keep = cdiv(num_tokens, self.block_size)
+        if num_blocks_to_keep >= len(req_blocks):
+            return
+        blocks_to_free = req_blocks[num_blocks_to_keep:]
+        self.block_pool.free_blocks(reversed(blocks_to_free))
+        self.req_to_blocks[request_id] = req_blocks[:num_blocks_to_keep]
+        # Reset the cached-block count: prior count covered the now-freed
+        # tail. allocate_new_blocks will recompute it on next allocation.
+        self.num_cached_block.pop(request_id, None)
+
+    def evict_and_compact(
+        self, request_id: str, start_token: int, end_token: int
+    ) -> None:
+        """Evict tokens in ``[start_token, end_token)`` from this request's
+        KV cache and compact its block list.
+
+        Fully-covered blocks within the evicted range are freed. The
+        surviving blocks at and past the eviction point will see their
+        K data modified by RoPE re-rotation (their tokens shift to
+        earlier positions); we therefore:
+
+        1. **Preflight**: raise ``RuntimeError`` if any modified block
+           is shared (``ref_cnt > 1``). Re-rotating a shared block would
+           corrupt the other request that holds it. The error message
+           instructs the caller to disable prefix caching for sessions
+           that use eviction. Performed *before* freeing anything, so a
+           failing call leaves both KV cache and request state intact.
+        2. Free the fully-covered evicted blocks.
+        3. Invalidate prefix-cache hashes on modified blocks via
+           ``BlockPool._maybe_evict_cached_block`` so future requests do
+           not match stale content.
+
+        No-op if the request is unknown or the range is degenerate.
+        """
+        req_blocks = self.req_to_blocks.get(request_id)
+        if not req_blocks:
+            return
+
+        # First fully-covered evicted block (ceil division).
+        start_block = cdiv(start_token, self.block_size)
+        # Last fully-covered evicted block (floor division).
+        end_block = min(end_token // self.block_size, len(req_blocks))
+
+        # Build the compacted block list and capture blocks to free.
+        if start_block < end_block:
+            blocks_to_free = req_blocks[start_block:end_block]
+            new_blocks = req_blocks[:start_block] + req_blocks[end_block:]
+        else:
+            blocks_to_free = []
+            new_blocks = list(req_blocks)
+
+        # Surviving blocks that will be modified by cascade shift / RoPE
+        # re-rotation. Includes the boundary block (floor div) which
+        # contains both preserved sink tokens and evicted tokens.
+        # Empty when the eviction covers every block at or past the
+        # eviction position (e.g., evicting the entire request from
+        # start_token=0); in that case there is nothing to re-rotate
+        # but we still must free blocks_to_free and update req_to_blocks
+        # below.
+        modified_start = start_token // self.block_size
+        modified_blocks = new_blocks[modified_start:]
+
+        # Preflight (only meaningful when there are blocks to re-rotate):
+        # refuse before any mutation if a modified block is shared.
+        # This keeps the operation atomic from the caller's view.
+        for block in modified_blocks:
+            if block.ref_cnt > 1:
+                raise RuntimeError(
+                    f"Cannot evict tokens [{start_token}, {end_token}) "
+                    f"for request {request_id!r}: surviving block "
+                    f"{block.block_id} is shared via prefix caching "
+                    f"(ref_cnt={block.ref_cnt}). RoPE re-rotation on a "
+                    "shared block would corrupt the other request "
+                    "holding it. Disable prefix caching "
+                    "(--no-enable-prefix-caching) for sessions that use "
+                    "evict_session_token_range."
+                )
+
+        # Free fully-covered evicted blocks. Always runs (including the
+        # "evicted everything" case where modified_blocks is empty),
+        # otherwise we leak the freed blocks.
+        if blocks_to_free:
+            self.block_pool.free_blocks(reversed(blocks_to_free))
+
+        # Invalidate hashes on surviving blocks whose content will change.
+        # No-op when modified_blocks is empty.
+        for block in modified_blocks:
+            self.block_pool._maybe_evict_cached_block(block)
+
+        # Always commit the compacted block list and reset the cached
+        # block count -- block content has changed (or, in the
+        # evict-everything case, the request now holds no blocks).
+        self.req_to_blocks[request_id] = new_blocks
+        self.num_cached_block.pop(request_id, None)
+
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """

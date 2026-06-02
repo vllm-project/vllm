@@ -117,6 +117,24 @@ class EngineCore:
 
         self.log_stats = log_stats
 
+        # Warn early when experimental session eviction is enabled together
+        # with prefix caching. The KV-cache manager will refuse to evict
+        # any surviving block that is shared via prefix caching (ref_cnt>1),
+        # which surfaces as a RuntimeError mid-session. Surfacing on init
+        # gives operators a chance to disable one or the other up front.
+        if (
+            envs.VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION
+            and vllm_config.cache_config.enable_prefix_caching
+        ):
+            logger.warning(
+                "VLLM_ENABLE_EXPERIMENTAL_SESSION_EVICTION=1 with "
+                "enable_prefix_caching=True. Sessions that call "
+                "evict_session_token_range will raise RuntimeError if "
+                "any surviving KV-cache block is shared via prefix "
+                "caching. Disable prefix caching for sessions that use "
+                "eviction (--no-enable-prefix-caching)."
+            )
+
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
@@ -1340,6 +1358,14 @@ class EngineCoreProc(EngineCore):
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
+        elif request_type == EngineCoreRequestType.TRUNCATE:
+            request_id, target_num_tokens = request
+            self.scheduler.truncate_request(request_id, target_num_tokens)
+        elif request_type == EngineCoreRequestType.EVICT_TOKEN_RANGE:
+            request_id, num_tokens_to_evict, num_sink_tokens = request
+            self.scheduler.evict_token_range(
+                request_id, num_tokens_to_evict, num_sink_tokens
+            )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:

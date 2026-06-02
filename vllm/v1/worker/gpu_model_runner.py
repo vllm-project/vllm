@@ -1226,6 +1226,8 @@ class GPUModelRunner(
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
+                num_sink_tokens=new_req_data.num_sink_tokens,
+                num_tokens_evicted=new_req_data.num_tokens_evicted,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
@@ -1435,6 +1437,10 @@ class GPUModelRunner(
             self.input_batch.add_request(request)
             self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
 
+        # Hook for subclasses to act on the just-added requests (e.g.,
+        # streaming-eviction RoPE re-rotation). No-op in the base runner.
+        self._post_add_requests(reqs_to_add)
+
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
         # Allow attention backend to reorder the batch, potentially
@@ -1487,6 +1493,17 @@ class GPUModelRunner(
             return correct_spec_decode_token_counts
         else:
             return None
+
+    def _post_add_requests(self, reqs_to_add: list[CachedRequestState]) -> None:
+        """Hook for subclasses to act on newly-added requests.
+
+        Called after newly-added requests are inserted into ``input_batch``
+        and their per-request spec token ids are recorded, but before the
+        batch is condensed and attention backends reorder it. Subclasses
+        may override this to perform per-request GPU-side work tied to
+        request setup (for example, re-rotating KV cache after streaming
+        eviction). Default implementation is a no-op.
+        """
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -1568,6 +1585,12 @@ class GPUModelRunner(
         self.late_interaction_runner.register_request(req_id, req_state.pooling_params)
         req_state.block_ids = new_req_data.block_ids
         req_state.num_computed_tokens = new_req_data.num_computed_tokens
+        # Streaming-eviction state must propagate on the streaming-resume
+        # path too, otherwise a runner subclass overriding
+        # `_post_add_requests` would see stale values when an eviction
+        # happens between streaming chunks of the same session.
+        req_state.num_sink_tokens = new_req_data.num_sink_tokens
+        req_state.num_tokens_evicted = new_req_data.num_tokens_evicted
         req_state.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             req_state.prompt_token_ids, req_state.prompt_embeds
         )
