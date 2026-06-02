@@ -233,7 +233,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, hy_v3, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
