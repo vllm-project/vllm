@@ -40,6 +40,7 @@ class SingleTypeKVCacheManager(ABC):
         block_pool: BlockPool,
         enable_caching: bool,
         kv_cache_group_id: int,
+        scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         max_admission_blocks_per_request: int | None = None,
@@ -50,6 +51,8 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_spec: The kv_cache_spec for this manager.
             block_pool: The block pool.
             kv_cache_group_id: The id of the kv cache group of this manager.
+            scheduler_block_size: The scheduling granularity (LCM of all group
+                block sizes); a multiple of this manager's ``block_size``.
             max_admission_blocks_per_request: Recycling-aware per-request
                 block cap used by `get_num_blocks_to_allocate`. Only set for
                 spec types that recycle blocks across chunks (SWA,
@@ -57,6 +60,7 @@ class SingleTypeKVCacheManager(ABC):
                 correct for full-attention-style specs that hold every
                 block until the request finishes.
         """
+        self.scheduler_block_size = scheduler_block_size
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
