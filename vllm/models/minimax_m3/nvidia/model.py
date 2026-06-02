@@ -126,7 +126,6 @@ class MiniMAXGemmaRMSNorm(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
-        # TODO: enable PDL for rmsnorm.
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
 
