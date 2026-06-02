@@ -112,6 +112,7 @@ class KVCacheManager:
         self,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
+        scheduler_block_size: int,
         hash_block_size: int,
         max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
@@ -147,6 +148,7 @@ class KVCacheManager:
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
         )
