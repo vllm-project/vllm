@@ -218,6 +218,11 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.use_dflash():
+                # DFlash requires an extra lookahead slot since it uses in-fill-style
+                # decoding instead of standard next-token sampling, so it has a query
+                # for the last sampled token plus queries for each draft token.
+                self.num_lookahead_tokens = self.num_spec_tokens + 1
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -232,6 +237,7 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             local_kv_retention_interval=self.cache_config.prefix_cache_retention_interval,
             metrics_collector=self.kv_metrics_collector,
@@ -624,6 +630,18 @@ class Scheduler(SchedulerInterface):
                     )
                     assert num_computed_tokens <= request.num_tokens
 
+                    # Skip request with pending mm encoding prefetches
+                    if (
+                        self.ec_connector is not None
+                        and request.mm_features
+                        and not self.ec_connector.ensure_cache_available(
+                            request, num_computed_tokens
+                        )
+                    ):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+
                     # Track first scheduled prefill, not post-preemption repeat prefills
                     if request.prefill_stats is not None:
                         assert num_computed_tokens <= request.num_prompt_tokens
@@ -703,8 +721,9 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
+                limit_lookahead_tokens = load_kv_async and self.use_eagle
                 effective_lookahead_tokens = (
-                    0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
+                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -2036,6 +2055,8 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+        if self.ec_connector is not None:
+            self.ec_connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods

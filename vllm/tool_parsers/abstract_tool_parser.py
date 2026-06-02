@@ -79,6 +79,25 @@ class ToolParser:
         else:
             self.tools = []
 
+    def get_remaining_unstreamed_args(self) -> str:
+        """Return tool call arguments parsed but not yet streamed."""
+        if not self.prev_tool_call_arr:
+            return ""
+        index = len(self.prev_tool_call_arr) - 1
+        args = self.prev_tool_call_arr[index].get("arguments", {})
+        if isinstance(args, str):
+            expected = args
+        else:
+            expected = json.dumps(args, ensure_ascii=False)
+        actual = (
+            self.streamed_args_for_tool[index]
+            if index < len(self.streamed_args_for_tool)
+            else ""
+        )
+        if expected.startswith(actual):
+            return expected[len(actual) :]
+        return ""
+
     @cached_property
     def vocab(self) -> dict[str, int]:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
