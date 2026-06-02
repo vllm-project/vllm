@@ -65,8 +65,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
         self._agent.create_backend("OBJ", params)
         self._transfers: dict[int, TransferEntry] = {}
+        self._failed_jobs: list[JobResult] = []
         self._primary_reg = None
-        self._dram_prepped_handle: nixl_prepped_dlist_handle | None = None
         self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
         self._file_mapper = FileMapper.from_offloading_spec(root_dir, offloading_spec)
@@ -86,7 +86,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
         # with the peer agent name ("ObjAgent").
-        self._dram_prepped_handle = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+        self._dram_prepped_handle: nixl_prepped_dlist_handle = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -112,16 +112,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         )
         return results[0] is not None
 
-    def _get_obj_key(self, key: OffloadKey) -> str:
-        return self._file_mapper.get_file_name(key)
-
     def _submit_transfer(
         self,
         job_id: int,
         block_ids: Iterable[int],
         obj_keys: Iterable[str],
         op: str,
-    ) -> bool:
+    ) -> None:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
         block_ids_list = [int(bid) for bid in block_ids]
         # The OBJ backend maps devId -> obj_key. All descriptors must have
@@ -133,13 +130,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         files_desc = self._agent.register_memory(nixl_files, "OBJ")
         if files_desc is None:
             logger.warning("register_memory (OBJ) failed for job %d", job_id)
-            return False
+            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            return
 
         obj_handle = self._agent.prep_xfer_dlist("ObjAgent", files_desc.trim())
         if not obj_handle:
             logger.warning("prep_xfer_dlist (OBJ) failed for job %d", job_id)
             self._agent.deregister_memory(files_desc)
-            return False
+            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            return
 
         xfer_handle = self._agent.make_prepped_xfer(
             op,
@@ -150,7 +149,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             logger.warning("make_prepped_xfer failed for job %d", job_id)
             self._agent.release_dlist_handle(obj_handle)
             self._agent.deregister_memory(files_desc)
-            return False
+            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            return
 
         state = self._agent.transfer(xfer_handle)
         if state == "ERR":
@@ -158,29 +158,30 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._agent.release_dlist_handle(obj_handle)
             self._agent.deregister_memory(files_desc)
             self._agent.release_xfer_handle(xfer_handle)
-            return False
+            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            return
 
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
-        return True
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         try:
-            return self._exists(self._get_obj_key(key))
+            return self._exists(self._file_mapper.get_file_name(key))
         except Exception as e:
             logger.warning("lookup failed for key %s: %s", key, e)
             return False
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ)
 
     def get_finished(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
-        results: list[JobResult] = []
+        results: list[JobResult] = self._failed_jobs
+        self._failed_jobs = []
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -217,12 +218,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             except Exception as exc:
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
         self._transfers.clear()
-        if self._dram_prepped_handle is not None:
-            try:
-                self._agent.release_dlist_handle(self._dram_prepped_handle)
-            except Exception as exc:
-                logger.warning("failed to release DRAM prepped handle: %s", exc)
-            self._dram_prepped_handle = None
+        try:
+            self._agent.release_dlist_handle(self._dram_prepped_handle)
+        except Exception as exc:
+            logger.warning("failed to release DRAM prepped handle: %s", exc)
+        self._dram_prepped_handle = None
         if self._primary_reg is not None:
             try:
                 self._agent.deregister_memory(self._primary_reg)

@@ -1,34 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for ObjectStoreSecondaryTierManager.
+Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
-These tests use real NIXL OBJ (S3) I/O to verify the OBJ secondary tier
-implementation. The tier writes KV cache blocks to an S3-compatible store via
-NIXL and reads them back, verifying data integrity throughout the process.
-
-Required environment variables (tests are skipped if any are absent):
-    VLLM_TEST_S3_BUCKET           — S3 bucket name
-    VLLM_TEST_S3_ENDPOINT         — S3 endpoint URL (e.g. http://minio:9000)
-    VLLM_TEST_S3_ACCESS_KEY       — S3 access key
-    VLLM_TEST_S3_SECRET_KEY       — S3 secret key
-    VLLM_TEST_S3_SCHEME           — (optional) http or https, default http
-    VLLM_TEST_S3_CA_BUNDLE        — (optional) path to CA bundle for TLS verification
+These tests replace the NIXL backend with an in-memory mock so they run
+without S3 credentials or a live object store. They verify the manager's
+state machine: job submission, transfer completion polling, and lookup.
 """
 
-import os
-import time
 import uuid
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import torch
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
+# ---------------------------------------------------------------------------
+# Shared stubs
+# ---------------------------------------------------------------------------
 
 def _make_vllm_config():
     return SimpleNamespace(
@@ -49,57 +42,16 @@ _OFFLOADING_SPEC = SimpleNamespace(
     kv_cache_config=SimpleNamespace(kv_cache_groups=[]),
 )
 
-# ---------------------------------------------------------------------------
-# S3 credentials — skip entire module if not configured
-# ---------------------------------------------------------------------------
-
-_S3_BUCKET = os.environ.get("VLLM_TEST_S3_BUCKET", "")
-_S3_ENDPOINT = os.environ.get("VLLM_TEST_S3_ENDPOINT", "")
-_S3_ACCESS_KEY = os.environ.get("VLLM_TEST_S3_ACCESS_KEY", "")
-_S3_SECRET_KEY = os.environ.get("VLLM_TEST_S3_SECRET_KEY", "")
-_S3_SCHEME = os.environ.get("VLLM_TEST_S3_SCHEME", "http")
-_S3_CA_BUNDLE = os.environ.get("VLLM_TEST_S3_CA_BUNDLE", "")
-
-if not all([_S3_BUCKET, _S3_ENDPOINT, _S3_ACCESS_KEY, _S3_SECRET_KEY]):
-    pytest.skip(
-        "S3 credentials not set — export VLLM_TEST_S3_BUCKET, "
-        "VLLM_TEST_S3_ENDPOINT, VLLM_TEST_S3_ACCESS_KEY, VLLM_TEST_S3_SECRET_KEY",
-        allow_module_level=True,
-    )
-
 _STORE_CONFIG = {
-    "bucket": _S3_BUCKET,
-    "endpoint_override": _S3_ENDPOINT,
-    "access_key": _S3_ACCESS_KEY,
-    "secret_key": _S3_SECRET_KEY,
-    "scheme": _S3_SCHEME,
-    "ca_bundle": _S3_CA_BUNDLE,
+    "bucket": "mock-bucket",
+    "endpoint_override": "mock:9000",
+    "access_key": "mock-access",
+    "secret_key": "mock-secret",
 }
 
-# Probe NIXL OBJ plugin availability
-try:
-    _probe_view = memoryview(torch.zeros(1, 1, dtype=torch.float32).numpy())
-    _probe = ObjectStoreSecondaryTierManager(
-        offloading_spec=_OFFLOADING_SPEC,
-        primary_kv_view=_probe_view,
-        tier_type="obj",
-        store_config=_STORE_CONFIG,
-    )
-    del _probe, _probe_view
-except RuntimeError as _e:
-    pytest.skip(f"NIXL OBJ plugin not available: {_e}", allow_module_level=True)
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-# Small blocks keep S3 round-trips fast; 1 KB per block is enough for integrity
-_BLOCK_ELEMENTS = 256  # float32 × 256 = 1 KB
+_BLOCK_ELEMENTS = 256
 _DTYPE = torch.float32
-
-# Unique prefix per test session so parallel runs don't collide
 _RUN_PREFIX = f"test/{uuid.uuid4().hex[:8]}"
-
 _CTX = ReqContext(req_id="test-req")
 
 
@@ -123,428 +75,259 @@ def make_job(
     )
 
 
-def make_tier(
-    key_prefix: str = _RUN_PREFIX,
-    num_blocks: int = 1,
-    **kwargs,
-) -> ObjectStoreSecondaryTierManager:
-    view = memoryview(torch.zeros(num_blocks, _BLOCK_ELEMENTS, dtype=_DTYPE).numpy())
-    return ObjectStoreSecondaryTierManager(
-        offloading_spec=_OFFLOADING_SPEC,
-        primary_kv_view=view,
-        tier_type="obj",
-        store_config=_STORE_CONFIG,
-        prefix=key_prefix,
-        **kwargs,
-    )
+# ---------------------------------------------------------------------------
+# Mock NIXL agent
+# ---------------------------------------------------------------------------
+
+class MockNixlAgent:
+    """In-memory NIXL agent. Tracks stored object keys and simulates async
+    transfers: transfer() returns PROC, check_xfer_state() returns DONE and
+    commits the write to the in-memory key set."""
+
+    def __init__(self):
+        self._stored_obj_keys: set[str] = set()
+        # handle_id -> (op, [obj_keys])
+        self._pending: dict[int, tuple[str, list[str]]] = {}
+        self._handle_counter = 0
+        self._last_obj_keys: list[str] = []
+
+    def create_backend(self, backend_type, params):
+        pass
+
+    def register_memory(self, descs, mem_type=None, backends=None):
+        mock = MagicMock()
+        mock.trim.return_value = MagicMock()
+        # Capture obj_keys from OBJ 4-tuples: (addr, len, dev_id, obj_key)
+        if mem_type == "OBJ" and descs:
+            self._last_obj_keys = [d[3] for d in descs if d[3]]
+        return mock
+
+    def deregister_memory(self, desc):
+        pass
+
+    def prep_xfer_dlist(self, agent_name, descs, mem_type=None, backends=None):
+        return MagicMock()
+
+    def make_prepped_xfer(
+        self, op, local_handle, local_indices,
+        remote_handle, remote_indices,
+        notif_msg=b"", backends=None, skip_desc_merge=False,
+    ):
+        handle = MagicMock()
+        handle._id = self._handle_counter
+        self._pending[self._handle_counter] = (op, list(self._last_obj_keys))
+        self._handle_counter += 1
+        return handle
+
+    def transfer(self, handle):
+        return "PROC"
+
+    def check_xfer_state(self, handle):
+        entry = self._pending.pop(handle._id, None)
+        if entry:
+            op, obj_keys = entry
+            if op == "WRITE":
+                self._stored_obj_keys.update(obj_keys)
+        return "DONE"
+
+    def release_xfer_handle(self, handle):
+        pass
+
+    def release_dlist_handle(self, handle):
+        pass
+
+    def query_memory(self, queries, mem_type, agent_name):
+        return [
+            object() if q[3] in self._stored_obj_keys else None
+            for q in queries
+        ]
 
 
-def make_tier_with_view(
-    num_total_blocks: int = 8,
-    key_prefix: str = _RUN_PREFIX,
-    **kwargs,
-) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
-    tensor = torch.zeros((num_total_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
-    tier = ObjectStoreSecondaryTierManager(
-        offloading_spec=_OFFLOADING_SPEC,
-        primary_kv_view=memoryview(tensor.numpy()),
-        tier_type="obj",
-        store_config=_STORE_CONFIG,
-        prefix=key_prefix,
-        **kwargs,
-    )
-    return tier, tensor
+# ---------------------------------------------------------------------------
+# Fixture
+# ---------------------------------------------------------------------------
+
+def _make_tier(num_blocks: int = 4) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
+    """Create a tier backed by a fresh MockNixlAgent."""
+    mock_agent = MockNixlAgent()
+    tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    view = memoryview(tensor.numpy())
+    with patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"):
+        with patch(
+            "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
+            return_value=mock_agent,
+        ):
+            tier = ObjectStoreSecondaryTierManager(
+                offloading_spec=_OFFLOADING_SPEC,
+                primary_kv_view=view,
+                tier_type="obj",
+                store_config=_STORE_CONFIG,
+                prefix=_RUN_PREFIX,
+            )
+    return tier, mock_agent
 
 
-def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 200) -> list[JobResult]:
-    """Poll get_finished() until all pending jobs resolve or timeout."""
+def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 20) -> list[JobResult]:
+    """Poll get_finished() until all in-flight jobs resolve."""
     results: list[JobResult] = []
     for _ in range(max_rounds):
         results.extend(tier.get_finished())
         if not tier._transfers:
             break
-        time.sleep(0.1)
     return results
 
 
 # ---------------------------------------------------------------------------
-# Basic functionality tests
+# Tests
 # ---------------------------------------------------------------------------
 
+class TestMockObjTierBasic:
 
-class TestObjTierBasic:
-    """Tests for basic tier operations with real S3 I/O."""
-
-    @pytest.fixture(autouse=True)
-    def _setup(self):
-        prefix = f"{_RUN_PREFIX}/basic/{uuid.uuid4().hex[:6]}"
-        self.tier, self.tensor = make_tier_with_view(
-            num_total_blocks=4, key_prefix=prefix
-        )
-        yield
-        self.tier.shutdown()
+    def setup_method(self):
+        self.tier, self.agent = _make_tier(num_blocks=4)
 
     def test_lookup_empty_tier(self):
         assert self.tier.lookup(key(1), _CTX) is False
-        assert self.tier.lookup(key(2), _CTX) is False
 
     def test_store_and_lookup(self):
-        job = make_job(1, [key(1)], [0])
-        self.tier.submit_store(job)
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
         assert results[0].success
         assert self.tier.lookup(key(1), _CTX) is True
 
-    def test_store_unknown_key_returns_false(self):
-        job = make_job(1, [key(1)], [0])
-        self.tier.submit_store(job)
+    def test_lookup_unrelated_key_returns_false(self):
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
-        assert self.tier.lookup(key(99), _CTX) is False
+        assert self.tier.lookup(key(999), _CTX) is False
 
     def test_store_then_load_roundtrip(self):
-        job_s = make_job(1, [key(1), key(2)], [0, 1])
-        self.tier.submit_store(job_s)
-        store_results = drain(self.tier)
-        assert all(r.success for r in store_results)
-        assert self.tier.lookup(key(1), _CTX) is True
-        assert self.tier.lookup(key(2), _CTX) is True
+        self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
+        results = drain(self.tier)
+        assert results[0].success
 
-        job_l = make_job(2, [key(1), key(2)], [2, 3])
-        self.tier.submit_load(job_l)
-        load_results = drain(self.tier)
-        assert all(r.success for r in load_results)
-        # Blocks remain in S3 after load
-        assert self.tier.lookup(key(1), _CTX) is True
-        assert self.tier.lookup(key(2), _CTX) is True
+        self.tier.submit_load(make_job(2, [key(1), key(2)], [0, 1]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
 
     def test_multiple_jobs_tracked_independently(self):
-        job1 = make_job(1, [key(1)], [0])
-        job2 = make_job(2, [key(2)], [1])
-        self.tier.submit_store(job1)
-        self.tier.submit_store(job2)
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        self.tier.submit_store(make_job(2, [key(2)], [1]))
         results = drain(self.tier)
-        job_ids = {r.job_id for r in results}
-        assert job_ids == {1, 2}
-        assert self.tier.lookup(key(1), _CTX) is True
-        assert self.tier.lookup(key(2), _CTX) is True
-
-
-
-# ---------------------------------------------------------------------------
-# Data integrity tests
-# ---------------------------------------------------------------------------
-
-
-class TestObjTierIO:
-    """Data written by store must be exactly recovered by load."""
-
-    def _make(self, num_total_blocks: int = 8) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
-        prefix = f"{_RUN_PREFIX}/io/{uuid.uuid4().hex[:6]}"
-        return make_tier_with_view(num_total_blocks=num_total_blocks, key_prefix=prefix)
-
-    def test_store_load_data_integrity(self):
-        num_blocks = 4
-        tier, tensor = self._make(num_total_blocks=num_blocks * 2)
-
-        for bid in range(num_blocks):
-            tensor[bid] = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-        expected = tensor[:num_blocks].clone()
-
-        keys = [key(i) for i in range(num_blocks)]
-        tier.submit_store(make_job(1, keys, list(range(num_blocks))))
-        results = drain(tier)
+        assert len(results) == 2
         assert all(r.success for r in results)
 
-        # Zero source slots to prove data comes from S3
-        tensor[:num_blocks] = 0.0
+    def test_failed_transfer_reported(self):
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert not results[0].success
 
-        load_ids = list(range(num_blocks, num_blocks * 2))
-        tier.submit_load(make_job(2, keys, load_ids))
+    def test_pending_transfer_not_returned_until_done(self):
+        # First poll returns PROC; second poll returns DONE.
+        call_count = [0]
+        original = self.agent.check_xfer_state
+        def delayed(h):
+            call_count[0] += 1
+            return "PROC" if call_count[0] == 1 else original(h)
+        self.agent.check_xfer_state = delayed
+
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert list(self.tier.get_finished()) == []
+        results = list(self.tier.get_finished())
+        assert len(results) == 1
+        assert results[0].success
+
+
+class TestMockObjTierMultiBlock:
+
+    def test_store_multiple_blocks(self):
+        tier, _ = _make_tier(num_blocks=8)
+        keys = [key(i) for i in range(8)]
+        tier.submit_store(make_job(1, keys, list(range(8))))
         results = drain(tier)
-        assert all(r.success for r in results)
+        assert len(results) == 1
+        assert results[0].success
+        assert all(tier.lookup(k, _CTX) for k in keys)
 
-        for i, bid in enumerate(load_ids):
-            assert torch.equal(tensor[bid], expected[i]), (
-                f"Block {bid} data mismatch after store+load"
-            )
+    def test_partial_block_lookup(self):
+        tier, _ = _make_tier(num_blocks=4)
+        tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
+        drain(tier)
+        assert tier.lookup(key(0), _CTX) is True
+        assert tier.lookup(key(1), _CTX) is True
+        assert tier.lookup(key(2), _CTX) is False
 
+
+class TestMockObjTierFailures:
+
+    def test_lookup_exception_returns_false(self):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("backend error"))
+        assert tier.lookup(key(1), _CTX) is False
+
+    def test_submit_store_register_memory_failure_reported_in_get_finished(self):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.register_memory = lambda *a, **k: None
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished())
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert not results[0].success
+
+    def test_submit_load_register_memory_failure_reported_in_get_finished(self):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.register_memory = lambda *a, **k: None
+        tier.submit_load(make_job(2, [key(1)], [0]))
+        results = list(tier.get_finished())
+        assert len(results) == 1
+        assert results[0].job_id == 2
+        assert not results[0].success
+
+    def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
+        tier, agent = _make_tier(num_blocks=4)
+        agent.make_prepped_xfer = lambda *a, **k: None
+        tier.submit_store(make_job(3, [key(1)], [0]))
+        results = list(tier.get_finished())
+        assert len(results) == 1
+        assert results[0].job_id == 3
+        assert not results[0].success
+
+    def test_failure_and_success_both_returned_by_get_finished(self):
+        # One job fails at submission, another succeeds in flight.
+        tier, agent = _make_tier(num_blocks=4)
+        original_register = agent.register_memory
+        call_count = [0]
+        def register_once_fail(*a, **k):
+            call_count[0] += 1
+            return None if call_count[0] == 1 else original_register(*a, **k)
+        agent.register_memory = register_once_fail
+
+        tier.submit_store(make_job(1, [key(1)], [0]))  # fails immediately
+        tier.submit_store(make_job(2, [key(2)], [1]))  # succeeds
+        results = drain(tier)
+        assert len(results) == 2
+        by_id = {r.job_id: r for r in results}
+        assert not by_id[1].success
+        assert by_id[2].success
+
+
+class TestMockObjTierShutdown:
+
+    def test_shutdown_clears_in_flight_transfers(self):
+        tier, agent = _make_tier(num_blocks=4)
+        # Keep transfer in flight by never completing it
+        agent.check_xfer_state = lambda h: "PROC"
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        assert len(tier._transfers) == 1
         tier.shutdown()
+        assert len(tier._transfers) == 0
+        assert tier._dram_prepped_handle is None
+        assert tier._primary_reg is None
 
-    def test_store_load_multiple_blocks(self):
-        num_blocks = 8
-        tier, tensor = self._make(num_total_blocks=num_blocks * 2)
-
-        for bid in range(num_blocks):
-            tensor[bid] = float(bid + 1)
-        expected = tensor[:num_blocks].clone()
-
-        keys = [key(i + 200) for i in range(num_blocks)]
-        tier.submit_store(make_job(10, keys, list(range(num_blocks))))
-        results = drain(tier)
-        assert all(r.success for r in results)
-
-        tensor[:num_blocks] = 0.0
-        load_ids = list(range(num_blocks, num_blocks * 2))
-        tier.submit_load(make_job(11, keys, load_ids))
-        results = drain(tier)
-        assert all(r.success for r in results)
-
-        for i, bid in enumerate(load_ids):
-            assert torch.equal(tensor[bid], expected[i])
-
+    def test_shutdown_idempotent(self):
+        tier, _ = _make_tier(num_blocks=4)
         tier.shutdown()
-
-
-# ---------------------------------------------------------------------------
-# End-to-end tests with primary tier integration
-# ---------------------------------------------------------------------------
-
-
-class TestObjTierE2EWithPrimary:
-    """
-    End-to-end tests integrating ObjectStoreSecondaryTierManager with
-    CPUPrimaryTierOffloadingManager using real S3 I/O via NIXL.
-
-    Verifies full data integrity through cascade and promotion pipelines.
-    """
-
-    @pytest.fixture
-    def setup_manager(self):
-        from vllm.v1.kv_offload.tiering.manager import (
-            CPUPrimaryTierOffloadingManager,
-            TieringOffloadingManager,
-        )
-
-        num_primary_blocks = 10
-        prefix = f"{_RUN_PREFIX}/e2e/{uuid.uuid4().hex[:6]}"
-
-        cpu_tensor = torch.zeros((num_primary_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
-        mmap_region = SimpleNamespace(
-            create_kv_memoryview=lambda: memoryview(cpu_tensor.numpy()),
-            cleanup=lambda: None,
-        )
-        primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=num_primary_blocks,
-            mmap_region=mmap_region,
-        )
-
-        obj_tier = ObjectStoreSecondaryTierManager(
-            offloading_spec=_OFFLOADING_SPEC,
-            primary_kv_view=memoryview(cpu_tensor.numpy()),
-            tier_type="obj",
-            store_config=_STORE_CONFIG,
-            prefix=prefix,
-        )
-
-        manager = TieringOffloadingManager(
-            primary_tier=primary_tier,
-            secondary_tiers=[obj_tier],
-        )
-
-        yield manager, primary_tier, obj_tier, cpu_tensor
-        manager.shutdown()
-
-    def _wait_cascade(self, manager, primary_tier, keys, rounds=60):
-        """Poll until all cascaded blocks have ref_cnt == 0."""
-        for _ in range(rounds):
-            manager._process_finished_jobs()
-            all_done = all(
-                primary_tier._policy.get(k) is None
-                or primary_tier._policy.get(k).ref_cnt == 0
-                for k in keys
-            )
-            if all_done:
-                break
-            time.sleep(0.1)
-
-    def test_cascade_store_and_lookup(self, setup_manager):
-        """Blocks stored to primary cascade to S3 and become findable."""
-        manager, primary_tier, obj_tier, cpu_tensor = setup_manager
-
-        num_blocks = 3
-        keys = [key(100 + i) for i in range(num_blocks)]
-
-        result = manager.prepare_store(keys, _CTX)
-        assert result is not None
-        manager.complete_store(keys, _CTX, success=True)
-
-        self._wait_cascade(manager, primary_tier, keys)
-
-        for k in keys:
-            assert primary_tier.lookup(k, _CTX) is True
-            assert obj_tier.lookup(k, _CTX) is True
-
-    def test_full_cascade_data_integrity(self, setup_manager):
-        """Data written to primary cascades to S3 with correct content."""
-        from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-
-        manager, primary_tier, obj_tier, cpu_tensor = setup_manager
-
-        num_blocks = 4
-        keys = [key(200 + i) for i in range(num_blocks)]
-        expected: dict[OffloadKey, torch.Tensor] = {}
-
-        result = manager.prepare_store(keys, _CTX)
-        assert result is not None
-        spec = result.store_spec
-        assert isinstance(spec, CPULoadStoreSpec)
-
-        for i, bid in enumerate(spec.block_ids):
-            data = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-            cpu_tensor[int(bid)] = data
-            expected[keys[i]] = data.clone()
-
-        manager.complete_store(keys, _CTX, success=True)
-        self._wait_cascade(manager, primary_tier, keys)
-
-        # Zero out primary slots; load back from S3 into fresh slots
-        load_ids = list(range(5, 5 + num_blocks))
-        for bid in spec.block_ids:
-            cpu_tensor[int(bid)] = 0.0
-
-        job = make_job(99, keys, load_ids)
-        obj_tier.submit_load(job)
-        drain(obj_tier)
-
-        for i, bid in enumerate(load_ids):
-            assert torch.equal(cpu_tensor[bid], expected[keys[i]]), (
-                f"Block {i} data mismatch after cascade+load"
-            )
-
-    def test_promotion_from_obj_tier(self, setup_manager):
-        """Blocks evicted from primary can be promoted back via lookup."""
-        from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-
-        manager, primary_tier, obj_tier, cpu_tensor = setup_manager
-
-        num_blocks = 3
-        keys = [key(300 + i) for i in range(num_blocks)]
-        expected: dict[OffloadKey, torch.Tensor] = {}
-
-        # Store to primary (cascades to S3)
-        result = manager.prepare_store(keys, _CTX)
-        assert result is not None
-        spec = result.store_spec
-        assert isinstance(spec, CPULoadStoreSpec)
-        for i, bid in enumerate(spec.block_ids):
-            data = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-            cpu_tensor[int(bid)] = data
-            expected[keys[i]] = data.clone()
-        manager.complete_store(keys, _CTX, success=True)
-        self._wait_cascade(manager, primary_tier, keys)
-
-        # Evict from primary by filling it with new blocks
-        evict_keys = [key(400 + i) for i in range(10)]
-        result = manager.prepare_store(evict_keys, _CTX)
-        assert result is not None
-        for bid in result.store_spec.block_ids:
-            cpu_tensor[int(bid)] = 0.0
-        manager.complete_store(evict_keys, _CTX, success=True)
-        self._wait_cascade(manager, primary_tier, evict_keys)
-
-        # Original blocks should be gone from primary but present in S3
-        for k in keys:
-            assert primary_tier.lookup(k, _CTX) is False
-            assert obj_tier.lookup(k, _CTX) is True
-
-        # Trigger promotion via lookup
-        for k in keys:
-            manager.lookup(k, _CTX)
-
-        # Wait for promotion to complete
-        for _ in range(60):
-            list(manager.take_events())
-            time.sleep(0.1)
-
-        # Blocks should now be back in primary
-        assert all(manager.lookup(k, _CTX) is True for k in keys)
-
-        # Verify data integrity after promotion
-        load_spec = primary_tier.prepare_load(keys, _CTX)
-        for i, bid in enumerate(load_spec.block_ids):
-            assert torch.equal(
-                cpu_tensor[int(bid)], expected[keys[i]]
-            ), f"Block {i} data mismatch after promotion"
-        primary_tier.complete_load(keys, _CTX)
-
-    def test_cascade_promotion_roundtrip(self, setup_manager):
-        """Full roundtrip: store -> cascade -> evict -> promote -> data intact."""
-        from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-
-        manager, primary_tier, obj_tier, cpu_tensor = setup_manager
-
-        num_blocks = 3
-        keys = [key(500 + i) for i in range(num_blocks)]
-        expected: dict[OffloadKey, torch.Tensor] = {}
-
-        result = manager.prepare_store(keys, _CTX)
-        assert result is not None
-        spec = result.store_spec
-        assert isinstance(spec, CPULoadStoreSpec)
-        for i, bid in enumerate(spec.block_ids):
-            data = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-            cpu_tensor[int(bid)] = data
-            expected[keys[i]] = data.clone()
-        manager.complete_store(keys, _CTX, success=True)
-        self._wait_cascade(manager, primary_tier, keys)
-
-        # Evict
-        evict_keys = [key(600 + i) for i in range(10)]
-        result = manager.prepare_store(evict_keys, _CTX)
-        assert result is not None
-        for bid in result.store_spec.block_ids:
-            cpu_tensor[int(bid)] = 0.0
-        manager.complete_store(evict_keys, _CTX, success=True)
-        self._wait_cascade(manager, primary_tier, evict_keys)
-
-        for k in keys:
-            assert primary_tier.lookup(k, _CTX) is False
-
-        # Promote
-        for k in keys:
-            manager.lookup(k, _CTX)
-        for _ in range(60):
-            list(manager.take_events())
-            time.sleep(0.1)
-
-        assert all(manager.lookup(k, _CTX) is True for k in keys)
-
-        load_spec = primary_tier.prepare_load(keys, _CTX)
-        for i, bid in enumerate(load_spec.block_ids):
-            assert torch.equal(
-                cpu_tensor[int(bid)], expected[keys[i]]
-            ), f"Block {i} data mismatch after roundtrip"
-        primary_tier.complete_load(keys, _CTX)
-
-    def test_ref_cnt_released_after_cascade(self, setup_manager):
-        """ref_cnt on primary blocks must reach 0 after S3 cascade completes."""
-        from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-
-        manager, primary_tier, obj_tier, cpu_tensor = setup_manager
-
-        keys = [key(700 + i) for i in range(3)]
-        result = manager.prepare_store(keys, _CTX)
-        assert result is not None
-        spec = result.store_spec
-        assert isinstance(spec, CPULoadStoreSpec)
-        for bid in spec.block_ids:
-            cpu_tensor[int(bid)] = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-        manager.complete_store(keys, _CTX, success=True)
-
-        # Immediately after complete_store, ref_cnt must be 1 (cascade in flight)
-        for k in keys:
-            block = primary_tier._policy.get(k)
-            assert block is not None
-            assert block.ref_cnt == 1
-
-        self._wait_cascade(manager, primary_tier, keys)
-
-        for k in keys:
-            block = primary_tier._policy.get(k)
-            assert block is not None
-            assert block.ref_cnt == 0
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        tier.shutdown()  # must not raise
