@@ -605,6 +605,33 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
 
 
 @VIDEO_LOADER_REGISTRY.register(
+    "qwen3_vl",
+    video_processor="Qwen3VLVideoProcessor",
+)
+class Qwen3VLVideoBackend(VideoBackend):
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        fps = target.fps
+        max_frame_idx = source.total_frames_num - 1
+        min_frames = kwargs.get("min_frames", 4)
+        max_frames = kwargs.get("max_frames", 768)
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
+        num_frames = int(total_frames_num / original_fps * fps)
+        num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
+        indices = np.linspace(0, max_frame_idx, num_frames).round().astype(int).tolist()
+        return indices
+
+
+@VIDEO_LOADER_REGISTRY.register(
     "opencv_dynamic",
     video_processor="Glm4vVideoProcessor",
 )
