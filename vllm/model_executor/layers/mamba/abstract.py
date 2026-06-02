@@ -21,6 +21,8 @@ class MambaBase(AttentionLayerBase):
     Inherit from this class if you implement a custom layer.
     """
 
+    # Contains the KV cache (mamba state) for the layer
+    # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
