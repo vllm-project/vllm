@@ -1367,7 +1367,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
-        "stepfun-ai/step3", trust_remote_code=True
+        "stepfun-ai/step3",
+        trust_remote_code=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where "
+                "validate_rope() no longer accepts ignore_keys param"
+            )
+        },
     ),
     "StepVLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
