@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
 
+from typing_extensions import override
+
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -57,6 +59,7 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
+    @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
             kv_events_config = self.vllm_config.kv_events_config
@@ -81,15 +84,14 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def _create_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> CpuGpuOffloadingHandlers:
+    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
         return CpuGpuOffloadingHandlers(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
         )
 
+    @override
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
@@ -98,7 +100,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
-            self._handlers = self._create_handlers(kv_caches)
+            self._handlers = self.create_handlers(kv_caches)
 
         assert self._handlers is not None
         yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler

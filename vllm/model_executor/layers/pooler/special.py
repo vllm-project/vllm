@@ -102,6 +102,7 @@ class DispatchPooler(Pooler):
                 # portion of the batch. Token offset is computed from the CPU
                 # `num_scheduled_tokens_cpu` to avoid a GPU->CPU sync.
                 group_cursor = group_metadata.pooling_cursor
+                assert group_cursor is not None
                 num_group_tokens = int(group_cursor.num_scheduled_tokens_cpu.sum())
                 group_hidden_states = hidden_states[
                     token_offset : token_offset + num_group_tokens
