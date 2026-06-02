@@ -212,9 +212,11 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
 
 
 class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
-    # Full cudagraphs for uniform-query-length decode (spec decode -> >1 token).
+    # Full cudagraphs for uniform single-query decode batches.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-    # Reorder pulls decodes to the front; widened by spec tokens in __init__.
+    # The split-K decode kernel doesn't support spec decode yet (it handles one
+    # query token per request only). Keep the threshold at 1 so multi-query
+    # verify batches route to the prefill kernels instead of the decode kernel.
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -225,14 +227,6 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-
-        speculative_config = vllm_config.speculative_config
-        self.num_speculative_tokens = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            else 0
-        )
-        self.reorder_batch_threshold += self.num_speculative_tokens
 
         # Stable per-request context-length buffer for decode cudagraph replays.
         # Sized to max_num_batched_tokens (>= num_reqs).

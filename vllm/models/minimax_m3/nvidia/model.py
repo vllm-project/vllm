@@ -51,7 +51,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsMultiModal,
 )
 from vllm.model_executor.models.utils import (
@@ -690,7 +692,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MiniMaxM3Model(nn.Module):
+class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -731,17 +733,25 @@ class MiniMaxM3Model(nn.Module):
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
 
-        for layer in self.layers[self.start_layer : self.end_layer]:
+        # EAGLE3 is not yet compatible with pipeline parallel
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -852,7 +862,7 @@ class MiniMaxM3Model(nn.Module):
         return loaded_params
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module):
+class MiniMaxM3SparseForCausalLM(nn.Module, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -900,7 +910,9 @@ class MiniMaxM3SparseForCausalLM(nn.Module):
     info=MiniMaxM3VLProcessingInfo,
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
-class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MiniMaxM3SparseForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsEagle3
+):
     """Top-level (VL) entry point for MiniMax M3.
 
     The vision tower is not modeled yet; this wrapper routes the text
@@ -961,6 +973,15 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["MiniMaxM3SparseForCausalLM"],
         )
+
+    # Expose language model / lm_head for EAGLE3 spec decode.
+    @property
+    def model(self) -> nn.Module:
+        return self.language_model.model
+
+    @property
+    def lm_head(self) -> nn.Module:
+        return self.language_model.lm_head
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         pixel_values = kwargs.pop("pixel_values", None)
