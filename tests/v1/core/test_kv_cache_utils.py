@@ -1366,7 +1366,10 @@ def test_allocate_with_lookahead():
 
     # Test case 1: Requires additional lookahead tokens
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1377,7 +1380,10 @@ def test_allocate_with_lookahead():
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
@@ -1390,7 +1396,10 @@ def test_allocate_with_lookahead():
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     blocks = kv_cache_manager.allocate_slots(
         request,

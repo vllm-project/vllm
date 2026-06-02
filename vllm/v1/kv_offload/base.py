@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -256,6 +257,14 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def on_schedule_end(self) -> None:
+        """Called once at the end of each scheduler step.
+
+        Managers may override this to flush deferred work accumulated
+        during the step (e.g., batched promotions).
+        """
+        return
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
@@ -311,6 +320,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.block_indices: Sequence[int] = block_indices
 
     @staticmethod
+    @override
     def medium() -> str:
         return "GPU"
 

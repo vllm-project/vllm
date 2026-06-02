@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         enable_log_requests: false,
+        enable_request_id_headers: false,
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
