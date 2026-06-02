@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Walsh-Hadamard transform and Randomized Hadamard Transform (RHT).
 
-Used by INT2 (Hadamard + Lloyd-Max centroids) and INT4 (single RHT +
-asymmetric quantization) per-token-head KV cache backends.
+Used by INT4 (single RHT + asymmetric quantization) per-token-head KV
+cache backend.
 
 Three-tier dispatch for ``fast_hadamard_transform``:
   1. Hadacore CUDA Tensor Core kernel (sm_80+).
@@ -158,13 +158,13 @@ def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
         from vllm import _custom_ops as ops
 
         # hadacore returns x @ (H/√d); rescale to the unnormalized H × x
-        # convention the INT2/INT4 scale math is calibrated to.
+        # convention the INT4 scale math is calibrated to.
         rescale = d**0.5
         if x.dtype in (torch.float16, torch.bfloat16):
             y = ops.hadacore_transform(x.contiguous().clone(), inplace=True)
             return y * rescale
         # fp32 → bf16 round-trip; precision loss is irrelevant before
-        # INT2/INT4 quantization.
+        # INT4 quantization.
         orig_dtype = x.dtype
         x_bf16 = x.contiguous().to(torch.bfloat16)
         y_bf16 = ops.hadacore_transform(x_bf16, inplace=True)

@@ -27,11 +27,6 @@ from ..utils import check_logprobs_close
         (
             "meta-llama/Meta-Llama-3-8B",
             "meta-llama/Meta-Llama-3-8B",
-            "int2_per_token_head",
-        ),
-        (
-            "meta-llama/Meta-Llama-3-8B",
-            "meta-llama/Meta-Llama-3-8B",
             "int4_per_token_head",
         ),
         (

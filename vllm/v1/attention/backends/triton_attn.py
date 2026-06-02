@@ -396,7 +396,6 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
-        "int2_per_token_head",
         "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
@@ -703,9 +702,9 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Dedicated prefill kernel (with packed variant for INT4 / INT2).
+        # Dedicated prefill kernel (with packed variant for INT4).
         # Decode is gated separately below: only INT8 / FP8 use the
-        # dedicated split-KV decode kernel — INT4 / INT2 fall through to
+        # dedicated split-KV decode kernel — INT4 falls through to
         # ``unified_attention`` / ``_attn_packed``, which gets tensor cores
         # via ``tl.dot`` whereas the split-KV decode kernel uses vector
         # mul-reduce.

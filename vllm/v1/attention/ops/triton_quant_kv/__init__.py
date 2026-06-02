@@ -9,11 +9,11 @@ The core attention kernel
 registered here own:
 
   * the **write side** for any mode that needs more than a plain copy
-    (per-token-head absmax, asymmetric INT4 with zero-point packing,
-    INT2 Lloyd-Max + Hadamard, …); and
-  * the **attention read side** for sub-byte packed modes (INT4 / INT2)
+    (per-token-head absmax, asymmetric INT4 with zero-point packing, …);
+    and
+  * the **attention read side** for sub-byte packed modes (INT4)
     whose inner loop is structurally different from the core kernel
-    (split-dot, centroid lookup, etc.).
+    (split-dot, etc.).
 
 Adding a new quantization mode
 ------------------------------
@@ -55,9 +55,6 @@ _MODULES: dict[KVQuantMode, str] = {
         "vllm.v1.attention.ops.triton_quant_kv.int8_fp8_per_token_head"
     ),
     KVQuantMode.INT4_PER_TOKEN_HEAD: (
-        "vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head"
-    ),
-    KVQuantMode.INT2_PER_TOKEN_HEAD: (
         "vllm.v1.attention.ops.triton_quant_kv.packed_per_token_head"
     ),
 }

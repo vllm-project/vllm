@@ -24,15 +24,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_decode_attention import _fwd_kernel_stage2
-from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
-    fast_hadamard_transform,
-    single_rht,
-)
-from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import (
-    unpack_int2_quartet,
-    unpack_int4_nibbles,
-)
-from vllm.v1.attention.ops.triton_quant_kv._packed_reshape import _lloyd_max_dequant_4
+from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
+from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import unpack_int4_nibbles
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 
@@ -180,7 +173,7 @@ def _pth_attn_stage1(
 
 
 # ------------------------------------------------------------------ #
-#  Stage 1 — sub-byte packed (INT4 / INT2) per-token-head decode       #
+#  Stage 1 — sub-byte packed (INT4) per-token-head decode             #
 # ------------------------------------------------------------------ #
 
 
@@ -222,10 +215,9 @@ def _pth_attn_stage1_packed(
     PACKED_HEAD_PADDED: tl.constexpr,
     PACKING_FACTOR: tl.constexpr,
 ):
-    """Per-(query, head) split-KV decode for sub-byte packed modes.
+    """Per-(query, head) split-KV decode for the sub-byte packed INT4 mode.
 
-    INT4 (``PACKING_FACTOR=2``) / INT2 (``PACKING_FACTOR=4``).  Q arrives
-    pre-rotated (RHT for INT4, full Hadamard for INT2) so the dot is
+    INT4 (``PACKING_FACTOR=2``).  Q arrives pre-rotated (RHT) so the dot is
     computed in the same rotated space the cache was written in.
 
     Per tile:
@@ -236,8 +228,8 @@ def _pth_attn_stage1_packed(
          ``Q_sum * k_zp`` correction; the zp is steganographed in the low
          4 bits of the fp32 scale's mantissa.
       3. Accumulate ``Σ_s (P · v_scale) · V_s`` into ``PACKING_FACTOR``
-         output streams; for INT4 subtract the analogous ``Pv·v_zp`` term
-         once per stream.
+         output streams; subtract the analogous ``Pv·v_zp`` term once per
+         stream.
 
     Output streams are interleaved back into the head-size layout when
     they are written into ``mid_o``; ``_fwd_kernel_stage2`` then reduces
@@ -273,25 +265,14 @@ def _pth_attn_stage1_packed(
     q_base = q_id * stride_q_tok + h_id * stride_q_h
     Q_s0 = tl.load(Q_ptr + q_base + offs_s0, mask=mask_s0, other=0.0).to(tl.float32)
     Q_s1 = tl.load(Q_ptr + q_base + offs_s1, mask=mask_s1, other=0.0).to(tl.float32)
-    if PACKING_FACTOR == 4:
-        offs_s2 = packed_offs * 4 + 2
-        offs_s3 = packed_offs * 4 + 3
-        mask_s2 = offs_s2 < HEAD_DIM
-        mask_s3 = offs_s3 < HEAD_DIM
-        Q_s2 = tl.load(Q_ptr + q_base + offs_s2, mask=mask_s2, other=0.0).to(tl.float32)
-        Q_s3 = tl.load(Q_ptr + q_base + offs_s3, mask=mask_s3, other=0.0).to(tl.float32)
 
     # INT4 asymmetric quant needs Σ Q for the zero-point correction.
-    if PACKING_FACTOR == 2:
-        Q_sum = tl.sum(Q_s0) + tl.sum(Q_s1)
+    Q_sum = tl.sum(Q_s0) + tl.sum(Q_s1)
 
     m_prev = -float("inf")
     l_prev = 0.0
     acc_s0 = tl.zeros([PACKED_HEAD_PADDED], dtype=tl.float32)
     acc_s1 = tl.zeros([PACKED_HEAD_PADDED], dtype=tl.float32)
-    if PACKING_FACTOR == 4:
-        acc_s2 = tl.zeros([PACKED_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([PACKED_HEAD_PADDED], dtype=tl.float32)
 
     bt_base = req_id * stride_bt_r
     kv_range = tl.arange(0, BLOCK_KV)
@@ -318,16 +299,9 @@ def _pth_attn_stage1_packed(
             mask=kv_mask[:, None] & packed_dim_mask[None, :],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
-            K_s0 = K_s0_u.to(tl.float32)
-            K_s1 = K_s1_u.to(tl.float32)
-        else:
-            kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_packed)
-            K_s0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
-            K_s1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
-            K_s2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
-            K_s3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
+        K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+        K_s0 = K_s0_u.to(tl.float32)
+        K_s1 = K_s1_u.to(tl.float32)
 
         k_sc_addrs = (
             block_nums * stride_ks_blk
@@ -336,27 +310,16 @@ def _pth_attn_stage1_packed(
         )
         ks_raw = tl.load(K_scale_ptr + k_sc_addrs, mask=kv_mask, other=0.0)
 
-        # INT4 stegos zp in low 4 bits of mantissa; INT2 stores plain fp32.
-        if PACKING_FACTOR == 2:
-            ks_bits = ks_raw.to(tl.int32, bitcast=True)
-            k_zp = (ks_bits & 0xF).to(tl.float32)
-            k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            k_scales = ks_raw
+        # INT4 stegos zp in low 4 bits of mantissa.
+        ks_bits = ks_raw.to(tl.int32, bitcast=True)
+        k_zp = (ks_bits & 0xF).to(tl.float32)
+        k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
 
         # Score = Σ_s (Q_s · K_s) ; Q_s shape (packed_dim,), K_s (BLOCK_KV, pd).
-        if PACKING_FACTOR == 2:
-            dot = tl.sum(Q_s0[None, :] * K_s0, axis=1) + tl.sum(
-                Q_s1[None, :] * K_s1, axis=1
-            )
-            dot = dot - Q_sum * k_zp
-        else:
-            dot = (
-                tl.sum(Q_s0[None, :] * K_s0, axis=1)
-                + tl.sum(Q_s1[None, :] * K_s1, axis=1)
-                + tl.sum(Q_s2[None, :] * K_s2, axis=1)
-                + tl.sum(Q_s3[None, :] * K_s3, axis=1)
-            )
+        dot = tl.sum(Q_s0[None, :] * K_s0, axis=1) + tl.sum(
+            Q_s1[None, :] * K_s1, axis=1
+        )
+        dot = dot - Q_sum * k_zp
         scores = dot * k_scales * ATTN_SCALE
         scores = tl.where(kv_mask, scores, -float("inf"))
 
@@ -377,16 +340,9 @@ def _pth_attn_stage1_packed(
             mask=kv_mask[:, None] & packed_dim_mask[None, :],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
-            V_s0 = V_s0_u.to(tl.float32)
-            V_s1 = V_s1_u.to(tl.float32)
-        else:
-            vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_packed)
-            V_s0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
-            V_s1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
-            V_s2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
-            V_s3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
+        V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
+        V_s0 = V_s0_u.to(tl.float32)
+        V_s1 = V_s1_u.to(tl.float32)
 
         v_sc_addrs = (
             block_nums * stride_vs_blk
@@ -394,24 +350,17 @@ def _pth_attn_stage1_packed(
             + kv_head * stride_vs_head
         )
         vs_raw = tl.load(V_scale_ptr + v_sc_addrs, mask=kv_mask, other=0.0)
-        if PACKING_FACTOR == 2:
-            vs_bits = vs_raw.to(tl.int32, bitcast=True)
-            v_zp = (vs_bits & 0xF).to(tl.float32)
-            v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            v_scales = vs_raw
+        vs_bits = vs_raw.to(tl.int32, bitcast=True)
+        v_zp = (vs_bits & 0xF).to(tl.float32)
+        v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         # Per-stream PV accumulation; INT4 subtracts the v-zp term once.
         pv = p * v_scales
         acc_s0 = acc_s0 * re_scale + tl.sum(pv[:, None] * V_s0, axis=0)
         acc_s1 = acc_s1 * re_scale + tl.sum(pv[:, None] * V_s1, axis=0)
-        if PACKING_FACTOR == 4:
-            acc_s2 = acc_s2 * re_scale + tl.sum(pv[:, None] * V_s2, axis=0)
-            acc_s3 = acc_s3 * re_scale + tl.sum(pv[:, None] * V_s3, axis=0)
-        if PACKING_FACTOR == 2:
-            pv_zp_sum = tl.sum(pv * v_zp)
-            acc_s0 = acc_s0 - pv_zp_sum
-            acc_s1 = acc_s1 - pv_zp_sum
+        pv_zp_sum = tl.sum(pv * v_zp)
+        acc_s0 = acc_s0 - pv_zp_sum
+        acc_s1 = acc_s1 - pv_zp_sum
 
         l_prev = l_prev * re_scale + tl.sum(p, 0)
         m_prev = n_e_max
@@ -420,9 +369,6 @@ def _pth_attn_stage1_packed(
     safe_l = tl.where(l_prev > 0.0, l_prev, 1.0)
     tl.store(Mid_o_ptr + out_base + offs_s0, acc_s0 / safe_l, mask=mask_s0)
     tl.store(Mid_o_ptr + out_base + offs_s1, acc_s1 / safe_l, mask=mask_s1)
-    if PACKING_FACTOR == 4:
-        tl.store(Mid_o_ptr + out_base + offs_s2, acc_s2 / safe_l, mask=mask_s2)
-        tl.store(Mid_o_ptr + out_base + offs_s3, acc_s3 / safe_l, mask=mask_s3)
     lse = m_prev + tl.log(safe_l)
     tl.store(Mid_o_ptr + out_base + HEAD_DIM, lse)
 
@@ -641,7 +587,7 @@ def _pth_attn_stage1_gqa_wmma(
 
 
 # ------------------------------------------------------------------ #
-#  Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4 / INT2)        #
+#  Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4)               #
 # ------------------------------------------------------------------ #
 
 
@@ -685,7 +631,7 @@ def _pth_attn_stage1_packed_gqa(
     PACKED_HEAD_PADDED: tl.constexpr,
     PACKING_FACTOR: tl.constexpr,
 ):
-    """Split-KV stage1 for INT4 / INT2 packed cache, with GQA grouping.
+    """Split-KV stage1 for INT4 packed cache, with GQA grouping.
 
     Mirrors :func:`_pth_attn_stage1_gqa_wmma` (groups ``KV_GROUP_SIZE``
     Q-heads into one ``BLOCK_M × HEAD_DIM`` tile, lets QK / PV land as
@@ -694,7 +640,7 @@ def _pth_attn_stage1_packed_gqa(
     interleaved streams, like :func:`_attn_packed` and
     :func:`_pth_attn_stage1_packed`.
 
-    Q is expected pre-rotated (RHT for INT4, full Hadamard for INT2);
+    Q is expected pre-rotated (RHT for INT4);
     the output is in the rotated space and the launcher un-rotates it
     after stage 2.
     """
@@ -739,33 +685,14 @@ def _pth_attn_stage1_packed_gqa(
         mask=q_mask & mask_s1[None, :],
         other=0.0,
     ).to(tl.float32)
-    if PACKING_FACTOR == 4:
-        offs_s2 = packed_offs * 4 + 2
-        offs_s3 = packed_offs * 4 + 3
-        mask_s2 = offs_s2 < HEAD_DIM
-        mask_s3 = offs_s3 < HEAD_DIM
-        Q_s2 = tl.load(
-            Q_ptr + q_base + offs_s2[None, :],
-            mask=q_mask & mask_s2[None, :],
-            other=0.0,
-        ).to(tl.float32)
-        Q_s3 = tl.load(
-            Q_ptr + q_base + offs_s3[None, :],
-            mask=q_mask & mask_s3[None, :],
-            other=0.0,
-        ).to(tl.float32)
 
     # Σ Q per row (BLOCK_M,) for the INT4 zero-point correction.
-    if PACKING_FACTOR == 2:
-        Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+    Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
 
     m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc_s0 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
     acc_s1 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-    if PACKING_FACTOR == 4:
-        acc_s2 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
 
     bt_base = req_id * stride_bt_r
     kv_range = tl.arange(0, BLOCK_KV)
@@ -793,16 +720,9 @@ def _pth_attn_stage1_packed_gqa(
             mask=kv_mask[None, :] & packed_dim_mask[:, None],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
-            K_s0 = K_s0_u.to(tl.float32)
-            K_s1 = K_s1_u.to(tl.float32)
-        else:
-            kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_packed)
-            K_s0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
-            K_s1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
-            K_s2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
-            K_s3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
+        K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+        K_s0 = K_s0_u.to(tl.float32)
+        K_s1 = K_s1_u.to(tl.float32)
 
         k_sc_addrs = (
             block_nums * stride_ks_blk
@@ -810,26 +730,12 @@ def _pth_attn_stage1_packed_gqa(
             + kv_head * stride_ks_head
         )
         ks_raw = tl.load(K_scale_ptr + k_sc_addrs, mask=kv_mask, other=0.0)
-        if PACKING_FACTOR == 2:
-            ks_bits = ks_raw.to(tl.int32, bitcast=True)
-            k_zp = (ks_bits & 0xF).to(tl.float32)
-            k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            k_scales = ks_raw
+        ks_bits = ks_raw.to(tl.int32, bitcast=True)
+        k_zp = (ks_bits & 0xF).to(tl.float32)
+        k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
 
-        if PACKING_FACTOR == 2:
-            qk = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
-            qk = (qk - Q_sum[:, None] * k_zp[None, :]) * (
-                ATTN_SCALE * k_scales[None, :]
-            )
-        else:
-            qk = (
-                tl.dot(Q_s0, K_s0)
-                + tl.dot(Q_s1, K_s1)
-                + tl.dot(Q_s2, K_s2)
-                + tl.dot(Q_s3, K_s3)
-            )
-            qk = qk * (ATTN_SCALE * k_scales[None, :])
+        qk = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+        qk = (qk - Q_sum[:, None] * k_zp[None, :]) * (ATTN_SCALE * k_scales[None, :])
 
         # Mask padded K columns and padded Q-head rows to -inf.
         qk = tl.where(kv_mask[None, :] & h_mask[:, None], qk, -float("inf"))
@@ -843,9 +749,6 @@ def _pth_attn_stage1_packed_gqa(
         l_i = l_i * alpha + l_ij
         acc_s0 = acc_s0 * alpha[:, None]
         acc_s1 = acc_s1 * alpha[:, None]
-        if PACKING_FACTOR == 4:
-            acc_s2 = acc_s2 * alpha[:, None]
-            acc_s3 = acc_s3 * alpha[:, None]
 
         # V : (BLOCK_KV, packed_dim) bytes.
         v_addrs = (
@@ -859,16 +762,9 @@ def _pth_attn_stage1_packed_gqa(
             mask=kv_mask[:, None] & packed_dim_mask[None, :],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
-            V_s0 = V_s0_u.to(tl.float32)
-            V_s1 = V_s1_u.to(tl.float32)
-        else:
-            vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_packed)
-            V_s0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
-            V_s1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
-            V_s2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
-            V_s3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
+        V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
+        V_s0 = V_s0_u.to(tl.float32)
+        V_s1 = V_s1_u.to(tl.float32)
 
         v_sc_addrs = (
             block_nums * stride_vs_blk
@@ -876,25 +772,16 @@ def _pth_attn_stage1_packed_gqa(
             + kv_head * stride_vs_head
         )
         vs_raw = tl.load(V_scale_ptr + v_sc_addrs, mask=kv_mask, other=0.0)
-        if PACKING_FACTOR == 2:
-            vs_bits = vs_raw.to(tl.int32, bitcast=True)
-            v_zp = (vs_bits & 0xF).to(tl.float32)
-            v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            v_scales = vs_raw
+        vs_bits = vs_raw.to(tl.int32, bitcast=True)
+        v_zp = (vs_bits & 0xF).to(tl.float32)
+        v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         # PV split-dot.  P (BLOCK_M, BLOCK_KV) → P_v (BLOCK_M, BLOCK_KV)
         # → tl.dot(P_v, V_si) (BLOCK_M, packed_dim).
         P_v = p * v_scales[None, :]
-        if PACKING_FACTOR == 2:
-            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-            acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
-            acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
-        else:
-            acc_s0 += tl.dot(P_v, V_s0)
-            acc_s1 += tl.dot(P_v, V_s1)
-            acc_s2 += tl.dot(P_v, V_s2)
-            acc_s3 += tl.dot(P_v, V_s3)
+        Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+        acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
+        acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
 
         m_i = m_ij
 
@@ -912,17 +799,6 @@ def _pth_attn_stage1_packed_gqa(
         acc_s1 / safe_l[:, None],
         mask=out_mask & mask_s1[None, :],
     )
-    if PACKING_FACTOR == 4:
-        tl.store(
-            Mid_o_ptr + out_base + offs_s2[None, :],
-            acc_s2 / safe_l[:, None],
-            mask=out_mask & mask_s2[None, :],
-        )
-        tl.store(
-            Mid_o_ptr + out_base + offs_s3[None, :],
-            acc_s3 / safe_l[:, None],
-            mask=out_mask & mask_s3[None, :],
-        )
 
     lse_addrs = (
         q_id * stride_mid_q + h_offs * stride_mid_h + sid * stride_mid_s + HEAD_DIM
@@ -1002,8 +878,8 @@ def triton_per_token_head_attention(
       ``use_qk_int8_wmma`` is true and ``kv_group >= 2``, the grouped
       Q-heads WMMA kernel is used (int8 tensor cores).  Otherwise the
       per-query elementwise kernel.
-    * INT4 / INT2 per-token-head — sub-byte packed cache.  Q is rotated
-      (RHT for INT4, full Hadamard for INT2) before the kernel; the
+    * INT4 per-token-head — sub-byte packed cache.  Q is rotated
+      (RHT) before the kernel; the
       packed kernel reads one byte per (slot, packed_offs) and runs the
       QK / PV dots split across PACKING_FACTOR streams; output is
       un-rotated in place after stage 2.  No int8 WMMA in this path —
@@ -1067,8 +943,8 @@ def triton_per_token_head_attention(
     # Stage 1 — four dispatches, all write the same mid_o layout consumed
     # by _fwd_kernel_stage2:
     #   * grouped-WMMA: int8 tensor cores (INT8 cache, kv_group >= 2)
-    #   * packed-GQA: sub-byte unpack + tl.dot tile (INT4 / INT2 + GQA)
-    #   * packed (per-query): mul-reduce fallback for MHA + INT4 / INT2
+    #   * packed-GQA: sub-byte unpack + tl.dot tile (INT4 + GQA)
+    #   * packed (per-query): mul-reduce fallback for MHA + INT4
     #   * elementwise: bf16/fp16/int8/fp8 flat head slot (everything else)
     if use_grouped_wmma:
         BLOCK_M = max(16, triton.next_power_of_2(kv_group))
@@ -1119,7 +995,7 @@ def triton_per_token_head_attention(
         # masked to -inf and zeroed in the store.
         BLOCK_M = max(16, triton.next_power_of_2(kv_group))
         # Pad to >=16 so the kernel's tl.dot also compiles for the
-        # tightest head_size + packing combos (e.g. head_size=32 + INT2).
+        # tightest head_size + packing combos (e.g. head_size=32 + INT4).
         packed_head_padded = max(16, triton.next_power_of_2(D // packing_factor))
         _pth_attn_stage1_packed_gqa[(total_q, Hk, NUM_KV_SPLITS)](
             query,
@@ -1164,7 +1040,7 @@ def triton_per_token_head_attention(
         )
     elif packing_factor > 1:
         # Pad to >=16 so the prefill kernel's tl.dot also compiles for the
-        # tightest head_size + packing combos (e.g. head_size=32 + INT2).
+        # tightest head_size + packing combos (e.g. head_size=32 + INT4).
         packed_head_padded = max(16, triton.next_power_of_2(D // packing_factor))
         _pth_attn_stage1_packed[(total_q, Hq, NUM_KV_SPLITS)](
             query,
@@ -1535,11 +1411,10 @@ def _pth_prefill_kernel_packed(
     the QK / PV dots split across ``PACKING_FACTOR`` interleaved streams,
     same trick as :func:`_pth_attn_stage1_packed`.
 
-    Q is expected pre-rotated (RHT for INT4, full Hadamard for INT2);
+    Q is expected pre-rotated (RHT for INT4);
     output is in the rotated space and the caller un-rotates it.  Per-tile
     dequant: nibble unpack + asymmetric zp for INT4 (zp steganographed in
-    the scale's mantissa low 4 bits), quartet unpack + Lloyd-Max centroids
-    for INT2.
+    the scale's mantissa low 4 bits).
     """
     req_id = tl.program_id(0)
     head_id = tl.program_id(1)
@@ -1581,32 +1456,13 @@ def _pth_prefill_kernel_packed(
         mask=q_mask & mask_s1[None, :],
         other=0.0,
     ).to(tl.float32)
-    if PACKING_FACTOR == 4:
-        offs_s2 = packed_offs * 4 + 2
-        offs_s3 = packed_offs * 4 + 3
-        mask_s2 = offs_s2 < HEAD_DIM
-        mask_s3 = offs_s3 < HEAD_DIM
-        Q_s2 = tl.load(
-            Q_ptr + q_base + offs_s2[None, :],
-            mask=q_mask & mask_s2[None, :],
-            other=0.0,
-        ).to(tl.float32)
-        Q_s3 = tl.load(
-            Q_ptr + q_base + offs_s3[None, :],
-            mask=q_mask & mask_s3[None, :],
-            other=0.0,
-        ).to(tl.float32)
 
-    if PACKING_FACTOR == 2:
-        Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+    Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
 
     m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc_s0 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
     acc_s1 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-    if PACKING_FACTOR == 4:
-        acc_s2 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
 
     q_pos = cached_len + offs_m
     end_n = tl.minimum(seq_len, cached_len + block_start + BLOCK_M)
@@ -1635,16 +1491,9 @@ def _pth_prefill_kernel_packed(
             mask=valid_k[None, :] & packed_dim_mask[:, None],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
-            K_s0 = K_s0_u.to(tl.float32)
-            K_s1 = K_s1_u.to(tl.float32)
-        else:
-            kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_packed)
-            K_s0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
-            K_s1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
-            K_s2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
-            K_s3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
+        K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+        K_s0 = K_s0_u.to(tl.float32)
+        K_s1 = K_s1_u.to(tl.float32)
 
         k_sc_addrs = (
             block_nums * stride_ks_blk
@@ -1652,26 +1501,12 @@ def _pth_prefill_kernel_packed(
             + kv_head * stride_ks_head
         )
         ks_raw = tl.load(K_scale_ptr + k_sc_addrs, mask=valid_k, other=0.0)
-        if PACKING_FACTOR == 2:
-            ks_bits = ks_raw.to(tl.int32, bitcast=True)
-            k_zp = (ks_bits & 0xF).to(tl.float32)
-            k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            k_scales = ks_raw
+        ks_bits = ks_raw.to(tl.int32, bitcast=True)
+        k_zp = (ks_bits & 0xF).to(tl.float32)
+        k_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
 
-        if PACKING_FACTOR == 2:
-            raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
-            qk = (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-                SM_SCALE * k_scales[None, :]
-            )
-        else:
-            raw_dot = (
-                tl.dot(Q_s0, K_s0)
-                + tl.dot(Q_s1, K_s1)
-                + tl.dot(Q_s2, K_s2)
-                + tl.dot(Q_s3, K_s3)
-            )
-            qk = raw_dot * (SM_SCALE * k_scales[None, :])
+        raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+        qk = (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (SM_SCALE * k_scales[None, :])
 
         causal = k_pos[None, :] <= q_pos[:, None]
         full_mask = causal & valid_k[None, :]
@@ -1686,9 +1521,6 @@ def _pth_prefill_kernel_packed(
         l_i = l_i * alpha + l_ij
         acc_s0 = acc_s0 * alpha[:, None]
         acc_s1 = acc_s1 * alpha[:, None]
-        if PACKING_FACTOR == 4:
-            acc_s2 = acc_s2 * alpha[:, None]
-            acc_s3 = acc_s3 * alpha[:, None]
 
         # V : (BLOCK_N, packed_dim).
         v_addrs = (
@@ -1702,16 +1534,9 @@ def _pth_prefill_kernel_packed(
             mask=valid_k[:, None] & packed_dim_mask[None, :],
             other=0,
         )
-        if PACKING_FACTOR == 2:
-            V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
-            V_s0 = V_s0_u.to(tl.float32)
-            V_s1 = V_s1_u.to(tl.float32)
-        else:
-            vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_packed)
-            V_s0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
-            V_s1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
-            V_s2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
-            V_s3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
+        V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
+        V_s0 = V_s0_u.to(tl.float32)
+        V_s1 = V_s1_u.to(tl.float32)
 
         v_sc_addrs = (
             block_nums * stride_vs_blk
@@ -1719,32 +1544,20 @@ def _pth_prefill_kernel_packed(
             + kv_head * stride_vs_head
         )
         vs_raw = tl.load(V_scale_ptr + v_sc_addrs, mask=valid_k, other=0.0)
-        if PACKING_FACTOR == 2:
-            vs_bits = vs_raw.to(tl.int32, bitcast=True)
-            v_zp = (vs_bits & 0xF).to(tl.float32)
-            v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            v_scales = vs_raw
+        vs_bits = vs_raw.to(tl.int32, bitcast=True)
+        v_zp = (vs_bits & 0xF).to(tl.float32)
+        v_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         P_v = p * v_scales[None, :]
-        if PACKING_FACTOR == 2:
-            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-            acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
-            acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
-        else:
-            acc_s0 += tl.dot(P_v, V_s0)
-            acc_s1 += tl.dot(P_v, V_s1)
-            acc_s2 += tl.dot(P_v, V_s2)
-            acc_s3 += tl.dot(P_v, V_s3)
+        Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+        acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
+        acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
 
         m_i = m_ij
 
     safe_l = tl.where(l_i > 0.0, l_i, 1.0)
     acc_s0 = acc_s0 / safe_l[:, None]
     acc_s1 = acc_s1 / safe_l[:, None]
-    if PACKING_FACTOR == 4:
-        acc_s2 = acc_s2 / safe_l[:, None]
-        acc_s3 = acc_s3 / safe_l[:, None]
 
     out_base = (q_start + offs_m)[:, None] * stride_o_tok + head_id * stride_o_h
     out_mask = m_mask[:, None]
@@ -1758,17 +1571,6 @@ def _pth_prefill_kernel_packed(
         acc_s1,
         mask=out_mask & mask_s1[None, :],
     )
-    if PACKING_FACTOR == 4:
-        tl.store(
-            Out_ptr + out_base + offs_s2[None, :],
-            acc_s2,
-            mask=out_mask & mask_s2[None, :],
-        )
-        tl.store(
-            Out_ptr + out_base + offs_s3[None, :],
-            acc_s3,
-            mask=out_mask & mask_s3[None, :],
-        )
 
 
 # ------------------------------------------------------------------ #
@@ -1780,30 +1582,22 @@ def _packing_factor_for(kv_quant_mode: KVQuantMode) -> int:
     """Return the packing factor for a per-token-head quant mode (1 if flat)."""
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
         return 2
-    if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-        return 4
     return 1
 
 
 def _maybe_rotate_q(q: torch.Tensor, kv_quant_mode: KVQuantMode) -> torch.Tensor:
-    """RHT for INT4, Hadamard for INT2 — same as the factory does."""
+    """RHT for INT4 — same as the factory does."""
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
         return single_rht(q.float()).to(q.dtype)
-    if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-        return fast_hadamard_transform(q.float()).to(q.dtype)
     return q
 
 
 def _maybe_unrotate_out(
     out: torch.Tensor, kv_quant_mode: KVQuantMode, head_size: int
 ) -> torch.Tensor:
-    """Inverse rotation written back into ``out`` for INT4/INT2."""
+    """Inverse rotation written back into ``out`` for INT4."""
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
         out_f = single_rht(out.float(), inverse=True) / head_size
-        out.copy_(out_f.to(out.dtype))
-        return out
-    if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-        out_f = fast_hadamard_transform(out.float())
         out.copy_(out_f.to(out.dtype))
         return out
     return out
@@ -1850,8 +1644,8 @@ def triton_per_token_head_prefill(
     * INT8 / FP8 per-token-head — flat head slot.  ``use_qk_int8_wmma``
       routes the QKᵀ dot through native int8 matrix instructions
       (RDNA3/4 WMMA, CDNA2/3 MFMA) for ~2× throughput on int8 caches.
-    * INT4 / INT2 per-token-head — sub-byte packed cache.  Q is rotated
-      (RHT for INT4, full Hadamard for INT2) before the kernel; the
+    * INT4 per-token-head — sub-byte packed cache.  Q is rotated
+      (RHT) before the kernel; the
       packed kernel reads one byte per (slot, packed_offs) and runs the
       QK / PV dots split across PACKING_FACTOR streams; output is
       un-rotated in place after the kernel.  ``use_qk_int8_wmma`` is
@@ -1876,7 +1670,7 @@ def triton_per_token_head_prefill(
         # Packed prefill carries PACKING_FACTOR fp32 acc tiles (one per
         # interleaved Q stream).  At BLOCK_M=128 the per-program register
         # footprint is ``PACKING_FACTOR × BLOCK_M × packed_dim × 4 B``
-        # which for INT2 + D=128 hits ~65 KB and spills to scratch on
+        # which for INT4 + D=128 hits ~33 KB and spills to scratch on
         # RDNA3.  Shrink BLOCK_M proportionally to the packing factor so
         # the acc tiles stay roughly the same size as in the flat case.
         BLOCK_M = max(16, (64 if D > 128 else 128) // packing_factor)
@@ -1890,7 +1684,7 @@ def triton_per_token_head_prefill(
 
     if packing_factor > 1:
         # Pad to >=16 so the prefill kernel's tl.dot also compiles for the
-        # tightest head_size + packing combos (e.g. head_size=32 + INT2).
+        # tightest head_size + packing combos (e.g. head_size=32 + INT4).
         packed_head_padded = max(16, triton.next_power_of_2(D // packing_factor))
         _pth_prefill_kernel_packed[grid](
             query,

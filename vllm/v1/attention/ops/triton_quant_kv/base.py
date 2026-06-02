@@ -66,10 +66,10 @@ class QuantKVFactory(ABC):
         ``float32`` per (block, slot, kv_head) for both K and V — the
         layout shared by every per-token-head mode (INT8 / FP8 store
         one absmax-derived scale; INT4 steganographs the zero-point in
-        the low 4 mantissa bits of that scale; INT2 stores
-        ``norm / d^1.5``).  Modes that need a different shape or dtype
-        override this method.  Modes that don't need scale caches at
-        all (``needs_scale_caches = False``) get ``(None, None)``.
+        the low 4 mantissa bits of that scale).  Modes that need a
+        different shape or dtype override this method.  Modes that don't
+        need scale caches at all (``needs_scale_caches = False``) get
+        ``(None, None)``.
         """
         if not self.needs_scale_caches:
             return (None, None)
@@ -99,9 +99,9 @@ class QuantKVFactory(ABC):
         """
 
     # ----- Attention read path ----------------------------------------------
-    # Only modes that need a bespoke attention loop (INT4 / INT2 with
-    # split-dot + sub-byte unpack) override this.  INT8 / FP8 per-token-head
-    # use the core kernel via a constexpr branch and never call this method.
+    # Only modes that need a bespoke attention loop (INT4 with split-dot +
+    # sub-byte unpack) override this.  INT8 / FP8 per-token-head use the
+    # core kernel via a constexpr branch and never call this method.
     def unified_attention(
         self,
         q: torch.Tensor,

@@ -1,19 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention (read-path) kernel + launcher for the sub-byte packed modes.
+"""Attention (read-path) kernel + launcher for the sub-byte packed INT4 mode.
 
-A single :func:`_attn_packed` kernel handles both INT4
-(``PACKING_FACTOR=2``) and INT2 (``PACKING_FACTOR=4``) — the constexpr
-gates all mode-specific branches and Triton only traces the taken one,
-so each concrete launch compiles to the same code a bespoke per-mode
-kernel would.  Mode-specific pieces handled by the branch:
-
-* How many Q/KV streams are split (2 for INT4, 4 for INT2).
-* KV dequantization (nibble unpack vs Lloyd-Max centroid lookup).
-* Score correction (asymmetric zero-point subtraction vs plain).
+The :func:`_attn_packed` kernel handles INT4 (``PACKING_FACTOR=2``): it
+splits Q/KV into 2 interleaved streams, unpacks the cache nibbles, runs
+the split dot, and applies the asymmetric zero-point correction.
 
 Everything else (prologue, masking, online softmax, tile loop, 2D/3D
-epilogue) is shared.
+epilogue) is the shared attention skeleton.
 """
 
 from __future__ import annotations
@@ -36,11 +30,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     softmax_step,
     store_segm_reduce_scalars,
 )
-from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import (
-    unpack_int2_quartet,
-    unpack_int4_nibbles,
-)
-from vllm.v1.attention.ops.triton_quant_kv._packed_reshape import _lloyd_max_dequant_4
+from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import unpack_int4_nibbles
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -111,9 +101,8 @@ def _attn_packed(
     NUM_SEGMENTS_PER_SEQ: tl.constexpr,
     USE_FP8: tl.constexpr,
     IS_3D: tl.constexpr,
-    # 2 → INT4 nibble pair (asymmetric + zp); 4 → INT2 quartet
-    # (Lloyd-Max centroids).  All mode-specific branches below gate on
-    # this value.
+    # 2 → INT4 nibble pair (asymmetric + zp).  The packed KV cache stores
+    # one byte per ``packed_offs``, holding PACKING_FACTOR values.
     PACKING_FACTOR: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -157,9 +146,8 @@ def _attn_packed(
 
     # -----------------------------------------------------------------
     # Split-Q prologue: PACKING_FACTOR interleaved streams of Q.
-    # INT4 uses 2 streams (even / odd); INT2 uses 4.  The packed KV
-    # cache stores one byte per ``packed_offs``, which holds
-    # PACKING_FACTOR values.
+    # INT4 uses 2 streams (even / odd).  The packed KV cache stores one
+    # byte per ``packed_offs``, which holds PACKING_FACTOR values.
     # -----------------------------------------------------------------
     packed_offs = tl.arange(0, PACKED_HEAD_PADDED)
     offs_s0 = packed_offs * PACKING_FACTOR
@@ -184,25 +172,9 @@ def _attn_packed(
         mask=mask_s1[None, :] & q_mask,
         other=0.0,
     ).to(tl.float32)
-    if PACKING_FACTOR == 4:
-        offs_s2 = packed_offs * 4 + 2
-        offs_s3 = packed_offs * 4 + 3
-        mask_s2 = tl.where(offs_s2 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_s3 = tl.where(offs_s3 < HEAD_SIZE, 1, 0).to(tl.int1)
-        Q_s2 = tl.load(
-            query_ptr + q_base + offs_s2[None, :],
-            mask=mask_s2[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s3 = tl.load(
-            query_ptr + q_base + offs_s3[None, :],
-            mask=mask_s3[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
 
     # INT4 asymmetric correction needs sum(Q) per row.
-    if PACKING_FACTOR == 2:
-        Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
+    Q_sum = tl.sum(Q_s0, axis=1) + tl.sum(Q_s1, axis=1)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -215,9 +187,6 @@ def _attn_packed(
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc_s0 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
     acc_s1 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-    if PACKING_FACTOR == 4:
-        acc_s2 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
 
     context_len = seq_len - cur_batch_query_len
 
@@ -282,26 +251,13 @@ def _attn_packed(
             other=0,
         )
         # Dequantize KV.  INT4 unpacks nibbles as plain uint [0..15];
-        # the zero-point is applied on the score side.  INT2 unpacks
-        # quartet indices and looks up Lloyd-Max centroids (N(0, 1)).
-        if PACKING_FACTOR == 2:
-            K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
-            K_s0 = K_s0_u.to(tl.float32)
-            K_s1 = K_s1_u.to(tl.float32)
-            V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
-            V_s0 = V_s0_u.to(tl.float32)
-            V_s1 = V_s1_u.to(tl.float32)
-        else:
-            kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_packed)
-            K_s0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
-            K_s1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
-            K_s2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
-            K_s3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
-            vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_packed)
-            V_s0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
-            V_s1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
-            V_s2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
-            V_s3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
+        # the zero-point is applied on the score side.
+        K_s0_u, K_s1_u = unpack_int4_nibbles(K_packed)
+        K_s0 = K_s0_u.to(tl.float32)
+        K_s1 = K_s1_u.to(tl.float32)
+        V_s0_u, V_s1_u = unpack_int4_nibbles(V_packed)
+        V_s0 = V_s0_u.to(tl.float32)
+        V_s1 = V_s1_u.to(tl.float32)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk
@@ -317,17 +273,13 @@ def _attn_packed(
         vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
 
         # INT4 steganographs the 4-bit zero-point in the low 4 bits of
-        # the float32 scale's mantissa.  INT2 stores a plain scale.
-        if PACKING_FACTOR == 2:
-            ks_bits = ks_raw.to(tl.int32, bitcast=True)
-            k_zp = (ks_bits & 0xF).to(tl.float32)
-            k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-            vs_bits = vs_raw.to(tl.int32, bitcast=True)
-            v_zp = (vs_bits & 0xF).to(tl.float32)
-            v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-        else:
-            k_token_head_scales = ks_raw
-            v_token_head_scales = vs_raw
+        # the float32 scale's mantissa.
+        ks_bits = ks_raw.to(tl.int32, bitcast=True)
+        k_zp = (ks_bits & 0xF).to(tl.float32)
+        k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
+        vs_bits = vs_raw.to(tl.int32, bitcast=True)
+        v_zp = (vs_bits & 0xF).to(tl.float32)
+        v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = compute_kv_seq_mask(
@@ -340,23 +292,14 @@ def _attn_packed(
             MAX_MM_RANGES,
         )
 
-        # Score: split-dot across PACKING_FACTOR streams; fused
+        # Score: split-dot across the 2 INT4 streams; fused
         # softmax_scale * per-(token, head) k_scale in one mul.  INT4
-        # subtracts the ``zp * sum(Q)`` correction term; INT2 doesn't.
+        # subtracts the ``zp * sum(Q)`` correction term.
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        if PACKING_FACTOR == 2:
-            raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
-            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-                scale * k_token_head_scales[None, :]
-            )
-        else:
-            raw_dot = (
-                tl.dot(Q_s0, K_s0)
-                + tl.dot(Q_s1, K_s1)
-                + tl.dot(Q_s2, K_s2)
-                + tl.dot(Q_s3, K_s3)
-            )
-            S += raw_dot * (scale * k_token_head_scales[None, :])
+        raw_dot = tl.dot(Q_s0, K_s0) + tl.dot(Q_s1, K_s1)
+        S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
+            scale * k_token_head_scales[None, :]
+        )
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -378,31 +321,19 @@ def _attn_packed(
         M, L, P, alpha = softmax_step(S, M, L)
         acc_s0 = acc_s0 * alpha[:, None]
         acc_s1 = acc_s1 * alpha[:, None]
-        if PACKING_FACTOR == 4:
-            acc_s2 = acc_s2 * alpha[:, None]
-            acc_s3 = acc_s3 * alpha[:, None]
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
             sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
             V_s0 = tl.where(sw_mask[:, None], V_s0, 0.0)
             V_s1 = tl.where(sw_mask[:, None], V_s1, 0.0)
-            if PACKING_FACTOR == 4:
-                V_s2 = tl.where(sw_mask[:, None], V_s2, 0.0)
-                V_s3 = tl.where(sw_mask[:, None], V_s3, 0.0)
 
         # Fuse v per-(token, head) scale into P.  INT4 also subtracts
         # the v-zero-point contribution from each stream once.
         P_v = (P * v_token_head_scales[None, :]).to(tl.float32)
-        if PACKING_FACTOR == 2:
-            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-            acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
-            acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
-        else:
-            acc_s0 += tl.dot(P_v, V_s0)
-            acc_s1 += tl.dot(P_v, V_s1)
-            acc_s2 += tl.dot(P_v, V_s2)
-            acc_s3 += tl.dot(P_v, V_s3)
+        Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
+        acc_s0 += tl.dot(P_v, V_s0) - Pv_zp_sum[:, None]
+        acc_s1 += tl.dot(P_v, V_s1) - Pv_zp_sum[:, None]
 
     # -----------------------------------------------------------------
     # Epilogue.  2D writes the final output with optional FP8 clamp;
@@ -428,17 +359,6 @@ def _attn_packed(
             acc_s1,
             mask=mask_s1[None, :] & out_mask,
         )
-        if PACKING_FACTOR == 4:
-            tl.store(
-                segm_output_ptr + segm_base + offs_s2[None, :],
-                acc_s2,
-                mask=mask_s2[None, :] & out_mask,
-            )
-            tl.store(
-                segm_output_ptr + segm_base + offs_s3[None, :],
-                acc_s3,
-                mask=mask_s3[None, :] & out_mask,
-            )
         store_segm_reduce_scalars(
             segm_max_ptr,
             segm_expsum_ptr,
@@ -455,16 +375,10 @@ def _attn_packed(
     else:
         acc_s0 = acc_s0 / L[:, None]
         acc_s1 = acc_s1 / L[:, None]
-        if PACKING_FACTOR == 4:
-            acc_s2 = acc_s2 / L[:, None]
-            acc_s3 = acc_s3 / L[:, None]
         if USE_FP8:
             out_s = tl.load(out_scale)
             acc_s0 = tl.clamp(acc_s0 * out_s, FP8_MIN, FP8_MAX)
             acc_s1 = tl.clamp(acc_s1 * out_s, FP8_MIN, FP8_MAX)
-            if PACKING_FACTOR == 4:
-                acc_s2 = tl.clamp(acc_s2 * out_s, FP8_MIN, FP8_MAX)
-                acc_s3 = tl.clamp(acc_s3 * out_s, FP8_MIN, FP8_MAX)
         out_base = (
             query_offset_0[:, None] * output_stride_0
             + query_offset_1[:, None] * output_stride_1
@@ -479,17 +393,6 @@ def _attn_packed(
             acc_s1,
             mask=mask_s1[None, :] & out_mask,
         )
-        if PACKING_FACTOR == 4:
-            tl.store(
-                output_ptr + out_base + offs_s2[None, :],
-                acc_s2,
-                mask=mask_s2[None, :] & out_mask,
-            )
-            tl.store(
-                output_ptr + out_base + offs_s3[None, :],
-                acc_s3,
-                mask=mask_s3[None, :] & out_mask,
-            )
 
 
 def _launch_packed_attn(

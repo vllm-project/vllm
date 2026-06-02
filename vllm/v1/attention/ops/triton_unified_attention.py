@@ -256,8 +256,8 @@ def kernel_unified_attention(
     stride_vs_head: tl.int64 = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
-    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4=4/INT2=5 use the triton_quant_kv
-    # factories, not this kernel.
+    # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4=4 uses the triton_quant_kv
+    # factory, not this kernel.
     KV_QUANT_MODE: tl.constexpr = 0,
     # Use int8 WMMA/MFMA for the QK dot (requires KV_QUANT_MODE==2 and int8 cache)
     QK_INT8_WMMA: tl.constexpr = False,
@@ -829,16 +829,12 @@ def unified_attention(
 ):
     assert causal, "Only causal attention is supported"
 
-    # Sub-byte packed modes (INT4 / INT2) need bespoke kernels — they
-    # split the dot, look up centroids / dequantize from packed bytes,
-    # and live in their own factory modules under
-    # ``vllm.v1.attention.ops.triton_quant_kv``.  Everything else
-    # (NONE, FP8 per-tensor, INT8 / FP8 per-token-head) goes through the
-    # core kernel below via constexpr branches.
-    if kv_quant_mode in (
-        KVQuantMode.INT4_PER_TOKEN_HEAD,
-        KVQuantMode.INT2_PER_TOKEN_HEAD,
-    ):
+    # Sub-byte packed mode (INT4) needs a bespoke kernel — it splits the
+    # dot, dequantizes from packed bytes, and lives in its own factory
+    # module under ``vllm.v1.attention.ops.triton_quant_kv``.  Everything
+    # else (NONE, FP8 per-tensor, INT8 / FP8 per-token-head) goes through
+    # the core kernel below via constexpr branches.
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
         from vllm.v1.attention.ops.triton_quant_kv import get_quant_kv_factory
 
         factory = get_quant_kv_factory(kv_quant_mode)

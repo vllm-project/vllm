@@ -4,7 +4,7 @@
 
 This file owns the canonical (mode NONE / FP8 per-tensor) reshape kernels
 and the diff-kv variant.  All per-token-head and packed-int modes
-(INT8 / FP8 / INT4 / INT2) live in dedicated backend modules under
+(INT8 / FP8 / INT4) live in dedicated backend modules under
 :mod:`vllm.v1.attention.ops.triton_quant_kv`.
 
 For backwards compatibility this module still exposes
@@ -439,7 +439,7 @@ def triton_reshape_and_cache_flash_diffkv(
 
 
 # ---------------------------------------------------------------------------
-# Per-token-head quantization (INT8 / FP8 / INT4 / INT2)
+# Per-token-head quantization (INT8 / FP8 / INT4)
 # ---------------------------------------------------------------------------
 # Public dispatcher kept for backwards compatibility.  All actual reshape
 # kernels live in :mod:`vllm.v1.attention.ops.triton_quant_kv` — one file per
@@ -459,10 +459,8 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
 
     Dispatches to the appropriate backend in
     :mod:`vllm.v1.attention.ops.triton_quant_kv`.  When *kv_quant_mode* is
-    ``None`` (legacy callers) the mode is inferred from the cache dtype
-    — but this disambiguation cannot tell INT4 from INT2 (both stored as
-    ``torch.uint8``) and is deprecated; pass ``kv_quant_mode``
-    explicitly.
+    ``None`` (legacy callers) the mode is inferred from the cache dtype,
+    which is deprecated; pass ``kv_quant_mode`` explicitly.
     """
     if kv_quant_mode is None:
         from vllm.model_executor.layers.quantization.utils.quant_utils import (

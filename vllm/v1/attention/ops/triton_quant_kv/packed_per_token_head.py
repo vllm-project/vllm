@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sub-byte per-token-head KV cache quantization factories (INT4 + INT2).
+"""Sub-byte per-token-head KV cache quantization factory (INT4).
 
-Both modes share the same skeleton — per-(token, head) dynamic scale +
-Hadamard pre-rotation on the inputs and inverse Hadamard on the output
-— but differ in their quantization math and packing factor:
+INT4 uses a per-(token, head) dynamic scale + single RHT pre-rotation on
+the inputs and inverse RHT on the output:
 
 +----------+------------+---------------------+----------------------+
 | Mode     | Packing    | Pre-rotation        | Scale encodes        |
@@ -12,14 +11,11 @@ Hadamard pre-rotation on the inputs and inverse Hadamard on the output
 | INT4     | 2 / byte   | Single RHT          | ``scale`` + 4-bit zp |
 |          |            | (random Hadamard)   | (stego in mantissa)  |
 +----------+------------+---------------------+----------------------+
-| INT2     | 4 / byte   | Full Hadamard       | ``norm / d^1.5``     |
-|          |            | (no random sign)    | (centroid lookup)    |
-+----------+------------+---------------------+----------------------+
 
 The attention read kernel and reshape write kernels live in the two
 sibling private modules (:mod:`._packed_attention` and
 :mod:`._packed_reshape`).  This module only wires them into a
-:class:`QuantKVFactory` pair and registers them.
+:class:`QuantKVFactory` and registers it.
 """
 
 from __future__ import annotations
@@ -27,13 +23,9 @@ from __future__ import annotations
 import torch
 
 from vllm.v1.attention.ops.triton_quant_kv import register
-from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
-    fast_hadamard_transform,
-    single_rht,
-)
+from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
 from vllm.v1.attention.ops.triton_quant_kv._packed_attention import _launch_packed_attn
 from vllm.v1.attention.ops.triton_quant_kv._packed_reshape import (
-    _reshape_cache_int2_kernel,
     _reshape_cache_int4_kernel,
     _run_reshape_kernel,
 )
@@ -53,8 +45,7 @@ class _PackedFactory(QuantKVFactory):
     ``_reshape_kernel``
         The ``@triton.jit`` reshape kernel for this mode.
     ``_rotate_kv(x)``
-        Pre-rotation applied to K / V before packing (RHT for INT4,
-        full Hadamard for INT2).
+        Pre-rotation applied to K / V before packing (RHT for INT4).
     ``_rotate_q(q)``
         Pre-rotation applied to Q before attention.  Typically the same
         rotation as ``_rotate_kv`` so the dot product is preserved.
@@ -62,8 +53,7 @@ class _PackedFactory(QuantKVFactory):
         Inverse rotation on the kernel output, written back in-place.
     ``_transform_softmax_scale(scale, head_size)``
         Optional rescaling of ``softmax_scale`` before the kernel (INT4
-        divides by ``head_size`` to absorb the RHT scale; INT2 is a
-        no-op).
+        divides by ``head_size`` to absorb the RHT scale).
     """
 
     needs_scale_caches = True
@@ -211,28 +201,4 @@ class Int4PerTokenHeadFactory(_PackedFactory):
         return scale / head_size
 
 
-class Int2PerTokenHeadFactory(_PackedFactory):
-    """KV cache factory for ``KVQuantMode.INT2_PER_TOKEN_HEAD``."""
-
-    mode = KVQuantMode.INT2_PER_TOKEN_HEAD
-    packing_factor = 4  # 4 × int2 per byte
-    _reshape_kernel = _reshape_cache_int2_kernel
-
-    # Full Hadamard (no random sign).  Its own inverse — so the output
-    # rotation is identical.  No softmax_scale adjustment: the ``d^1.5``
-    # factor is absorbed into the stored scale at write time.
-    @staticmethod
-    def _rotate_kv(x: torch.Tensor) -> torch.Tensor:
-        return fast_hadamard_transform(x)
-
-    @staticmethod
-    def _rotate_q(q: torch.Tensor) -> torch.Tensor:
-        return fast_hadamard_transform(q)
-
-    @staticmethod
-    def _unrotate_out(out: torch.Tensor, head_size: int) -> torch.Tensor:
-        return fast_hadamard_transform(out.float())
-
-
 register(Int4PerTokenHeadFactory())
-register(Int2PerTokenHeadFactory())
