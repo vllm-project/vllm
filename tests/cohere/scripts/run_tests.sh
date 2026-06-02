@@ -401,6 +401,30 @@ run_guided_generation() {
     exit $errors
 }
 
+run_thinking_budget_overhead() {
+    echo "Running thinking budget TPOT overhead regression..."
+    local errors=0
+    local dataset="tests/cohere/bee_eval_data/aime_2025_16samples.jsonl"
+
+    BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
+
+    cd "${VLLM_WORKSPACE}" || return 1
+    export PYTHONPATH="${VLLM_WORKSPACE}:${PYTHONPATH}"
+
+    if [[ ! -f "$dataset" ]]; then
+        echo "ERROR: dataset not found: ${VLLM_WORKSPACE}/${dataset}"
+        return 1
+    fi
+
+    python3 tests/cohere/test_thinking_budget_overhead.py \
+        --model "$BLS_MODEL_DIR" \
+        --dataset-path "$dataset" \
+        --tp-size 1 \
+        || errors=1
+
+    return $errors
+}
+
 run_thinking_budget() {
     echo "Running thinking budget tests..."
     local errors=0
@@ -413,6 +437,8 @@ run_thinking_budget() {
     # Thinking budget — non-SD BLS
     echo "Running thinking budget non-SD with BLS model: $BLS_MODEL_DIR"
     python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 1 --mode "non-speculative" || errors=1
+
+    run_thinking_budget_overhead || errors=1
 
     exit $errors
 }
@@ -918,6 +944,9 @@ run_tests() {
             ;;
         thinking_budget)
             run_thinking_budget
+            ;;
+        thinking_budget_overhead)
+            run_thinking_budget_overhead
             ;;
         speculative_decoding)
             run_speculative_decoding

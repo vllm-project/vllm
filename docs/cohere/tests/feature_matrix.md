@@ -134,27 +134,27 @@ This matrix is part of a three-layer documentation structure:
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
 | --- | --- | --- | --- | --- | --- | --- |
-| | T.4.1.1 | T.4.1.1 | T.4.1.1 | | T.4.1.1 | |
+| | T.4.1.1, T.4.5.1 | T.4.1.1 | T.4.1.1 | | T.4.1.1 | |
 
 | Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
 | --- | --- | --- | --- | --- |
-| | | | T.4.1.1 | |
+| | | | T.4.1.1, T.4.5.1 | |
 
 | Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
 | --- | --- | --- | --- | --- |
-| | | | T.4.1.1 | |
+| | | | T.4.1.1, T.4.5.1 | |
 
 | Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
 | --- | --- | --- | --- | --- | --- |
-| | | T.4.1.1 | | | |
+| | | T.4.1.1, T.4.5.1 | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
-| | ❌ | T.4.1.1 | T.4.1.1 | T.4.1.1 | T.4.1.1 |
+| | ❌ | T.4.1.1, T.4.5.1 | T.4.1.1, T.4.5.1 | T.4.1.1, T.4.5.1 | T.4.1.1, T.4.5.1 |
 
 | vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs |
 | --- | --- | --- | --- | --- | --- |
-| | T.4.1.1 | | | | T.4.1.1 |
+| | T.4.1.1, T.4.5.1 | | | | T.4.1.1, T.4.5.1 |
 
 ### Cohere Auto-Config
 

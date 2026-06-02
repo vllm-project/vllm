@@ -57,6 +57,10 @@ This matrix is part of a three-layer documentation structure:
 - 4.2.1 `test_thinking_budget` non-SD (c5-3a30t_fp8)
 - 4.2.2 `test_thinking_budget` SD (c5-3a30t_fp8 + eagle)
 
+#### 4.5 [Thinking Budget TPOT Overhead](./features/thinking_budget_overhead.md)
+
+- 4.5.1 `test_thinking_budget_overhead` (c5-3a30t_fp8)
+
 #### 4.3 Guided Generation — Text (BLS)
 
 - 4.3.1 `test_guided_generation --suite merged` non-SD (c5-3a30t_fp8, JSON + tools + long-context with thinking)
