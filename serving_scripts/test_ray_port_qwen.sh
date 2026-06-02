@@ -17,96 +17,56 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="test-ray-port-qwen3-30b-r32-sp128-sd512-pp2-tp2-v1"
+SCRIPT_VERSION="test-ray-port-qwen3-30b-r32-sp128-sd512-pp2-tp2-v2-ray-ready"
 
 # Configuration:
 #   2 nodes x 2 H100s/node = 4 total GPUs
 #   TP=2 within each node
 #   PP=2 across the two nodes
 #
-# Layout:
-#   htc-g059: 2-GPU TP group for PP stage 0
-#   htc-g060: 2-GPU TP group for PP stage 1
+# Main fix in v2:
+#   Do not launch Ray workers after a fixed sleep.
+#   Instead:
+#     1. Start Ray head.
+#     2. Wait until the head node appears alive in Ray GCS.
+#     3. Start Ray workers.
+#     4. Wait until all expected Ray nodes are alive.
+#     5. Start vLLM.
 #
-# This variant intentionally DOES NOT wrap the vLLM API server in:
-#   nsys profile python -m vllm.entrypoints.openai.api_server
-#
-# It still enables vLLM worker-side Nsight via:
-#   --ray-workers-use-nsight
-#
-# It also enables your patched per-iteration/per-comm NVTX path via:
-#   VLLM_ITERATION_NVTX=1
-#
-# ARC/SLURM temp layout:
-#   Ray is launched with a short --temp-dir:
-#       /tmp/vray-${SLURM_JOB_ID}-${node}
-#
-#   That short path is a symlink to the real job-local Slurm tmp tree:
-#       /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${node}
-#
-#   This prevents Ray from falling back to plain /tmp/ray or /tmp/ray-${SLURM_JOB_ID}-<node>
-#   while keeping Ray's AF_UNIX socket paths short.
-#
-# Important Nsight copy behavior:
-#   - Ignore empty.nsys-rep and zero-byte placeholder reports.
-#   - Keep Ray alive after the workload/server stops while worker Nsight
-#     has time to finalize real worker_process_*.nsys-rep files.
-#   - Run a live sidecar copier inside each Ray srun step.
-#   - Worker reports are copied to:
-#       ${TRACE_RUN_DIR}/ray_worker_nsight/<node>/
-#   - NCCL logs are written directly to:
-#       ${TRACE_RUN_DIR}/nccl_logs/
+# This avoids:
+#   No node info found for head node in GCS.
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
-# Post-run fallback copy should not hang the batch forever.
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
-
-# Server shutdown should not hang forever.
 SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
-
-# Live sidecar copy interval inside each Ray srun step.
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
-
-# After stopping the vLLM API server, keep Ray alive this long while waiting
-# for real worker_process_*.nsys-rep files to appear and be copied.
 WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-900}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
-
-# Treat files smaller than this as placeholders, not useful reports.
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
-# Ray compiled-DAG get timeout. Nsight + cold-start can exceed Ray's default 300s.
 RAY_CGRAPH_GET_TIMEOUT="${RAY_CGRAPH_GET_TIMEOUT:-1400}"
 export RAY_CGRAPH_get_timeout="${RAY_CGRAPH_get_timeout:-${RAY_CGRAPH_GET_TIMEOUT}}"
 export RAY_CGRAPH_submit_timeout="${RAY_CGRAPH_submit_timeout:-1800}"
 
-# Short path for Ray. This stays in /tmp only as a symlink, not as real storage.
+RAY_HEAD_READY_TIMEOUT_S="${RAY_HEAD_READY_TIMEOUT_S:-240}"
+RAY_CLUSTER_READY_TIMEOUT_S="${RAY_CLUSTER_READY_TIMEOUT_S:-300}"
+RAY_READY_POLL_S="${RAY_READY_POLL_S:-5}"
+
 RAY_TMP_LINK_PARENT="${RAY_TMP_LINK_PARENT:-/tmp}"
 RAY_TMP_PREFIX="${RAY_TMP_PREFIX:-vray-${SLURM_JOB_ID}}"
 
-# Optional override for real ARC/SLURM tmp parent. Leave unset normally.
 export ARC_RAY_REAL_TMP_PARENT="${ARC_RAY_REAL_TMP_PARENT:-}"
 export ARC_NODE_TMPDIR="${ARC_NODE_TMPDIR:-}"
 
-# Ray object store.
 RAY_PLASMA_DIRECTORY="${RAY_PLASMA_DIRECTORY:-/dev/shm}"
 RAY_OBJECT_STORE_MEMORY="${RAY_OBJECT_STORE_MEMORY:-200000000000}"
-
-# Remove node-local Ray tmp dirs at the end. They are job-local anyway, but this
-# keeps /tmp cleaner while still preserving copied results in TRACE_RUN_DIR.
 CLEAN_RAY_TMP_ON_EXIT="${CLEAN_RAY_TMP_ON_EXIT:-1}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
     echo "[slurm-debug] $*" >&2
-  fi
-}
-
-nsight_debug() {
-  if [ "${NSYS_COPY_DEBUG}" = "1" ] || [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
-    echo "[nsight-debug] $*"
   fi
 }
 
@@ -128,13 +88,13 @@ wait_for_pid_or_kill() {
   local pid="$1"
   local label="$2"
   local timeout_s="${3:-420}"
+  local elapsed=0
 
   if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
     echo "${label}: pid ${pid:-<empty>} is not running"
     return 0
   fi
 
-  local elapsed=0
   while kill -0 "${pid}" 2>/dev/null && [ "${elapsed}" -lt "${timeout_s}" ]; do
     sleep 1
     elapsed=$((elapsed + 1))
@@ -284,8 +244,6 @@ discover_arc_node_tmp_parent() {
     return 0
   fi
 
-  # Use ARC-provided TMPDIR only if it looks like a job-local Slurm tmp.
-  # Do NOT accept plain /tmp.
   if [ -n "${TMPDIR:-}" ] && [ "${TMPDIR}" != "/" ] && [ "${TMPDIR}" != "/tmp" ]; then
     case "${TMPDIR}" in
       "${RAY_TMP_LINK_PARENT}/${RAY_TMP_PREFIX}-"*"/py_tmp")
@@ -303,14 +261,12 @@ discover_arc_node_tmp_parent() {
   fi
 
   mkdir -p "${slurm_tmp_with_tmp}" 2>/dev/null || true
-
   if [ -d "${slurm_tmp_with_tmp}" ]; then
     printf '%s' "${slurm_tmp_with_tmp}"
     return 0
   fi
 
   mkdir -p "${slurm_tmp_root}" 2>/dev/null || true
-
   if [ -d "${slurm_tmp_root}" ]; then
     printf '%s' "${slurm_tmp_root}"
     return 0
@@ -328,7 +284,6 @@ ray_tmp_link_for_node() {
 ray_tmp_real_dir_for_node() {
   local node="$1"
   local parent
-
   parent="$(discover_arc_node_tmp_parent)"
   printf '%s/ray-%s-%s' "${parent}" "${SLURM_JOB_ID}" "${node}"
 }
@@ -383,6 +338,162 @@ link="$2"
 rm -rf "${root}" "${link}" 2>/dev/null || true
 REMOTE_CLEAN
   done
+}
+
+# -----------------------------------------------------------------------------
+# Ray readiness helpers
+# -----------------------------------------------------------------------------
+
+wait_for_ray_head_ready() {
+  local timeout_s="${1:-240}"
+  local poll_s="${2:-5}"
+  local elapsed=0
+
+  echo "Waiting for Ray head to become ready at ${RAY_ADDRESS}..."
+
+  while [ "${elapsed}" -lt "${timeout_s}" ]; do
+    if [ -n "${HEAD_RAY_PID:-}" ] && ! kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+      echo "Error: Ray head srun step died before becoming ready." >&2
+      echo "Ray head stdout tail:" >&2
+      tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" >&2 2>/dev/null || true
+      echo "Ray head stderr tail:" >&2
+      tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" >&2 2>/dev/null || true
+      return 1
+    fi
+
+    if python - <<'PY'
+import os
+import sys
+import ray
+
+addr = os.environ["RAY_ADDRESS"]
+head_ip = os.environ["HEAD_NODE_IP"]
+
+try:
+    ray.init(address=addr, ignore_reinit_error=True, logging_level="ERROR")
+    nodes = ray.nodes()
+    alive = [n for n in nodes if n.get("Alive")]
+    head = [n for n in alive if n.get("NodeManagerAddress") == head_ip]
+
+    print("Ray nodes currently visible:")
+    for n in alive:
+        print(
+            f"  {n.get('NodeManagerAddress')} "
+            f"alive={n.get('Alive')} "
+            f"resources={n.get('Resources')}"
+        )
+
+    ray.shutdown()
+
+    if head:
+        sys.exit(0)
+    sys.exit(1)
+
+except Exception as e:
+    print(f"Ray head not ready yet: {type(e).__name__}: {e}")
+    try:
+        ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+    then
+      echo "Ray head is ready."
+      return 0
+    fi
+
+    elapsed=$((elapsed + poll_s))
+    echo "Ray head not ready yet; retrying in ${poll_s}s (${elapsed}/${timeout_s}s)..."
+    sleep "${poll_s}"
+  done
+
+  echo "Error: Ray head did not become ready within ${timeout_s}s." >&2
+  echo "Ray head stdout tail:" >&2
+  tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" >&2 2>/dev/null || true
+  echo "Ray head stderr tail:" >&2
+  tail -100 "${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" >&2 2>/dev/null || true
+  return 1
+}
+
+wait_for_ray_cluster_ready() {
+  local expected_nodes="${1}"
+  local timeout_s="${2:-300}"
+  local poll_s="${3:-5}"
+  local elapsed=0
+
+  echo "Waiting for Ray cluster to show ${expected_nodes} alive node(s)..."
+
+  while [ "${elapsed}" -lt "${timeout_s}" ]; do
+    if [ -n "${HEAD_RAY_PID:-}" ] && ! kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+      echo "Error: Ray head srun step died while waiting for cluster." >&2
+      return 1
+    fi
+
+    local dead_worker=0
+    for pid in ${WORKER_RAY_PIDS:-}; do
+      if ! kill -0 "${pid}" 2>/dev/null; then
+        dead_worker=1
+      fi
+    done
+
+    if [ "${dead_worker}" = "1" ]; then
+      echo "Error: at least one Ray worker srun step died while joining." >&2
+      for node in ${WORKER_NODES}; do
+        echo "Worker ${node} stdout tail:" >&2
+        tail -100 "${TRACE_RUN_DIR}/slurm_ray_worker_${node}.out" >&2 2>/dev/null || true
+        echo "Worker ${node} stderr tail:" >&2
+        tail -100 "${TRACE_RUN_DIR}/slurm_ray_worker_${node}.err" >&2 2>/dev/null || true
+      done
+      return 1
+    fi
+
+    if EXPECTED_RAY_NODES="${expected_nodes}" python - <<'PY'
+import os
+import sys
+import ray
+
+addr = os.environ["RAY_ADDRESS"]
+expected = int(os.environ["EXPECTED_RAY_NODES"])
+
+try:
+    ray.init(address=addr, ignore_reinit_error=True, logging_level="ERROR")
+    nodes = ray.nodes()
+    alive = [n for n in nodes if n.get("Alive")]
+
+    print(f"Ray alive nodes: {len(alive)}/{expected}")
+    for n in alive:
+        print(
+            f"  {n.get('NodeManagerAddress')} "
+            f"alive={n.get('Alive')} "
+            f"resources={n.get('Resources')}"
+        )
+
+    ray.shutdown()
+
+    if len(alive) >= expected:
+        sys.exit(0)
+    sys.exit(1)
+
+except Exception as e:
+    print(f"Ray cluster not ready yet: {type(e).__name__}: {e}")
+    try:
+        ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+PY
+    then
+      echo "Ray cluster is ready with ${expected_nodes} alive node(s)."
+      return 0
+    fi
+
+    elapsed=$((elapsed + poll_s))
+    echo "Ray cluster not ready yet; retrying in ${poll_s}s (${elapsed}/${timeout_s}s)..."
+    sleep "${poll_s}"
+  done
+
+  echo "Error: Ray cluster did not reach ${expected_nodes} alive node(s) within ${timeout_s}s." >&2
+  return 1
 }
 
 # -----------------------------------------------------------------------------
@@ -444,7 +555,6 @@ wait_for_real_worker_nsys_reports() {
   done
 
   echo "[nsight-copy] WARNING: timed out waiting for expected real non-empty worker_process_*.nsys-rep files."
-  echo "[nsight-copy] Current worker Nsight destination contents:"
   find "${TRACE_RUN_DIR}/ray_worker_nsight" -type f \
     \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
     -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
@@ -479,7 +589,6 @@ copy_ray_nsight_locally_once() {
   local candidate_dirs=""
   local d s ray_real
 
-  # Primary location: the Ray --temp-dir passed in this step.
   if [ -n "${RAY_TMPDIR:-}" ]; then
     for d in "${RAY_TMPDIR}"/session_*/logs/nsight "${RAY_TMPDIR}"/session_latest/logs/nsight; do
       [ -d "${d}" ] && candidate_dirs="${candidate_dirs}
@@ -495,7 +604,6 @@ ${d}"
     fi
   fi
 
-  # Current-job SLURM tmp locations. These are keyed by SLURM_JOB_ID and node.
   for d in \
     /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${node}/session_*/logs/nsight \
     /tmp/slurm-${SLURM_JOB_ID}/ray-${SLURM_JOB_ID}-${node}/session_*/logs/nsight \
@@ -505,7 +613,6 @@ ${d}"
 ${d}"
   done
 
-  # Only trust /tmp/ray for process-referenced live sessions, to avoid stale jobs.
   for s in ${live_sessions}; do
     [ -d "/tmp/ray/${s}/logs/nsight" ] && candidate_dirs="${candidate_dirs}
 /tmp/ray/${s}/logs/nsight"
@@ -532,7 +639,6 @@ ${d}"
     else
       echo "[nsight-copy]   none"
     fi
-
     echo "[nsight-copy] candidate dirs:"
     if [ -n "${candidate_dirs}" ]; then
       printf '%s\n' "${candidate_dirs}" | sed 's/^/[nsight-copy]   /'
@@ -817,16 +923,12 @@ copy_ray_logs_from_node() {
 # Main setup
 # -----------------------------------------------------------------------------
 
-# SP = prompt / prefill token bucket
-# SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-512}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
 REQUEST_RATE="${REQUEST_RATE:-1}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
-
-# Worker Nsight is the target. API-server outer wrapper is intentionally removed.
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
@@ -846,6 +948,10 @@ echo "SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-}"
 echo "HEAD_NODE=${HEAD_NODE}"
 echo "WORKER_NODES=${WORKER_NODES}"
 echo "RAY_CGRAPH_get_timeout=${RAY_CGRAPH_get_timeout}"
+echo "RAY_CGRAPH_submit_timeout=${RAY_CGRAPH_submit_timeout}"
+echo "RAY_HEAD_READY_TIMEOUT_S=${RAY_HEAD_READY_TIMEOUT_S}"
+echo "RAY_CLUSTER_READY_TIMEOUT_S=${RAY_CLUSTER_READY_TIMEOUT_S}"
+echo "RAY_READY_POLL_S=${RAY_READY_POLL_S}"
 echo "RAY_TMP_LINK_PARENT=${RAY_TMP_LINK_PARENT}"
 echo "RAY_TMP_PREFIX=${RAY_TMP_PREFIX}"
 echo "ARC_RAY_REAL_TMP_PARENT=${ARC_RAY_REAL_TMP_PARENT:-<unset>}"
@@ -889,7 +995,6 @@ module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
 
-# === Trace output directory ===
 TRACE_BASE="${TRACE_BASE:-/data/engs-glass/catz0932/inference-traces/vllm/results}"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
 
@@ -899,20 +1004,15 @@ mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 mkdir -p "${TRACE_RUN_DIR}/ray_session_names"
 mkdir -p "${TRACE_RUN_DIR}/ray_logs"
 
-# === Nsight Systems ===
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 
-# Per-iteration + per-comm NVTX ranges on Ray GPU workers.
-# Requires your patched vLLM with iteration_phase_nvtx.py / comm_nvtx_mark().
 export VLLM_ITERATION_NVTX="${VLLM_ITERATION_NVTX:-1}"
 
-# Sampled KV block residency metrics (lifetime, idle-before-evict, reuse gaps).
 export VLLM_KV_CACHE_METRICS="${VLLM_KV_CACHE_METRICS:-1}"
 export VLLM_KV_CACHE_METRICS_SAMPLE="${VLLM_KV_CACHE_METRICS_SAMPLE:-0.01}"
 
-# === NCCL logs ===
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
 
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
@@ -927,12 +1027,10 @@ MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-# Test layout for 2 nodes x 2 GPUs/node.
 GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
 TOTAL_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
 
-# TP stays inside each node; PP spans the two nodes.
 TP="${TP:-${GPUS_PER_NODE}}"
 PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
@@ -945,7 +1043,6 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
-# With TP=2 and PP=2, expect one Ray worker report per GPU, i.e. 2 per node.
 EXPECTED_WORKER_REPORTS_PER_NODE="${EXPECTED_WORKER_REPORTS_PER_NODE:-${GPUS_PER_NODE}}"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
@@ -1012,7 +1109,6 @@ python -m pip install "${RAY_REQUIREMENT}"
 RAY_BIN="${VENV_DIR}/bin/ray"
 if [ ! -x "${RAY_BIN}" ]; then
   echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
-  echo "Hint: source \"${VENV_DIR}/bin/activate\" && python -m pip install ray" >&2
   exit 1
 fi
 echo "Using RAY_BIN=${RAY_BIN}"
@@ -1038,8 +1134,6 @@ if [ -n "${HF_TOKEN:-}" ]; then
 else
   echo "HF_TOKEN is not set"
 fi
-
-slurm_debug "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} VLLM_USE_DEEP_GEMM=${VLLM_USE_DEEP_GEMM}"
 
 SERVER_STEP_PID=""
 HEAD_RAY_PID=""
@@ -1068,6 +1162,10 @@ cleanup() {
   remove_ray_tmp_dirs_on_cluster
 }
 trap cleanup EXIT
+
+# -----------------------------------------------------------------------------
+# Start Ray
+# -----------------------------------------------------------------------------
 
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE}..."
@@ -1154,7 +1252,8 @@ srun \
 HEAD_RAY_PID=$!
 
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
-sleep 20
+
+wait_for_ray_head_ready "${RAY_HEAD_READY_TIMEOUT_S}" "${RAY_READY_POLL_S}"
 
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
@@ -1252,13 +1351,13 @@ fi"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
 
-  sleep 20
+  wait_for_ray_cluster_ready "${NUM_NODES}" "${RAY_CLUSTER_READY_TIMEOUT_S}" "${RAY_READY_POLL_S}"
 fi
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
 
-"${RAY_BIN}" status --address="${RAY_ADDRESS}" || echo "Warning: ray status failed; continuing with Python Ray node check."
+"${RAY_BIN}" status --address="${RAY_ADDRESS}" || echo "Warning: ray status failed; Python Ray node check already passed."
 
 python - <<'PY'
 import os
@@ -1275,12 +1374,13 @@ for node in nodes:
     )
 PY
 
+# -----------------------------------------------------------------------------
+# Start vLLM and benchmark
+# -----------------------------------------------------------------------------
+
 echo "=== vLLM api_server (background process; no outer nsys wrapper) ==="
 echo "Starting vLLM server on head node WITHOUT outer Nsight wrapper..."
 
-# The batch script usually runs on the head node. Use the head short Ray tmp path
-# for Python/Ray-client temp files too. Do not call ensure_ray_tmp_for_node here,
-# because that would delete the live Ray head session.
 export RAY_TMPDIR="$(ray_tmp_link_for_node "${HEAD_NODE}")"
 export RAY_SPILL_DIR="${RAY_TMPDIR}/spill"
 export TMPDIR="${RAY_TMPDIR}/py_tmp"
@@ -1363,7 +1463,7 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
 
 # -----------------------------------------------------------------------------
-# Clean shutdown and trace collection.
+# Clean shutdown and trace collection
 # -----------------------------------------------------------------------------
 
 echo "Workload finished. Stopping vLLM server process cleanly..."
