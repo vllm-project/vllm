@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -452,7 +453,10 @@ def test_json_schema_response_format_missing_schema():
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
-    with pytest.raises(Exception, match="Invalid response_format structural_tag"):
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],
@@ -463,7 +467,10 @@ def test_structural_tag_response_format_invalid(format_value):
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_batch_structural_tag_response_format_invalid(format_value):
     """Batch chat should reject malformed structural tags at request parsing."""
-    with pytest.raises(Exception, match="Invalid response_format structural_tag"):
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
         BatchChatCompletionRequest(
             model=MODEL_NAME,
             messages=[[{"role": "user", "content": "hello"}]],
@@ -474,7 +481,10 @@ def test_batch_structural_tag_response_format_invalid(format_value):
 @pytest.mark.parametrize("structural_tag", ["not json", ""])
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
-    with pytest.raises(Exception, match="Invalid structured_outputs structural_tag"):
+    with pytest.raises(
+        ValidationError,
+        match="Invalid structured_outputs structural_tag",
+    ):
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "hello"}],

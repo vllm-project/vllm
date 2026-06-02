@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -305,7 +306,10 @@ def test_json_schema_response_format_missing_schema():
 @pytest.mark.parametrize("format_value", [None, {}])
 def test_structural_tag_response_format_invalid(format_value):
     """Malformed structural tags should be rejected during request validation."""
-    with pytest.raises(Exception, match="Invalid response_format structural_tag"):
+    with pytest.raises(
+        ValidationError,
+        match="Invalid response_format structural_tag",
+    ):
         CompletionRequest(
             model=MODEL_NAME,
             prompt="Test prompt",
@@ -317,7 +321,10 @@ def test_structural_tag_response_format_invalid(format_value):
 @pytest.mark.parametrize("structural_tag", ["not json", ""])
 def test_structured_outputs_structural_tag_invalid(structural_tag):
     """Malformed direct structured_outputs structural tags should be rejected."""
-    with pytest.raises(Exception, match="Invalid structured_outputs structural_tag"):
+    with pytest.raises(
+        ValidationError,
+        match="Invalid structured_outputs structural_tag",
+    ):
         CompletionRequest(
             model=MODEL_NAME,
             prompt="Test prompt",
