@@ -6,7 +6,7 @@ Compares ``aiter.ops.triton.unified_attention`` against ``ref_paged_attn`` under
 decode, prefill, and mixed batches with varied shapes.
 """
 
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -36,25 +36,29 @@ MIXED_SEQ_LENS = [
 DECODE_SEQ_LENS = [
     [(1, 128), (1, 256), (1, 384), (1, 512)],
 ]
+PREFILL_SEQ_LENS = [
+    [(256, 256), (128, 512)],
+    [(64, 128), (32, 256), (16, 512)],
+]
 
 DEFAULT_ATOL, DEFAULT_RTOL = 1.5e-2, 1e-2
-FP8_KV_ATOL, FP8_KV_RTOL = 1.5e-1, 1.5e-1
+FP8_ATOL, FP8_RTOL = 1.5e-1, 1.5e-1
+# Non-unity scale so q_descale handling is exercised explicitly.
+Q_SCALE = 0.75
+K_SCALE, V_SCALE = 0.5, 0.25
 
-# kv_cache_dtype, k_scale, v_scale, atol, rtol
-KV_CACHE_CONFIGS = [
-    pytest.param(None, 1.0, 1.0, DEFAULT_ATOL, DEFAULT_RTOL, id="native"),
-    pytest.param(
-        FP8_DTYPE,
-        0.5,
-        0.25,
-        FP8_KV_ATOL,
-        FP8_KV_RTOL,
-        id="fp8_kv",
-        marks=pytest.mark.skipif(
-            not current_platform.supports_fp8(),
-            reason="FP8 not supported on this hardware",
-        ),
-    ),
+Fp8Variant = Literal["fp8_kv", "fp8_query", "fp8_query_kv"]
+
+FP8_VARIANTS = [
+    pytest.param("fp8_kv", id="fp8_kv"),
+    pytest.param("fp8_query", id="fp8_query"),
+    pytest.param("fp8_query_kv", id="fp8_query_kv"),
+]
+
+FP8_SEQ_LENS = [
+    MIXED_SEQ_LENS[0],
+    DECODE_SEQ_LENS[0],
+    PREFILL_SEQ_LENS[0],
 ]
 
 
@@ -75,6 +79,8 @@ def _make_case(
     kv_cache_dtype: torch.dtype | None = None,
     k_scale: float = 1.0,
     v_scale: float = 1.0,
+    q_dtype: torch.dtype | None = None,
+    q_scale: float = Q_SCALE,
 ) -> dict[str, Any]:
     torch.set_default_device("cuda")
 
@@ -117,8 +123,15 @@ def _make_case(
     k_descale = torch.full(descale_shape, k_scale, dtype=torch.float32, device="cuda")
     v_descale = torch.full(descale_shape, v_scale, dtype=torch.float32, device="cuda")
 
+    kernel_query = query
+    q_descale = None
+    if q_dtype is not None:
+        q_descale = torch.tensor(q_scale, dtype=torch.float32, device="cuda")
+        kernel_query = (query / q_scale).to(q_dtype)
+
     return {
         "query": query,
+        "kernel_query": kernel_query,
         "key_cache": key_cache,
         "value_cache": value_cache,
         "block_tables": block_tables,
@@ -126,6 +139,7 @@ def _make_case(
         "kv_lens": kv_lens,
         "seq_lens_tensor": seq_lens_tensor,
         "cu_seqlens_q": cu_seqlens_q,
+        "q_descale": q_descale,
         "k_descale": k_descale,
         "v_descale": v_descale,
         "scale": scale,
@@ -137,12 +151,35 @@ def _make_case(
     }
 
 
+def _make_fp8_case(
+    *,
+    seq_lens: list[tuple[int, int]],
+    head_size: int,
+    block_size: int,
+    variant: Fp8Variant,
+) -> dict[str, Any]:
+    use_fp8_kv = variant in ("fp8_kv", "fp8_query_kv")
+    use_fp8_query = variant in ("fp8_query", "fp8_query_kv")
+    return _make_case(
+        seq_lens=seq_lens,
+        head_size=head_size,
+        block_size=block_size,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=FP8_DTYPE if use_fp8_kv else None,
+        k_scale=K_SCALE if use_fp8_kv else 1.0,
+        v_scale=V_SCALE if use_fp8_kv else 1.0,
+        q_dtype=FP8_DTYPE if use_fp8_query else None,
+    )
+
+
 def _run_aiter_unified_attention(case: dict[str, Any]) -> torch.Tensor:
     from aiter.ops.triton.unified_attention import unified_attention
 
+    kernel_query = case["kernel_query"]
+    # Kernel writes high-precision output even when Q is FP8 (matches vLLM usage).
     output = torch.empty_like(case["query"])
     unified_attention(
-        q=case["query"],
+        q=kernel_query,
         k=case["key_cache"],
         v=case["value_cache"],
         out=output,
@@ -156,7 +193,7 @@ def _run_aiter_unified_attention(case: dict[str, Any]) -> torch.Tensor:
         window_size=(-1, -1),
         block_table=case["block_tables"],
         softcap=0,
-        q_descale=None,
+        q_descale=case["q_descale"],
         k_descale=case["k_descale"],
         v_descale=case["v_descale"],
         sinks=None,
@@ -198,20 +235,14 @@ def _assert_matches_reference(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("kv_cache_dtype,k_scale,v_scale,atol,rtol", KV_CACHE_CONFIGS)
 @torch.inference_mode()
 def test_aiter_unified_attn_mixed_batch(
     seq_lens: list[tuple[int, int]],
     head_size: int,
     block_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: torch.dtype | None,
-    k_scale: float,
-    v_scale: float,
-    atol: float,
-    rtol: float,
 ) -> None:
-    """Decode + prefill sequences in one batch."""
+    """Decode + prefill sequences in one batch (native dtypes)."""
     _require_aiter()
     set_random_seed(0)
 
@@ -220,31 +251,22 @@ def test_aiter_unified_attn_mixed_batch(
         head_size=head_size,
         block_size=block_size,
         dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
-        k_scale=k_scale,
-        v_scale=v_scale,
     )
-    _assert_matches_reference(case, atol=atol, rtol=rtol)
+    _assert_matches_reference(case)
 
 
 @pytest.mark.parametrize("seq_lens", DECODE_SEQ_LENS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype,k_scale,v_scale,atol,rtol", KV_CACHE_CONFIGS)
 @torch.inference_mode()
 def test_aiter_unified_attn_decode(
     seq_lens: list[tuple[int, int]],
     head_size: int,
     block_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: torch.dtype | None,
-    k_scale: float,
-    v_scale: float,
-    atol: float,
-    rtol: float,
 ) -> None:
-    """Single-token decode."""
+    """Single-token decode (native dtypes)."""
     _require_aiter()
     set_random_seed(0)
 
@@ -253,35 +275,20 @@ def test_aiter_unified_attn_decode(
         head_size=head_size,
         block_size=block_size,
         dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
-        k_scale=k_scale,
-        v_scale=v_scale,
     )
-    _assert_matches_reference(case, atol=atol, rtol=rtol)
+    _assert_matches_reference(case)
 
 
-@pytest.mark.parametrize(
-    "seq_lens",
-    [
-        [(256, 256), (128, 512)],
-        [(64, 128), (32, 256), (16, 512)],
-    ],
-)
+@pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
 @pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("kv_cache_dtype,k_scale,v_scale,atol,rtol", KV_CACHE_CONFIGS)
 @torch.inference_mode()
 def test_aiter_unified_attn_prefill(
     seq_lens: list[tuple[int, int]],
     head_size: int,
     block_size: int,
-    kv_cache_dtype: torch.dtype | None,
-    k_scale: float,
-    v_scale: float,
-    atol: float,
-    rtol: float,
 ) -> None:
-    """Prefill-only batches with query_len > 1."""
+    """Prefill-only batches with query_len > 1 (native dtypes)."""
     _require_aiter()
     set_random_seed(0)
 
@@ -290,8 +297,33 @@ def test_aiter_unified_attn_prefill(
         head_size=head_size,
         block_size=block_size,
         dtype=torch.bfloat16,
-        kv_cache_dtype=kv_cache_dtype,
-        k_scale=k_scale,
-        v_scale=v_scale,
     )
-    _assert_matches_reference(case, atol=atol, rtol=rtol)
+    _assert_matches_reference(case)
+
+
+@pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 not supported on this hardware",
+)
+@pytest.mark.parametrize("variant", FP8_VARIANTS)
+@pytest.mark.parametrize("seq_lens", FP8_SEQ_LENS)
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("block_size", [16, 64])
+@torch.inference_mode()
+def test_aiter_unified_attn_fp8(
+    variant: Fp8Variant,
+    seq_lens: list[tuple[int, int]],
+    head_size: int,
+    block_size: int,
+) -> None:
+    """FP8 KV cache, FP8 query, or both; compared at bf16 reference precision."""
+    _require_aiter()
+    set_random_seed(0)
+
+    case = _make_fp8_case(
+        seq_lens=seq_lens,
+        head_size=head_size,
+        block_size=block_size,
+        variant=variant,
+    )
+    _assert_matches_reference(case, atol=FP8_ATOL, rtol=FP8_RTOL)
