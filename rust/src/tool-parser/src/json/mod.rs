@@ -1,20 +1,22 @@
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
 pub use hermes::HermesToolParser;
+pub use internlm2::Internlm2ToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use qwen::Qwen3XmlToolParser;
 
 mod hermes;
+mod internlm2;
 mod llama;
 mod mistral;
 mod qwen;
 
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
-use winnow::error::{ModalResult, StrContext, StrContextValue};
+use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
 use winnow::prelude::*;
-use winnow::stream::Partial;
+use winnow::stream::{Partial, Stream};
 use winnow::token::literal;
 
 use super::utils::{
@@ -32,7 +34,10 @@ struct JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace,
     delimiter: Option<&'static str>,
     name_key: &'static str,
-    arguments_key: &'static str,
+    /// Candidate JSON keys naming the arguments payload, tried in order.
+    /// Most parsers use a single key like `["arguments"]`, but some accept
+    /// multiple (e.g. InternLM2 accepts `parameters` or `arguments`).
+    arguments_key: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,7 +229,7 @@ fn tool_call_header_event(
         _: ws0,
         _: literal(","),
         _: ws0,
-        _: |input: &mut JsonToolInput<'_>| json_key(input, config.arguments_key),
+        _: |input: &mut JsonToolInput<'_>| json_arguments_key(input, config.arguments_key),
         _: ws0,
         _: literal(":"),
         _: ws0,
@@ -244,6 +249,39 @@ fn json_key(input: &mut JsonToolInput<'_>, key: &'static str) -> ModalResult<()>
     )
     .void()
     .parse_next(input)
+}
+
+/// Parse a JSON object key accepting any of `candidates`.
+///
+/// The full quoted key is consumed and compared against the candidate list,
+/// so this works correctly under partial input regardless of key lengths.
+///
+/// On mismatch, each candidate is attached as its own `Expected` context so the
+/// error enumerates every valid key ("expected `a`, expected `b`"). Because
+/// `StrContextValue::StringLiteral` carries a single `&'static str`, the
+/// contexts are added in a loop over `candidates` rather than through chained
+/// `.context(...)` calls, which keeps the diagnostics complete for any number
+/// of candidates.
+fn json_arguments_key(
+    input: &mut JsonToolInput<'_>,
+    candidates: &'static [&'static str],
+) -> ModalResult<()> {
+    let start = input.checkpoint();
+    json_str
+        .verify(|key: &String| candidates.contains(&key.as_str()))
+        .void()
+        .parse_next(input)
+        .map_err(|err| {
+            err.map(|context_error| {
+                candidates.iter().fold(context_error, |context_error, candidate| {
+                    context_error.add_context(
+                        &*input,
+                        &start,
+                        StrContext::Expected(StrContextValue::StringLiteral(candidate)),
+                    )
+                })
+            })
+        })
 }
 
 /// Parse one event inside a marker-wrapped JSON tool-call arguments payload.
@@ -341,7 +379,7 @@ mod tests {
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some("<"),
         name_key: "function",
-        arguments_key: "parameters",
+        arguments_key: &["parameters"],
     };
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {

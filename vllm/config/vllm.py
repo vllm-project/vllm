@@ -66,7 +66,13 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "Qwen3ForCausalLM",
+    }
+)
 
 
 class OptimizationLevel(IntEnum):
@@ -121,7 +127,13 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
+    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
+
+    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
+    assumes byte-identical kernel launches across TP peers, but concurrent
+    independent warmup of multiple TP subgroups lets ranks pick divergent
+    FlashInfer launch configs and deadlock.
+    """
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -134,6 +146,7 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
+        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
@@ -479,6 +492,15 @@ class VllmConfig:
             :10
         ]
         return hash_str
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        # Async scheduling requires 2 concurrent batches to overlap.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if pp_size > 1:
+            return pp_size
+        return 2 if self.scheduler_config.async_scheduling else 1
 
     @property
     def num_speculative_tokens(self) -> int:
