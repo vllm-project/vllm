@@ -10,7 +10,7 @@ from torch.multiprocessing import spawn
 from tests.kernels.utils import opcheck
 from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
+from vllm.model_executor.layers.minimax_rms_norm import MiniMaxText01RMSNormTP
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
@@ -59,7 +59,7 @@ def _worker_forward_qk(
 
     # Set up Lamport workspace.
     from vllm.distributed.parallel_state import get_tp_group
-    from vllm.model_executor.layers.mamba.lamport_workspace import (
+    from vllm.model_executor.layers.minimax_rms_norm.lamport_workspace import (
         get_allreduce_workspace,
     )
 

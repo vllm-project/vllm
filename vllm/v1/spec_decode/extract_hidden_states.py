@@ -52,6 +52,14 @@ class ExtractHiddenStatesProposer:
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
         )
 
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
+        )
+
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
         layer_ids = getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", None)
         if not layer_ids:
@@ -314,7 +322,7 @@ class ExtractHiddenStatesProposer:
         """
         num_reqs = gpu_input_batch.num_reqs
 
-        # Compute backup tokens for discarded / invalid requests
+        # Precompute backup token IDs for discarded requests.
         for i in range(num_reqs):
             self.backup_next_token_ids.np[i] = requests[
                 gpu_input_batch.req_ids[i]
