@@ -418,7 +418,8 @@ class LLRouterSplitK:
 
         else:
             # MMA warps with k-phase interleaving
-            cute.arch.setmaxregister_increase(232)
+            cute.arch.setmaxregister_increase(232) # tCrC: 16×16 FP32 = 256 floats = 1024 bytes + plus A/B register fragments for ldmatrix
+            
             lane_id = mma_tidx % 32
             mma_warp_idx = mma_tidx // 32
             NUM_MMA_WARPS: cutlass.Constexpr = self.num_mma_warps
@@ -427,28 +428,32 @@ class LLRouterSplitK:
             tCsA = thr_mma.partition_A(sA)
             tCsB = thr_mma.partition_B(sB)
             tCgC = thr_mma.partition_C(gC)
+            
             tCrA = tiled_mma.make_fragment_A(tCsA[None, None, None, 0])
             tCrB = tiled_mma.make_fragment_B(tCsB[None, None, None, 0])
             tCrC = tiled_mma.make_fragment_C(tCgC)
             tCrC.fill(0.0)
 
+            # loads 8×8 matrices of 16-bit elements from SMEM -> RF
             atom_s2r_A = cute.make_copy_atom(
                 cute.nvgpu.warp.LdMatrix8x8x16bOp(False, 4), mA.element_type
-            )
+            ) # False = not transposed. 4 = load 4 matrices per instruction
             atom_s2r_B = cute.make_copy_atom(
                 cute.nvgpu.warp.LdMatrix8x8x16bOp(False, 4), mB.element_type
             )
+
+            # Creates SMEM -> RF copy path
             tiled_s2r_A = cute.make_tiled_copy_A(atom_s2r_A, tiled_mma)
             tiled_s2r_B = cute.make_tiled_copy_B(atom_s2r_B, tiled_mma)
             thr_s2r_A = tiled_s2r_A.get_slice(lane_id)
             thr_s2r_B = tiled_s2r_B.get_slice(lane_id)
-            tCsA_v = thr_s2r_A.partition_S(sA)
+            tCsA_v = thr_s2r_A.partition_S(sA) # _v = views of same underlying tensor, not copies
             tCrA_v = thr_s2r_A.retile(tCrA)
             tCsB_v = thr_s2r_B.partition_S(sB)
             tCrB_v = thr_s2r_B.retile(tCrB)
 
             num_k_block = cute.size(tCrA, mode=[2])
-            K_PER_WARP: cutlass.Constexpr = num_k_block // NUM_MMA_WARPS
+            K_PER_WARP: cutlass.Constexpr = num_k_block // NUM_MMA_WARPS # Each warp handles 4 K-blocks per tile
 
             consumer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Consumer, num_stages
@@ -458,17 +463,17 @@ class LLRouterSplitK:
                 mainloop_pipeline.consumer_wait(consumer_state)
                 tCsA_p = tCsA_v[None, None, None, consumer_state.index]
                 tCsB_p = tCsB_v[None, None, None, consumer_state.index]
-                for ki in cutlass.range(K_PER_WARP, unroll_full=True):
+                for ki in cutlass.range(K_PER_WARP, unroll_full=True): # unroll_full=True unrolls all 4 iterations
                     k_block = ki * NUM_MMA_WARPS + mma_warp_idx
                     cute.copy(
                         tiled_s2r_A, tCsA_p[None, None, k_block], tCrA_v[None, None, 0]
-                    )
+                    ) # ldmatrix
                     cute.copy(
                         tiled_s2r_B, tCsB_p[None, None, k_block], tCrB_v[None, None, 0]
                     )
                     cute.gemm(
                         tiled_mma, tCrC, tCrA[None, None, 0], tCrB[None, None, 0], tCrC
-                    )
+                    ) # mma.sync
                 mainloop_pipeline.consumer_release(consumer_state)
                 consumer_state.advance()
 
