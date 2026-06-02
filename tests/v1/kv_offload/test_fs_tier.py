@@ -3,7 +3,7 @@
 """
 Unit tests for FileSystemTierManager.
 
-These tests use real disk I/O to verify the Python filesystem tier implementation.
+These tests use real disk I/O to verify the filesystem tier implementation.
 The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
@@ -72,14 +72,14 @@ def make_job(
 
 def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
     """
-    Call get_finished() repeatedly until no new results arrive for 5
+    Call get_finished_jobs() repeatedly until no new results arrive for 5
     consecutive rounds or max_rounds is reached.
     """
     results = []
     idle = 0
     for _ in range(max_rounds):
         time.sleep(0.01)
-        new = list(tier.get_finished())
+        new = list(tier.get_finished_jobs())
         results.extend(new)
         if new:
             idle = 0
@@ -102,7 +102,7 @@ def fs_tier(tmp_path):
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_view,
-        tier_type="fs_python",
+        tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
         n_write_threads=4,
@@ -162,7 +162,7 @@ def test_invalid_path_raises_at_construction():
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
-            tier_type="fs_python",
+            tier_type="fs",
             root_dir="/dev/null/invalid_path",
         )
 
