@@ -11,9 +11,9 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.generate.factories import get_generate_invocation_types
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.generate.factories import get_generate_invocation_types
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.base.serving import PoolingServingBase
 from vllm.entrypoints.pooling.factories import get_pooling_invocation_types
