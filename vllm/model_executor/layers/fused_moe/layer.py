@@ -291,17 +291,18 @@ def FusedMoE(
             hash_indices_table=hash_indices_table,
         )
 
+    if params_dtype is None:
+        params_dtype = torch.get_default_dtype()
+
     # FIXME (varun): We should have a better way of inferring the activation
     # datatype. This works for now as the tensor datatype entering the MoE
     # operation is typically unquantized (i.e. float16/bfloat16).
     if vllm_config.model_config is not None:
         moe_in_dtype = vllm_config.model_config.dtype
-    elif params_dtype is not None:
+    else:
         # TODO (bnell): This is a hack to get test_mixtral_moe to work
         # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
-    else:
-        moe_in_dtype = torch.get_default_dtype()
 
     moe_config = FusedMoEConfig(
         num_experts=global_num_experts,
@@ -330,6 +331,7 @@ def FusedMoE(
     if routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
 
+    assert params_dtype is not None
     routed_experts = routed_experts_cls(
         layer_name,
         params_dtype,

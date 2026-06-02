@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-from vllm.config import get_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -56,7 +55,7 @@ class RoutedExperts(PluggableLayer):
     def __init__(
         self,
         layer_name: str,
-        params_dtype: torch.dtype | None,
+        params_dtype: torch.dtype,
         moe_config: FusedMoEConfig,
         quant_config: QuantizationConfig | None,
         expert_map_manager: ExpertMapManager,
@@ -86,6 +85,7 @@ class RoutedExperts(PluggableLayer):
         self.hidden_size = moe_config.hidden_dim
         self.global_num_experts = moe_config.num_experts
         self.local_num_experts = moe_config.num_local_experts
+        self.params_dtype = params_dtype
 
         # Register buffers for state_dict compatibility
         self.update_expert_map_info()
@@ -116,26 +116,11 @@ class RoutedExperts(PluggableLayer):
 
         # Round up hidden size and update moe_config.
         # TODO: move roundup to _get_quant_method?
-        # FIXME (varun): We should have a better way of inferring the activation
-        # datatype. This works for now as the tensor datatype entering the MoE
-        # operation is typically unquantized (i.e. float16/bfloat16).
-        vllm_config = get_current_vllm_config()
-
-        if vllm_config.model_config is not None:
-            moe_in_dtype = vllm_config.model_config.dtype
-        elif params_dtype is not None:
-            # TODO (bnell): This is a hack to get test_mixtral_moe to work
-            # since model_config is not set in the pytest test.
-            moe_in_dtype = params_dtype
-        else:
-            params_dtype = torch.get_default_dtype()
-            moe_in_dtype = params_dtype
-
         self.hidden_size, self.intermediate_size_per_partition = (
             self.quant_method.maybe_roundup_sizes(
                 self.hidden_size,
                 self.moe_config.intermediate_size_per_partition,
-                moe_in_dtype,
+                self.moe_config.in_dtype,
                 self.moe_config.moe_parallel_config,
             )
         )
