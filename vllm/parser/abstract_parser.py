@@ -320,6 +320,7 @@ class Parser:
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         """Parse a single streaming delta, orchestrating reasoning then
         tool call extraction via internal stream state.
@@ -656,12 +657,28 @@ class DelegatingParser(Parser):
             return False
         return state.reasoning_ended
 
+    def _append_unstreamed_tool_args(
+        self,
+        delta_message: DeltaMessage | None,
+    ) -> None:
+        """Append parsed-but-unstreamed tool-call arguments to *delta_message*."""
+        if (
+            self._tool_parser is not None
+            and delta_message
+            and delta_message.tool_calls
+            and (last_tc := delta_message.tool_calls[-1]).function
+        ):
+            last_tc.function.arguments = (
+                last_tc.function.arguments or ""
+            ) + self._tool_parser.get_remaining_unstreamed_args()
+
     def parse_delta(
         self,
         delta_text: str,
         delta_token_ids: list[int],
         request: ChatCompletionRequest | ResponsesRequest,
         prompt_token_ids: list[int] | None = None,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         state = self._stream_state
 
@@ -745,6 +762,10 @@ class DelegatingParser(Parser):
 
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids
+
+        if finished:
+            self._append_unstreamed_tool_args(delta_message)
+
         return delta_message
 
 
