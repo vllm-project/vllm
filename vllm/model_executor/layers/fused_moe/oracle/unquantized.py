@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
-from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -26,6 +26,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -147,10 +150,17 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
 
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
+    weight_key: "QuantKey | None" = None,
+    activation_key: "QuantKey | None" = None,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
+
+    `weight_key` / `activation_key` are accepted to match the
+    `MoEKernelOracle.select_backend` contract; they are ignored here
+    because the unquantized oracle has no quantization scheme to
+    disambiguate.
     """
 
     if current_platform.is_cpu():
@@ -295,15 +305,15 @@ def select_unquantized_moe_backend(
 
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
-    layer: Module,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_act_and_mul: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        if layer.moe_config.is_act_and_mul:
+        if is_act_and_mul:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
@@ -399,19 +409,22 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         return map_unquantized_backend(runner_backend)
 
     def select_backend(
-        self, moe_config: FusedMoEConfig
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        return select_unquantized_moe_backend(moe_config)
+        return select_unquantized_moe_backend(moe_config, weight_key, activation_key)
 
     def convert_to_kernel_format(
         self,
         backend: UnquantizedMoeBackend,
-        layer: Module,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
+        is_act_and_mul: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return convert_to_unquantized_kernel_format(
-            backend, layer, w13_weight, w2_weight
+            backend, w13_weight, w2_weight, is_act_and_mul
         )
 
     def make_kernel(
