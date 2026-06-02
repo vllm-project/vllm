@@ -84,20 +84,8 @@ def triton_scale_swizzle(
     )
 
 
+@torch.library.custom_op("vllm::triton_mx_block_rearrange", mutates_args=())
 def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
-    """
-    Rearranges an E8M0 tensor scale from row-major format to
-    block-scaled swizzle format.
-
-    This format is suitable for Tmem as described in NVIDIA documentation:
-    https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
-
-    Args:
-        scale_tensor: Input tensor in row-major format with 8-bit elements
-
-    Returns:
-        Rearranged tensor in block-scaled swizzle format
-    """
     assert scale_tensor.element_size() == 1, (
         "Expected element size to be 1 byte (8 bits)"
     )
@@ -105,7 +93,6 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
 
     rows, cols = scale_tensor.shape
 
-    # Calculate blocks needed
     n_row_blocks = triton.cdiv(rows, 128)
     n_col_blocks = triton.cdiv(cols, 4)
     padded_rows = n_row_blocks * 128
@@ -113,17 +100,11 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
 
     out = scale_tensor.new_empty((padded_rows, padded_cols))
 
-    # Input stride (for row-major format)
     input_row_stride = cols
-
-    # We probably want handle multiple blocks per tile but
-    # for now keep it simple
     BLOCK_ROWS, BLOCK_COLS = 128, 4
-
-    # Output block stride for the rearranged format
     output_block_stride = BLOCK_ROWS * BLOCK_COLS * (padded_cols // BLOCK_COLS)
 
-    grid = lambda META: (
+    grid = lambda _: (
         triton.cdiv(padded_rows, BLOCK_ROWS),
         triton.cdiv(padded_cols, BLOCK_COLS),
     )
@@ -140,6 +121,14 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     )
 
     return out
+
+
+@triton_mx_block_rearrange.register_fake
+def _triton_mx_block_rearrange_fake(scale_tensor: torch.Tensor) -> torch.Tensor:
+    rows, cols = scale_tensor.shape
+    padded_rows = cdiv(rows, 128) * 128
+    padded_cols = cdiv(cols, 4) * 4
+    return scale_tensor.new_empty((padded_rows, padded_cols))
 
 
 def to_blocked(
