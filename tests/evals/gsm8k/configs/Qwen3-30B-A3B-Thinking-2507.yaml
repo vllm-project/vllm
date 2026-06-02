@@ -1,5 +1,5 @@
 model_name: "Qwen/Qwen3-30B-A3B-Thinking-2507"
-accuracy_threshold: 0.58
+accuracy_threshold: 0.81
 num_questions: 1319
 num_fewshot: 5
 max_tokens: 1024
