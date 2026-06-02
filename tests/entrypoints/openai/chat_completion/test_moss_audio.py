@@ -13,7 +13,10 @@ from vllm.multimodal.utils import encode_audio_base64, encode_audio_url
 
 MODEL_NAME = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
 TEST_AUDIO = AudioAsset("winning_call")
+MARY_HAD_LAMB_AUDIO = AudioAsset("mary_had_lamb")
 QUESTION = "What is happening in this audio?"
+MARY_HAD_LAMB_QUESTION = "Transcribe this audio."
+MARY_HAD_LAMB_KEYWORDS = ("mary", "lamb", "fleece", "snow")
 
 
 @pytest.fixture(scope="module")
@@ -44,13 +47,16 @@ def client(server):
     return server.get_client()
 
 
-def _messages_from_audio_url(audio_url: str) -> list[dict[str, object]]:
+def _messages_from_audio_url(
+    audio_url: str,
+    question: str = QUESTION,
+) -> list[dict[str, object]]:
     return [
         {
             "role": "user",
             "content": [
                 {"type": "audio_url", "audio_url": {"url": audio_url}},
-                {"type": "text", "text": QUESTION},
+                {"type": "text", "text": question},
             ],
         }
     ]
@@ -75,6 +81,15 @@ def _get_test_audio_data():
     return TEST_AUDIO.audio_and_sample_rate
 
 
+def _assert_mentions_mary_had_lamb(text: str | None) -> None:
+    assert text is not None
+    text_lower = text.lower()
+    assert any(word in text_lower for word in MARY_HAD_LAMB_KEYWORDS), (
+        "Expected MOSS-Audio to mention one of "
+        f"{MARY_HAD_LAMB_KEYWORDS}, got {text!r}"
+    )
+
+
 def test_single_chat_session_audio_url(
     client: openai.OpenAI,
 ):
@@ -90,6 +105,21 @@ def test_single_chat_session_audio_url(
     choice = chat_completion.choices[0]
     assert choice.message.content is not None
     assert choice.message.content.strip() != ""
+
+
+def test_mary_had_lamb_keywords(
+    client: openai.OpenAI,
+):
+    audio_url = encode_audio_url(*MARY_HAD_LAMB_AUDIO.audio_and_sample_rate)
+    chat_completion = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=_messages_from_audio_url(audio_url, MARY_HAD_LAMB_QUESTION),
+        max_completion_tokens=16,
+        temperature=0.0,
+    )
+
+    assert len(chat_completion.choices) == 1
+    _assert_mentions_mary_had_lamb(chat_completion.choices[0].message.content)
 
 
 def test_single_chat_session_input_audio(
