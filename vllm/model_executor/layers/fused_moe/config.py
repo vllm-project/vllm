@@ -895,6 +895,9 @@ def fp8_w8a16_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
@@ -920,6 +923,9 @@ def fp8_w8a16_moe_quant_config(
             None,
             w2_bias,
         ),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 

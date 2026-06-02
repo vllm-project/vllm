@@ -232,7 +232,10 @@ class MiniMaxM3MoE(nn.Module):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
-            activation=config.hidden_act,
+            # w13 (gate_up_proj) is loaded packed via MergedColumnParallelLinear
+            # ([all gates; all ups]), so use the uninterleaved SwiGLU-OAI variant
+            # rather than the interleaved gpt-oss layout.
+            activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=config.swiglu_beta,

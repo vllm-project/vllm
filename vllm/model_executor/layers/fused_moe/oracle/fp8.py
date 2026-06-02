@@ -541,6 +541,9 @@ def make_fp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=block_shape,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # Flashinfer CUTLASS per-tensor uses single dq scale

@@ -175,11 +175,13 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         # silu/swigluoai go through the fused alpha/beta kernel; swiglustep
-        # uses the unfused activation path.
+        # uses the unfused activation path. The fused kernel reads packed w13
+        # (gate = first half, up = second half), so it implements the
+        # *uninterleaved* SwiGLU-OAI variant.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.SWIGLUSTEP,
-            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -231,7 +233,11 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
         # silu and swigluoai are both expressible by the fused gated kernel via
         # (alpha, beta): silu uses alpha=1, beta=0; swigluoai uses config values.
-        fused_gated = activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+        # The fused kernel reads packed w13, hence SWIGLUOAI_UNINTERLEAVE.
+        fused_gated = activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
 
         # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:

@@ -34,6 +34,9 @@ class MiniMaxM3TextConfig(PretrainedConfig):
         partial_rotary_factor: float = 0.5,
         hidden_act: str = "swigluoai",
         swiglu_alpha: float = 1.702,
+        # SwiGLU-OAI uses the (up + 1) bias, i.e. beta=1.0 (matches the
+        # reference: gate * sigmoid(gate * alpha) * (up + 1)). The checkpoint
+        # config omits swiglu_beta, so this default must stay 1.0.
         swiglu_beta: float = 1.0,
         swiglu_limit: float = 7.0,
         use_qk_norm: bool = True,
