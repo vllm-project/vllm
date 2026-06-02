@@ -5,6 +5,10 @@
 import pytest
 import torch
 
+from vllm.models.minimax_m3.common.ops.index_topk import (
+    minimax_m3_index_topk,
+    minimax_m3_index_topk_decode,
+)
 from vllm.models.minimax_m3.common.ops.sparse_attn import minimax_m3_sparse_attn
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
@@ -22,6 +26,164 @@ SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
 
 
+# Index top-k kernels.
+def _reference_index_topk(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    q_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    topk: int,
+    init_blocks: int,
+    local_blocks: int,
+    sm_scale: float,
+) -> torch.Tensor:
+    total_q, num_idx_heads, _ = idx_q.shape
+    out = torch.full(
+        (num_idx_heads, total_q, topk), -1, device=idx_q.device, dtype=torch.int32
+    )
+
+    q_start = 0
+    for req_id, (q_len, seq_len, prefix_len) in enumerate(
+        zip(q_lens.tolist(), seq_lens.tolist(), prefix_lens.tolist())
+    ):
+        q_end = q_start + q_len
+        q = idx_q[q_start:q_end]
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        pages = block_table[req_id, :num_blocks]
+        k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
+        score = torch.einsum("qhd,kd->hqk", q.float(), k.float()) * sm_scale
+
+        q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
+        k_pos = torch.arange(k.shape[0], device=idx_q.device)
+        score.masked_fill_(k_pos[None, :] > q_pos[:, None], -float("inf"))
+        score = score.reshape(num_idx_heads, q_len, num_blocks, BLOCK_SIZE)
+        score_tensor = score.max(dim=3).values
+
+        valid_blocks = (q_pos + BLOCK_SIZE) // BLOCK_SIZE
+        for local_q, num_valid_blocks in enumerate(valid_blocks.tolist()):
+            end = min(init_blocks, num_valid_blocks)
+            score_tensor[:, local_q, :end] = 1e30
+            start = max(0, num_valid_blocks - local_blocks)
+            score_tensor[:, local_q, start:num_valid_blocks] = 1e29
+
+            k = min(topk, num_valid_blocks)
+            topk_idx = score_tensor[:, local_q].topk(k, dim=1).indices
+            out[:, q_start + local_q, :k] = topk_idx
+        q_start = q_end
+
+    return out
+
+
+def test_prefill_index_topk_correctness():
+    topk = 6
+    init_blocks = 0
+    local_blocks = 1
+    num_idx_heads = 2
+    head_dim = 16
+    q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    seq_lens = prefix_lens + q_lens
+    batch = q_lens.numel()
+    max_seq_len = seq_lens.max().item()
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = batch * max_blocks
+
+    cu_seqlens = torch.zeros(batch + 1, device="cuda", dtype=torch.int32)
+    cu_seqlens[1:] = q_lens.cumsum(0)
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+    idx_q = torch.ones(q_lens.sum().item(), num_idx_heads, head_dim, device="cuda")
+    index_kv_cache = torch.empty(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+    for req_id in range(batch):
+        for block_id in range(max_blocks):
+            page = block_table[req_id, block_id]
+            index_kv_cache[page].fill_(block_id + 1)
+
+    actual = minimax_m3_index_topk(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        cu_seqlens,
+        seq_lens,
+        prefix_lens,
+        max_query_len=q_lens.max().item(),
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        sm_scale=head_dim**-0.5,
+    )
+    expected = _reference_index_topk(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        head_dim**-0.5,
+    )
+    assert torch.equal(actual, expected)
+
+
+def test_decode_index_topk_correctness():
+    topk = 6
+    init_blocks = 0
+    local_blocks = 1
+    num_idx_heads = 2
+    head_dim = 16
+    seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
+    q_lens = torch.ones_like(seq_lens)
+    prefix_lens = seq_lens - 1
+    batch = seq_lens.numel()
+    max_seq_len = seq_lens.max().item()
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = batch * max_blocks
+
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+    idx_q = torch.ones(batch, num_idx_heads, head_dim, device="cuda")
+    index_kv_cache = torch.empty(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+    for req_id in range(batch):
+        for block_id in range(max_blocks):
+            page = block_table[req_id, block_id]
+            index_kv_cache[page].fill_(block_id + 1)
+
+    actual = minimax_m3_index_topk_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        sm_scale=head_dim**-0.5,
+    )
+    expected = _reference_index_topk(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        q_lens,
+        seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        head_dim**-0.5,
+    )
+    assert torch.equal(actual, expected)
+
+
+# Sparse attention kernels.
 def _reference_sparse_attn(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -89,7 +251,6 @@ def test_prefill_sparse_attention_correctness(
         if not has_cutedsl():
             pytest.skip("cutedsl (cutlass) is not installed")
 
-    torch.manual_seed(0)
     assert len(q_lens) == len(kv_lens)
     assert all(kv_len >= q_len for q_len, kv_len in zip(q_lens, kv_lens))
 

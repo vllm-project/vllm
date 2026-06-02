@@ -276,7 +276,9 @@ def _topk_index_kernel(
         + pid_h * stride_ti_h
         + off_t * stride_ti_t
     )
-    store_mask = tl.arange(0, BLOCK_SIZE_T) < min(topk, valid_blocks)
+    store_mask = off_t < topk
+    valid_mask = off_t < valid_blocks
+    topk_idx = tl.where(store_mask & valid_mask, topk_idx, -1)
     tl.store(ti_ptrs, topk_idx.to(ti_ptrs.dtype.element_ty), mask=store_mask)
 
 
@@ -582,8 +584,11 @@ def _topk_index_merge_kernel(
         + pid_b * stride_tif_b
         + off_t * stride_tif_t
     )
+    store_mask = off_t < topk
     topk_idx_final = tl.where(off_t < tl.minimum(topk, num_blocks), topk_idx_final, -1)
-    tl.store(tif_ptrs, topk_idx_final.to(ti_final_ptr.dtype.element_ty))
+    tl.store(
+        tif_ptrs, topk_idx_final.to(ti_final_ptr.dtype.element_ty), mask=store_mask
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -618,9 +623,8 @@ def minimax_m3_index_topk(
     batch = cu_seqlens_q.shape[0] - 1
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
 
-    score = torch.full(
+    score = torch.empty(
         (num_idx_heads, total_q, max_block),
-        float("-inf"),
         dtype=torch.float32,
         device=idx_q.device,
     )
@@ -651,9 +655,8 @@ def minimax_m3_index_topk(
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
     )
 
-    topk_idx = torch.full(
+    topk_idx = torch.empty(
         (num_idx_heads, total_q, topk),
-        fill_value=-1,
         dtype=torch.int32,
         device=idx_q.device,
     )
@@ -705,9 +708,8 @@ def minimax_m3_index_topk_decode(
     )
     batch = total_q
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
-    score = torch.full(
+    score = torch.empty(
         (num_idx_heads, total_q, max_block),
-        float("-inf"),
         dtype=torch.float32,
         device=idx_q.device,
     )
@@ -746,9 +748,8 @@ def minimax_m3_index_topk_decode(
         NUM_KV_CHUNKS=num_kv_chunks,
     )
 
-    topk_idx = torch.full(
+    topk_idx = torch.empty(
         (num_idx_heads, total_q, topk),
-        fill_value=-1,
         dtype=torch.int32,
         device=idx_q.device,
     )
