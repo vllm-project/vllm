@@ -214,7 +214,6 @@ def run_with_expert_maps(
                 moe_config=moe_config,
                 quant_config=new_quant_config,
             ),
-            inplace=False,
         )
         out_tensor = out_tensor + kernel.apply(**kwargs)
 
@@ -284,7 +283,6 @@ def run_8_bit(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
         return kernel.apply(**kwargs)
 

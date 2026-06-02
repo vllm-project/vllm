@@ -821,7 +821,10 @@ class StreamingXMLToolCallParser:
                         raw_for_parse = raw_text + "\n"
                     else:
                         raw_for_parse = raw_text
-                    parsed_value = ast.literal_eval(raw_for_parse)
+                    try:
+                        parsed_value = json.loads(raw_for_parse)
+                    except json.JSONDecodeError:
+                        parsed_value = ast.literal_eval(raw_for_parse)
                     output_arguments = json.dumps(parsed_value, ensure_ascii=False)
                 except Exception:
                     # Fallback: output as string as-is
