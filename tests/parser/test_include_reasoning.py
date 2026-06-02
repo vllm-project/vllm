@@ -354,25 +354,30 @@ class TestParseDeltaIncludeReasoning:
 
 
 class TestResponsesParserIncludeReasoning:
-    def test_process_include_false_suppresses_reasoning(self, tokenizer):
-        """ResponsesParser.process() suppresses reasoning items."""
+    def _make_responses_parser(self, tokenizer, request):
         from vllm.entrypoints.openai.parser.responses_parser import (
             ResponsesParser,
         )
-        from vllm.outputs import CompletionOutput
 
-        request = make_responses_request(include_reasoning=False)
+        _WrappedParser.reasoning_parser_cls = ThinkReasoningParser
+        _WrappedParser.tool_parser_cls = None
         response_messages: list = []
 
-        parser = ResponsesParser(
+        return ResponsesParser(
             tokenizer=tokenizer,
-            reasoning_parser_cls=ThinkReasoningParser,
+            parser_cls=_WrappedParser,
             response_messages=response_messages,
             request=request,
-            tool_parser_cls=None,
             chat_template=None,
             chat_template_content_format="auto",
         )
+
+    def test_process_include_false_suppresses_reasoning(self, tokenizer):
+        """ResponsesParser.process() suppresses reasoning items."""
+        from vllm.outputs import CompletionOutput
+
+        request = make_responses_request(include_reasoning=False)
+        parser = self._make_responses_parser(tokenizer, request)
 
         output = CompletionOutput(
             index=0,
@@ -394,23 +399,10 @@ class TestResponsesParserIncludeReasoning:
 
     def test_process_include_true_has_reasoning(self, tokenizer):
         """ResponsesParser.process() includes reasoning by default."""
-        from vllm.entrypoints.openai.parser.responses_parser import (
-            ResponsesParser,
-        )
         from vllm.outputs import CompletionOutput
 
         request = make_responses_request(include_reasoning=True)
-        response_messages: list = []
-
-        parser = ResponsesParser(
-            tokenizer=tokenizer,
-            reasoning_parser_cls=ThinkReasoningParser,
-            response_messages=response_messages,
-            request=request,
-            tool_parser_cls=None,
-            chat_template=None,
-            chat_template_content_format="auto",
-        )
+        parser = self._make_responses_parser(tokenizer, request)
 
         output = CompletionOutput(
             index=0,
