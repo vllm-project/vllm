@@ -637,6 +637,14 @@ class DeepseekV4MoE(nn.Module):
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
+        self.n_redundant_experts = 0
+        self.n_shared_experts = config.n_shared_experts or 0
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts
+        self.n_local_physical_experts = self.n_local_experts
+        self.physical_expert_start = self.experts_start_idx
+        self.physical_expert_end = self.experts_end_idx
+
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
