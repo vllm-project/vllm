@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -119,6 +120,37 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
     return serving_chat
 
 
+def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = OnlineRenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        model_registry=models.registry,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    serving_render = ServingRender(
+        model_config=engine.model_config,
+        model_registry=models.registry,
+        online_renderer=online_renderer
+    )
+    async def _fake_preprocess_chat(*args, **kwargs):
+        # return conversation, engine_inputs
+        return (
+            [{"role": "user", "content": "Test"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+
+    serving_render.online_renderer.preprocess_chat = AsyncMock(
+        side_effect=_fake_preprocess_chat
+    )
+    return serving_render
+
+
 @pytest.mark.asyncio
 async def test_chat_error_non_stream():
     """test finish_reason='error' returns 500 InternalServerError (non-streaming)"""
@@ -200,18 +232,18 @@ async def test_renderer_only_chat_request_skips_mm_cache():
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_chat = _build_serving_chat(mock_engine)
+    serving_render = _build_serving_render(mock_engine)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "Test prompt"}],
     )
 
-    result = await serving_chat.online_renderer.render_chat_request(request)
+    result = await serving_render.render_chat_request(request)
 
     assert result.token_ids == [1, 2, 3]
     assert (
-        serving_chat.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
+        serving_render.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
     )
 
