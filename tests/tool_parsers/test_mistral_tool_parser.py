@@ -1382,7 +1382,20 @@ def test_adjust_request_non_mistral_tokenizer(
     [
         {"regex": r"\d+"},
         {"choice": ["a", "b"]},
-        {"structural_tag": '{"key": "value"}'},
+        {
+            "structural_tag": json.dumps(
+                {
+                    "structures": [
+                        {
+                            "begin": "<tool>",
+                            "schema": {"type": "object"},
+                            "end": "</tool>",
+                        }
+                    ],
+                    "triggers": ["<tool>"],
+                }
+            )
+        },
         {"grammar": "start: 'hello'"},
     ],
     ids=["regex", "choice", "structural_tag", "grammar"],
@@ -1404,7 +1417,18 @@ def test_adjust_request_unsupported_response_format(
 ) -> None:
     request = _make_request(
         response_format=StructuralTagResponseFormat(
-            type="structural_tag", format={"some": "config"}
+            type="structural_tag",
+            format={
+                "type": "triggered_tags",
+                "tags": [
+                    {
+                        "begin": "<tool>",
+                        "content": {"type": "any_text"},
+                        "end": "</tool>",
+                    }
+                ],
+                "triggers": ["<tool>"],
+            },
         ),
     )
     result = mistral_tool_parser.adjust_request(request)
