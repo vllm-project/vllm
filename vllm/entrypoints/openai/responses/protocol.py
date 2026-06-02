@@ -527,7 +527,7 @@ class ResponsesRequest(OpenAIBaseModel):
             elif item_type == "message" and item.get("role") == "assistant":
                 content = item.get("content")
                 if not isinstance(content, list):
-                    # String (or missing) content is a valid EasyInputMessageParam,
+                    # String content is a valid EasyInputMessageParam,
                     # do not coerce it to ResponseOutputMessage
                     processed_input.append(item)
                     continue
