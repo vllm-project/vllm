@@ -353,13 +353,13 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     for the given attention phase.
 
     SM90 (Hopper) supports the XQA decode kernel but not TRTLLM prefill.
-    SM100+ supports TRTLLM for both phases.  All others are unsupported.
+    SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
-    # Batch-invariant mode disables TRTLLM attention.
+    # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires NVIDIA artifactory to be accessible to download cubins.
+    # Requires NVIDIA artifactory to be accessible to download cubins
     if not has_nvidia_artifactory():
         return False
 
@@ -410,13 +410,13 @@ def use_trtllm_attention(
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
-    """Return ``True`` if TRTLLM attention should be used for this call."""
+    """Return `True` if TRTLLM attention is used."""
 
-    # CLI argument is set to 0 - respect it.
+    # CLI argument is set to 0 - respect it
     if force_use_trtllm is not None and not force_use_trtllm:
         return False
 
-    # Decode context parallel is not supported.
+    # Decode context parallel is not supported
     if dcp_world_size > 1:
         logger.warning_once(
             "Trtllm does not support returning LSE and as a result "
@@ -424,7 +424,7 @@ def use_trtllm_attention(
         )
         return False
 
-    # The platform is not supported.
+    # The platform is not supported
     if not supports_trtllm_attention(is_prefill=is_prefill):
         if force_use_trtllm:
             logger.warning_once(
@@ -434,7 +434,7 @@ def use_trtllm_attention(
             )
         return False
 
-    # The combination of query and key heads is not supported.
+    # The combination of query and key heads is not supported
     if num_qo_heads % num_kv_heads != 0:
         if force_use_trtllm:
             logger.warning_once(
@@ -444,31 +444,32 @@ def use_trtllm_attention(
             )
         return False
 
-    # Speculative decoding requires TRTLLM attention for decodes.
     if has_spec and not is_prefill:
+        # Speculative decoding requires TRTLLM attention for decodes
         logger.info_once("Using TRTLLM attention (enabled for speculative decoding).")
         return True
 
-    # Must use TRTLLM attention if query is FP8 quantized.
+    # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
-    # TRTLLM is the only backend that supports attention sinks.
+    # If sinks are being used, we must use TRTLLM attention as it's
+    # the only backend that supports them
     if has_sinks:
         logger.info_once("Using TRTLLM attention (required for attention sinks).")
         return True
 
     if force_use_trtllm is None:
-        # Auto-detect.
+        # CLI argument not set - use auto-detection
         if is_prefill:
-            # Prefill: TRTLLM only when KV cache dtype is "auto" (BF16/FP16).
+            # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
         elif current_platform.is_device_capability(90) and kv_cache_dtype != "auto":
             # SM90 + FP8/NVFP4 KV cache: prefer XQA decode kernel.
             use_trtllm = True
         else:
-            # SM100 decode: only at small batch with auto KV dtype.
+            # Decode auto-detection
             use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
         if use_trtllm:
             logger.warning_once(
@@ -477,7 +478,7 @@ def use_trtllm_attention(
             )
         return use_trtllm
 
-    # CLI argument is set to 1 - respect it.
+    # CLI argument is set to 1 - respect it
     logger.info_once(
         "Using TRTLLM attention (--attention-config.use_trtllm_attention is set to 1)"
     )
