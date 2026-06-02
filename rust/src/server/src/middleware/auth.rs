@@ -62,13 +62,9 @@ fn verify_token(authorization: Option<&HeaderValue>, api_keys: &[String]) -> boo
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    let mut diff = left.len() ^ right.len();
-    for index in 0..left.len().max(right.len()) {
-        let left = left.get(index).copied().unwrap_or_default();
-        let right = right.get(index).copied().unwrap_or_default();
-        diff |= usize::from(left ^ right);
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+
+    bool::from(left.ct_eq(right))
 }
 
 #[cfg(test)]

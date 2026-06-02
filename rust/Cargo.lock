@@ -5814,6 +5814,7 @@ dependencies = [
  "serde_with",
  "serial_test",
  "socket2",
+ "subtle",
  "thiserror-ext",
  "tokio",
  "tokio-stream",

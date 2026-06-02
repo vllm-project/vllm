@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
 socket2.workspace = true
+subtle.workspace = true
 thiserror-ext.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
