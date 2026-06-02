@@ -164,9 +164,10 @@ def compute_tile_loop_bounds(
     Combines three concerns into one helper:
 
     1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active or non-causal sequences need the full
-       sequence.
+       Clamped to ``seq_len`` for causal requests. MM prefix needs the
+       full valid sequence but must not extend tile loads past ``seq_len``;
+       non-causal and per-sequence causal batches may extend to the full
+       sequence range.
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA.
        For non-causal sequences, the window extends in both directions.
@@ -182,7 +183,12 @@ def compute_tile_loop_bounds(
         + (BLOCK_M - 1) // num_queries_per_kv
         + 1
     )
-    if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+    if USE_MM_PREFIX:
+        # Image bidirectional attention ranges require the full valid sequence
+        # to make sure the prefix mask is complete, but q-block padding must
+        # not extend tile loads past seq_len.
+        max_seq_prefix_len = seq_len
+    elif USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
         # Non-causal or mixed batches need the full sequence range.
         # Per-element masking in compute_kv_seq_mask handles the
         # actual causal/non-causal boundary per sequence.

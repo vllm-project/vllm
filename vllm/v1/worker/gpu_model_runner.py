@@ -153,6 +153,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_attn_backend_cache_dtype_str,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
@@ -7118,12 +7119,13 @@ class GPUModelRunner(
                     else:
                         shape_block_size = kernel_block_size
 
+                    cache_dtype_str = get_attn_backend_cache_dtype_str(kv_cache_spec)
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         shape_block_size,
                         kv_cache_spec.num_kv_heads,
                         kv_cache_spec.head_size,
-                        cache_dtype_str=self.cache_config.cache_dtype,
+                        cache_dtype_str=cache_dtype_str,
                     )
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
@@ -7131,6 +7133,12 @@ class GPUModelRunner(
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    block_dim = attn_backend.get_kv_cache_block_dim(
+                        shape_block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype_str=cache_dtype_str,
+                    )
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
                         kv_cache_spec,
@@ -7138,6 +7146,7 @@ class GPUModelRunner(
                         kv_cache_stride_order,
                         kernel_num_blocks,
                         packing,
+                        block_dim,
                     )
 
                 elif isinstance(kv_cache_spec, MambaSpec):
@@ -7192,7 +7201,7 @@ class GPUModelRunner(
                 kernel_block_sizes[group.kv_cache_group_id],
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
-                cache_dtype_str=self.cache_config.cache_dtype,
+                cache_dtype_str=get_attn_backend_cache_dtype_str(kv_cache_spec),
             )
             # block_dim: 0 means (num_blocks, 2, ...); 1 means (2, num_blocks, ...).
             if block_dim == 0:
