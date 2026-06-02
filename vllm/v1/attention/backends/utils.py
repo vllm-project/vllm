@@ -136,6 +136,32 @@ def get_per_layer_parameters(
     return per_layer_params
 
 
+def get_num_attention_heads_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> int | None:
+    """Per-TP-rank ``num_heads`` shared by the named Attention layers.
+
+    Use in metadata builders whose plan-time allocations depend on the
+    head count: the model-wide ``get_num_attention_heads()`` is wrong
+    for models with non-uniform per-layer head counts. All layers in
+    one attention group must agree on ``num_heads``; this is asserted.
+    Returns ``None`` when no matching Attention layer is found.
+    """
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    if not attn_layers:
+        return None
+    heads = {layer.impl.num_heads for layer in attn_layers.values()}
+    assert len(heads) == 1, (
+        f"All layers in one attention group must share num_heads; "
+        f"got {heads} for {layer_names}."
+    )
+    return heads.pop()
+
+
 def infer_global_hyperparameters(
     per_layer_params: dict[str, PerLayerParameters],
 ) -> PerLayerParameters:
@@ -878,8 +904,10 @@ def mamba_get_block_table_tensor(
     Get the block table tensor for mamba kernels from the input
     common_attn_metadata.block_table_tensor given different mamba cache modes.
 
-    - "all":   input  (#requests, cdiv(max_model_len, block_size));
-               output (#requests, cdiv(max_model_len, block_size)).
+    - "all":   input  (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks);
+               output (#requests, cdiv(max_model_len, block_size)
+                        + num_speculative_blocks).
 
     - "none":  input  (#requests, 1 + num_speculative_blocks);
                output (#requests, 1 + num_speculative_blocks).
