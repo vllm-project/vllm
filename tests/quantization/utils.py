@@ -80,6 +80,8 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
+    # model specific, allenai/OLMoE-1B-7B-0125-Instruct fp8 online quant
+    # uses 6.65 GiB for weight loading (bf16 checkpoint is ~12.89 GiB)
     expected_model_memory_gib = 6.7
 
     # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06

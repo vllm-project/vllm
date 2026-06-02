@@ -265,7 +265,10 @@ that `df1e30e74` depends on are not yet in this fork:
 - **vllm-project/vllm#39205** (`MxFp8LinearKernel` refactor). Upstream's scheme
   file imports `init_mxfp8_linear_kernel()`, which does not exist here. The
   cohere port wires directly to `Mxfp8LinearOp` instead, mirroring
-  `Mxfp8OnlineLinearMethod` in `vllm/model_executor/layers/quantization/mxfp8.py`.
+  `Mxfp8OnlineLinearMethod` in
+  `vllm/model_executor/layers/quantization/online/mxfp8.py` (moved from the
+  former single-file path as part of the new online-quant frontend; see
+  section 12).
 - **vllm-project/vllm#39187** (CT MoE "Oracle Structure" package split).
   Upstream places the new MoE method at
   `compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w8a8_mxfp8.py`.
@@ -311,3 +314,109 @@ git grep -nE '# cohere.*#38815|Upstream-Commit:.*df1e30e74|Drop-After-Upstream-M
 2. Accuracy: `lm_eval --model vllm --trust_remote_code --model_args pretrained=AliEdalati97/Qwen3-30B-A3B-MXFP8 --tasks gsm8k,mmlu_pro --batch_size auto`. Upstream PR reports GSM8K strict-match 88.9, MMLU-Pro 68.8 vs bf16 89.4 / 69.3.
 3. Throughput: confirm FlashInfer-CUTLASS backend is selected (check `logger.info_once("Using %s backend for MXFP8 GEMM", ...)` output) — emulation fallback is materially slower.
 4. Coexistence with `#665` online path: a bf16 checkpoint served with `--quantization mxfp8` should still take the online path; only checkpoints whose `compressed_tensors` config has `type=float, num_bits=8, group_size=32, scale_dtype=uint8` should route to this new scheme.
+
+## 12) Online Quantization Frontend + Cohere `config.json` Path
+
+Online quantization (quantize bf16/fp16 weights at load time, no
+pre-quantized checkpoint) now has a dedicated frontend package under
+`vllm/model_executor/layers/quantization/online/`:
+
+- `base.py` — `OnlineQuantizationConfig` (the `QuantizationConfig` subclass
+  registered as `"online"`); dispatches per-layer to the per-scheme methods
+  in `get_quant_method`.
+- `fp8.py` — `Fp8PerTensorOnline{Linear,MoE}Method`,
+  `Fp8PerBlockOnline{Linear,MoE}Method`.
+- `mxfp8.py` — `Mxfp8Online{Linear,MoE}Method` (moved from the former
+  single-file `vllm/model_executor/layers/quantization/mxfp8.py` in #40152).
+- `int8.py` — `Int8OnlineMoEMethod` (consolidated from `experts_int8` in
+  #38463; weight-only per-channel, MoE experts only — linear layers stay
+  unquantized).
+- `moe_base.py` — `OnlineMoEMethodBase`, the meta-device + QeRL
+  `initialize_online_processing` shared base for all online MoE methods.
+
+### Two entry points into the same config
+
+`OnlineQuantizationConfig` accepts the same scheme set
+(`OnlineQuantScheme` in `vllm/config/quantization.py`:
+`fp8_per_tensor`, `fp8_per_block`, `mxfp8`, `int8_per_channel_weight_only`)
+through two distinct call sites:
+
+1. **CLI / `OnlineQuantizationConfigArgs`** (upstream path, exercised by
+   [`tests/quantization/test_online.py`](../../../tests/quantization/test_online.py)):
+   `--quantization {fp8_per_tensor|fp8_per_block|mxfp8|...}` flows through
+   `resolve_online_quant_config` in `vllm/config/quantization.py`, which
+   normalizes `--quantization` + `quantization_config` into a single
+   `OnlineQuantizationConfigArgs` and rejects mismatched
+   `quantization` / `global_scheme` pairs.
+2. **Cohere `from_config`** (cohere-marked block in
+   [`vllm/model_executor/layers/quantization/online/base.py`](../../../vllm/model_executor/layers/quantization/online/base.py)
+   L91-149, exercised by
+   [`tests/cohere/cpu/test_online_quant_from_config.py`](../../../tests/cohere/cpu/test_online_quant_from_config.py)):
+   loads the config from a checkpoint's `config.json`
+   `quantization_config` block. This path is what `model.config.json` driven
+   workflows hit; the upstream CLI path bypasses it.
+
+### `from_config` schema (cohere path)
+
+```jsonc
+"quantization_config": {
+    // dispatch — either "online" (with explicit overrides below) or one of
+    // the scheme shorthands. Shorthand auto-populates global_scheme.
+    "quant_method": "fp8_per_block",
+
+    // optional. Module names; "re:" prefix opts into regex matching
+    // (semantics from compressed_tensors.should_ignore_layer).
+    "ignore": ["re:.*self_attn\\..*", "model.layers.0.mlp.experts"],
+
+    // optional aliases of "ignore" — merged in declared order
+    // (back-compat with Mxfp8Config / HF / modelopt).
+    "ignored_layers": [...],
+    "modules_to_not_convert": [...],
+
+    // optional per-layer-class overrides; either may be set without
+    // global_scheme.
+    "linear_scheme_override": "fp8_per_block",
+    "moe_scheme_override":   "fp8_per_tensor",
+
+    // optional. Only "dynamic" is accepted; anything else raises ValueError.
+    "activation_scheme": "dynamic"
+}
+```
+
+Validation invariants enforced by `from_config` + `__init__`:
+
+- At least one of `global_scheme`, `linear_scheme_override`,
+  `moe_scheme_override` must be set, else `ValueError("global_scheme...")`.
+- `quant_method` shorthand never clobbers an explicit `global_scheme`.
+- `activation_scheme != "dynamic"` raises `ValueError("activation_scheme...")`.
+
+### Per-layer dispatch
+
+`OnlineQuantizationConfig.get_quant_method` resolves
+`linear_scheme_override or global_scheme` for `LinearBase` and
+`moe_scheme_override or global_scheme` for `FusedMoE`, then routes to the
+matching scheme class above. Layers matching `ignored_layers` (via
+`compressed_tensors.utils.should_ignore_layer`, with
+`packed_modules_mapping` honored) fall back to
+`Unquantized{Linear,FusedMoE}Method`. `INT8_PER_CHANNEL_WEIGHT_ONLY` is a
+MoE-only scheme — linear layers under that scheme are forced unquantized
+with a `warning_once`.
+
+### Change hotspots
+
+- New entries are added by extending `OnlineQuantScheme` and registering a
+  new `{Linear,MoE}Method` pair in `online/`; `from_config` automatically
+  picks up the new shorthand because it derives `scheme_values` from the
+  enum.
+- The `skip_with_substr` knob was removed; ignore semantics now go through
+  `compressed_tensors.utils.should_ignore_layer` exclusively.
+- The cohere `from_config` path is wrapped in `# cohere start` /
+  `# cohere end` markers; keep them in place when porting future
+  upstream changes to this method.
+
+### Validation
+
+- Parsing path: `pytest -v tests/cohere/cpu/test_online_quant_from_config.py`
+  (CPU-only; runs in the `cpu_check` group on every PR).
+- Upstream CLI path:
+  `pytest -v tests/quantization/test_online.py`.

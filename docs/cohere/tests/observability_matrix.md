@@ -40,6 +40,17 @@ This matrix is part of a three-layer documentation structure:
 - 2.1.2 `test_lm_head_fp32_projection_diff_is_small_but_nonzero`
 - 2.1.3 `test_lm_head_fp32_projection_benchmark_writes_summary`
 
+#### 2.2 [Online Quantization Config Parsing](./features/online_quant_config.md)
+
+- 2.2.1 `test_shorthand_quant_method_populates_global_scheme`
+- 2.2.2 `test_online_quant_method_with_explicit_overrides`
+- 2.2.3 `test_explicit_global_scheme_not_overwritten_by_shorthand`
+- 2.2.4 `test_ignore_aliases_are_merged`
+- 2.2.5 `test_ignore_only_from_alias_when_primary_missing`
+- 2.2.6 `test_activation_scheme_dynamic_is_accepted`
+- 2.2.7 `test_activation_scheme_static_raises`
+- 2.2.8 `test_no_scheme_raises`
+
 ### 3. Multimodal
 
 #### 3.1 [MM + GG + TB](./features/mm_gg_tb.md)

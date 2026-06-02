@@ -88,11 +88,65 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "OnlineQuantizationConfig":
-        raise NotImplementedError(
-            "OnlineQuantizationConfig does not support loading from a "
-            "checkpoint config. Use quantization_config or "
-            "quantization='fp8_per_tensor'/'fp8_per_block' instead."
-        )
+        # cohere start
+        """Load online quantization config from a checkpoint's
+        ``config.json`` ``quantization_config`` block.
+
+        Schema::
+
+            "quantization_config": {
+                # Picks the dispatch path. May be ``"online"`` (in which case
+                # ``global_scheme`` / ``linear_scheme_override`` /
+                # ``moe_scheme_override`` must be set in the same dict) or one
+                # of the scheme shorthands ``"fp8_per_tensor"``,
+                # ``"fp8_per_block"``, ``"mxfp8"``, or
+                # ``"int8_per_channel_weight_only"`` -- the latter auto-populate
+                # ``global_scheme``.
+                "quant_method": "fp8_per_block",
+
+                # Optional. Entries are matched as exact module names or
+                # regex patterns when prefixed with ``re:``.
+                "ignore": ["re:.*self_attn\\..*", "model.layers.0.mlp.experts"],
+
+                # Optional aliases of ``ignore`` (for back-compat with
+                # ``Mxfp8Config`` / HF / modelopt). Merged into ``ignore``.
+                "ignored_layers": [...],
+                "modules_to_not_convert": [...],
+
+                # Optional explicit overrides if you want different schemes
+                # for linear vs MoE layers.
+                "linear_scheme_override": "fp8_per_block",
+                "moe_scheme_override": "fp8_per_tensor",
+
+                # Optional, must be ``"dynamic"`` (the only supported value).
+                "activation_scheme": "dynamic"
+            }
+        """
+        args_dict: dict[str, Any] = dict(config)
+
+        quant_method = args_dict.pop("quant_method", None)
+
+        ignore: list[str] = list(args_dict.pop("ignore", None) or [])
+        for alias in ("ignored_layers", "modules_to_not_convert"):
+            extra = args_dict.pop(alias, None)
+            if extra:
+                ignore.extend(extra)
+        if ignore:
+            args_dict["ignore"] = ignore
+
+        activation_scheme = args_dict.pop("activation_scheme", None)
+        if activation_scheme is not None and activation_scheme != "dynamic":
+            raise ValueError(
+                "online quantization only supports activation_scheme="
+                f"'dynamic', got {activation_scheme!r}"
+            )
+
+        scheme_values = {s.value for s in OnlineQuantScheme}
+        if quant_method in scheme_values and args_dict.get("global_scheme") is None:
+            args_dict["global_scheme"] = quant_method
+
+        return cls(args=OnlineQuantizationConfigArgs(**args_dict))
+        # cohere end
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
