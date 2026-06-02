@@ -508,9 +508,11 @@ def triton_turboquant_decode_attention(
 
     Returns: output tensor [B, Hq, D] in query's dtype.
     """
+    # [B, H, N, C] -> [B, N, H, C]
+    kv_cache = kv_cache.permute(0, 2, 1, 3)
     B, Hq, D = query.shape
-    Hk = kv_cache.shape[1]
-    block_size = kv_cache.shape[2]
+    Hk = kv_cache.shape[2]
+    block_size = kv_cache.shape[1]
     kv_group_size = Hq // Hk
     device = query.device
 
@@ -561,8 +563,8 @@ def triton_turboquant_decode_attention(
         q_rot.stride(0),
         q_rot.stride(1),
         kv_cache.stride(0),
-        kv_cache.stride(2),
         kv_cache.stride(1),
+        kv_cache.stride(2),
         block_table.stride(0),
         mid_o.stride(0),
         mid_o.stride(1),

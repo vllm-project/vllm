@@ -350,7 +350,7 @@ def _tq_fused_store_mse(
 def triton_turboquant_store(
     key: torch.Tensor,  # [N, H, D] — raw keys (post-RoPE)
     value: torch.Tensor,  # [N, H, D] — raw values
-    kv_cache: torch.Tensor,  # [num_blocks, Hk, block_size, padded_slot] uint8
+    kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
     slot_mapping: torch.Tensor,  # [N] int32
     PiT: torch.Tensor,  # [D, D] float32
     midpoints: torch.Tensor,  # [n_centroids-1] float32
@@ -360,9 +360,11 @@ def triton_turboquant_store(
     key_fp8: bool = False,
 ):
     """Launch TQ store kernel (FP8 or MSE path)."""
+    # [B, H, N, C] -> [B, N, H, C]
+    kv_cache = kv_cache.permute(0, 2, 1, 3)
     N, H, D = key.shape
     NH = N * H
-    block_size = kv_cache.shape[2]
+    block_size = kv_cache.shape[1]
     BLOCK_D = triton.next_power_of_2(D)
     mse_bytes = math.ceil(D * mse_bits / 8)
     n_centroids = 2**mse_bits
@@ -373,8 +375,8 @@ def triton_turboquant_store(
 
     # Cache strides (element_size=1 for uint8, so stride in bytes = stride())
     stride_block = kv_cache.stride(0)
-    stride_head = kv_cache.stride(1)
-    stride_pos = kv_cache.stride(2)
+    stride_pos = kv_cache.stride(1)
+    stride_head = kv_cache.stride(2)
 
     block_grp = triton.next_power_of_2(D // 8) if D >= 8 else 1
 

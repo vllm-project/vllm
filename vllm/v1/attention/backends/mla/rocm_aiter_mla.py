@@ -889,7 +889,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             device=q.device,
         )
 
-        kv_buffer = kv_c_and_k_pe_cache.transpose(1, 2)
+        kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
         # Build kwargs for mla_decode_fwd. Pass persistent metadata only
         # when it was successfully computed (qseqlen=1 decode steps).

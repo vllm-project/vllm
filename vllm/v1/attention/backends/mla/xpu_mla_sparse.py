@@ -197,7 +197,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+            -1, 1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)

@@ -1342,9 +1342,7 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: KV cache tensor with different possible shapes:
-                - NHC: [num_blocks, 2, block_size, num_kv_heads, head_size]
-                - HNC: [num_blocks, 2, num_kv_heads, block_size, head_size]
+            kv_cache: [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1457,8 +1455,14 @@ class FlashInferImpl(AttentionImpl):
         # Split K/V — zero-copy views.
         # For nvfp4, K and V are stored as separate head groups (2*H heads
         # in dim 1); for other dtypes, K and V are packed in the content dim.
+        nvfp4_kv_data = None
+        nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
             kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=1)
+            k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
+            v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
+            nvfp4_kv_data = (k_data, v_data)
+            nvfp4_kv_block_scales = (k_sf, v_sf)
         else:
             kv_cache_tuple = kv_cache_permute.split(self.head_size, dim=-1)
 
@@ -1471,25 +1475,12 @@ class FlashInferImpl(AttentionImpl):
             trtllm_kv_layout = flashinfer_layout
 
         if attn_metadata.use_cascade:
-            # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache_tuple))
             return output
 
-        # When using spec decoding, num_decodes can be < num_decode_tokens
-        # because some decode requests may have more than one query token.
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
-
-        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
-        # Split into correctly-strided data and scale views.
-        nvfp4_kv_data = None
-        nvfp4_kv_block_scales = None
-        if self.is_kvcache_nvfp4:
-            k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
-            v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
-            nvfp4_kv_data = (k_data, v_data)
-            nvfp4_kv_block_scales = (k_sf, v_sf)
 
         use_dcp = self.dcp_world_size > 1
 

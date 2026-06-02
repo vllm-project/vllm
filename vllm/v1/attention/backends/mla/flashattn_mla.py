@@ -326,7 +326,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError("FP8 FlashAttention MLA not yet supported")
 
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.transpose(1, 2)
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank :]
 

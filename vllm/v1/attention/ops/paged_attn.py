@@ -19,33 +19,16 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return strided K/V views over the unified KV cache.
-
-        Input ``kv_cache`` has shape ``[B, N, H, 2*C]`` with K and V
-        interleaved in the trailing content dim. Returns:
-          * key_cache:   ``[B, H, C//x, N, x]``
-          * value_cache: ``[B, H, N, C]``
-
-        where ``x = 16 // element_size``. V is in ``[B, H, N, C]`` (not
-        the legacy ``[B, H, C, N]``) because no permutation of the
-        interleaved cache yields N-innermost as a view. Triton consumers
-        use explicit per-dim strides, so the layout change is invisible
-        as long as callers pass strides by semantic dimension.
-
-        TODO(RFC #42082): the ROCm C++ ``ops.paged_attention_rocm`` kernel
-        still requires the legacy V layout and contiguous tensors;
-        ``has_native_kv_cache_layout`` routes around it. A follow-up
-        should port that HIP kernel to consume the unified layout.
-        """
+        # [B, H, N, 2*C] -> key [B, H, C//x, N, x], value [B, H, C, N]
         x = 16 // kv_cache.element_size()
         key_slice = kv_cache[..., :head_size]
         value_slice = kv_cache[..., head_size:]
         key_cache = (
-            key_slice.permute(0, 2, 1, 3)
-            .unflatten(-1, (head_size // x, x))
-            .transpose(2, 3)
+            key_slice.permute(0, 1, 3, 2)
+            .unflatten(2, (head_size // x, x))
+            .transpose(3, 4)
         )
-        value_cache = value_slice.permute(0, 2, 1, 3)
+        value_cache = value_slice.permute(0, 1, 3, 2)
         return key_cache, value_cache
 
     @staticmethod

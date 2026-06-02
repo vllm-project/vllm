@@ -252,7 +252,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # tokenspeed_mla_decode expects 3D (num_blocks, block_size, head_size).
         o = tokenspeed_mla_decode(
             query=q,
-            kv_cache=kv_c_and_k_pe_cache.squeeze(1),
+            kv_cache=kv_c_and_k_pe_cache,
             workspace_buffer=self._workspace_buffer,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
