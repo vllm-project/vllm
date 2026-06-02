@@ -373,7 +373,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
         # internally via a single fused kernel.
-        return not self.moe_config.use_mori_kernels
+        return not (
+            self.moe_config.use_moriep_ht_kernels
+            or self.moe_config.use_moriep_ll_kernels
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -487,6 +490,29 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             num_local_tokens = expert_tokens_meta.expert_num_tokens
         else:
             num_local_tokens = None
+
+        # MoRI FP4 dispatch onto non-mxfp4 weights: there is no AITER kernel for
+        # the (fp4x2 act / fp8|bf16 weight) pair, so dequantize the dispatched
+        # activations back to the compute dtype and let fused_moe re-quantize.
+        # The default path (mxfp4 weights) feeds fp4x2 + e8m0 straight into the
+        # BLOCK_1X32 kernel and is intentionally left untouched.
+        if hidden_states.dtype == torch.float4_e2m1fn_x2 and not (
+            self.quant_config.use_mxfp4_w4a4 or self.quant_config.use_mxfp4_w4a16
+        ):
+            from vllm.model_executor.layers.fused_moe.rocm_mori_utils import (
+                upscale_mxfp4,
+            )
+
+            assert a1q_scale is not None, "FP4 dispatch must provide e8m0 scales"
+            recv_token_num = (
+                num_local_tokens
+                if num_local_tokens is not None
+                else torch.tensor(hidden_states.shape[0], device=hidden_states.device)
+            )
+            hidden_states = upscale_mxfp4(
+                hidden_states, a1q_scale, recv_token_num, output.dtype
+            )
+            a1q_scale = None
 
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,

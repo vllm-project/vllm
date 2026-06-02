@@ -335,7 +335,10 @@ class FusedMoE(PluggableLayer):
             swiglu_limit=swiglu_limit,
             # TODO: in_dtype == out_dtype?
         )
-        if self.moe_config.use_mori_kernels:
+        if (
+            self.moe_config.use_moriep_ht_kernels
+            or self.moe_config.use_moriep_ll_kernels
+        ):
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
             )

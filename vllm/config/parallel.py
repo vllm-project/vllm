@@ -42,8 +42,8 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "mori_high_throughput",
-    "mori_low_latency",
+    "moriep_high_throughput",
+    "moriep_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -178,8 +178,9 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
-    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
+    - "moriep_high_throughput": MoRI EP with InterNodeV1/InterNodeV1LL
+      for intra/inter-node
+    - "moriep_low_latency": MoRI EP with AsyncLL kernel for intra/inter-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
@@ -628,8 +629,8 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "mori_high_throughput",
-                "mori_low_latency",
+                "moriep_high_throughput",
+                "moriep_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
