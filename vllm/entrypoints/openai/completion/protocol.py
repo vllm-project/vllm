@@ -18,6 +18,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
+    validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -370,6 +372,9 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter="response_format",
                 )
 
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+
         return data
 
     @model_validator(mode="before")
@@ -397,6 +402,7 @@ class CompletionRequest(OpenAIBaseModel):
                 "outputs ('json', 'regex' or 'choice').",
                 parameter="structured_outputs",
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
