@@ -1759,9 +1759,24 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                needs_fp8_out = False
+                # NVFP4 trtllm-gen prefill only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out = self._nvfp4_fp8_out[:num_prefill_tokens]
+
                 prefill_kv_block_scales = None
-                if (
+                if self.is_kvcache_nvfp4:
+                    # NVFP4 trtllm-gen prefill requires FP8 query.
+                    assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
+                        "NVFP4 KV cache requires FP8 quantized queries for "
+                        "trtllm-gen prefill. Set "
+                        "disable_flashinfer_q_quantization=False."
+                    )
+                    mock_kv_cache = nvfp4_kv_data
+                    mock_block_table = block_tables_prefill
+                    prefill_kv_block_scales = nvfp4_kv_block_scales
+                elif (
                     attn_metadata.q_data_type_prefill != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
                 ):
