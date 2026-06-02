@@ -26,7 +26,7 @@
 
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -74,6 +74,9 @@ from .minicpmv import (
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
+
+if TYPE_CHECKING:
+    from vllm.transformers_utils.processors.minicpmo import MiniCPMOProcessor
 
 if os.getenv("USE_FLAGOS") == "1":
     import flag_gems
