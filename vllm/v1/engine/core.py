@@ -461,6 +461,8 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
+
+        batch_start_time_ns = time.time_ns()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -470,6 +472,40 @@ class EngineCore:
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+            batch_end_time_ns = time.time_ns()
+
+            # Emit per-request vllm_step_execution spans
+            step_attributes = {
+                "num_prefill_requests": len(scheduler_output.scheduled_new_reqs),
+                "num_decode_requests": len(
+                    scheduler_output.scheduled_cached_reqs.req_ids
+                ),
+                "total_scheduled_tokens": scheduler_output.total_num_scheduled_tokens,
+            }
+            prefill_attrs = {"phase": "prefill", **step_attributes}
+            decode_attrs = {"phase": "decode", **step_attributes}
+
+            for req_data in scheduler_output.scheduled_new_reqs:
+                req = self.scheduler.get_request(req_data.req_id)
+                if req and req.trace_headers:
+                    attrs = (
+                        decode_attrs if req.num_computed_tokens > 0 else prefill_attrs
+                    )
+                    req.emit_span(
+                        span_name="vllm_step_execution",
+                        start_time=batch_start_time_ns,
+                        end_time=batch_end_time_ns,
+                        attributes=attrs,
+                    )
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                req = self.scheduler.get_request(req_id)
+                if req and req.trace_headers:
+                    req.emit_span(
+                        span_name="vllm_step_execution",
+                        start_time=batch_start_time_ns,
+                        end_time=batch_end_time_ns,
+                        attributes=decode_attrs,
+                    )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -518,6 +554,8 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+
+            scheduler_output.batch_start_time_ns = time.time_ns()
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -561,6 +599,8 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
+
+        batch_start_time_ns = scheduler_output.batch_start_time_ns
         with (
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
@@ -571,6 +611,45 @@ class EngineCore:
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
+            batch_end_time_ns = time.time_ns()
+
+            # Emit per-request vllm_step_execution spans
+            if batch_start_time_ns is not None:
+                step_attributes = {
+                    "num_prefill_requests": len(scheduler_output.scheduled_new_reqs),
+                    "num_decode_requests": len(
+                        scheduler_output.scheduled_cached_reqs.req_ids
+                    ),
+                    "total_scheduled_tokens": (
+                        scheduler_output.total_num_scheduled_tokens
+                    ),
+                }
+                prefill_attrs = {"phase": "prefill", **step_attributes}
+                decode_attrs = {"phase": "decode", **step_attributes}
+
+                for req_data in scheduler_output.scheduled_new_reqs:
+                    req = self.scheduler.get_request(req_data.req_id)
+                    if req and req.trace_headers:
+                        attrs = (
+                            decode_attrs
+                            if req.num_computed_tokens > 0
+                            else prefill_attrs
+                        )
+                        req.emit_span(
+                            span_name="vllm_step_execution",
+                            start_time=batch_start_time_ns,
+                            end_time=batch_end_time_ns,
+                            attributes=attrs,
+                        )
+                for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                    req = self.scheduler.get_request(req_id)
+                    if req and req.trace_headers:
+                        req.emit_span(
+                            span_name="vllm_step_execution",
+                            start_time=batch_start_time_ns,
+                            end_time=batch_end_time_ns,
+                            attributes=decode_attrs,
+                        )
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
