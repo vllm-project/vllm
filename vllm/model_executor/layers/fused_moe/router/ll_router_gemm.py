@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 _cutedsl_available: bool | None = None
 
+
 # Called once per process.
 def is_available() -> bool:
     global _cutedsl_available

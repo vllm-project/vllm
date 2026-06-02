@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""cuteDSL A GEMM: C[M,N] = A[M,K] @ B[N,K]^T.
+
+Dot-product kernel for low-latency problems using FMA instructions.
+"""
+
 import operator
 
 import cutlass
@@ -7,29 +12,29 @@ import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
 
 
-# Returns a compiled host function specialized for a specific K. 
-# The closure captures all K-derived constants, so the kernel has zero runtime 
+# Returns a compiled host function specialized for a specific K.
+# The closure captures all K-derived constants, so the kernel has zero runtime
 # loop overhead
 # TODO (roberto): add 256-bit instructions support.
 def make_host_bf16(k_val: int):
     # Main loop constants
-    _VPT = 8 # vectors per thread: 8 × bf16 (2 bytes) = 16 bytes = 128-bit load
-    _BS = 256 # block size: 256 threads
+    _VPT = 8  # vectors per thread: 8 × bf16 (2 bytes) = 16 bytes = 128-bit load
+    _BS = 256  # block size: 256 threads
     _KPI = _VPT * _BS  # = 2048 K elements processed per main-loop iteration
     _k_main = k_val // _KPI  # main loop iters
-    
-    # Tail loop constants
-    _VPT_T = 4 # 4 × bf16 = 8 bytes = 64-bit load
-    _KPT = _VPT_T * _BS  # = 1024 K elements per tail iteration
-    _k_tail = (k_val - _k_main * _KPI) // _KPT # Number of 64-bit tail iterations
-    
-    # Scalar remainder
-    _k_done = _k_main * _KPI + _k_tail * _KPT # elements handled by vectorized loops
-    _scalar_rem = k_val - _k_done # leftover
-    _ks_full = _scalar_rem // _BS # full scalar iterations (256 threads, 1 elem each)
-    _ks_part = _scalar_rem % _BS # partial: fewer than 256 active threads
 
-    # ^ Every one of these becomes a Constexpr inside the kernel, 
+    # Tail loop constants
+    _VPT_T = 4  # 4 × bf16 = 8 bytes = 64-bit load
+    _KPT = _VPT_T * _BS  # = 1024 K elements per tail iteration
+    _k_tail = (k_val - _k_main * _KPI) // _KPT  # Number of 64-bit tail iterations
+
+    # Scalar remainder
+    _k_done = _k_main * _KPI + _k_tail * _KPT  # elements handled by vectorized loops
+    _scalar_rem = k_val - _k_done  # leftover
+    _ks_full = _scalar_rem // _BS  # full scalar iterations (256 threads, 1 elem each)
+    _ks_part = _scalar_rem % _BS  # partial: fewer than 256 active threads
+
+    # ^ Every one of these becomes a Constexpr inside the kernel,
     # so the compiler statically removes dead branches.
 
     @cute.kernel
@@ -37,40 +42,48 @@ def make_host_bf16(k_val: int):
         gA: cute.Tensor,  # activations, flat [M*K]
         gB: cute.Tensor,  # weights, flat [N*K]
         gC: cute.Tensor,  # output, flat [M*N]
-        M: cutlass.Constexpr,     # number of tokens (compile-time constant)
-        K_dim: cutlass.Constexpr, # hidden dimension (compile-time constant)
-        N_dim: cutlass.Int32,     # number of experts (runtime value)
+        M: cutlass.Constexpr,  # number of tokens (compile-time constant)
+        K_dim: cutlass.Constexpr,  # hidden dimension (compile-time constant)
+        N_dim: cutlass.Int32,  # number of experts (runtime value)
     ):
         cute.arch.setmaxregister_increase(128)
-        
-        tidx  = cute.arch.thread_idx()[0] # [0, 255]
-        n_idx = cute.arch.block_idx()[0] # which expert this CTA computes. [0, N-1]
-        
+
+        tidx = cute.arch.thread_idx()[0]  # [0, 255]
+        n_idx = cute.arch.block_idx()[0]  # which expert this CTA computes. [0, N-1]
+
         # Compile-time constants
         VPT: cutlass.Constexpr = _VPT
         BS: cutlass.Constexpr = _BS
         KPI: cutlass.Constexpr = _KPI
         K_MAIN: cutlass.Constexpr = _k_main
-        
+
         elem = gB.element_type
-        b_base = gB.iterator + n_idx * K_dim  # Pointer to the start of this expert's weight row in the flat B tensor
-        tid_off = tidx * VPT # This thread's starting offset within a K-chunk (256 threads, 8 bf16 elements each)
+        b_base = (
+            gB.iterator + n_idx * K_dim
+        )  # Pointer to the start of this expert's weight row in the flat B tensor
+        tid_off = (
+            tidx * VPT
+        )  # This thread's starting offset within a K-chunk (256 threads, 8 bf16 elements each)
 
         # One FP32 accumulator per token, in registers
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
-        for m in cutlass.range_constexpr(M): # fully unrolls
+        for m in cutlass.range_constexpr(M):  # fully unrolls
             acc[m] = cutlass.Float32(0.0)
 
-        cute.arch.griddepcontrol_wait() # PDL wait
+        cute.arch.griddepcontrol_wait()  # PDL wait
 
         # Main K-loop (fully unrolled via range_constexpr)
-        for ki in cutlass.range_constexpr(K_MAIN):            
+        for ki in cutlass.range_constexpr(K_MAIN):
             # Load B tile - B is loaded once from GMEM per K-iteration, then reused across all M tokens
             kb = ki * KPI + tid_off
-            bp = (b_base + kb).align(16) # pointer with 16-byte alignment guarantees
-            bt = cute.make_tensor(bp, cute.make_layout((VPT,))) # creates a 1D tensor view of 8 elements
-            br = cute.make_rmem_tensor((VPT,), elem) # allocates 8 registers for the loaded data
-            cute.autovec_copy(bt, br) # GMEM -> RF
+            bp = (b_base + kb).align(16)  # pointer with 16-byte alignment guarantees
+            bt = cute.make_tensor(
+                bp, cute.make_layout((VPT,))
+            )  # creates a 1D tensor view of 8 elements
+            br = cute.make_rmem_tensor(
+                (VPT,), elem
+            )  # allocates 8 registers for the loaded data
+            cute.autovec_copy(bt, br)  # GMEM -> RF
             # Batch-load all A tokens into registers
             ar_all = cute.make_rmem_tensor((M, VPT), elem)
             for m in cutlass.range_constexpr(M):
@@ -80,13 +93,13 @@ def make_host_bf16(k_val: int):
                 cute.autovec_copy(at, ar)
                 # This indirection exists because autovec_copy needs a 1D target
                 for v in cutlass.range_constexpr(VPT):
-                    ar_all[m, v] = ar[v] # register-to-register copy
+                    ar_all[m, v] = ar[v]  # register-to-register copy
             # FMA Compute (all data in registers)
             for m in cutlass.range_constexpr(M):
                 for v in cutlass.range_constexpr(VPT):
                     acc[m] = acc[m] + ar_all[m, v].to(cutlass.Float32) * br[v].to(
                         cutlass.Float32
-                    ) # upcast from bf16 to FP32 before multiply-add — no tensor cores
+                    )  # upcast from bf16 to FP32 before multiply-add — no tensor cores
 
         VPT_T: cutlass.Constexpr = _VPT_T
         KPT: cutlass.Constexpr = _KPT
@@ -124,9 +137,9 @@ def make_host_bf16(k_val: int):
                 ar = cute.make_rmem_tensor((1,), elem)
                 cute.autovec_copy(at, ar)
                 acc[m] = acc[m] + ar[0].to(cutlass.Float32) * bv
-        # Compile-time guard (_ks_part > 0) — if there's no partial remainder, this entire 
-        # block is eliminated from the binary. 
-        # Runtime guard (tidx < KS_PART) — only the first _ks_part threads participate. 
+        # Compile-time guard (_ks_part > 0) — if there's no partial remainder, this entire
+        # block is eliminated from the binary.
+        # Runtime guard (tidx < KS_PART) — only the first _ks_part threads participate.
         # Remaining threads are idle but don't execute any loads (no out-of-bounds access).
         if _ks_part > 0:
             KS_PART: cutlass.Constexpr = _ks_part
@@ -148,7 +161,7 @@ def make_host_bf16(k_val: int):
 
         # Intra-warp shuffle reduction
         WS: cutlass.Constexpr = 32
-        NW: cutlass.Constexpr = BS // WS # = 8 warps        
+        NW: cutlass.Constexpr = BS // WS  # = 8 warps
         for m in cutlass.range_constexpr(M):
             acc[m] = cute.arch.warp_reduction(acc[m], operator.add)
             # TODO (roberto): uses __shfl_xor_sync -> try redux.sync.add instead
@@ -157,9 +170,11 @@ def make_host_bf16(k_val: int):
         wid = tidx // WS
         lid = tidx % WS
         sp = cute.arch.alloc_smem(cutlass.Float32, M * NW, alignment=16)
-        sm = cute.make_tensor(sp, cute.make_layout((M, NW))) # token partials are contiguous in M-dim
+        sm = cute.make_tensor(
+            sp, cute.make_layout((M, NW))
+        )  # token partials are contiguous in M-dim
         for m in cutlass.range_constexpr(M):
-            if lid == 0: # Lane 0 of each warp writes its partial sum
+            if lid == 0:  # Lane 0 of each warp writes its partial sum
                 sm[m, wid] = acc[m]
 
         # Final reduction and output
@@ -169,8 +184,8 @@ def make_host_bf16(k_val: int):
                 t = cutlass.Float32(0.0)
                 for w in cutlass.range_constexpr(NW):
                     t = t + sm[m, w]
-                gC[m * N_dim + n_idx] = t.to(cutlass.Float32)
-        cute.arch.griddepcontrol_launch_dependents() # PDL signal
+                gC[m * N_dim + n_idx] = t
+        cute.arch.griddepcontrol_launch_dependents()  # PDL signal
 
     @cute.jit
     def host_bf16_lf(
@@ -183,7 +198,7 @@ def make_host_bf16(k_val: int):
         stream: CUstream,
     ):
         dotprod_bf16_lf(gA, gB, gC, M, K_dim, N_dim).launch(
-            grid=[N_dim, 1, 1], # one CTA per expert
+            grid=[N_dim, 1, 1],  # one CTA per expert
             block=[256, 1, 1],
             smem=M * 4 * 8,
             stream=stream,
