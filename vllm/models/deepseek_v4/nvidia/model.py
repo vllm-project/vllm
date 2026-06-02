@@ -420,25 +420,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 f"but the symmetric buffer was sized for {self.max_num_tokens}."
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        self._run_mega_moe(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            y,
-            activation_clamp,
-            fast_math,
-        )
-        return y
 
-    def _run_mega_moe(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        y: torch.Tensor,
-        activation_clamp: float | None,
-        fast_math: bool,
-    ) -> None:
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
