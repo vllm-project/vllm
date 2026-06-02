@@ -292,10 +292,6 @@ ARG SCCACHE_WEBDAV_TOKEN
 ARG SCCACHE_WEBDAV_KEY_PREFIX
 # cohere end
 ARG SCCACHE_DOWNLOAD_URL
-ARG SCCACHE_ENDPOINT
-ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
-ARG SCCACHE_REGION_NAME=us-west-2
-ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 # Flag to control whether to use pre-built vLLM wheels
 ARG VLLM_USE_PRECOMPILED=""
@@ -321,10 +317,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
 
 # Build the vLLM wheel
-# if USE_SCCACHE is set, use sccache to speed up compilation
-# AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
+# if USE_SCCACHE is set, use sccache to speed up compilation (Depot WebDAV for Cohere CI)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         echo "Installing sccache..." \
         && case "${TARGETPLATFORM}" in \
@@ -342,10 +336,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export SCCACHE_WEBDAV_TOKEN="${SCCACHE_WEBDAV_TOKEN}" \
         && export SCCACHE_WEBDAV_KEY_PREFIX="${SCCACHE_WEBDAV_KEY_PREFIX}$([ "${SCCACHE_ARCH}" = "aarch64" ] && echo "-arm64")" \
         # cohere end
-        && if [ ! -z ${SCCACHE_ENDPOINT} ] ; then export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT} ; fi \
-        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
-        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
-        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
         && export SCCACHE_IDLE_TIMEOUT=0 \
         && export CMAKE_BUILD_TYPE=Release \
         && export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" \

@@ -53,6 +53,7 @@ Intent:
 Rebase risk:
 
 - upstream sccache updates often touch the same area; partial cherry-picks can leave mixed env var sets and silently disable cache reuse.
+- do not re-add `SCCACHE_BUCKET` / `SCCACHE_REGION` / `SCCACHE_ENDPOINT` in the `csrc-build` wheel step: sccache prefers S3 over WebDAV and Depot CI gets `403` on `vllm-build-sccache` without vLLM AWS creds (v0.21 merge regression; v0.19.1b03 was WebDAV-only).
 
 ## 4) CPU Build Divergence Points
 
