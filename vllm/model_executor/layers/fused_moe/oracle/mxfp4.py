@@ -1191,7 +1191,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 ]:
     """Convert loaded weights into backend-specific kernel format.
 
-    Supports DeepGEMM, TRTLLM MXFP8, Triton and Marlin backends.
+    Supports DeepGEMM, TRTLLM MXFP8, CUTLASS MXFP8, Triton and Marlin backends.
     """
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
@@ -1245,6 +1245,47 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     hidden_size = w13_weight.shape[2] * 2
 
     sf_block_size = 32  # mxfp4 block size
+
+    if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8:
+        from flashinfer import block_scale_interleave
+
+        w13_weight = w13_weight.data
+        w2_weight = w2_weight.data
+        w13_weight_scale = w13_weight_scale.data
+        w2_weight_scale = w2_weight_scale.data
+
+        # FlashInfer CUTLASS expects [up, gate], while vLLM stores [gate, up].
+        w1_weight = w13_weight[:, :intermediate_size, :]
+        w3_weight = w13_weight[:, intermediate_size:, :]
+        w13_weight = torch.cat([w3_weight, w1_weight], dim=1).contiguous()
+
+        w1_scale = w13_weight_scale[:, :intermediate_size, :]
+        w3_scale = w13_weight_scale[:, intermediate_size:, :]
+        w13_weight_scale = torch.cat([w3_scale, w1_scale], dim=1).contiguous()
+
+        if w13_bias is not None:
+            b1 = w13_bias[:, :intermediate_size]
+            b3 = w13_bias[:, intermediate_size:]
+            w13_bias = torch.cat([b3, b1], dim=1).contiguous()
+
+        w13_scale_shape = w13_weight_scale.shape
+        w13_weight_scale = block_scale_interleave(
+            w13_weight_scale.view(torch.uint8)
+        ).reshape(w13_scale_shape)
+
+        w2_scale_shape = w2_weight_scale.shape
+        w2_weight_scale = block_scale_interleave(
+            w2_weight_scale.view(torch.uint8)
+        ).reshape(w2_scale_shape)
+
+        return (
+            w13_weight,
+            w2_weight.contiguous(),
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     if mxfp4_backend in TRTLLM_BACKENDS:
         assert _cache_permute_indices is not None
