@@ -142,6 +142,10 @@ class Request:
         self.async_tokens_to_discard = 0
 
         self.spec_token_ids: list[int] = []
+        # Number of async speculative placeholders to emit as -1 tokens in the
+        # next scheduling step. This is distinct from spec_token_ids, which
+        # only stores real draft token IDs.
+        self.num_pending_async_spec_placeholders = 0
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
@@ -241,7 +245,11 @@ class Request:
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return len(self._all_token_ids) + len(self.spec_token_ids)
+        return (
+            len(self._all_token_ids)
+            + len(self.spec_token_ids)
+            + self.num_pending_async_spec_placeholders
+        )
 
     @property
     def num_output_tokens(self) -> int:

@@ -121,9 +121,19 @@ def create_scheduler(
 
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
-        speculative_config = SpeculativeConfig(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
-        )
+        # VllmConfig requires ngram_gpu (not plain ngram) when async scheduling
+        # and speculative decoding are both enabled. SpeculativeConfig infers
+        # method "draft_model" if only model=... is set for unknown names, so
+        # pass method="ngram_gpu" explicitly.
+        if async_scheduling:
+            speculative_config = SpeculativeConfig(
+                method="ngram_gpu",
+                num_speculative_tokens=num_speculative_tokens,
+            )
+        else:
+            speculative_config = SpeculativeConfig(
+                model="ngram", num_speculative_tokens=num_speculative_tokens
+            )
 
     ec_transfer_config = (
         ECTransferConfig(

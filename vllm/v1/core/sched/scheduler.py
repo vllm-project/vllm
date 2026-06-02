@@ -337,7 +337,8 @@ class Scheduler(SchedulerInterface):
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
         # num_tokens_with_spec. num_tokens_with_spec =
-        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
+        # len(prompt_token_ids) + len(output_token_ids)
+        # + len(spec_token_ids) + num_pending_async_spec_placeholders.
         # At each step, the scheduler tries to assign tokens to the requests
         # so that each request's num_computed_tokens can catch up its
         # num_tokens_with_spec. This is general enough to cover
@@ -505,17 +506,14 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
-            if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens
-                    + request.num_computed_tokens
-                    - request.num_tokens
-                    - request.num_output_placeholders
+            if (
+                request.spec_token_ids
+                or request.num_pending_async_spec_placeholders > 0
+            ):
+                spec_token_ids = self._consume_spec_decode_tokens_for_step(
+                    request, num_new_tokens
                 )
-                if num_scheduled_spec_tokens > 0:
-                    spec_token_ids = request.spec_token_ids
-                    if len(spec_token_ids) > num_scheduled_spec_tokens:
-                        spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                if spec_token_ids is not None:
                     scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
@@ -940,6 +938,60 @@ class Scheduler(SchedulerInterface):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
 
+    def _consume_spec_decode_tokens_for_step(
+        self, request: Request, num_new_tokens: int
+    ) -> list[int] | None:
+        """Build this step's speculative tokens and consume pending intent.
+
+        `request.spec_token_ids` stores only real draft token IDs. Async
+        placeholder intent is tracked separately in
+        `request.num_pending_async_spec_placeholders` and materialized as
+        `-1` tokens only when the request was present in the previous worker
+        batch (required for GPU-side overwrite in async input preparation).
+
+        Args:
+            request: Request being considered for scheduling.
+            num_new_tokens: Number of tokens scheduled for this request in this
+                step.
+
+        Returns:
+            A list of scheduled speculative tokens for this step, or `None` if
+            no speculative tokens should be scheduled.
+
+        Side effects:
+            Consumes (clears) `request.num_pending_async_spec_placeholders`
+            regardless of whether placeholders are materialized.
+        """
+        num_scheduled_spec_tokens = (
+            num_new_tokens
+            + request.num_computed_tokens
+            - request.num_tokens
+            - request.num_output_placeholders
+        )
+        if num_scheduled_spec_tokens <= 0:
+            request.num_pending_async_spec_placeholders = 0
+            return None
+
+        pending_placeholders = request.num_pending_async_spec_placeholders
+        request.num_pending_async_spec_placeholders = 0
+
+        if request.spec_token_ids:
+            spec_token_ids = request.spec_token_ids
+        elif (
+            self.scheduler_config.async_scheduling
+            and pending_placeholders > 0
+            and request.request_id in self.prev_step_scheduled_req_ids
+        ):
+            # These placeholders are consumed by worker-side async input
+            # preparation before model execution.
+            spec_token_ids = [-1] * pending_placeholders
+        else:
+            return None
+
+        if len(spec_token_ids) > num_scheduled_spec_tokens:
+            spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+        return spec_token_ids
+
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -960,6 +1012,7 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
+        request.num_pending_async_spec_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1721,6 +1774,7 @@ class Scheduler(SchedulerInterface):
                 # Ignore draft tokens for prefill chunks.
                 if request.spec_token_ids:
                     request.spec_token_ids = []
+                request.num_pending_async_spec_placeholders = 0
                 continue
 
             # Add newly generated spec token ids to the request.
@@ -1728,6 +1782,7 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
+            request.num_pending_async_spec_placeholders = 0
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
