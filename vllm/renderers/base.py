@@ -419,17 +419,28 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     @staticmethod
-    def _tokens_prompt_with_offsets(
+    def _tokens_prompt_from_encoding(
         encoding,
         prompt: "TextPrompt",
+        *,
+        with_offsets: bool,
     ) -> "TokensPrompt":
-        return TokensPrompt(
-            prompt_token_ids=list(encoding["input_ids"]),
-            prompt_token_offsets=[
-                (int(s), int(e)) for s, e in encoding["offset_mapping"]
-            ],
-            **prompt,
-        )
+        """Build a TokensPrompt from a BatchEncoding.
+
+        Both tokenization paths go through the tokenizer's ``__call__``
+        (which returns a BatchEncoding), so token ids are always read from
+        ``encoding["input_ids"]``. Offsets are attached only when requested.
+        """
+        token_ids = list(encoding["input_ids"])
+        if with_offsets:
+            return TokensPrompt(
+                prompt_token_ids=token_ids,
+                prompt_token_offsets=[
+                    (int(s), int(e)) for s, e in encoding["offset_mapping"]
+                ],
+                **prompt,
+            )
+        return TokensPrompt(prompt_token_ids=token_ids, **prompt)
 
     def _tokenize_prompt(
         self,
@@ -437,20 +448,14 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        if self._wants_offsets(prompt, params):
-            encoding = tokenizer(
-                prompt["prompt"],
-                **params.get_encode_kwargs(),
-                return_offsets_mapping=True,  # type: ignore[call-arg]
-            )
-            return self._tokens_prompt_with_offsets(encoding, prompt)
-
-        prompt_token_ids = tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
+        want_offsets = self._wants_offsets(prompt, params)
+        kwargs = params.get_encode_kwargs()
+        if want_offsets:
+            kwargs = {**kwargs, "return_offsets_mapping": True}
+        encoding = tokenizer(prompt["prompt"], **kwargs)
+        return self._tokens_prompt_from_encoding(
+            encoding, prompt, with_offsets=want_offsets
         )
-
-        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
     async def _tokenize_prompt_async(
         self,
@@ -458,20 +463,14 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_async_tokenizer()
-        if self._wants_offsets(prompt, params):
-            encoding = await tokenizer(
-                prompt["prompt"],
-                **params.get_encode_kwargs(),
-                return_offsets_mapping=True,
-            )
-            return self._tokens_prompt_with_offsets(encoding, prompt)
-
-        prompt_token_ids = await tokenizer.encode(
-            prompt["prompt"],
-            **params.get_encode_kwargs(),
+        want_offsets = self._wants_offsets(prompt, params)
+        kwargs = params.get_encode_kwargs()
+        if want_offsets:
+            kwargs = {**kwargs, "return_offsets_mapping": True}
+        encoding = await tokenizer(prompt["prompt"], **kwargs)
+        return self._tokens_prompt_from_encoding(
+            encoding, prompt, with_offsets=want_offsets
         )
-
-        return TokensPrompt(prompt_token_ids=prompt_token_ids, **prompt)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
