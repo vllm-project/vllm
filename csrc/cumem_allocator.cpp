@@ -66,8 +66,8 @@ static CUresult reserve_rocm_address(CUdeviceptr* d_mem, size_t size,
     return status;
   }
 
-  CUresult free_status = cuMemAddressFree(*d_mem, size);
-  return free_status == CUresult(0) ? hipErrorInvalidValue : free_status;
+  (void)cuMemAddressFree(*d_mem, size);
+  return hipErrorNotSupported;
 }
 
 static const char* PYARGS_PARSE = "KKKO";
