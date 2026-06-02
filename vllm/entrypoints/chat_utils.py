@@ -578,7 +578,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
-    @cached_property
+    @property
     def video_processor_name(self) -> str | None:
         return get_video_processor_cls_name(self.model_config)
 

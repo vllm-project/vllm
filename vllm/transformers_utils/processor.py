@@ -177,6 +177,7 @@ def get_video_processor_cls_name_from_config(
     return None
 
 
+@lru_cache
 def get_video_processor_cls_name(
     model_config: "ModelConfig",
 ) -> str | None:
