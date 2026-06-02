@@ -36,7 +36,13 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         "norm_before_residual", True
     )
     pre_trained_config["norm_before_fc"] = config_dict.get("norm_before_fc", False)
-    pre_trained_config["architectures"] = ["Eagle3LlamaForCausalLM"]
+    eagle3_arch_map = {
+        "qwen3": "Eagle3Qwen3ForCausalLM",
+    }
+    model_type = pre_trained_config.get("model_type", "llama")
+    pre_trained_config["architectures"] = [
+        eagle3_arch_map.get(model_type, "Eagle3LlamaForCausalLM")
+    ]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
         pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
             "eagle_aux_hidden_state_layer_ids"
