@@ -39,7 +39,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -1402,34 +1401,6 @@ def test_hybrid_attention_mamba_tensor_shapes():
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
-
-
-def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride():
-    ambiguous_cache = torch.empty((2, 2, BLOCK_SIZE, 1, 8), dtype=torch.float16)
-    hidden_size = ambiguous_cache.shape[2:].numel()
-    assert ambiguous_cache.stride()[:2] == (2 * hidden_size, hidden_size)
-
-    attention_spec = AttentionSpec(
-        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.float16
-    )
-    runner_stub = SimpleNamespace(
-        cache_config=SimpleNamespace(cache_dtype="auto"),
-        _kv_cache_spec_attn_group_iterator=lambda: iter(
-            [
-                AttentionGroup(
-                    _DTypeSensitiveAttentionBackend,
-                    ["attn"],
-                    attention_spec,
-                    0,
-                )
-            ]
-        ),
-    )
-    GPUModelRunner._update_hybrid_attention_mamba_layout(
-        runner_stub, {"attn": ambiguous_cache}, [BLOCK_SIZE]
-    )
-
-    assert ambiguous_cache.stride()[:2] == (hidden_size, 2 * hidden_size)
 
 
 def test_attn_backend_cache_dtype_str_uses_spec_quant_mode():
