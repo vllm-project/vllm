@@ -132,19 +132,23 @@ def test_dflash_first_prefill_query_window_fits_allocated_blocks():
 
 
 def test_dflash_drafter_window_reserves_bonus_token():
-    # DFlash's drafter window is num_spec + 1 with the extra slot as bonus token
+    # DFlash's drafter window is num_spec + 1 (the extra slot is the bonus token),
+    # so max_seq_len + num_spec + 1 must stay within the draft model's max len.
+    input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
     dflash_runner = SimpleNamespace(
         num_spec_tokens=NUM_SPECULATIVE_TOKENS,
         effective_drafter_max_model_len=100,
         speculative_config=_dflash_speculative_config(NUM_SPECULATIVE_TOKENS),
     )
-    assert GPUModelRunner._input_fits_in_drafter(dflash_runner, 96)  # 96 + 4 == 100
-    assert not GPUModelRunner._input_fits_in_drafter(dflash_runner, 97)  # 97 + 4 > 100
+    # window = 4, so 96 fits (96 + 4 == 100) but 97 does not (97 + 4 == 101)
+    assert input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=96))
+    assert not input_fits_in_drafter(dflash_runner, SimpleNamespace(max_seq_len=97))
+    assert not input_fits_in_drafter(dflash_runner, None)  # no metadata
 
-    # Other drafters don't reserve the bonus token, so 97 still fits
+    # Other drafters don't reserve the bonus token, so 97 fits (97 + 3 == 100).
     plain_runner = SimpleNamespace(
         num_spec_tokens=NUM_SPECULATIVE_TOKENS,
         effective_drafter_max_model_len=100,
         speculative_config=SimpleNamespace(use_dflash=lambda: False),
     )
-    assert GPUModelRunner._input_fits_in_drafter(plain_runner, 97)  # 97 + 3 == 100
+    assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
