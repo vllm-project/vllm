@@ -32,12 +32,42 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_ar
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+
+def _merge_dcp_compressor_stats(
+    partial_m: torch.Tensor,
+    partial_s: torch.Tensor,
+    partial_v: torch.Tensor,
+    dcp_group: Any,
+) -> torch.Tensor:
+    valid = partial_s > 0
+    masked_m = torch.where(
+        valid,
+        partial_m,
+        torch.full_like(partial_m, -float("inf")),
+    )
+    gathered_m = dcp_group.all_gather(masked_m, dim=0).reshape(
+        (dcp_group.world_size,) + masked_m.shape
+    )
+    global_m = gathered_m.max(dim=0).values
+
+    scale = torch.exp(masked_m - global_m)
+    scale = torch.where(valid, scale, torch.zeros_like(scale))
+    rescaled_s = torch.where(valid, partial_s * scale, torch.zeros_like(partial_s))
+    rescaled_v = torch.where(valid, partial_v * scale, torch.zeros_like(partial_v))
+    reduce_payload = torch.stack((rescaled_s, rescaled_v))
+    global_s, global_v = dcp_group.all_reduce(reduce_payload).unbind(0)
+
+    return torch.where(
+        global_s > 0,
+        global_v / global_s,
+        torch.zeros_like(global_v),
+    )
 
 
 class CompressorBackend(AttentionBackend):
@@ -460,24 +490,13 @@ class DeepseekCompressor(nn.Module):
             **pdl_kwargs,
         )
 
-        valid = partial_s > 0
-        partial_out = torch.where(
-            valid,
-            partial_v / partial_s,
-            torch.zeros_like(partial_v),
-        )
-        partial_lse = torch.where(
-            valid,
-            partial_m + torch.log(partial_s),
-            torch.full_like(partial_m, -float("inf")),
-        )
         assert self.dcp_group is not None
-        compressed_kv = cp_lse_ag_out_ar(
-            partial_out.unsqueeze(-1),
-            partial_lse,
+        compressed_kv = _merge_dcp_compressor_stats(
+            partial_m,
+            partial_s,
+            partial_v,
             self.dcp_group,
-            is_lse_base_on_e=True,
-        ).squeeze(-1)
+        )
 
         if self.head_dim == 512:
             dsv4_dcp_finalize_sparse_attn_kernel[(num_actual,)](
