@@ -420,10 +420,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
     @staticmethod
     def _build_tokens_prompt(
-        token_ids,
+        token_ids: Sequence[int],
         prompt: "TextPrompt",
         *,
-        offset_mapping=None,
+        offset_mapping: Sequence[tuple[int, int]] | None = None,
     ) -> "TokensPrompt":
         """Build a TokensPrompt from already-extracted token ids.
 
