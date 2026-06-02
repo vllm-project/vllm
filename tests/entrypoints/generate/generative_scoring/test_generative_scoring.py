@@ -18,13 +18,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.generative_scoring.serving import (
+from vllm.entrypoints.generate.generative_scoring.serving import (
     GenerativeScoringItemResult,
     GenerativeScoringRequest,
     GenerativeScoringResponse,
-    OpenAIServingGenerativeScoring,
+    ServingGenerativeScoring,
 )
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logprobs import Logprob
@@ -86,13 +86,13 @@ def _create_mock_engine():
     return mock_engine
 
 
-def _create_serving(mock_engine) -> OpenAIServingGenerativeScoring:
-    """Create an OpenAIServingGenerativeScoring instance with mocks."""
+def _create_serving(mock_engine) -> ServingGenerativeScoring:
+    """Create an ServingGenerativeScoring instance with mocks."""
     models = OpenAIServingModels(
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    return OpenAIServingGenerativeScoring(mock_engine, models, request_logger=None)
+    return ServingGenerativeScoring(mock_engine, models, request_logger=None)
 
 
 def _create_mock_request_output(logprobs_dict: dict[int, float]) -> RequestOutput:
@@ -186,7 +186,7 @@ class TestProbabilityComputation:
         self, label_logprobs, apply_softmax, should_sum_to_one
     ):
         """Test probability computation for softmax and true probability modes."""
-        serving = OpenAIServingGenerativeScoring.__new__(OpenAIServingGenerativeScoring)
+        serving = ServingGenerativeScoring.__new__(ServingGenerativeScoring)
         probs = serving._compute_probabilities(
             label_logprobs, apply_softmax=apply_softmax
         )
@@ -211,7 +211,7 @@ class TestProbabilityComputation:
 
     def test_score_formula(self):
         """Test the score formula: P(token[0]) / (P(token[0]) + P(token[1]))."""
-        serving = OpenAIServingGenerativeScoring.__new__(OpenAIServingGenerativeScoring)
+        serving = ServingGenerativeScoring.__new__(ServingGenerativeScoring)
 
         # With logprobs -0.5 and -2.0, softmax gives higher prob to first token
         logprobs = {9454: -0.5, 2753: -2.0}
