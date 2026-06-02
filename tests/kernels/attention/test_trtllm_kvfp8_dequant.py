@@ -3,14 +3,14 @@
 """
 Standalone unit tests for trtllm_prefill_attn_kvfp8_dequant.
 
-Tests both contiguous and non-contiguous (permuted) KV cache layouts
-against a pure-PyTorch reference implementation.
+Tests KV cache layouts against a pure-PyTorch reference implementation.
 """
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 if current_platform.is_rocm():
     pytest.skip(
@@ -34,38 +34,23 @@ def to_float8(x, dtype=None):
     return x_scl_sat.to(dtype), scale.float().reciprocal()
 
 
-def make_kv_cache(num_blocks, num_kv_heads, block_size, head_size, layout="contiguous"):
-    """Create an fp8 KV cache with the specified layout.
+def make_random_kv_cache(
+    num_blocks, num_kv_heads, block_size, head_size, layout=KVCacheLayout.LBHNC
+):
+    """Create a random fp8 KV cache in 5D ``(B, 2, H, N, hs)`` format.
 
-    Args:
-        layout: "contiguous" for standard 5D ``(B, 2, H, N, hs)``
-            or "permuted" for split-from-content where the block_size
-            dim has non-contiguous stride (mimics the actual forward
-            path where a 4D ``(B, H, N, 2*hs)`` cache is viewed as
-            5D and permuted).
+    The 4D cache ``(B, H, N, 2*hs)`` is allocated with the physical stride
+    order from *layout*, then reshaped to 5D. Non-identity layouts produce
+    non-contiguous strides on inner dims, matching the actual forward path.
     """
-    if layout == "contiguous":
-        raw = torch.randn(
-            num_blocks,
-            2,
-            num_kv_heads,
-            block_size,
-            head_size,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        kv_cache, scale = to_float8(raw)
-        return kv_cache, scale
+    logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
+    stride_order = layout.layer_stride_order
+    physical_4d = tuple(logical_4d[i] for i in stride_order)
+    inv_order = [stride_order.index(i) for i in range(4)]
 
-    raw_4d = torch.randn(
-        num_blocks,
-        num_kv_heads,
-        block_size,
-        2 * head_size,
-        dtype=torch.bfloat16,
-        device="cuda",
-    )
-    fp8_4d, scale = to_float8(raw_4d)
+    raw_phys = torch.randn(*physical_4d, dtype=torch.bfloat16, device="cuda")
+    fp8_phys, scale = to_float8(raw_phys)
+    fp8_4d = fp8_phys.permute(*inv_order)
     kv_5d = fp8_4d.view(
         num_blocks,
         num_kv_heads,
@@ -109,7 +94,7 @@ def ref_dequant(kv_cache, block_tables, k_scale, v_scale, dequant_dtype):
 @pytest.mark.parametrize("block_size", [16, 32])
 @pytest.mark.parametrize("batch_size", [1, 4])
 @pytest.mark.parametrize("num_pages_per_seq", [3, 8])
-@pytest.mark.parametrize("layout", ["contiguous", "permuted"])
+@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.LBNHC])
 @torch.inference_mode()
 def test_trtllm_kvfp8_dequant(
     num_kv_heads: int,
@@ -117,7 +102,7 @@ def test_trtllm_kvfp8_dequant(
     block_size: int,
     batch_size: int,
     num_pages_per_seq: int,
-    layout: str,
+    layout: KVCacheLayout,
 ):
     from vllm.v1.attention.backends.flashinfer import (
         trtllm_prefill_attn_kvfp8_dequant,
@@ -125,7 +110,7 @@ def test_trtllm_kvfp8_dequant(
 
     torch.set_default_device("cuda")
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -175,7 +160,7 @@ def test_block_tables_with_zero_pages():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -222,7 +207,7 @@ def test_all_zero_block_tables():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 16, 64
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -254,7 +239,7 @@ def test_different_k_v_scales():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 64
 
-    kv_cache, _ = make_kv_cache(
+    kv_cache, _ = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -287,7 +272,7 @@ def test_single_page_per_seq():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 8, 16, 128
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,
@@ -320,7 +305,7 @@ def test_large_page_indices():
     num_kv_heads, block_size, head_size = 8, 16, 128
     large_num_blocks = 32768
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         large_num_blocks,
         num_kv_heads,
         block_size,
@@ -357,7 +342,7 @@ def test_large_block_size():
     torch.set_default_device("cuda")
     num_kv_heads, block_size, head_size = 4, 64, 128
 
-    kv_cache, scale = make_kv_cache(
+    kv_cache, scale = make_random_kv_cache(
         NUM_BLOCKS,
         num_kv_heads,
         block_size,

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from math import prod
 
 import pytest
 import torch._dynamo
@@ -127,8 +128,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
         inv_order = [
             kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
-
-        from math import prod
 
         raw_tensor = torch.zeros(
             prod(kv_cache_shape),

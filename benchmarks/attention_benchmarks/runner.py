@@ -11,6 +11,7 @@ This module provides helpers for running standard attention backends
 import logging
 import types
 from contextlib import contextmanager
+from math import prod
 
 import numpy as np
 import torch
@@ -338,8 +339,6 @@ def _create_kv_cache(
         dtype=dtype,
     )
     layout = resolve_kv_cache_layout()
-    from math import prod
-
     total_bytes = (
         prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
         * config.num_layers
