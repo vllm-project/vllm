@@ -62,7 +62,7 @@ class MambaBase(AttentionLayerBase):
             dtype_size = get_dtype_size(dtype)
             page_stride = page_size_bytes // dtype_size
             target_shape = (num_blocks, *shape)
-            inner_strides = torch.empty(target_shape).stride()[1:]
+            inner_strides = torch.empty(target_shape, device="meta").stride()[1:]
             abs_offset = base_offset + byte_offset
             assert abs_offset % dtype_size == 0
             state_tensors.append(
@@ -73,7 +73,9 @@ class MambaBase(AttentionLayerBase):
                     storage_offset=abs_offset // dtype_size,
                 )
             )
-            byte_offset += torch.empty(target_shape).stride()[0] * dtype_size
+            byte_offset += (
+                torch.empty(target_shape, device="meta").stride()[0] * dtype_size
+            )
         return state_tensors
 
     @abstractmethod

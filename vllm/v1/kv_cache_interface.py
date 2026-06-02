@@ -251,7 +251,7 @@ def reshape_kv_cache(
     inv_order = [stride_order.index(i) for i in range(5)]
 
     if page_size_padded := getattr(spec, "page_size_padded", None):
-        strides = list(torch.empty(physical_shape_bytes).stride())
+        strides = list(torch.empty(physical_shape_bytes, device="meta").stride())
         strides[inv_order[_DIM_B]] = page_size_padded
         cache = torch.as_strided(raw, size=physical_shape_bytes, stride=tuple(strides))
     else:
