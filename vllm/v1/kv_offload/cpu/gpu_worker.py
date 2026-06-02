@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -179,6 +180,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
+    @override
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
@@ -348,6 +350,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # success
         return True
 
+    @override
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
@@ -370,12 +373,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             del self._transfer_events[transfer.job_id]
         return results
 
+    @override
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
                 event.synchronize()
 
+    @override
     def shutdown(self) -> None:
         while self._transfers:
             transfer = self._transfers.popleft()
