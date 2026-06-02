@@ -58,6 +58,7 @@ from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
+from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -577,6 +578,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
+    @property
+    def video_processor_name(self) -> str | None:
+        return get_video_processor_cls_name(self.model_config)
+
     def add(self, modality: ModalityStr, item: _T) -> str | None:
         """
         Add a multi-modal item to the current prompt and returns the
@@ -1025,7 +1030,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        video = self._connector.fetch_video(video_url=video_url) if video_url else None
+        video = (
+            self._connector.fetch_video(
+                video_url=video_url,
+                video_processor=self._tracker.video_processor_name,
+            )
+            if video_url
+            else None
+        )
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
@@ -1205,7 +1217,12 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
         video = (
-            await self._connector.fetch_video_async(video_url) if video_url else None
+            await self._connector.fetch_video_async(
+                video_url,
+                video_processor=self._tracker.video_processor_name,
+            )
+            if video_url
+            else None
         )
         return video, uuid
 
