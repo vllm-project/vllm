@@ -131,7 +131,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.ll_fp8_block import (
+from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block_mm import (
     LLFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
