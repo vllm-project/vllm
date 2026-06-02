@@ -1081,6 +1081,9 @@ class SpeculativeConfig:
     def use_dflash(self) -> bool:
         return self.method == "dflash"
 
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
+
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
