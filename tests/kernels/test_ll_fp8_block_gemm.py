@@ -6,9 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="CUDA required"
-)
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -43,9 +41,7 @@ def _make_fp8_tensors(M, N, K):
     import deep_gemm
 
     # Activation: packed ue8m0 int32 (for LL kernel) + unpacked fp32 (for DG ref)
-    a_fp8, a_s_fp32 = deep_gemm.per_token_cast_to_fp8(
-        a_bf16, use_ue8m0=True
-    )
+    a_fp8, a_s_fp32 = deep_gemm.per_token_cast_to_fp8(a_bf16, use_ue8m0=True)
     _, a_s_packed = deep_gemm.per_token_cast_to_fp8(
         a_bf16, use_ue8m0=True, use_packed_ue8m0=True
     )
@@ -62,7 +58,8 @@ def _make_fp8_tensors(M, N, K):
 
     if is_deep_gemm_e8m0_used():
         b_fp8, b_scale = deepgemm_post_process_fp8_weight_block(
-            b_fp8, b_scale,
+            b_fp8,
+            b_scale,
             quant_block_shape=(128, 128),
             use_e8m0=True,
         )
@@ -88,16 +85,14 @@ def _ref_deepgemm(a_fp8, a_scale_fp32, b_fp8_pp, b_scale_pp):
 
 def _run_gemm(a_fp8, a_scale_packed, b_fp8, b_scale):
     """Run the LL FP8 block-scaled GEMM (uses packed int32 act scales)."""
-    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
-
     import vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block  # noqa: F401
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
     M = a_fp8.shape[0]
     N = b_fp8.shape[0]
     output = torch.empty(M, N, dtype=torch.bfloat16, device="cuda")
     torch.ops.vllm.ll_fp8_block_dispatch_op(
-        a_fp8, a_scale_packed, b_fp8, b_scale, output,
-        is_deep_gemm_e8m0_used()
+        a_fp8, a_scale_packed, b_fp8, b_scale, output, is_deep_gemm_e8m0_used()
     )
     return output
 
@@ -133,9 +128,7 @@ SHAPES = [
 @pytest.mark.parametrize("M", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("N,K,desc", SHAPES, ids=[s[2] for s in SHAPES])
 def test_correctness(M, N, K, desc):
-    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(
-        M, N, K
-    )
+    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(M, N, K)
     out = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     ref = _ref_deepgemm(a_fp8, a_s_fp32, b_fp8, b_s)
     assert out.dtype == torch.bfloat16
@@ -152,9 +145,7 @@ def test_correctness(M, N, K, desc):
 def test_dispatch_ll_kernel(M):
     """M<=16 uses LL kernel — verify correctness vs DeepGEMM."""
     N, K = 1024, 4096
-    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(
-        M, N, K
-    )
+    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(M, N, K)
     out = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     ref = _ref_deepgemm(a_fp8, a_s_fp32, b_fp8, b_s)
     assert out.shape == (M, N)
@@ -168,7 +159,9 @@ def test_dispatch_ll_kernel(M):
 
 @pytest.mark.parametrize("M", [1, 8])
 def test_output_bf16(M):
-    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(M, 1024, 4096)
+    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(
+        M, 1024, 4096
+    )
     out = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     assert out.dtype == torch.bfloat16
 
@@ -192,7 +185,9 @@ def test_no_nan(N, K, desc):
 
 @pytest.mark.parametrize("M", [1, 4, 8, 16])
 def test_deterministic(M):
-    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(M, 1536, 4096)
+    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(
+        M, 1536, 4096
+    )
     out1 = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     out2 = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     torch.testing.assert_close(out1, out2, atol=0, rtol=0)
@@ -209,12 +204,12 @@ def test_deterministic(M):
     ids=["wqa", "wo", "down", "smallK"],
 )
 def test_single_token(N, K):
-    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(
-        1, N, K
-    )
+    a_fp8, a_s_packed, a_s_fp32, b_fp8, b_s, b_fp8_o, b_s_o = _make_fp8_tensors(1, N, K)
     out = _run_gemm(a_fp8, a_s_packed, b_fp8, b_s)
     assert out.shape == (1, N)
-    _assert_close(out, _ref_deepgemm(a_fp8, a_s_fp32, b_fp8_o, b_s_o), context=f"M=1 {N}x{K}")
+    _assert_close(
+        out, _ref_deepgemm(a_fp8, a_s_fp32, b_fp8_o, b_s_o), context=f"M=1 {N}x{K}"
+    )
 
 
 if __name__ == "__main__":

@@ -23,6 +23,9 @@ from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
+    LLFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -130,9 +133,6 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.kernels.linear.cute_dsl.ll_fp8_block import (
-    LLFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFp8DeepGEMMDynamicBlockScaledKernel,

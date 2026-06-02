@@ -19,11 +19,11 @@ import logging
 
 import torch
 
-from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
-    DeepGemmFp8BlockScaledMMKernel,
-)
 from vllm.model_executor.kernels.linear.scaled_mm.BlockScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.platforms import current_platform
 
@@ -41,6 +41,7 @@ def is_available() -> bool:
     try:
         import cutlass  # noqa: F401
         import cutlass.cute  # noqa: F401
+
         _cutedsl_available = True
     except ImportError:
         _cutedsl_available = False
@@ -62,6 +63,7 @@ def _cute():
     from cuda.bindings.driver import CUstream
     from cutlass.cute.runtime import from_dlpack
     from torch.cuda import current_stream
+
     _cute_ctx = (cute, from_dlpack, CUstream, current_stream)
     return _cute_ctx
 
@@ -81,27 +83,32 @@ def _get_compiled(a_bf16, b_bf16, out, sa_flat, sb_flat):
         return _compiled_cache[cache_key]
 
     div = 8
-    mA = (from_dlpack(a_bf16, assumed_align=16, enable_tvm_ffi=True)
-          .mark_layout_dynamic(leading_dim=1)
-          .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1),
-                                      divisibility=div))
-    mB = (from_dlpack(b_bf16, assumed_align=16, enable_tvm_ffi=True)
-          .mark_layout_dynamic(leading_dim=1)
-          .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1),
-                                      divisibility=div))
-    mC = (from_dlpack(out, assumed_align=16, enable_tvm_ffi=True)
-          .mark_layout_dynamic(leading_dim=1)
-          .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1),
-                                      divisibility=div))
-    mSA = from_dlpack(sa_flat, assumed_align=4,
-                      enable_tvm_ffi=True).mark_layout_dynamic()
-    mSB = from_dlpack(sb_flat, assumed_align=4,
-                      enable_tvm_ffi=True).mark_layout_dynamic()
+    mA = (
+        from_dlpack(a_bf16, assumed_align=16, enable_tvm_ffi=True)
+        .mark_layout_dynamic(leading_dim=1)
+        .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
+    )
+    mB = (
+        from_dlpack(b_bf16, assumed_align=16, enable_tvm_ffi=True)
+        .mark_layout_dynamic(leading_dim=1)
+        .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
+    )
+    mC = (
+        from_dlpack(out, assumed_align=16, enable_tvm_ffi=True)
+        .mark_layout_dynamic(leading_dim=1)
+        .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
+    )
+    mSA = from_dlpack(
+        sa_flat, assumed_align=4, enable_tvm_ffi=True
+    ).mark_layout_dynamic()
+    mSB = from_dlpack(
+        sb_flat, assumed_align=4, enable_tvm_ffi=True
+    ).mark_layout_dynamic()
 
-    gemm = LLFp8BlockGemm(tile_n=16, tile_k=256, num_stages=2,
-                           num_dma_warps=4)
-    compiled = cute.compile(gemm, mA, mB, mC, mSA, mSB, _stream(),
-                            options="--enable-tvm-ffi")
+    gemm = LLFp8BlockGemm(tile_n=16, tile_k=256, num_stages=2, num_dma_warps=4)
+    compiled = cute.compile(
+        gemm, mA, mB, mC, mSA, mSB, _stream(), options="--enable-tvm-ffi"
+    )
     _compiled_cache[cache_key] = compiled
     logger.info("Compiled ll_fp8_block_gemm")
     return compiled
@@ -178,6 +185,7 @@ def _ll_fp8_block_dispatch(
 ) -> None:
     if weight.ndim != 2:
         from vllm.utils.deep_gemm import fp8_gemm_nt
+
         fp8_gemm_nt(
             (q_input, input_scale),
             (weight, weight_scale),
@@ -189,10 +197,10 @@ def _ll_fp8_block_dispatch(
     K_fp8 = q_input.shape[1]
     N = weight.shape[0]
     if M <= 16 and K_fp8 <= 4096 and K_fp8 % 256 == 0 and N <= 4096:
-        _ll_fp8_block_gemm(
-            q_input, input_scale, weight, weight_scale, output)
+        _ll_fp8_block_gemm(q_input, input_scale, weight, weight_scale, output)
     else:
         from vllm.utils.deep_gemm import fp8_gemm_nt
+
         fp8_gemm_nt(
             (q_input, input_scale),
             (weight, weight_scale),
