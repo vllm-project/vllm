@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, HyV3ToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser,
-    ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
+    Ernie45ToolParser, Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser,
+    HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
+    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
@@ -19,6 +19,7 @@ pub mod names {
     pub const DEEPSEEK_V31: &str = "deepseek_v31";
     pub const DEEPSEEK_V32: &str = "deepseek_v32";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
+    pub const ERNIE45: &str = "ernie45";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
@@ -61,6 +62,7 @@ impl ToolParserFactory {
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
             .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32)
             .register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4)
+            .register_parser::<Ernie45ToolParser>(names::ERNIE45)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
@@ -101,6 +103,12 @@ impl ToolParserFactory {
             .register_pattern("deepseek-v3.2", names::DEEPSEEK_V32)
             .register_pattern("deepseek-v3.1", names::DEEPSEEK_V31)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
+            // Route Baidu ERNIE 4.5 model families to the JSON `<tool_call>`
+            // parser. ERNIE 4.5 model IDs are `baidu/ERNIE-4.5-<size>-<variant>`,
+            // including VL variants (`ERNIE-4.5-VL-*`). Earlier ERNIE versions
+            // use different tool-call formats and are not routed here.
+            .register_pattern("ernie-4.5", names::ERNIE45)
+            .register_pattern("ernie4.5", names::ERNIE45)
             .register_pattern("glm-5", names::GLM47)
             .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)
