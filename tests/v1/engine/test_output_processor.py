@@ -141,6 +141,43 @@ def test_incremental_detokenization(
     assert not output_processor.has_unfinished_requests()
 
 
+def test_streaming_delta_omits_prompt_token_ids(dummy_test_vectors):
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer, log_stats=False, stream_interval=1
+    )
+    prompt_token_ids = dummy_test_vectors.prompt_tokens[0]
+    request = EngineCoreRequest(
+        request_id="request-0-int",
+        external_req_id="request-0",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+        ),
+        pooling_params=None,
+        resumable=True,
+    )
+    output_processor.add_request(request, dummy_test_vectors.prompt_strings[0])
+    engine_core = MockEngineCore(
+        tokens_list=[dummy_test_vectors.generation_tokens[0]],
+        prompts_list=[prompt_token_ids],
+        request_ids=[request.request_id],
+    )
+
+    request_outputs = output_processor.process_outputs(
+        engine_core.get_outputs()
+    ).request_outputs
+
+    assert len(request_outputs) == 1
+    assert request_outputs[0].prompt_token_ids is None
+
+
 def _validate_logprobs(
     gen_tokens: dict[str, list[int]],
     gen_logprobs: dict[str, SampleLogprobs | None],
