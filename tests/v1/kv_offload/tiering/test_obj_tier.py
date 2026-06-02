@@ -9,6 +9,7 @@ state machine: job submission, transfer completion polling, and lookup.
 """
 
 import uuid
+from collections.abc import Callable
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -22,6 +23,7 @@ from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManag
 # ---------------------------------------------------------------------------
 # Shared stubs
 # ---------------------------------------------------------------------------
+
 
 def _make_vllm_config():
     return SimpleNamespace(
@@ -79,10 +81,22 @@ def make_job(
 # Mock NIXL agent
 # ---------------------------------------------------------------------------
 
+
 class MockNixlAgent:
     """In-memory NIXL agent. Tracks stored object keys and simulates async
     transfers: transfer() returns PROC, check_xfer_state() returns DONE and
-    commits the write to the in-memory key set."""
+    commits the write to the in-memory key set.
+
+    The four methods overridden by tests (register_memory, make_prepped_xfer,
+    check_xfer_state, query_memory) are stored as Callable instance attributes
+    so mypy allows reassignment in tests.
+    """
+
+    # Callable attributes — tests may reassign these on instances.
+    register_memory: Callable
+    make_prepped_xfer: Callable
+    check_xfer_state: Callable
+    query_memory: Callable
 
     def __init__(self):
         self._stored_obj_keys: set[str] = set()
@@ -90,11 +104,16 @@ class MockNixlAgent:
         self._pending: dict[int, tuple[str, list[str]]] = {}
         self._handle_counter = 0
         self._last_obj_keys: list[str] = []
+        # Bind default implementations as instance attributes.
+        self.register_memory = self._register_memory
+        self.make_prepped_xfer = self._make_prepped_xfer
+        self.check_xfer_state = self._check_xfer_state
+        self.query_memory = self._query_memory
 
     def create_backend(self, backend_type, params):
         pass
 
-    def register_memory(self, descs, mem_type=None, backends=None):
+    def _register_memory(self, descs, mem_type=None, backends=None):
         mock = MagicMock()
         mock.trim.return_value = MagicMock()
         # Capture obj_keys from OBJ 4-tuples: (addr, len, dev_id, obj_key)
@@ -108,10 +127,16 @@ class MockNixlAgent:
     def prep_xfer_dlist(self, agent_name, descs, mem_type=None, backends=None):
         return MagicMock()
 
-    def make_prepped_xfer(
-        self, op, local_handle, local_indices,
-        remote_handle, remote_indices,
-        notif_msg=b"", backends=None, skip_desc_merge=False,
+    def _make_prepped_xfer(
+        self,
+        op,
+        local_handle,
+        local_indices,
+        remote_handle,
+        remote_indices,
+        notif_msg=b"",
+        backends=None,
+        skip_desc_merge=False,
     ):
         handle = MagicMock()
         handle._id = self._handle_counter
@@ -122,7 +147,7 @@ class MockNixlAgent:
     def transfer(self, handle):
         return "PROC"
 
-    def check_xfer_state(self, handle):
+    def _check_xfer_state(self, handle):
         entry = self._pending.pop(handle._id, None)
         if entry:
             op, obj_keys = entry
@@ -136,38 +161,42 @@ class MockNixlAgent:
     def release_dlist_handle(self, handle):
         pass
 
-    def query_memory(self, queries, mem_type, agent_name):
-        return [
-            object() if q[3] in self._stored_obj_keys else None
-            for q in queries
-        ]
+    def _query_memory(self, queries, mem_type, agent_name):
+        return [object() if q[3] in self._stored_obj_keys else None for q in queries]
 
 
 # ---------------------------------------------------------------------------
 # Fixture
 # ---------------------------------------------------------------------------
 
-def _make_tier(num_blocks: int = 4) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
+
+def _make_tier(
+    num_blocks: int = 4,
+) -> tuple[ObjectStoreSecondaryTierManager, MockNixlAgent]:
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
     tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
     view = memoryview(tensor.numpy())
-    with patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"):
-        with patch(
+    with (
+        patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
+        patch(
             "vllm.v1.kv_offload.tiering.obj.manager.nixl_agent",
             return_value=mock_agent,
-        ):
-            tier = ObjectStoreSecondaryTierManager(
-                offloading_spec=_OFFLOADING_SPEC,
-                primary_kv_view=view,
-                tier_type="obj",
-                store_config=_STORE_CONFIG,
-                prefix=_RUN_PREFIX,
-            )
+        ),
+    ):
+        tier = ObjectStoreSecondaryTierManager(
+            offloading_spec=_OFFLOADING_SPEC,
+            primary_kv_view=view,
+            tier_type="obj",
+            store_config=_STORE_CONFIG,
+            prefix=_RUN_PREFIX,
+        )
     return tier, mock_agent
 
 
-def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 20) -> list[JobResult]:
+def drain(
+    tier: ObjectStoreSecondaryTierManager, max_rounds: int = 20
+) -> list[JobResult]:
     """Poll get_finished() until all in-flight jobs resolve."""
     results: list[JobResult] = []
     for _ in range(max_rounds):
@@ -181,8 +210,8 @@ def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 20) -> list[J
 # Tests
 # ---------------------------------------------------------------------------
 
-class TestMockObjTierBasic:
 
+class TestMockObjTierBasic:
     def setup_method(self):
         self.tier, self.agent = _make_tier(num_blocks=4)
 
@@ -229,9 +258,11 @@ class TestMockObjTierBasic:
         # First poll returns PROC; second poll returns DONE.
         call_count = [0]
         original = self.agent.check_xfer_state
+
         def delayed(h):
             call_count[0] += 1
             return "PROC" if call_count[0] == 1 else original(h)
+
         self.agent.check_xfer_state = delayed
 
         self.tier.submit_store(make_job(1, [key(1)], [0]))
@@ -242,7 +273,6 @@ class TestMockObjTierBasic:
 
 
 class TestMockObjTierMultiBlock:
-
     def test_store_multiple_blocks(self):
         tier, _ = _make_tier(num_blocks=8)
         keys = [key(i) for i in range(8)]
@@ -262,10 +292,11 @@ class TestMockObjTierMultiBlock:
 
 
 class TestMockObjTierFailures:
-
     def test_lookup_exception_returns_false(self):
         tier, agent = _make_tier(num_blocks=4)
-        agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("backend error"))
+        agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
+            RuntimeError("backend error")
+        )
         assert tier.lookup(key(1), _CTX) is False
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
@@ -300,9 +331,11 @@ class TestMockObjTierFailures:
         tier, agent = _make_tier(num_blocks=4)
         original_register = agent.register_memory
         call_count = [0]
+
         def register_once_fail(*a, **k):
             call_count[0] += 1
             return None if call_count[0] == 1 else original_register(*a, **k)
+
         agent.register_memory = register_once_fail
 
         tier.submit_store(make_job(1, [key(1)], [0]))  # fails immediately
@@ -315,7 +348,6 @@ class TestMockObjTierFailures:
 
 
 class TestMockObjTierShutdown:
-
     def test_shutdown_clears_in_flight_transfers(self):
         tier, agent = _make_tier(num_blocks=4)
         # Keep transfer in flight by never completing it

@@ -6,8 +6,8 @@ import ctypes
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
-from nixl._api import nixl_agent, nixl_agent_config, nixl_prepped_dlist_handle, nixl_xfer_handle
-
+from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
+from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
@@ -15,6 +15,8 @@ from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTie
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 if TYPE_CHECKING:
+    from nixl._api import nixl_prepped_dlist_handle, nixl_xfer_handle
+
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
@@ -75,18 +77,22 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._probe_connectivity()
 
         base_addr = ctypes.addressof(ctypes.c_char.from_buffer(primary_kv_view))
+        assert primary_kv_view.strides is not None
         stride = primary_kv_view.strides[0]
         self._primary_reg = self._agent.register_memory(
             [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
         )
         self._block_size_bytes = stride
         all_blocks = [
-            (base_addr + i * stride, stride, NIXL_DEV_ID) for i in range(len(primary_kv_view))
+            (base_addr + i * stride, stride, NIXL_DEV_ID)
+            for i in range(len(primary_kv_view))
         ]
         # NIXL_INIT_AGENT marks this as the local side; make_prepped_xfer requires
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
         # with the peer agent name ("ObjAgent").
-        self._dram_prepped_handle: nixl_prepped_dlist_handle = self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+        self._dram_prepped_handle: nixl_prepped_dlist_handle = (
+            self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+        )
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -123,8 +129,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         block_ids_list = [int(bid) for bid in block_ids]
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
-        nixl_files = [(0, self._block_size_bytes, dev_id, key)
-                      for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)]
+        nixl_files = [
+            (0, self._block_size_bytes, dev_id, key)
+            for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
+        ]
         self._next_obj_dev_id += len(nixl_files)
 
         files_desc = self._agent.register_memory(nixl_files, "OBJ")
@@ -142,8 +150,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
         xfer_handle = self._agent.make_prepped_xfer(
             op,
-            self._dram_prepped_handle, block_ids_list,
-            obj_handle, list(range(len(nixl_files))),
+            self._dram_prepped_handle,
+            block_ids_list,
+            obj_handle,
+            list(range(len(nixl_files))),
         )
         if not xfer_handle:
             logger.warning("make_prepped_xfer failed for job %d", job_id)
@@ -172,11 +182,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE)
+        self._submit_transfer(
+            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
+        )
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
-        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ)
+        self._submit_transfer(
+            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
+        )
 
     def get_finished(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
@@ -212,17 +226,20 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             try:
                 self._agent.release_dlist_handle(entry.obj_handle)
             except Exception as exc:
-                logger.warning("release_dlist_handle failed for job %d: %s", job_id, exc)
+                logger.warning(
+                    "release_dlist_handle failed for job %d: %s", job_id, exc
+                )
             try:
                 self._agent.deregister_memory(entry.files_desc)
             except Exception as exc:
                 logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
         self._transfers.clear()
-        try:
-            self._agent.release_dlist_handle(self._dram_prepped_handle)
-        except Exception as exc:
-            logger.warning("failed to release DRAM prepped handle: %s", exc)
-        self._dram_prepped_handle = None
+        if self._dram_prepped_handle is not None:
+            try:
+                self._agent.release_dlist_handle(self._dram_prepped_handle)
+            except Exception as exc:
+                logger.warning("failed to release DRAM prepped handle: %s", exc)
+            self._dram_prepped_handle = None
         if self._primary_reg is not None:
             try:
                 self._agent.deregister_memory(self._primary_reg)

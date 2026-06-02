@@ -132,7 +132,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 except Exception as e:
                     logger.error(
                         "Failed to create secondary tier from config index %i: %s",
-                        i, e,
+                        i,
+                        e,
                     )
                     raise
 
