@@ -10,9 +10,9 @@ use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
 use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
+    default_ready_response,
 };
-use crate::protocol::ModelDtype;
-use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
+use crate::protocol::handshake::HandshakeInitMessage;
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///
@@ -57,12 +57,7 @@ fn test_mock_engine_config() -> MockEngineConfig {
     MockEngineConfig {
         local: true,
         headless: true,
-        ready_response: EngineCoreReadyResponse {
-            max_model_len: 4096,
-            num_gpu_blocks: 0,
-            dp_stats_address: None,
-            dtype: Some(ModelDtype::Float32),
-        },
+        ready_response: default_ready_response(),
         ..Default::default()
     }
 }

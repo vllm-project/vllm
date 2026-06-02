@@ -123,6 +123,11 @@ class TestTieringOffloadingManager:
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
 
+    def _simulate_on_schedule_end(self):
+        """Simulate end of scheduler step: lifecycle flush + drain events."""
+        self.manager.on_schedule_end()
+        list(self.manager.take_events())
+
     def test_basic_store_to_primary(self, manager_setup):
         """Test basic store operation to primary tier."""
         blocks = to_keys(range(3))
@@ -185,10 +190,10 @@ class TestTieringOffloadingManager:
             assert block.ref_cnt == 2
 
         # End of step 1: _maybe_process_finished_jobs() was already called by
-        # prepare_store() above (setting the per-step flag), so take_events()
+        # prepare_store() above (setting the per-step flag), so on_schedule_end()
         # does NOT poll get_finished_jobs() again — cascade completions remain
         # unprocessed until the next step.
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # ref_cnt still held: cascade jobs finished (sync tier) but haven't
         # been polled yet because the per-step guard skipped the second call.
@@ -202,7 +207,7 @@ class TestTieringOffloadingManager:
 
         # End of step 2: flag was reset, so _maybe_process_finished_jobs()
         # runs and processes the cascade completions (complete_read → ref_cnt--)
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # After cascade completes, ref_cnt should be 0
         for block_hash in blocks:
@@ -238,10 +243,10 @@ class TestTieringOffloadingManager:
             assert result is None  # Retry later (promotion initiated)
 
         # End of step 1: flushes deferred submit_load() calls
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # End of step 2: processes the completed promotion jobs
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # Now blocks should be in primary tier
         assert count_hits(self.primary_tier, blocks) == 3
@@ -271,7 +276,7 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(blocks, _CTX, success=True)
 
         # End of step: release ref_cnt from cascade
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # Now try to store 2 more blocks (should trigger eviction)
         more_blocks = to_keys(range(5, 7))
@@ -289,7 +294,7 @@ class TestTieringOffloadingManager:
         # Store blocks
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)
         self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)
@@ -328,7 +333,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier2.submit_store.assert_not_called()
 
     def test_lookup_batches_submit_load_per_request(self, manager_setup):
-        """lookup() defers submit_load until take_events(), one call per request.
+        """lookup() defers submit_load until on_schedule_end(), one per request.
 
         Blocks from different requests each get their own submit_load call, each
         carrying the correct req_context.
@@ -354,7 +359,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.submit_load.assert_not_called()
 
         # simulate end of step
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         assert self.secondary_tier1.submit_load.call_count == 2
         calls = self.secondary_tier1.submit_load.call_args_list
@@ -389,7 +394,7 @@ class TestTieringOffloadingManager:
         assert result_a is None
         assert result_b is None
 
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # Only one submit_load call despite two lookups
         self.secondary_tier1.submit_load.assert_called_once()
@@ -449,8 +454,7 @@ class TestTieringOffloadingManager:
         assert result is not None
         self.manager.complete_store(existing_blocks, _CTX, success=True)
         # Drain cascade completions
-        list(self.manager.take_events())
-        list(self.manager.take_events())
+        self._simulate_on_schedule_end()
 
         # Make tier1 request-level, tier2 stays block-level
         self.secondary_tier1.on_new_request = (

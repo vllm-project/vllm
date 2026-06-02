@@ -6,6 +6,7 @@ mod load;
 mod metrics;
 pub(crate) mod openai;
 mod sleep;
+mod version;
 
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
+        .route("/version", get(version::version))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -54,11 +56,18 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
             .route("/is_sleeping", get(sleep::is_sleeping))
     }
 
-    router
+    let enable_request_id_headers = state.enable_request_id_headers;
+    let mut router = router
         .with_state(state.clone())
         .layer(from_fn_with_state(state, middleware::track_server_load))
         .layer(from_fn(middleware::track_http_metrics))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http());
+
+    if enable_request_id_headers {
+        router = router.layer(from_fn(middleware::set_request_id_header));
+    }
+
+    router
 }
 
 #[cfg(test)]
