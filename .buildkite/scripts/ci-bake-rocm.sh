@@ -30,6 +30,7 @@ SCRIPT_TMP_DIR=""
 BAKE_CONFIG_FILE=""
 BAKE_FILES=()
 BAKE_TARGETS=()
+DEPENDENCY_CACHE_TARGETS=()
 
 cleanup() {
     if [[ -n "${SCRIPT_TMP_DIR}" && -d "${SCRIPT_TMP_DIR}" ]]; then
@@ -571,6 +572,7 @@ create_and_bootstrap_builder() {
 init_config() {
     TARGET="${1:-test-ci}"
     BAKE_TARGETS=("${TARGET}")
+    DEPENDENCY_CACHE_TARGETS=()
     CI_HCL_SOURCE="${CI_HCL_SOURCE:-${CI_HCL_FILE:-${DEFAULT_CI_HCL_SOURCE}}}"
     VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake-rocm.hcl}"
     BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
@@ -1386,23 +1388,64 @@ dependency_cache_ref_exists() {
     docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1
 }
 
+dependency_cache_ref_for_target() {
+    local target="$1"
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+
+    case "${target}" in
+        rixl-rocm-ci)
+            if [[ -n "${RIXL_CACHE_KEY:-}" ]]; then
+                printf '%s\n' "${cache_repo}:rixl-rocm-${RIXL_CACHE_KEY}"
+            elif [[ -n "${RIXL_BRANCH:-}" ]]; then
+                printf '%s\n' "${cache_repo}:rixl-rocm-${RIXL_BRANCH}-ucx-${UCX_BRANCH:-}"
+            fi
+            ;;
+        rocshmem-rocm-ci)
+            if [[ -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
+                printf '%s\n' "${cache_repo}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}"
+            elif [[ -n "${ROCSHMEM_BRANCH:-}" ]]; then
+                printf '%s\n' "${cache_repo}:rocshmem-rocm-${ROCSHMEM_BRANCH}"
+            fi
+            ;;
+        deepep-rocm-ci)
+            if [[ -n "${DEEPEP_CACHE_KEY:-}" ]]; then
+                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_CACHE_KEY}"
+            elif [[ -n "${DEEPEP_BRANCH:-}" ]]; then
+                printf '%s\n' "${cache_repo}:deepep-rocm-${DEEPEP_BRANCH}-rocshmem-${ROCSHMEM_BRANCH:-}"
+            fi
+            ;;
+    esac
+}
+
+add_dependency_cache_target() {
+    local target="$1"
+
+    if printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "${target}"; then
+        return 0
+    fi
+    DEPENDENCY_CACHE_TARGETS+=("${target}")
+}
+
 resolve_ci_base_dependency_targets() {
     local mode="${ROCM_DEP_CACHE_EXPORT_MODE:-missing}"
-    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
     local rixl_ref=""
     local rocshmem_ref=""
     local deepep_ref=""
-    local -a seed_targets=()
 
     [[ "${TARGET}" == "ci-base-rocm-ci-with-deps" ]] || return 0
 
     case "${mode}" in
         always)
-            echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches"
-            return 0
+            echo "ROCM_DEP_CACHE_EXPORT_MODE=always; exporting all dependency caches serially"
+            for target in rixl-rocm-ci rocshmem-rocm-ci deepep-rocm-ci; do
+                if [[ -n "$(dependency_cache_ref_for_target "${target}")" ]]; then
+                    add_dependency_cache_target "${target}"
+                fi
+            done
             ;;
         never)
             BAKE_TARGETS=("ci-base-rocm-ci")
+            DEPENDENCY_CACHE_TARGETS=()
             echo "ROCM_DEP_CACHE_EXPORT_MODE=never; building ci_base without dependency cache exports"
             return 0
             ;;
@@ -1414,56 +1457,65 @@ resolve_ci_base_dependency_targets() {
             ;;
     esac
 
-    if [[ -n "${RIXL_CACHE_KEY:-}" ]]; then
-        rixl_ref="${cache_repo}:rixl-rocm-${RIXL_CACHE_KEY}"
+    if [[ "${mode}" != "always" && -n "${RIXL_CACHE_KEY:-}" ]]; then
+        rixl_ref=$(dependency_cache_ref_for_target "rixl-rocm-ci")
         if dependency_cache_ref_exists "${rixl_ref}"; then
             echo "RIXL dependency cache exists: ${rixl_ref}"
         else
             echo "RIXL dependency cache missing; will seed: ${rixl_ref}"
-            seed_targets+=("rixl-rocm-ci")
+            add_dependency_cache_target "rixl-rocm-ci"
         fi
     fi
 
-    if [[ -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
-        rocshmem_ref="${cache_repo}:rocshmem-rocm-${ROCSHMEM_CACHE_KEY}"
+    if [[ "${mode}" != "always" && -n "${ROCSHMEM_CACHE_KEY:-}" ]]; then
+        rocshmem_ref=$(dependency_cache_ref_for_target "rocshmem-rocm-ci")
         if dependency_cache_ref_exists "${rocshmem_ref}"; then
             echo "ROCShmem dependency cache exists: ${rocshmem_ref}"
         else
             echo "ROCShmem dependency cache missing; will seed: ${rocshmem_ref}"
-            seed_targets+=("rocshmem-rocm-ci")
+            add_dependency_cache_target "rocshmem-rocm-ci"
         fi
     fi
 
-    if [[ -n "${DEEPEP_CACHE_KEY:-}" ]]; then
-        deepep_ref="${cache_repo}:deepep-rocm-${DEEPEP_CACHE_KEY}"
+    if [[ "${mode}" != "always" && -n "${DEEPEP_CACHE_KEY:-}" ]]; then
+        deepep_ref=$(dependency_cache_ref_for_target "deepep-rocm-ci")
         if dependency_cache_ref_exists "${deepep_ref}"; then
             echo "DeepEP dependency cache exists: ${deepep_ref}"
         else
             echo "DeepEP dependency cache missing; will seed: ${deepep_ref}"
-            seed_targets+=("deepep-rocm-ci")
+            add_dependency_cache_target "deepep-rocm-ci"
         fi
     fi
 
     # DeepEP inherits from ROCShmem. If ROCShmem is being seeded, seed DeepEP too
     # so the pair stays consistent for future ci_base rebuilds.
-    if printf '%s\n' "${seed_targets[@]}" | grep -qx "rocshmem-rocm-ci" \
-        && ! printf '%s\n' "${seed_targets[@]}" | grep -qx "deepep-rocm-ci" \
+    if printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "rocshmem-rocm-ci" \
+        && ! printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" | grep -qx "deepep-rocm-ci" \
         && [[ -n "${DEEPEP_BRANCH:-}" ]]; then
         echo "ROCShmem cache is missing; also seeding DeepEP cache"
-        seed_targets+=("deepep-rocm-ci")
+        add_dependency_cache_target "deepep-rocm-ci"
     fi
 
-    BAKE_TARGETS=("${seed_targets[@]}" "ci-base-rocm-ci")
-    if [[ ${#seed_targets[@]} -eq 0 ]]; then
+    BAKE_TARGETS=("ci-base-rocm-ci")
+    if [[ ${#DEPENDENCY_CACHE_TARGETS[@]} -eq 0 ]]; then
         echo "All dependency caches exist; building ci_base without dependency cache exports"
     else
+        echo "Resolved dependency cache seed targets: ${DEPENDENCY_CACHE_TARGETS[*]}"
         echo "Resolved ci_base bake targets: ${BAKE_TARGETS[*]}"
     fi
 }
 
+bake_config_targets() {
+    printf '%s\n' "${DEPENDENCY_CACHE_TARGETS[@]}" "${BAKE_TARGETS[@]}" \
+        | awk 'NF && !seen[$0]++'
+}
+
 print_bake_config() {
+    local -a print_targets=()
+
     echo "--- :page_facing_up: Resolved bake configuration"
-    docker buildx bake "${BAKE_FILES[@]}" --print "${BAKE_TARGETS[@]}" | tee "${BAKE_CONFIG_FILE}"
+    mapfile -t print_targets < <(bake_config_targets)
+    docker buildx bake "${BAKE_FILES[@]}" --print "${print_targets[@]}" | tee "${BAKE_CONFIG_FILE}"
 
     if command -v buildkite-agent >/dev/null 2>&1 && [[ -n "${BUILDKITE_BUILD_NUMBER:-}" ]]; then
         buildkite-agent artifact upload "${BAKE_CONFIG_FILE}" || true
@@ -1517,6 +1569,56 @@ confirm_remote_image_push() {
     fi
 
     return 0
+}
+
+verify_dependency_cache_ref() {
+    local cache_ref="$1"
+    local attempts="${ROCM_DEP_CACHE_VERIFY_ATTEMPTS:-6}"
+    local delay_secs="${ROCM_DEP_CACHE_VERIFY_DELAY:-5}"
+    local attempt
+
+    for ((attempt = 1; attempt <= attempts; attempt++)); do
+        if dependency_cache_ref_exists "${cache_ref}"; then
+            echo "Dependency cache confirmed: ${cache_ref}"
+            return 0
+        fi
+        if [[ ${attempt} -lt ${attempts} ]]; then
+            echo "Dependency cache not visible yet (${attempt}/${attempts}): ${cache_ref}"
+            sleep "${delay_secs}"
+        fi
+    done
+
+    echo "ERROR: dependency cache was not confirmed after upload: ${cache_ref}"
+    return 1
+}
+
+seed_dependency_caches_if_needed() {
+    local target=""
+    local cache_ref=""
+
+    if [[ "${TARGET}" != "ci-base-rocm-ci-with-deps" ]]; then
+        return 0
+    fi
+    if [[ ${#DEPENDENCY_CACHE_TARGETS[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "--- :docker: Seeding ROCm dependency caches"
+    echo "Dependency cache uploads are required for this build."
+    echo "Seeding serially to avoid concurrent Docker Hub cache exporters."
+
+    for target in "${DEPENDENCY_CACHE_TARGETS[@]}"; do
+        cache_ref=$(dependency_cache_ref_for_target "${target}")
+        if [[ -z "${cache_ref}" ]]; then
+            echo "ERROR: could not resolve dependency cache ref for ${target}"
+            return 1
+        fi
+
+        echo "--- :docker: Seeding ${target}"
+        echo "Expected cache ref: ${cache_ref}"
+        docker buildx bake "${BAKE_FILES[@]}" --progress plain "${target}"
+        verify_dependency_cache_ref "${cache_ref}"
+    done
 }
 
 annotate_cache_export_warning() {
@@ -1639,6 +1741,7 @@ main() {
         echo "BAKE_PRINT_ONLY=1 set; skipping build"
         return 0
     fi
+    seed_dependency_caches_if_needed
     run_bake
     upload_wheel_artifacts_if_present
 }
