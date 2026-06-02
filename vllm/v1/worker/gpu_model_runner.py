@@ -4384,6 +4384,15 @@ class GPUModelRunner(
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
+            # Set adaptive K for this step on the drafter.
+            # Only applies to proposers that support current_spec_tokens
+            # (subclasses of SpecDecodeBaseProposer).
+            adaptive_k = scheduler_output.adaptive_k_for_step
+            if (adaptive_k is not None
+                    and hasattr(self, "drafter")
+                    and self.drafter is not None
+                    and hasattr(self.drafter, "current_spec_tokens")):
+                self.drafter.current_spec_tokens = adaptive_k
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,

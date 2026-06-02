@@ -229,6 +229,10 @@ class SchedulerOutput:
     # Used for adjusting acceptance rate calculation.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
+    # Adaptive K: number of speculative tokens for this step.
+    # When None (default), uses speculative_config.num_speculative_tokens.
+    adaptive_k_for_step: int | None = None
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 

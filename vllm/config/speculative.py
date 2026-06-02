@@ -208,6 +208,26 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    # Adaptive K configuration (Leviathan 2023 cost-model baseline)
+    enable_adaptive_k: bool = False
+    """If True, dynamically adjust the number of speculative tokens per step
+    based on the batch acceptance rate using the Leviathan 2023 cost model.
+    When the acceptance rate is high, more tokens are proposed; when it is
+    low, fewer tokens are proposed to avoid wasting compute."""
+    adaptive_k_ema_alpha: float = 0.3
+    """Smoothing factor for the exponential moving average of batch acceptance
+    rate. Higher values (e.g. 0.5) respond faster to changes; lower values
+    (e.g. 0.1) are smoother. Used when enable_adaptive_k is True."""
+    adaptive_k_c_draft: float = 0.1
+    """Estimated ratio of draft model cost to target model forward cost.
+    Used in the Leviathan 2023 speedup formula. Lower values (≈ 0.05)
+    favor more speculative tokens; higher values (≈ 0.2) are conservative.
+    Used when enable_adaptive_k is True."""
+    adaptive_k_min_tokens: int = 1
+    """Minimum number of speculative tokens to generate when adaptive K is
+    enabled. Must be >= 1. Prevents speculation from being completely disabled
+    by a temporary dip in acceptance rate."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using

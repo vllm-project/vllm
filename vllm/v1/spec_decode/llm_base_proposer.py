@@ -73,6 +73,10 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
+        # Adaptive K: can be set per-step to generate fewer draft tokens.
+        # Defaults to num_speculative_tokens (no adaptation).
+        self.current_spec_tokens: int = self.num_speculative_tokens
+
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -504,15 +508,20 @@ class SpecDecodeBaseProposer:
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1 or self.parallel_drafting:
+        if self.current_spec_tokens <= 1 or self.parallel_drafting:
             draft_token_ids, draft_probs = self._sample_draft_tokens(
                 sample_hidden_states, sampling_metadata
             )
             if draft_probs is not None:
                 self._last_draft_probs = draft_probs.view(
-                    -1, self.num_speculative_tokens, draft_probs.shape[-1]
+                    -1, self.current_spec_tokens, draft_probs.shape[-1]
                 ).contiguous()
-            return draft_token_ids.view(-1, self.num_speculative_tokens)
+            draft_token_ids = draft_token_ids.view(
+                -1, self.current_spec_tokens)
+            if self.current_spec_tokens < self.num_speculative_tokens:
+                draft_token_ids = self._pad_draft_tokens(
+                    draft_token_ids, batch_size)
+            return draft_token_ids
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, token_indices_to_sample]
@@ -559,7 +568,7 @@ class SpecDecodeBaseProposer:
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
         # (i.e., not the first proposal).
-        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+        if self.current_spec_tokens > 1 and num_rejected_tokens_gpu is not None:
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
@@ -567,7 +576,7 @@ class SpecDecodeBaseProposer:
 
         block_size = self.block_size
         assert block_size > 0, "block_size has not been initialized."
-        for token_index in range(self.num_speculative_tokens - 1):
+        for token_index in range(self.current_spec_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -640,8 +649,35 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
-            self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+            if self.current_spec_tokens < self.num_speculative_tokens:
+                # Adaptive K: can't cleanly pad probs to full width.
+                # Skip storing for this step; rejection sampler handles
+                # missing probs gracefully (defaults to logit-based).
+                self._last_draft_probs = None
+            else:
+                self._last_draft_probs = torch.stack(
+                    draft_probs_list, dim=1).contiguous()
+        if self.current_spec_tokens < self.num_speculative_tokens:
+            draft_token_ids = self._pad_draft_tokens(
+                draft_token_ids, batch_size)
         return draft_token_ids
+
+    def _pad_draft_tokens(
+        self,
+        draft_token_ids: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
+        """Pad draft token ids to num_speculative_tokens with PADDING_SLOT_ID."""
+        pad_len = self.num_speculative_tokens - self.current_spec_tokens
+        if pad_len <= 0:
+            return draft_token_ids
+        padding = torch.full(
+            (batch_size, pad_len),
+            PADDING_SLOT_ID,
+            device=self.device,
+            dtype=draft_token_ids.dtype,
+        )
+        return torch.cat([draft_token_ids, padding], dim=-1)
 
     def _update_positions_dependent_metadata(
         self,

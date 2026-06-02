@@ -115,6 +115,7 @@ class SpecDecodingLogging:
             rates_str,
             draft_acceptance_rate,
         )
+
         self.reset()
 
 
