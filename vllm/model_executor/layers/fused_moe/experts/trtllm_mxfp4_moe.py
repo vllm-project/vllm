@@ -113,9 +113,6 @@ class TrtLlmMxfp4ExpertsBase:
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return False
@@ -246,9 +243,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> bool:
         # Modular kernel handles only the expert computation;
         # routing is done externally, so accept any routing method.
-        return True
-
-    def supports_expert_map(self) -> bool:
         return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
