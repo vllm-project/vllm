@@ -54,7 +54,6 @@ from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
     IMAGE_SIZE,
-    MAX_CROPS,
     DeepseekOCRProcessor,
     count_tiles,
 )
@@ -515,23 +514,38 @@ class DeepseekOCRForCausalLM(
         )
         features = self.projector(features)
 
-        _, hw, dim = features.shape
-        patch_side = int(hw**0.5)
+        return self._assemble_patch_grid(features, crop_shape)
 
+    def _assemble_patch_grid(
+        self, patches: torch.Tensor, crop_shape: torch.Tensor
+    ) -> torch.Tensor:
+        """Assemble projected patches into a 2-D tile grid with newline columns.
+
+        Args:
+            patches: Projected patch features ``[num_patches, hw, n_embed]``
+                where ``hw = patch_side * patch_side`` (typically 100).
+            crop_shape: ``[width_tiles, height_tiles]`` tile layout for
+                this image.
+
+        Returns:
+            Flattened tile grid with one newline column per grid row:
+            ``[(Ht * ps) * (Wt * ps + 1), n_embed]``.
+        """
+        n_embed = patches.shape[-1]
+        patch_side = int(patches.shape[1] ** 0.5)
         width_tiles = int(crop_shape[0].item())
         height_tiles = int(crop_shape[1].item())
 
-        features = (
-            features.view(height_tiles, width_tiles, patch_side, patch_side, dim)
-            .permute(0, 2, 1, 3, 4)
-            .reshape(height_tiles * patch_side, width_tiles * patch_side, dim)
+        grid = patches.reshape(
+            height_tiles, width_tiles, patch_side, patch_side, n_embed
+        )
+        grid = grid.permute(0, 2, 1, 3, 4).reshape(
+            height_tiles * patch_side, width_tiles * patch_side, n_embed
         )
         newline = self.image_newline[None, None, :].expand(
-            height_tiles * patch_side, 1, dim
+            height_tiles * patch_side, 1, n_embed
         )
-        features = torch.cat([features, newline], dim=1)
-
-        return features.view(-1, dim)
+        return torch.cat([grid, newline], dim=1).reshape(-1, n_embed)
 
     def _pixel_values_to_embedding(
         self,
@@ -653,19 +667,17 @@ class DeepseekOCRForCausalLM(
         # Compute output size:
         global_h = global_w = math.ceil(global_input_side / downsample_ratio)
         self.image_side = global_h
-        # We only consider the raw proj output (without new line tokens)
-        # in the cuda graph.
-        num_output_tokens = global_h * global_w
-        self.global_image_output_token = num_output_tokens  # 256
+        num_output_tokens = global_h * (global_w + 1)
+        self.global_image_output_token = num_output_tokens  # 272
 
         local_h = local_w = math.ceil(local_input_side / downsample_ratio)
         self.patch_side = local_h
         self.single_patch_output_token = local_h * local_w  # 100
-        if is_tiled:
-            num_output_tokens += (image_spatial_crop[0] * local_h) * (
-                image_spatial_crop[1] * local_w
-            )
 
+        # We don't contain the local patch tokens in the CUDA graph.
+        # Because the assembly of tile grids for local patches requires crop_shape
+        # (which varies for each image), and the number of patches can be variable,
+        # making it impossible to incorporate into a CUDA graph.
         return num_input_tokens, num_output_tokens
 
     def get_encoder_cudagraph_config(self):
@@ -674,7 +686,7 @@ class DeepseekOCRForCausalLM(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            buffer_keys=["pixel_values", "images_crop"],
+            buffer_keys=["pixel_values"],
             out_hidden_size=self.projector_config.n_embed,
         )
 
@@ -688,9 +700,8 @@ class DeepseekOCRForCausalLM(
         self,
         vllm_config,
     ) -> tuple[int, int]:
-        min_budget = (
-            self.global_image_output_token + MAX_CROPS * self.single_patch_output_token
-        )
+        # Min budget to hold at least one global image with newline tokens.
+        min_budget = self.global_image_output_token
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
@@ -756,10 +767,7 @@ class DeepseekOCRForCausalLM(
         device: torch.device,
         dtype: torch.dtype,
     ):
-        token_budget_per_image = (
-            self.global_image_output_token + MAX_CROPS * self.single_patch_output_token
-        )
-        max_num_images = token_budget // token_budget_per_image
+        max_num_images = token_budget // self.global_image_output_token
         max_batch_size = min(max_batch_size, max_num_images)
 
         dummy_pixel_values = torch.randn(
@@ -770,18 +778,9 @@ class DeepseekOCRForCausalLM(
             device=device,
             dtype=dtype,
         )
-        dummy_images_crop = torch.randn(
-            MAX_CROPS * max_batch_size,
-            3,
-            IMAGE_SIZE,
-            IMAGE_SIZE,
-            device=device,
-            dtype=dtype,
-        )
 
         values = {
             "pixel_values": dummy_pixel_values,
-            "images_crop": dummy_images_crop,
         }
         return EncoderCudaGraphCaptureInputs(values=values)
 
@@ -793,7 +792,6 @@ class DeepseekOCRForCausalLM(
     ):
         values = {
             "pixel_values": mm_kwargs["pixel_values"],
-            "images_crop": mm_kwargs["images_crop"],
         }
         return EncoderCudaGraphReplayBuffers(values=values)
 
@@ -802,25 +800,19 @@ class DeepseekOCRForCausalLM(
         values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """
-        Encode batched global/local vision inputs to raw outputs (without new
-        line tokens and view separator tokens).
+        Encode batched global vision inputs with newline tokens inserted.
 
-        Output shape: ``[B * 256 + P * 100, n_embed]``, where B is the
-        number of global images and P is the total number of local patches
-        in the batch.
+        Output shape: ``[B * 272, n_embed]``, where B is the number of
+        global images in the batch (each global image produces ``16×17 =
+        272`` tokens after newline insertion).
 
-        As for eager execution, it encode global features and local features,
-        then merge them for each image sequentially, which contains many
-        CPU-side dynamic behavior.
-
-        This method directly batched "SAM + CLIP + projector + newline insertion",
-        capturing all GPU kernels. Per-image tile arrangement and view_separator
-        merging happen CPU-side in `postprocess_encoder_output()`.
+        Only the global (SAM + CLIP + projector + newline) path is
+        captured by the CUDA graph. Local patches are handled eagerly in
+        ``postprocess_encoder_output()`` so that the graph avoids wasted
+        compute on zero-padded patch buffers when images are untiled.
         """
         pixel_values = values["pixel_values"]
-        images_crop = values["images_crop"]
 
-        # Encode batched global images (without adding new line token).
         global_feat_1 = self.sam_model(pixel_values)
         global_feat_2 = self.vision_model(pixel_values, global_feat_1)
         global_feat = torch.cat(
@@ -831,25 +823,13 @@ class DeepseekOCRForCausalLM(
             dim=-1,
         )
         global_proj = self.projector(global_feat)
-        global_flat = global_proj.reshape(-1, global_proj.shape[-1])
 
-        # Encode batched local patches (without adding new line token).
-        has_patches = images_crop.shape[0] > 0
-        if has_patches:
-            local_feat_1 = self.sam_model(images_crop)
-            local_feat_2 = self.vision_model(images_crop, local_feat_1)
-            local_feat = torch.cat(
-                (
-                    local_feat_2[:, 1:],
-                    local_feat_1.flatten(2).permute(0, 2, 1),
-                ),
-                dim=-1,
-            )
-            local_proj = self.projector(local_feat)
-            local_flat = local_proj.reshape(-1, local_proj.shape[-1])
-            return torch.cat([global_flat, local_flat], dim=0)
-
-        return global_flat
+        B = pixel_values.shape[0]
+        n_embed = global_proj.shape[-1]
+        side = self.image_side
+        global_2d = global_proj.reshape(B, side, side, n_embed)
+        newline = self.image_newline.view(1, 1, 1, n_embed).expand(B, side, 1, n_embed)
+        return torch.cat([global_2d, newline], dim=2).reshape(-1, n_embed)
 
     def encoder_eager_forward(
         self,
@@ -874,18 +854,20 @@ class DeepseekOCRForCausalLM(
         batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """
-        CPU-side newline insertion, tile arrangement and per-image merge.
+        CPU-side newline insertion for patches, tile arrangement and per-image merge.
 
-        The graph output is raw projected features with NO newlines:
-        ``[all_global_raw, all_local_patches_raw]`` where each global
-        image contributes ``global_image_output_token`` (256) tokens and
-        each local patch contributes ``single_patch_output_token`` (100)
-        tokens.
+        The graph output is projected global features with newlines already
+        inserted: ``[B * 272, n_embed]`` where B is the number of global
+        images (each ``16×17 = 272`` tokens).
+
+        Local patches are encoded eagerly here (outside the CUDA graph) so
+        that untiled images skip the SAM+CLIP+projector patch computation
+        entirely.
 
         This method:
-        1. Splits the flat output into per-image portions.
-        2. For each global image: reshapes to ``[16, 16, n_embed]``,
-           adds a newline column → ``[16, 17, n_embed]`` → flattens.
+        1. Splits the flat output into per-image global portions (with
+           newlines already baked in from ``encoder_cudagraph_forward``).
+        2. Eagerly encodes all local patches in one batched call.
         3. For local patches: groups per image, reshapes each patch
            to ``[10, 10, n_embed]``, assembles patches into a 2-D tile
            grid via ``crop_shape``, adds ONE newline per grid row.
@@ -901,80 +883,46 @@ class DeepseekOCRForCausalLM(
         ]
         total_patches = sum(num_patches)
 
-        image_side = self.image_side
-        patch_side = self.patch_side
-
-        global_portion = bsz * self.global_image_output_token
-        patch_portion = total_patches * self.single_patch_output_token
-
-        global_part = output[:global_portion].reshape(
-            bsz, self.global_image_output_token, n_embed
+        global_per_image = self.image_side * (self.image_side + 1)
+        global_part = output[: bsz * global_per_image].reshape(
+            bsz, global_per_image, n_embed
         )
-        local_part = (
-            output[global_portion : global_portion + patch_portion].reshape(
+
+        # Eagerly encode all local patches in one batched call.
+        local_flat = None
+        if total_patches > 0:
+            images_crop = batch_mm_kwargs["images_crop"]
+            local_feat_1 = self.sam_model(images_crop)
+            local_feat_2 = self.vision_model(images_crop, local_feat_1)
+            local_feat = torch.cat(
+                (
+                    local_feat_2[:, 1:],
+                    local_feat_1.flatten(2).permute(0, 2, 1),
+                ),
+                dim=-1,
+            )
+            local_proj = self.projector(local_feat)
+            local_flat = local_proj.reshape(
                 total_patches, self.single_patch_output_token, n_embed
             )
-            if patch_portion > 0
-            else None
-        )
 
         cur_patch = 0
         for i, idx in enumerate(indices):
             num_patch = num_patches[i]
-            # num_patch_tokens = num_patch * self.single_patch_output_token
             single_image_output: list[torch.Tensor] = []
 
             # 1. Process local patches: assemble tile grid, add 1 newline per row.
-            if num_patch > 0 and local_part is not None:
-                crop_shape = images_spatial_crop[i]
-                width_tiles = int(crop_shape[0].item())
-                height_tiles = int(crop_shape[1].item())
-
-                patches = local_part[cur_patch : cur_patch + num_patch]
+            if num_patch > 0 and local_flat is not None:
+                patches = local_flat[cur_patch : cur_patch + num_patch]
                 cur_patch += num_patch
+                single_image_output.append(
+                    self._assemble_patch_grid(patches, images_spatial_crop[i])
+                )
 
-                # Each patch:
-                # [100, n_embed] → [10, 10, n_embed]
-                patches = patches.reshape(num_patch, patch_side, patch_side, n_embed)
-                # Arrange into tile grid:
-                # [num_patch, 10, 10, n_embed] → [Ht, Wt, 10, 10, n_embed]
-                patches = patches.reshape(
-                    height_tiles,
-                    width_tiles,
-                    patch_side,
-                    patch_side,
-                    n_embed,
-                )
-                # → [Ht, 10, Wt, 10, n_embed] → [Ht * 10, Wt * 10, n_embed]
-                patches = patches.permute(0, 2, 1, 3, 4).reshape(
-                    height_tiles * patch_side,
-                    width_tiles * patch_side,
-                    n_embed,
-                )
-                # Add newline column per assembled grid row.
-                newline_col = self.image_newline[None, None, :].expand(
-                    height_tiles * patch_side, 1, n_embed
-                )
-                patches = torch.cat([patches, newline_col], dim=1)
-                # [Ht * 10, Wt * 10 + 1, n_embed] → flatten
-                patches = patches.reshape(-1, n_embed)
-                single_image_output.append(patches)
-
-            # 2. Process global images: add 1 newline per row.
-            # → [16, 16, n_embed]
-            global_image = global_part[i].reshape(image_side, image_side, n_embed)
-            newline_col = self.image_newline[None, None, :].expand(
-                image_side,
-                1,
-                n_embed,
-            )
-            # → [16, 17, n_embed]
-            global_image = torch.cat([global_image, newline_col], dim=1)
-            global_image = global_image.reshape(-1, n_embed)
-            single_image_output.append(global_image)
+            # 2. Global image: newlines already inserted in graph output.
+            single_image_output.append(global_part[i])
 
             # 3. Add view separator for each image.
-            # single_image_output + [1, n_embed]
             single_image_output.append(self.view_seperator[None, :])
 
             # 4. Save final outputs for each image.
