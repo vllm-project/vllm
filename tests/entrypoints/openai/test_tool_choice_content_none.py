@@ -228,6 +228,39 @@ def test_parse_delta_tool_choice_none_multiple_chunks_remain_content():
     assert parser._tool_parser.prev_tool_call_arr == []
 
 
+def test_parse_delta_responses_tool_choice_none_skips_tool_parser():
+    """Responses streaming also routes through ``parse_delta``; the shared
+    guard must bypass the tool parser there too when ``tool_choice="none"``."""
+    parser = _make_streaming_parser_with_tool_only()
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "test-model",
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+            "tool_choice": "none",
+        }
+    )
+
+    delta = parser.parse_delta(
+        delta_text="hello ",
+        delta_token_ids=[1, 2],
+        request=request,
+        prompt_token_ids=[10],
+    )
+
+    assert delta is not None
+    assert delta.tool_calls == []
+    assert delta.content == "hello "
+    # The stub tool parser must not have been called.
+    assert parser._tool_parser.prev_tool_call_arr == []
+
+
 def test_responses_parser_allows_named_tool_choice_with_none_content():
     request = ResponsesRequest.model_validate(
         {

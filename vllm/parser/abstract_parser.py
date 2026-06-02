@@ -707,6 +707,13 @@ class DelegatingParser(Parser):
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
         assert self._tool_parser is not None
+        if not request.tool_choice or request.tool_choice == "none":
+            # tool_choice="none", or explicitly disabled via JSON null
+            # (request.tool_choice is None): never invoke the tool parser;
+            # surface any remaining (post-reasoning) model output as plain
+            # content, mirroring the non-streaming Chat Completions guard
+            # (not request.tool_choice or request.tool_choice == "none").
+            return (DeltaMessage(content=delta_text) if delta_text else None), False
         supports_required_and_named = self._tool_parser.supports_required_and_named
         if (
             supports_required_and_named
@@ -859,42 +866,31 @@ class DelegatingParser(Parser):
             # A boundary delta may carry both reasoning and tool call,
             # save it before the tool parser overwrites delta_message.
             reasoning = delta_message.reasoning if delta_message else None
-            if not request.tool_choice or request.tool_choice == "none":
-                # tool_choice="none", or explicitly disabled via JSON null
-                # (request.tool_choice is None): skip the tool parser and
-                # surface any remaining model output as plain content,
-                # mirroring the non-streaming Chat Completions guard
-                # (not request.tool_choice or request.tool_choice == "none").
-                if delta_text:
-                    if delta_message is None:
-                        delta_message = DeltaMessage(content=delta_text)
-                    else:
-                        delta_message.content = delta_text
-            else:
-                delta_message, state.function_name_returned = (
-                    self._extract_tool_calls_streaming(
-                        previous_text=state.previous_text,
-                        current_text=current_text,
-                        delta_text=delta_text,
-                        previous_token_ids=state.previous_token_ids,
-                        current_token_ids=current_token_ids,
-                        delta_token_ids=delta_token_ids,
-                        request=request,  # type: ignore[arg-type]
-                        tool_call_idx=state.history_tool_call_cnt,
-                        tool_call_id_type=state.tool_call_id_type,
-                        function_name_returned=state.function_name_returned,
-                    )
+            delta_message, state.function_name_returned = (
+                self._extract_tool_calls_streaming(
+                    previous_text=state.previous_text,
+                    current_text=current_text,
+                    delta_text=delta_text,
+                    previous_token_ids=state.previous_token_ids,
+                    current_token_ids=current_token_ids,
+                    delta_token_ids=delta_token_ids,
+                    request=request,  # type: ignore[arg-type]
+                    tool_call_idx=state.history_tool_call_cnt,
+                    tool_call_id_type=state.tool_call_id_type,
+                    function_name_returned=state.function_name_returned,
                 )
-                if (
-                    delta_message
-                    and delta_message.tool_calls
-                    and delta_message.tool_calls[0].id is not None
-                ):
-                    state.history_tool_call_cnt += 1
+            )
             if reasoning:
                 if not delta_message:
                     delta_message = DeltaMessage()
                 delta_message.reasoning = reasoning
+
+            if (
+                delta_message
+                and delta_message.tool_calls
+                and delta_message.tool_calls[0].id is not None
+            ):
+                state.history_tool_call_cnt += 1
 
         # No phase active: pass through as content
         if (
