@@ -231,6 +231,27 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
+torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    torch::stable::Tensor const& q_in, torch::stable::Tensor const& kv,
+    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
+    double eps, int64_t cache_block_size);
+
+#ifndef USE_ROCM
+torch::stable::Tensor minimax_allreduce_rms(
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
+    int64_t const rank, int64_t const nranks, double const eps);
+std::tuple<torch::stable::Tensor, torch::stable::Tensor>
+minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
+                         torch::stable::Tensor const& norm_weight_q,
+                         torch::stable::Tensor const& norm_weight_k,
+                         torch::stable::Tensor workspace, int64_t const q_size,
+                         int64_t const kv_size, int64_t const rank,
+                         int64_t const nranks, double const eps);
+#endif
+
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
     torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
@@ -272,6 +293,26 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& initial_state_idx,
     const std::optional<torch::stable::Tensor>& cu_chunk_seqlen,
     const std::optional<torch::stable::Tensor>& last_chunk_indices);
+
+using fptr_t = int64_t;
+fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
+                      torch::stable::Tensor& rank_data, int64_t rank,
+                      bool fully_connected);
+void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
+                torch::stable::Tensor& out, fptr_t reg_buffer,
+                int64_t reg_buffer_sz_bytes);
+void dispose(fptr_t _fa);
+int64_t meta_size();
+void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta(fptr_t _fa);
+void register_graph_buffers(fptr_t _fa,
+                            const std::vector<std::vector<int64_t>>& handles,
+                            const std::vector<std::vector<int64_t>>& offsets);
+std::tuple<int64_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
+    int64_t size);
+int64_t open_mem_handle(torch::stable::Tensor& mem_handle);
+void free_shared_buffer(int64_t buffer);
 
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);

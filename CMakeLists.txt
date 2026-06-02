@@ -309,14 +309,9 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/custom_all_reduce.cu"
-  "csrc/torch_bindings.cpp"
-  "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+  "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_EXT_SRC
-    "csrc/minimax_reduce_rms_kernel.cu")
-
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
@@ -503,12 +498,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
     set(SRCS
-      "csrc/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
-      "csrc/moe/mxfp8_moe/mxfp8_experts_quant.cu")
+      "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+      "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
     message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
   else()
@@ -598,7 +593,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 if (VLLM_GPU_LANG STREQUAL "HIP")
-  # Add QuickReduce kernels
+  # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
   list(APPEND VLLM_EXT_SRC
     "csrc/custom_quickreduce.cu"
   )
@@ -647,7 +642,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/attention/paged_attention_v1.cu"
     "csrc/libtorch_stable/attention/paged_attention_v2.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
-    "csrc/libtorch_stable/cache_kernels_fused.cu")
+    "csrc/libtorch_stable/cache_kernels.cu"
+    "csrc/libtorch_stable/cache_kernels_fused.cu"
+    "csrc/libtorch_stable/custom_all_reduce.cu"
+    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -659,7 +657,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
+      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
+      "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
 
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
