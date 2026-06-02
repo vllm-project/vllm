@@ -155,21 +155,25 @@ def compute_tile_loop_bounds(
     IS_3D: tl.constexpr,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_TD: tl.constexpr = False,
 ):
-    """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
-    derived ``max_seq_prefix_len`` used for per-tile masking.
+    """Compute ``(loop_lo, loop_hi, max_seq_prefix_len, tile_base)`` for the
+    KV-tile loop, folding in: (1) the longest prefix any query in this q-block
+    spans (clamped to ``seq_len``, or extended to it under mm_prefix);
+    (2) sliding-window / chunked pruning; (3) 3D segment scoping when ``IS_3D``.
 
-    Combines three concerns into one helper:
-
-    1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active (bidirectional ranges can reach past the
-       causal prefix).
-    2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
-       only tiles that can contain an allowed key under SWA.
-    3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+    ``tile_base`` is the absolute KV position the loop starts from
+    (``seq_offset = tile_base + j * TILE_SIZE + offs_t``); it is 0 on every
+    non-shifted path. The 2D pointer SWA path shifts it to the exact window
+    lower bound instead of the floor-rounded tile boundary, so the window's
+    keys occupy the minimal ``ceil(W / TILE_SIZE)`` tiles; the floor-rounded
+    start, by contrast, lets the masked leading slots (positions before the
+    window in the first tile) push the window across up to one extra tile.
+    (It also makes the online-softmax reduction order independent of the window
+    offset mod ``TILE_SIZE``, so output is byte-identical across batch shapes.)
+    The 3D and ``USE_TD`` paths keep ``tile_base = 0``: the former
+    segments in absolute tile coordinates, and the latter's tensor-descriptor
+    load assumes each tile lies within a single KV block.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -188,34 +192,41 @@ def compute_tile_loop_bounds(
 
     num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
 
-    # ---- Sliding-window tile pruning --------------------
-    # Default: keep previous global behavior
+    # Default: iterate from absolute origin, all tiles.
+    tile_base: tl.int32 = 0
     tile_start = 0
     tile_end = num_tiles
     # TODO(Isotr0py): sliding window pruning with image bidirectional mask
     if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
-        # Query rows covered by this Q-block
+        # Query rows covered by this Q-block.
         qpos_lo = q_block_local_idx * BLOCK_Q
         qpos_hi = tl.minimum(
             qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
             cur_batch_query_len - 1,
         )
-        # For sliding window, each query position q can only attend to
-        # keys in the range [q_abs - SLIDING_WINDOW + 1, q_abs]
-        # where q_abs = context_len + q
-        # The union of allowed key positions for this Q-block is:
-        # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
+        # Allowed keys for this Q-block: [first_allowed_key, last_allowed_key],
+        # where each query q attends [q_abs - SLIDING_WINDOW + 1, q_abs].
         q_abs = context_len + qpos_lo
         if CHUNK_LOOKBACK > -1:
-            # Chunked attention: align lower bound to the start of the
-            # lookback'th previous chunk.
+            # Chunked attention: lower bound is the lookback'th prior chunk.
             first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
-        # Convert to tile indices and clamp
-        tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
-        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+        if IS_3D or USE_TD:
+            # Keep the floor-rounded, TILE_SIZE-aligned iteration here:
+            # 3D segmenting reasons in absolute tile coordinates, and the
+            # tensor-descriptor KV load assumes each tile lies in one block
+            # (which an arbitrary base offset would violate).
+            tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
+            tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
+        else:
+            # 2D pointer path: base-shift to the exact lower bound (see docstring).
+            tile_base = tl.maximum(0, first_allowed_key)
+            tile_start = 0
+            tile_end = cdiv_fn(
+                tl.maximum(0, last_allowed_key + 1 - tile_base), TILE_SIZE
+            )
 
     if IS_3D:
         loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
@@ -224,7 +235,7 @@ def compute_tile_loop_bounds(
         loop_lo = tile_start
         loop_hi = tile_end
 
-    return loop_lo, loop_hi, max_seq_prefix_len
+    return loop_lo, loop_hi, max_seq_prefix_len, tile_base
 
 
 @triton.jit

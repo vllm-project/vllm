@@ -647,3 +647,144 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@pytest.mark.parametrize("num_heads", [(4, 1)])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("sliding_window", [10, 17])
+@pytest.mark.parametrize("seq_threshold_3D", [0])
+@torch.inference_mode()
+def test_triton_unified_attn_sw_tile_base_bit_exact(
+    num_heads: tuple[int, int],
+    head_size: int,
+    block_size: int,
+    sliding_window: int,
+    seq_threshold_3D: int,
+) -> None:
+    """The kernel must produce bit-exact output for two SW invocations whose
+    sliding window covers the same logical (Q, K, V) values, even when the
+    SW window of one run fits in a single KV tile while the other run's
+    window straddles a tile boundary (so the two runs iterate a different
+    number of tiles and online softmax merges through the running
+    accumulator a different number of times).
+
+    Before the tile-base-shift fix, ``tile_start = first_allowed_key //
+    TILE_SIZE`` floor-rounded the iteration start. When the SW window
+    straddles a tile boundary, the second run iterates one extra tile and
+    online softmax merges across that boundary via the running-max +
+    correction pattern; bf16 ``acc_new = acc_old * exp(m_old - m_new) +
+    sum_of_tile_p`` is order-sensitive, so the same logical Q×K window
+    accumulates differently and the output drifts at ULP scale.
+
+    With the fix, the iteration begins exactly at ``first_allowed_key`` →
+    the run whose window straddled a tile boundary now iterates one tile
+    starting at the window's first key → both runs do a single-tile reduce
+    over the same set of real values → bit-exact.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    num_query_heads, num_kv_heads = num_heads
+    assert num_query_heads % num_kv_heads == 0
+    dtype = torch.bfloat16
+    scale = head_size**-0.5
+    window_size = (sliding_window - 1, 0)
+    sw = sliding_window
+    num_blocks = 2048
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+
+    # Prefill TILE_SIZE is 32. Pick query positions so run 1's SW window fits
+    # in tile 0 while run 2's straddles tiles 0-1, with identical window content
+    # and query. Without the base-shift fix, run 2's two-tile merge drifts by
+    # bf16 ULPs vs run 1's single-tile reduce.
+    kv_len_1 = sw + 5
+    kv_len_2 = sw + 31
+    # Sanity: run 1's window must fit in a single tile, run 2's must straddle.
+    assert (sw + 4) // 32 == 5 // 32, "run 1 should be single-tile"
+    assert (sw + 30) // 32 != 31 // 32, "run 2 should straddle tile boundary"
+
+    # Single decode step per sequence (query_len=1).
+    query_lens = [1]
+    max_query_len = 1
+
+    # Shared per-token tensors that go inside the SW window in both runs.
+    q_token = torch.randn(num_query_heads, head_size, dtype=dtype)
+    shared_k = torch.randn(sw, num_kv_heads, head_size, dtype=dtype)
+    shared_v = torch.randn(sw, num_kv_heads, head_size, dtype=dtype)
+
+    def _run(kv_len: int) -> torch.Tensor:
+        # Block layout: enough blocks to cover the longest run.
+        max_num_blocks_per_seq = (kv_len + block_size - 1) // block_size
+        key_cache = torch.randn(
+            num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+        )
+        value_cache = torch.randn_like(key_cache)
+        # Pick a fixed block_table mapping (deterministic) so two runs writing
+        # the SW-window slots access the same physical block layout structure.
+        block_table = torch.arange(
+            1, 1 + max_num_blocks_per_seq, dtype=torch.int32
+        ).view(1, max_num_blocks_per_seq)
+        # The query sits at logical position kv_len - 1; its SW window covers
+        # keys at logical positions [kv_len - sw .. kv_len - 1].
+        # Write shared_k / shared_v into those slots via the block_table.
+        for i, pos in enumerate(range(kv_len - sw, kv_len)):
+            blk = int(block_table[0, pos // block_size].item())
+            slot = pos % block_size
+            key_cache[blk, slot] = shared_k[i]
+            value_cache[blk, slot] = shared_v[i]
+
+        query = q_token[None, :, :].clone()  # (1, num_q_heads, head_size)
+        cu_query_lens = torch.tensor([0, 1], dtype=torch.int32)
+        kv_lens = torch.tensor([kv_len], dtype=torch.int32)
+        output = torch.empty_like(query)
+
+        softmax_segm_output = torch.empty(
+            (seq_threshold_3D, num_query_heads,
+             num_par_softmax_segments, head_size_padded),
+            dtype=torch.float32,
+        )
+        softmax_segm_max = torch.empty(
+            (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        )
+        softmax_segm_expsum = torch.empty(
+            (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+            dtype=torch.float32,
+        )
+
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=output,
+            cu_seqlens_q=cu_query_lens,
+            seqused_k=kv_lens,
+            max_seqlen_q=max_query_len,
+            max_seqlen_k=int(kv_len),
+            softmax_scale=scale,
+            causal=True,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+            kv_quant_mode=KVQuantMode.NONE,
+        )
+        return output
+
+    out1 = _run(kv_len_1)
+    out2 = _run(kv_len_2)
+    assert torch.equal(out1, out2), (
+        f"SW attention output drifted across two invocations whose windows "
+        f"cover the same logical (Q, K, V) values but land at different "
+        f"slot positions within the KV tile. max abs diff = "
+        f"{(out1 - out2).abs().max().item()}"
+    )
