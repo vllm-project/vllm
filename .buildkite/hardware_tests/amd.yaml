@@ -65,3 +65,9 @@ steps:
       IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
       REMOTE_VLLM: "1"
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
