@@ -466,6 +466,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             activation_clamp=activation_clamp,
             fast_math=fast_math,
         )
+        return y
 
 
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
