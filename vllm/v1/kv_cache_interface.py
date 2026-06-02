@@ -558,9 +558,11 @@ class MLAAttentionSpec(FullAttentionSpec):
     def real_page_size_bytes(self) -> int:
         if self.cache_dtype_str == "fp8_ds_mla":
             if self.model_version == "deepseek_v4":
-                # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B/token.
+                # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
+                # head_size stays semantic (512); bytes are determined here.
                 return self.storage_block_size * 584
-            # V3.2 main MLA: 656-byte custom layout. See flashmla_sparse.py.
+            # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
             return self.block_size * 656
         return (
             self.storage_block_size
@@ -740,7 +742,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     @property
     def real_page_size_bytes(self) -> int:
         if self.model_version == "deepseek_v4":
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B/token.
+            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
             return self.storage_block_size * 584
         assert self.model_version is None, (
             f"Unsupported model version: {self.model_version}"
@@ -858,17 +860,50 @@ class SinkFullAttentionSpec(FullAttentionSpec):
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, SinkFullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be "
-            "SinkFullAttentionSpec."
+        """
+        Merge a list of FullAttentionSpec objects into a single
+        FullAttentionSpec object.
+        """
+        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be FullAttentionSpec."
         )
-        sink_lens = {spec.sink_len for spec in specs}
-        assert len(sink_lens) == 1, (
-            "All SinkFullAttentionSpec layers in the same KV cache group must "
-            f"have the same sink_len; got {sink_lens}."
+
+        sliding_window = set(
+            spec.sliding_window for spec in specs if spec.sliding_window is not None
         )
-        merged = super().merge(specs)
-        return replace(merged, sink_len=sink_lens.pop())
+        attention_chunk_size = set(
+            spec.attention_chunk_size
+            for spec in specs
+            if spec.attention_chunk_size is not None
+        )
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
+            sink_len=specs[0].sink_len,
+            dtype=specs[0].dtype,
+            kv_quant_mode=specs[0].kv_quant_mode,
+            page_size_padded=specs[0].page_size_padded,
+            sliding_window=cls.merge_window_sizes(sliding_window),
+            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+        )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        assert (merged_spec.sliding_window is not None) + (
+            merged_spec.attention_chunk_size is not None
+        ) <= 1, (
+            "Model with both sliding window layers and chunked local attention "
+            "layers is not supported."
+        )
+        return merged_spec
 
 
 @dataclass(frozen=True)
@@ -1037,7 +1072,7 @@ class KVCacheTensor:
     """
 
     size: int  # total size in bytes
-    shared_by: list[list[str]]  # shared_by[layer_idx] = [layer_names]
+    shared_by: list[list[str]]  # shared_by[slot_idx] = [layer_names]
 
 
 @dataclass

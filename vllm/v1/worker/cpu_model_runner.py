@@ -137,7 +137,9 @@ class CPUModelRunner(GPUModelRunner):
         # content == 2*head_size (true for all CPU attention specs; MLA, which
         # differs, isn't supported).
         kv_caches = super()._allocate_kv_caches(
-            kv_cache_config, kernel_block_sizes, layout
+            kv_cache_config,
+            kernel_block_sizes,
+            layout=KVCacheLayout.LBHNC,
         )
         attn_layers = {
             name

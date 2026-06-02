@@ -915,16 +915,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    buckets: dict[int, list[list[str]]] = defaultdict(list)
-    for g_idx, group in enumerate(kv_cache_groups):
-        slot_count: dict[int, int] = defaultdict(int)
-        for layer_name in group.layer_names:
-            ps = _get_per_layer_page_size(group, layer_name)
-            slot_idx = slot_count[ps]
-            slot_count[ps] += 1
-            if slot_idx == len(buckets[ps]):
-                buckets[ps].append([])
-            buckets[ps][slot_idx].append(layer_name)
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
     return sum(ps * len(slots) for ps, slots in buckets.items())
 
 
@@ -1172,15 +1163,29 @@ def _get_kv_cache_groups_uniform_page_size(
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
-def _get_per_layer_page_size(
-    group: KVCacheGroupSpec,
-    layer_name: str,
-) -> int:
-    """Return the page_size_bytes for a specific layer."""
-    spec = group.kv_cache_spec
-    if isinstance(spec, UniformTypeKVCacheSpecs):
-        return spec.kv_cache_specs[layer_name].page_size_bytes
-    return spec.page_size_bytes
+def _bucket_layers_by_page_size(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> dict[int, list[list[str]]]:
+    """Bucket layers by page size: ``result[ps][slot_idx] = [layer_names]``.
+
+    Layers from different groups at the same ``slot_idx`` share a block
+    (they have independent block tables so block-id namespaces never collide).
+    """
+    buckets: dict[int, list[list[str]]] = defaultdict(list)
+    for group in kv_cache_groups:
+        spec = group.kv_cache_spec
+        slot_count: dict[int, int] = defaultdict(int)
+        for layer_name in group.layer_names:
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                ps = spec.kv_cache_specs[layer_name].page_size_bytes
+            else:
+                ps = spec.page_size_bytes
+            slot_idx = slot_count[ps]
+            slot_count[ps] += 1
+            if slot_idx == len(buckets[ps]):
+                buckets[ps].append([])
+            buckets[ps][slot_idx].append(layer_name)
+    return buckets
 
 
 def _get_per_layer_spec(
@@ -1276,18 +1281,7 @@ def get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
         )
 
-    # Bucket layers by page size: buckets[ps][slot_idx] = [layer_names].
-    # Layers from different groups at the same slot_idx share a block.
-    buckets: dict[int, list[list[str]]] = defaultdict(list)
-    for group in kv_cache_groups:
-        slot_count: dict[int, int] = defaultdict(int)
-        for layer_name in group.layer_names:
-            ps = _get_per_layer_page_size(group, layer_name)
-            slot_idx = slot_count[ps]
-            if slot_idx == len(buckets[ps]):
-                buckets[ps].append([])
-            buckets[ps][slot_idx].append(layer_name)
-            slot_count[ps] += 1
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
 
     page_sizes = list(buckets.keys())
     bytes_per_block = sum(ps * len(buckets[ps]) for ps in page_sizes)

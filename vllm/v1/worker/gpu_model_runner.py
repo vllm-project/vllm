@@ -6908,32 +6908,41 @@ class GPUModelRunner(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
 
-            representative = kv_cache_tensor.shared_by[0][0]
-            group = layer_to_group[representative]
-            spec = group.kv_cache_spec
-            kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
-
-            slot_bytes = kv_cache_tensor.size // num_layer_slots
-            num_blocks = slot_bytes // spec.page_size_bytes
-            num_blocks_per_kv_block = spec.block_size // kernel_block_size
-            kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-
-            if spec.storage_block_size != spec.block_size:
-                shape_block_size = spec.storage_block_size
-            else:
-                shape_block_size = kernel_block_size
-
-            views = reshape_kv_cache(
-                buf,
-                spec,
-                kernel_num_blocks,
-                num_layer_slots=num_layer_slots,
-                layout=layout,
-                block_size=shape_block_size,
-            )
+            layer_to_slot: dict[str, int] = {}
             for slot_idx, slot_layers in enumerate(kv_cache_tensor.shared_by):
                 for layer_name in slot_layers:
-                    kv_caches[layer_name] = views[slot_idx]
+                    layer_to_slot[layer_name] = slot_idx
+
+            group_layers: dict[int, list[str]] = defaultdict(list)
+            for layer_name in layer_to_slot:
+                group = layer_to_group[layer_name]
+                group_layers[group.kv_cache_group_id].append(layer_name)
+
+            slot_bytes = kv_cache_tensor.size // num_layer_slots
+            for group_id, layer_names in group_layers.items():
+                group = layer_to_group[layer_names[0]]
+                spec = group.kv_cache_spec
+                kernel_block_size = kernel_block_sizes[group_id]
+
+                num_blocks = slot_bytes // spec.page_size_bytes
+                num_blocks_per_kv_block = spec.block_size // kernel_block_size
+                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
+                if spec.storage_block_size != spec.block_size:
+                    shape_block_size = spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
+                views = reshape_kv_cache(
+                    buf,
+                    spec,
+                    kernel_num_blocks,
+                    num_layer_slots=num_layer_slots,
+                    layout=layout,
+                    block_size=shape_block_size,
+                )
+                for layer_name in layer_names:
+                    kv_caches[layer_name] = views[layer_to_slot[layer_name]]
 
         return kv_caches
 
