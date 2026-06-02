@@ -130,12 +130,6 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
     head_offsets = tl.arange(0, HEAD_STRIDE)
 
-    # Loop per head so tl.arange stays at the (typically power-of-2 and
-    # small) head_stride = block_size * head_size, instead of growing with
-    # num_kv_heads.  This avoids triton constraints on power-of-2 sizes and
-    # register pressure that a single huge tl.arange across all heads would
-    # impose, and also lets us honor non-contiguous source strides for
-    # both NHD and HND physical layouts.
     for h in range(NUM_KV_HEADS):
         h_off = tl.cast(h, tl.int64)
 
@@ -175,12 +169,8 @@ def trtllm_prefill_attn_kvfp8_dequant(
     v_scale: torch.Tensor,
     dequant_dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Materialize FP8 KV pages for the TRTLLM prefill kernel.
+    """Materialize FP8 KV pages for the TRTLLM-Gen prefill kernel. """
 
-    This helper is for the TRTLLM prefill path only. It is not used by the
-    SM90 XQA decode path. SM90 XQA uses TRTLLM for decode while prefill falls
-    back to native FlashInfer unless a supported TRTLLM prefill path exists.
-    """
     batch_size, num_of_page_per_token = block_tables_prefill.shape
     s = kv_cache.shape
     assert s[1] == 2
@@ -207,7 +197,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
         dtype=torch.int32,
         device=block_tables_prefill.device,
     ).reshape(batch_size, num_of_page_per_token)
-
     grid = (batch_size, num_of_page_per_token)
     _trtllm_prefill_attn_kvfp8_dequant[grid](
         kv_cache,
@@ -428,16 +417,19 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        """FlashInfer supports sinks when TRTLLM prefill and trtllm-gen decode
-        are both available (currently SM100+)."""
+        """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
+        from vllm.utils.flashinfer import (
+            force_use_trtllm_attention,
+            supports_trtllm_attention,
+        )
 
-        # If TRTLLM attention is explicitly disabled, sink is not supported.
+        # Respect explicit disable flag (e.g.,
+        # --attention-config.use_trtllm_attention=0)
         if force_use_trtllm_attention() is False:
             return False
 
-        return supports_trtllm_attention(is_prefill=True) and supports_trtllm_attention(
-            is_prefill=False
-        )
+        # Check if TRTLLM is supported on this platform
+        return supports_trtllm_attention(is_prefill=False) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
