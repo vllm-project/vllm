@@ -91,10 +91,12 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
 | `Qwen3_5ForConditionalGeneration` | `Qwen3.5` | ✅︎ | ✅︎ |
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ |
+| `PaddleOCRVLForConditionalGeneration` | `PaddleOCR-VL` | ✅︎ | ❌︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
     For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
+    PaddleOCR-VL support is currently scoped to FA-style image encoder graphs.
 
 ## Configuration
 

@@ -50,6 +50,10 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def paddleocr_vl_prompt(content: str) -> str:
+    return f"USER: {content}\nASSISTANT:"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
@@ -119,6 +123,26 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="StepVLForConditionalGeneration",
+            ),
+        },
+    ),
+    "paddleocr_vl": VitCudagraphTestConfig(
+        model="PaddlePaddle/PaddleOCR-VL",
+        modalities=["image"],
+        image_prompt=paddleocr_vl_prompt(
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>What is in this image?"
+        ),
+        max_model_len=8192,
+        # Single bucket sized above the largest default test image after
+        # PaddleOCR-VL preprocessing, avoiding a large capture pool fanout.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="PaddleOCRVLForConditionalGeneration",
             ),
         },
     ),

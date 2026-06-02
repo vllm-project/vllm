@@ -17,7 +17,7 @@
 import math
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -73,9 +73,20 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.encoder_cudagraph_defs import (
+    EncoderCudaGraphCaptureInputs,
+    EncoderCudaGraphConfig,
+    EncoderCudaGraphReplayBuffers,
+    EncoderItemSpec,
+)
 
 from .ernie45 import Ernie4_5ForCausalLM
-from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMRoPE,
+    SupportsMultiModal,
+)
 from .siglip import SiglipMLP
 from .utils import (
     AutoWeightsLoader,
@@ -85,6 +96,18 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import get_vit_attn_backend
+
+
+def _pad_paddleocr_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    capture_total = dst[-1].clone()
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src[:n])
+    if n < dst.shape[0]:
+        dst[n:] = capture_total
 
 
 def smart_resize(
@@ -381,6 +404,19 @@ class Projector(nn.Module):
 
         return hidden_states.view(*dims, -1)
 
+    def forward_packed(
+        self,
+        image_features: torch.Tensor,
+        merge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        x = image_features.reshape(-1, image_features.shape[-1])
+        x = self.pre_norm(x)
+        x = x[merge_index].reshape(-1, self.hidden_size)
+        x = self.linear_1(x)
+        x = self.act(x)
+        x = self.linear_2(x)
+        return x
+
 
 class PaddleOCRImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
@@ -486,7 +522,16 @@ class SiglipVisionEmbeddings(nn.Module):
         image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
         | None = None,
         interpolate_pos_encoding=False,
+        position_embeddings: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if position_embeddings is not None:
+            if pixel_values.dim() == 5:
+                pixel_values = rearrange(pixel_values, "b l c h w -> (b l) c h w")
+            target_dtype = self.patch_embedding.weight.dtype
+            patch_embeds = self.patch_embedding(pixel_values.to(dtype=target_dtype))
+            embeddings = patch_embeds.flatten(-2).squeeze(-1)
+            embeddings = embeddings + position_embeddings
+            return embeddings.unsqueeze(0)
         if pixel_values.dim() == 4:
             pixel_values = pixel_values.unsqueeze(0)
         if pixel_values.dim() == 5:
@@ -783,46 +828,50 @@ class SiglipEncoder(nn.Module):
         | None = None,
         height_position_ids: torch.Tensor | None = None,
         width_position_ids: torch.Tensor | None = None,
+        rotary_pos_emb: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         device = inputs_embeds.device
         hidden_states = inputs_embeds
 
-        flatten_image_grid_thw = self.flatten_list(image_grid_thw)
+        # Encoder CUDA graph path receives precomputed RoPE and attention metadata.
+        if rotary_pos_emb is None:
+            flatten_image_grid_thw = self.flatten_list(image_grid_thw)
 
-        if width_position_ids is None or height_position_ids is None:
-            split_hids = list()
-            split_wids = list()
-            for t, h, w in flatten_image_grid_thw:
-                image_pids = torch.arange(t * h * w, device=device) % (h * w)
-                sample_hids = image_pids // w
-                sample_wids = image_pids % w
-                split_hids.append(sample_hids)
-                split_wids.append(sample_wids)
-            width_position_ids = torch.concat(split_wids, dim=0)
-            height_position_ids = torch.concat(split_hids, dim=0)
+            if width_position_ids is None or height_position_ids is None:
+                split_hids = list()
+                split_wids = list()
+                for t, h, w in flatten_image_grid_thw:
+                    image_pids = torch.arange(t * h * w, device=device) % (h * w)
+                    sample_hids = image_pids // w
+                    sample_wids = image_pids % w
+                    split_hids.append(sample_hids)
+                    split_wids.append(sample_wids)
+                width_position_ids = torch.concat(split_wids, dim=0)
+                height_position_ids = torch.concat(split_hids, dim=0)
 
-        pids = torch.stack(
-            [height_position_ids, width_position_ids],
-            dim=-1,
-        )
-        max_grid_size = pids.max() + 1
-        rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
-        rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
+            pids = torch.stack(
+                [height_position_ids, width_position_ids],
+                dim=-1,
+            )
+            max_grid_size = pids.max() + 1
+            rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
+            rotary_pos_emb = rope_emb_max_grid[pids].flatten(1)
 
-        if cu_seqlens is None:
-            raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
-        if not isinstance(cu_seqlens, torch.Tensor):
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-        else:
-            cu_seqlens = cu_seqlens.to(device=device)
+            if cu_seqlens is None:
+                raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
+            if not isinstance(cu_seqlens, torch.Tensor):
+                cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            else:
+                cu_seqlens = cu_seqlens.to(device=device)
 
-        max_seqlen = None
-        if self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-            AttentionBackendEnum.TRITON_ATTN,
-        }:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+            max_seqlen = None
+            if self.attn_backend in {
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.TRITON_ATTN,
+            }:
+                max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -863,12 +912,24 @@ class SiglipVisionTransformer(nn.Module):
         width_position_ids: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         image_grid_thw: torch.Tensor | None = None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        # Encoder CUDA graph path: consume precomputed, fixed-shape buffers.
+        position_embeddings = None
+        rotary_pos_emb = None
+        max_seqlen = None
+        if encoder_metadata is not None:
+            position_embeddings = encoder_metadata["position_embeddings"]
+            rotary_pos_emb = encoder_metadata["rotary_pos_emb"]
+            cu_seqlens = encoder_metadata["cu_seqlens"]
+            max_seqlen = encoder_metadata.get("max_seqlen")
+
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
             position_ids=position_ids,
             image_grid_thw=image_grid_thw,
+            position_embeddings=position_embeddings,
         )
 
         last_hidden_state = self.encoder(
@@ -877,6 +938,8 @@ class SiglipVisionTransformer(nn.Module):
             image_grid_thw=image_grid_thw,
             height_position_ids=height_position_ids,
             width_position_ids=width_position_ids,
+            rotary_pos_emb=rotary_pos_emb,
+            max_seqlen=max_seqlen,
         )
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
@@ -910,6 +973,106 @@ class SiglipVisionModel(nn.Module):
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
 
+    def prepare_encoder_metadata(
+        self,
+        grid_thw: list[list[int]],
+        *,
+        max_batch_size: int | None = None,
+        max_seqlen_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Precompute fixed-shape buffers for encoder CUDA graph capture/replay."""
+        if device is None:
+            device = self.device
+
+        embeddings = self.vision_model.embeddings
+        encoder = self.vision_model.encoder
+        spatial_merge_size = self.vision_model.config.spatial_merge_size
+
+        pos_emb_weight = embeddings.position_embedding.weight
+        pos_emb_list = []
+        for t, h, w in grid_thw:
+            pe = (
+                embeddings.interpolate_pos_encoding(pos_emb_weight, h, w, True)
+                .squeeze(0)
+                .repeat(t, 1)
+            )
+            pos_emb_list.append(pe)
+        position_embeddings = torch.cat(pos_emb_list, dim=0).to(
+            device=device, dtype=self.dtype, non_blocking=True
+        )
+
+        split_hids = []
+        split_wids = []
+        for t, h, w in grid_thw:
+            image_pids = torch.arange(t * h * w) % (h * w)
+            split_hids.append(image_pids // w)
+            split_wids.append(image_pids % w)
+        height_position_ids = torch.concat(split_hids, dim=0)
+        width_position_ids = torch.concat(split_wids, dim=0)
+        pids = torch.stack([height_position_ids, width_position_ids], dim=-1)
+        max_grid_size = int(pids.max().item()) + 1
+        rope_table = encoder.rotary_pos_emb(max_grid_size)
+        rotary_pos_emb = rope_table[pids.to(rope_table.device)].flatten(1)
+        rotary_pos_emb = rotary_pos_emb.to(device=device, non_blocking=True)
+
+        seqlens = np.array([t * h * w for t, h, w in grid_thw], dtype=np.int32)
+        cu_seqlens_np = np.concatenate(
+            [np.zeros(1, dtype=np.int32), seqlens.cumsum(dtype=np.int32)]
+        )
+        if max_batch_size is not None:
+            num_seqs = len(cu_seqlens_np) - 1
+            if num_seqs < max_batch_size:
+                cu_seqlens_np = np.concatenate(
+                    (
+                        cu_seqlens_np,
+                        np.full(
+                            (max_batch_size - num_seqs,),
+                            cu_seqlens_np[-1],
+                            dtype=cu_seqlens_np.dtype,
+                        ),
+                    )
+                )
+
+        if max_seqlen_override is not None:
+            max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
+        else:
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                encoder.attn_backend,
+                cu_seqlens_np,
+            )
+            max_seqlen = (
+                torch.tensor(max_seqlen_val, dtype=torch.int32)
+                if max_seqlen_val != 0
+                else None
+            )
+        cu_seqlens = torch.from_numpy(cu_seqlens_np).to(
+            device=device,
+            non_blocking=True,
+        )
+
+        m = spatial_merge_size
+        merge_index_parts = []
+        offset = 0
+        for t, h, w in grid_thw:
+            idx = torch.arange(t * h * w).view(t, h // m, m, w // m, m)
+            idx = idx.permute(0, 1, 3, 2, 4).reshape(-1)
+            merge_index_parts.append(idx + offset)
+            offset += t * h * w
+        merge_index = torch.cat(merge_index_parts, dim=0).to(
+            device=device, non_blocking=True
+        )
+
+        metadata: dict[str, torch.Tensor] = {
+            "position_embeddings": position_embeddings,
+            "rotary_pos_emb": rotary_pos_emb,
+            "cu_seqlens": cu_seqlens,
+            "merge_index": merge_index,
+        }
+        if max_seqlen is not None:
+            metadata["max_seqlen"] = max_seqlen
+        return metadata
+
     def forward(
         self,
         pixel_values,
@@ -918,6 +1081,7 @@ class SiglipVisionModel(nn.Module):
         image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
         | None = None,
         cu_seqlens: torch.Tensor | None = None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> BaseModelOutputWithPooling:
         return self.vision_model(
             pixel_values=pixel_values,
@@ -925,6 +1089,7 @@ class SiglipVisionModel(nn.Module):
             position_ids=position_ids,
             image_grid_thw=image_grid_thw,
             cu_seqlens=cu_seqlens,
+            encoder_metadata=encoder_metadata,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -999,7 +1164,9 @@ class SiglipVisionModel(nn.Module):
     info=PaddleOCRVLProcessingInfo,
     dummy_inputs=PaddleOCRVLDummyInputsBuilder,
 )
-class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
+class PaddleOCRVLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsMRoPE, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -1027,6 +1194,8 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
+        self.multimodal_config = vllm_config.model_config.multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.visual = SiglipVisionModel(
@@ -1215,6 +1384,217 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         multimodal_embeddings += tuple(image_embeds)
 
         return multimodal_embeddings
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        attn_backend = self.visual.vision_model.encoder.attn_backend
+        if attn_backend not in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
+            return EncoderCudaGraphConfig(
+                modalities=[],
+                buffer_keys=[],
+                out_hidden_size=self.config.hidden_size,
+            )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values",
+                "position_embeddings",
+                "rotary_pos_emb",
+                "cu_seqlens",
+                "merge_index",
+                "max_seqlen",
+            ],
+            padding_logics={"cu_seqlens": _pad_paddleocr_cu_seqlens_buffer},
+            out_hidden_size=self.config.hidden_size,
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "image"
+
+    def get_max_frames_per_video(self) -> int:
+        return 1
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        min_budget = min(64, max_budget)
+        return min_budget, max_budget
+
+    def _get_image_grid_thw(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[tuple[int, int, int]]:
+        image_grid_thw = mm_kwargs["image_grid_thw"]
+        if isinstance(image_grid_thw, torch.Tensor):
+            image_grid_thw = image_grid_thw.tolist()
+        grids = []
+        for grid in image_grid_thw:
+            if isinstance(grid, torch.Tensor):
+                grid = grid.tolist()
+            grids.append(tuple(int(x) for x in grid))
+        return grids
+
+    def _get_pixel_values_list(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[torch.Tensor]:
+        pixel_values = mm_kwargs["pixel_values"]
+        if isinstance(pixel_values, torch.Tensor):
+            image_grid_thw = self._get_image_grid_thw(mm_kwargs)
+            patch_counts = [t * h * w for t, h, w in image_grid_thw]
+            return list(pixel_values.split(patch_counts))
+        return list(pixel_values)
+
+    def _get_cat_pixel_values(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        if isinstance(pixel_values, torch.Tensor):
+            return pixel_values
+        return torch.cat(list(pixel_values), dim=0)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[EncoderItemSpec]:
+        m = self.config.vision_config.spatial_merge_size
+        return [
+            EncoderItemSpec(
+                input_size=t * h * w,
+                output_tokens=t * (h // m) * (w // m),
+            )
+            for t, h, w in self._get_image_grid_thw(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values_list = self._get_pixel_values_list(mm_kwargs)
+        image_grid_thw = self._get_image_grid_thw(mm_kwargs)
+
+        if len(indices) == 0:
+            if pixel_values_list:
+                empty_pixel_values = pixel_values_list[0][:0]
+            else:
+                empty_pixel_values = self._get_cat_pixel_values(mm_kwargs)[:0]
+            return {
+                "pixel_values": empty_pixel_values,
+                "image_grid_thw": [],
+            }
+
+        selected_pixel_values = torch.cat(
+            [pixel_values_list[i] for i in indices],
+            dim=0,
+        )
+        selected_grid_thw = [image_grid_thw[i] for i in indices]
+        return {
+            "pixel_values": selected_pixel_values,
+            "image_grid_thw": selected_grid_thw,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> EncoderCudaGraphCaptureInputs:
+        vision_config = self.config.vision_config
+        spatial_merge_size = vision_config.spatial_merge_size
+        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        grid_config = [
+            [1, spatial_merge_size, per_item_output * spatial_merge_size]
+            for _ in range(max_batch_size)
+        ]
+
+        patch_size = vision_config.patch_size
+        dummy_pixel_values = torch.randn(
+            sum(t * h * w for t, h, w in grid_config),
+            vision_config.num_channels,
+            patch_size,
+            patch_size,
+            device=device,
+            dtype=dtype,
+        )
+
+        metadata = self.visual.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_seqlen_override=token_budget * (spatial_merge_size**2),
+            device=device,
+        )
+        metadata["cu_seqlens"] = torch.cat(
+            (metadata["cu_seqlens"], metadata["cu_seqlens"][-1:])
+        )
+        if "max_seqlen" not in metadata:
+            metadata["max_seqlen"] = torch.tensor(
+                token_budget * (spatial_merge_size**2),
+                dtype=torch.int32,
+                device=device,
+            )
+
+        return EncoderCudaGraphCaptureInputs(
+            values=metadata | {"pixel_values": dummy_pixel_values},
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> EncoderCudaGraphReplayBuffers:
+        metadata = self.visual.prepare_encoder_metadata(
+            [list(grid) for grid in self._get_image_grid_thw(mm_kwargs)],
+            max_batch_size=max_batch_size,
+        )
+        values: dict[str, torch.Tensor | None] = {
+            **metadata,
+            "pixel_values": self._get_cat_pixel_values(mm_kwargs),
+        }
+        values.setdefault("max_seqlen", None)
+
+        return EncoderCudaGraphReplayBuffers(
+            values=values,
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = values["pixel_values"].type(self.visual.dtype)
+        metadata = {k: v for k, v in values.items() if k != "pixel_values"}
+        vision_outputs = self.visual(
+            pixel_values=pixel_values,
+            encoder_metadata=metadata,
+        )
+        return self.mlp_AR.forward_packed(vision_outputs, metadata["merge_index"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        pixel_values = self._get_pixel_values_list(mm_kwargs)
+        image_grid_thw = self._get_image_grid_thw(mm_kwargs)
+        vision_outputs = tuple(
+            self.encode_image(pixel, torch.tensor(grid, device=pixel.device)).squeeze(0)
+            for pixel, grid in zip(pixel_values, image_grid_thw)
+        )
+        return torch.cat(self.mlp_AR(vision_outputs, image_grid_thw), dim=0)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
