@@ -61,7 +61,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.buffer_utils import (
+    async_copy_to_gpu,
+    set_default_max_concurrency,
+)
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -148,6 +151,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
+
+        # Size the UVA buffer pools to the max number of concurrent in-flight
+        # steps. Must run before any pooled buffer is constructed
+        set_default_max_concurrency(vllm_config.max_concurrent_batches)
 
         # PP broadcast/recv helper. Runs the collective on a side stream.
         self.pp_handler: PPHandler | None = None
