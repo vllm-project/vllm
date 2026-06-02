@@ -78,7 +78,7 @@ if [ -z "${HEAD_NODE_IP}" ]; then
   exit 1
 fi
 
-export RAY_PORT="${RAY_PORT:-$((6300 + (${SLURM_JOB_ID:-0} % 1000)))}"
+export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
 RAY_TMP_BASE="${RAY_TMP_BASE:-/tmp/vray-port-test-${SLURM_JOB_ID:-manual}}"
