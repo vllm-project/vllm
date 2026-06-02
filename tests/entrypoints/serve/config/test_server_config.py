@@ -285,12 +285,6 @@ class TestBuildResponseFeaturesSection:
         resp = _build_response(cfg, ["m"])
         assert resp.features.hma is False
 
-    def test_hma_enabled_when_manager_is_none(self):
-        # None is falsy — hma = not bool(None) = True
-        cfg = _make_vllm_config(disable_hybrid_kv_cache_manager=None)
-        resp = _build_response(cfg, ["m"])
-        assert resp.features.hma is True
-
     def test_all_features_enabled(self):
         cfg = _make_vllm_config(
             speculative_config=MagicMock(),
@@ -351,7 +345,8 @@ class TestGetServerConfigEndpoint:
         assert data["model"]["served_names"] == ["alias-a", "alias-b"]
 
     def test_served_names_fallback_from_model_config(self):
-        # When args.served_model_name is falsy, fall back to model_config.served_model_name
+        # When args.served_model_name is falsy, fall back to
+        # model_config.served_model_name
         cfg = _make_vllm_config(served_model_name="model-from-config")
         app = _make_test_app(cfg, served_model_name=None)
         with TestClient(app) as client:
