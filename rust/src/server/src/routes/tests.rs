@@ -746,6 +746,20 @@ async fn test_app() -> axum::Router {
     )))
 }
 
+async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-request-id",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+            .with_request_id_headers(true),
+    ));
+    (app, engine_task)
+}
+
 async fn test_health_app_with_engine_script<F>(
     script: F,
 ) -> (axum::Router, Arc<AppState>, MockEngineTask)
@@ -947,6 +961,18 @@ async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {
     (status, body)
 }
 
+async fn health_response(app: &axum::Router, request_id: Option<&str>) -> axum::response::Response {
+    let mut builder = Request::builder().method("GET").uri("/health");
+    if let Some(request_id) = request_id {
+        builder = builder.header("X-Request-Id", request_id);
+    }
+
+    app.clone()
+        .call(builder.body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app")
+}
+
 fn metric_value(rendered: &str, metric: &str, labels: Option<&str>) -> Option<f64> {
     rendered.lines().find_map(|line| {
         let rest = line.strip_prefix(metric)?;
@@ -992,6 +1018,43 @@ async fn list_models_returns_configured_model() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_id_header_is_absent_by_default() {
+    let app = test_app().await;
+    let response = health_response(&app, None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-request-id"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_id_header_generates_uuid_hex_when_enabled() {
+    let (app, _engine_task) = test_app_with_request_id_headers().await;
+    let response = health_response(&app, None).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .expect("x-request-id header")
+        .to_str()
+        .expect("header is ascii");
+    assert_eq!(request_id.len(), 32);
+    assert!(request_id.chars().all(|ch| ch.is_ascii_hexdigit()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_id_header_echoes_incoming_header_when_enabled() {
+    let (app, _engine_task) = test_app_with_request_id_headers().await;
+    let response = health_response(&app, Some("req-123")).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("x-request-id").unwrap(), "req-123");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
