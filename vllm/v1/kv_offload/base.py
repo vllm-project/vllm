@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
 import torch
+from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -319,6 +320,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.block_indices: Sequence[int] = block_indices
 
     @staticmethod
+    @override
     def medium() -> str:
         return "GPU"
 

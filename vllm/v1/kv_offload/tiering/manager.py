@@ -101,6 +101,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         """
         return self._kv_memoryview
 
+    @override
     def shutdown(self) -> None:
         super().shutdown()
         self._kv_memoryview.release()
@@ -223,6 +224,7 @@ class TieringOffloadingManager(OffloadingManager):
                         job_metadata.keys, job_metadata.req_context
                     )
 
+    @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
         Check whether a single block is offloaded and ready.
@@ -339,6 +341,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._pending_load_submissions.clear()
 
+    @override
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> LoadStoreSpec:
@@ -363,6 +366,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         return self.primary_tier.prepare_load(keys, req_context)
 
+    @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used in all tiers.
@@ -375,6 +379,7 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.touch(keys, req_context)
 
+    @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as done loading from primary tier to GPU.
@@ -388,6 +393,7 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self.primary_tier.complete_load(keys, req_context)
 
+    @override
     def prepare_store(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
@@ -471,6 +477,7 @@ class TieringOffloadingManager(OffloadingManager):
             self._transfer_jobs[job_id] = job_metadata
             tier.submit_store(job_metadata)
 
+    @override
     def complete_store(
         self,
         keys: Collection[OffloadKey],
@@ -529,6 +536,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
 
+    @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """
         Query each secondary tier for its offload policy preference.
@@ -548,6 +556,7 @@ class TieringOffloadingManager(OffloadingManager):
         )
         return RequestOffloadingContext(policy=policy)
 
+    @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.on_request_finished(req_context)
         for tier in self.secondary_tiers:
@@ -568,6 +577,7 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             tier.on_schedule_end()
 
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield offloading events collected since the last call.
 
@@ -580,6 +590,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         yield from self.primary_tier.take_events()
 
+    @override
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
         for tier in self.secondary_tiers:

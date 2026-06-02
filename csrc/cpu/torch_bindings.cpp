@@ -447,6 +447,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_vnni) -> Tensor");
   ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 
+  // Adapted from sglang: casual_conv1d kernels
+  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
+  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
+           &causal_conv1d_weight_pack);
+  ops.def(
+      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
+      "conv_states, Tensor? query_start_loc,"
+      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
+      "int pad_slot_id, bool is_vnni) -> "
+      "Tensor");
+  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
+  ops.def(
+      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "weight, Tensor? bias, bool silu_activation,"
+      "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+#endif
+
   // Adapted from sglang: GDN kernels
   ops.def(
       "chunk_gated_delta_rule_cpu(Tensor query, Tensor key, Tensor value, "
@@ -469,25 +488,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_gdn_gating_cpu(Tensor A_log, Tensor a, Tensor b, Tensor dt_bias) "
       "-> (Tensor, Tensor)");
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
-
-  // Adapted from sglang: casual_conv1d kernels
-  ops.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
-  ops.impl("causal_conv1d_weight_pack", torch::kCPU,
-           &causal_conv1d_weight_pack);
-  ops.def(
-      "causal_conv1d_fwd_cpu(Tensor x, Tensor weight, Tensor? bias, Tensor? "
-      "conv_states, Tensor? query_start_loc,"
-      "Tensor? cache_indices, Tensor? has_initial_state, bool silu_activation, "
-      "int pad_slot_id, bool is_vnni) -> "
-      "Tensor");
-  ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
-  ops.def(
-      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
-      "weight, Tensor? bias, bool silu_activation,"
-      "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
-      "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
-#endif
 
   // CPU attention kernels
   ops.def(
