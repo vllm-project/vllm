@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
@@ -203,6 +204,16 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         ]
         rank_expert_weights = [fml.get_expert_weights() for fml in fml_layers]
 
+        # Build the EPLB communicator. The expert weights live on CUDA, so
+        # `create_eplb_communicator` will route through the device process
+        # group (NCCL) regardless of the `ep_group` we pass below for
+        # rank/size queries and the optional profile-buffer reservation.
+        communicator = create_eplb_communicator(
+            group_coordinator=get_tp_group(),
+            backend=None,
+            expert_weights=rank_expert_weights[0],
+        )
+
         indices = torch.zeros(
             test_config.num_layers, test_config.num_experts, dtype=torch.long
         )
@@ -218,6 +229,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
             shuffled_indices,
             rank_expert_weights,
             ep_group,
+            communicator,
             is_profile=False,
         )
 
