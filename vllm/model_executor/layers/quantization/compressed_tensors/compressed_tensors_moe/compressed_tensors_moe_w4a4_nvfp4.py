@@ -43,6 +43,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     ):
         super().__init__(moe)
         self.group_size = 16
+        self.use_a16 = use_a16
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
@@ -212,11 +213,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
             w13_scale_2=(1.0 / w13_weight_global_scale),
-            a13_scale=(1.0 / layer.w13_input_global_scale),
+            a13_scale=(None if self.use_a16 else (1.0 / layer.w13_input_global_scale)),
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             w2_scale_2=(1.0 / layer.w2_weight_global_scale),
-            a2_scale=(1.0 / layer.w2_input_global_scale),
+            a2_scale=(None if self.use_a16 else (1.0 / layer.w2_input_global_scale)),
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
@@ -256,9 +257,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a13_scale=None if self.use_a16 else layer.w13_input_scale,
+            a2_scale=None if self.use_a16 else layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            source_format="compressed_tensors",
         )
 
     def apply_monolithic(

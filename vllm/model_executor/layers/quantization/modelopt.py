@@ -1392,12 +1392,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
+        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. Backends that
+        # accept activation_key=None (Marlin, FlashInferB12xExperts) run in
+        # bf16-activation mode; the activation scales loaded from the
+        # checkpoint must be suppressed in process_weights_after_loading and
+        # get_fused_moe_quant_config so a13_scale/a2_scale propagate as None.
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
@@ -1570,11 +1569,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
             w13_scale_2=w13_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
+            a13_scale=None if self.use_a16 else layer.w13_input_scale,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             w2_scale_2=layer.w2_weight_scale_2,
-            a2_scale=layer.w2_input_scale,
+            a2_scale=None if self.use_a16 else layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
@@ -1605,9 +1604,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale=layer.w2_weight_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
-            a13_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a13_scale=None if self.use_a16 else layer.w13_input_scale,
+            a2_scale=None if self.use_a16 else layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            source_format="modelopt",
         )
 
     @property
@@ -2398,6 +2398,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, ParallelLMHead):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             return UnquantizedLinearMethod()
 
         if isinstance(layer, RoutedExperts):

@@ -290,21 +290,21 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
-    a13_scale: torch.Tensor,
+    a13_scale: torch.Tensor | None,
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     w2_scale_2: torch.Tensor,
-    a2_scale: torch.Tensor,
+    a2_scale: torch.Tensor | None,
     is_act_and_mul: bool,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor | None,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor | None,
 ]:
     # Delayed import for circular dependency avoidance.
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -334,13 +334,17 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     ):
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
 
-    # For some FI kernels, the input scales are shared by all experts.
-    if is_global_sf_supported_for_nvfp4_backend(backend):
-        num_experts = w13.shape[0]
-        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
-    else:
-        a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
+    # W4A16: activations stay in BF16 inside the kernel, no scale needed.
+    # When a13_scale is provided, a2_scale is provided too (W4A4 path).
+    if a13_scale is not None:
+        assert a2_scale is not None
+        # For some FI kernels, the input scales are shared by all experts.
+        if is_global_sf_supported_for_nvfp4_backend(backend):
+            num_experts = w13.shape[0]
+            a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
+            a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+        else:
+            a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -388,5 +392,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             w2_scale = torch.nn.functional.pad(w2_scale, (0, pad_size // 16))
 
         w2_scale = swizzle_blockscale(w2_scale)
+        layer.moe_config.intermediate_size_per_partition = (
+            layer.moe_config.intermediate_size_per_partition + pad_size
+        )
 
     return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale

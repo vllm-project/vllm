@@ -349,11 +349,11 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor | None,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor | None,
 ]:
     if nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
         (
@@ -471,16 +471,18 @@ def make_nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
     w2_scale_2: torch.Tensor,
-    a13_scale: torch.Tensor,
-    a2_scale: torch.Tensor,
+    a13_scale: torch.Tensor | None,
+    a2_scale: torch.Tensor | None,
     swiglu_limit: float | None = None,
+    source_format: str | None = None,
 ) -> FusedMoEQuantConfig:
-    if backend == NvFp4MoeBackend.MARLIN:
+    if backend == NvFp4MoeBackend.MARLIN or a13_scale is None:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            source_format=source_format,
         )
     elif backend == NvFp4MoeBackend.EMULATION:
         return nvfp4_moe_quant_config(
@@ -491,12 +493,16 @@ def make_nvfp4_moe_quant_config(
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             gemm1_clamp_limit=swiglu_limit,
+            source_format=source_format,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
     # as the registered parameter, EPLB rearrangement stays in sync.
+    # a13_scale / a2_scale are guaranteed non-None here: the W4A16
+    # (a13_scale is None) branch returned above.
+    assert a13_scale is not None and a2_scale is not None
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
@@ -515,6 +521,7 @@ def make_nvfp4_moe_quant_config(
             )
         ),
         gemm1_clamp_limit=swiglu_limit,
+        source_format=source_format,
     )
 
 
