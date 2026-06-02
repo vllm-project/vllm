@@ -161,6 +161,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockDequantLinearKernel,
     XPUFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
@@ -332,6 +333,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
+        XPUFp8BlockDequantLinearKernel,
         XPUFP8ScaledMMLinearKernel,
     ],
 }
@@ -1022,6 +1024,7 @@ __all__ = [
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
+    "XPUFp8BlockDequantLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
