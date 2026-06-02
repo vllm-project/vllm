@@ -418,7 +418,6 @@ class FlashInferBackend(AttentionBackend):
         """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
         from vllm.utils.flashinfer import (
             force_use_trtllm_attention,
-            supports_trtllm_attention,
         )
 
         # Respect explicit disable flag (e.g.,
@@ -1396,13 +1395,20 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        # XQA decode (SM90) needs BF16/FP16-Q while FI native prefill on SM90
-        # wants FP8-Q, so quanting Q outside `forward()` does not work on
-        # SM90 — leave that case to `maybe_quant_query` instead.
         self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
             num_heads, num_kv_heads, is_prefill=False
         )
         vllm_config = get_current_vllm_config_or_none()
+        # Upstream query pre-quantization (`Attention.forward`, fusible by
+        # torch.compile) requires the whole query tensor to use a single dtype.
+        # That holds on SM100 trtllm-gen, where both prefill and decode use an
+        # FP8 query. It does NOT hold on SM90: XQA decode requires a BF16/FP16
+        # query, so we cannot quantize the (combined prefill+decode) query to
+        # FP8 beforehand. Hence we gate this on SM100 (family 100). On SM90 the
+        # prefill slice is instead quantized inside `forward()` via
+        # `maybe_quant_query`; that custom-op path may be slower than the fused
+        # upstream quant, but it only affects prefill (XQA decode keeps its
+        # BF16 query), so the overhead is acceptable.
         self.supports_quant_query_input = (
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
@@ -1450,11 +1456,17 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
-    # Helper function to quantize query to the expected dtype if needed.
-    # In general, this quantization should be handled outside of the forward() and
-    # self.supports_quant_query_input should be set to True so that query is already
-    # quantized in forward(). However, if prefill and decode require different query
-    # dtypes, we need to quantize the query in forward() instead.
+    # Quantize `query` to `q_data_type` if they differ, otherwise return it
+    # unchanged. This exists for the SM90 path: FI-native prefill needs an FP8
+    # query while XQA decode needs a BF16/FP16 query, so the combined query
+    # tensor cannot be pre-quantized to a single dtype upstream
+    # (`supports_quant_query_input` is False on SM90). Here we quantize only the
+    # slice that needs FP8 (prefill); the XQA decode slice already matches its
+    # BF16/FP16 target and passes through untouched.
+    #
+    # NOTE: today this only handles the SM90 XQA-decode / FI-native-prefill
+    # split (BF16/FP16 -> FP8). If another caller needs different conversions,
+    # generalize it then.
     def maybe_quant_query(
         self,
         query: torch.Tensor,

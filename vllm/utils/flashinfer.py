@@ -465,8 +465,11 @@ def use_trtllm_attention(
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
-        elif current_platform.is_device_capability(90) and kv_cache_dtype != "auto":
-            # SM90 + FP8/NVFP4 KV cache: prefer XQA decode kernel.
+        elif current_platform.is_device_capability(90) and kv_cache_dtype.startswith(
+            "fp8"
+        ):
+            # SM90 + FP8 KV cache: prefer the XQA decode kernel. XQA does not
+            # support NVFP4 KV (that is an SM100 trtllm-gen path only).
             use_trtllm = True
         else:
             # Decode auto-detection
