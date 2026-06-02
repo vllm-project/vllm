@@ -21,7 +21,9 @@ pub(super) struct ToolSchema {
     params: BTreeMap<String, JsonParamType>,
 }
 
-/// Parser-neutral parameter input for schema-aware conversion.
+/// Parameter input for schema-aware conversion.
+///
+/// It can be either a raw text string, or a structured input with named child elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ParamInput {
     Text(String),
@@ -133,7 +135,7 @@ impl ToolSchema {
         Self { params }
     }
 
-    /// Convert one parser-neutral parameter value using its normalized schema type.
+    /// Convert one parameter value using its normalized schema type.
     ///
     /// If the parameter name is unknown, or we don't have a schema for it, or
     /// the value fails to convert, this falls back to returning the raw
@@ -275,6 +277,7 @@ impl JsonParamType {
 
 /// Convert one parameter input to a normalized JSON value.
 fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
+    // For literal `null`, always convert to JSON null value.
     if let ParamInput::Text(value) = input
         && value.eq_ignore_ascii_case("null")
     {
@@ -287,7 +290,6 @@ fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &Para
     {
         return value;
     }
-
     // We don't have a schema, or conversion failed, use fallback logic.
     match input {
         ParamInput::Text(value) => Value::String(value.clone()),
@@ -340,20 +342,13 @@ fn try_convert_elements_value(
             properties,
             additional_properties.as_deref(),
         ))),
-        JsonParamType::Array { items } => {
-            if elements.iter().all(|element| element.name == "item") {
-                Some(Value::Array(
-                    elements
-                        .iter()
-                        .map(|element| {
-                            convert_with_optional_schema(items.as_deref(), &element.value)
-                        })
-                        .collect(),
-                ))
-            } else {
-                None
-            }
-        }
+        JsonParamType::Array { items } => Some(Value::Array(
+            // Collect all child elements into an array, regardless of their names.
+            elements
+                .iter()
+                .map(|element| convert_with_optional_schema(items.as_deref(), &element.value))
+                .collect(),
+        )),
         JsonParamType::OneOf(types) => types
             .iter()
             .find_map(|param_type| try_convert_elements_value(param_type, elements)),
@@ -386,8 +381,7 @@ fn convert_elements_to_object(
 fn insert_object_value(object: &mut Map<String, Value>, key: String, value: Value) {
     if let Some(existing) = object.get_mut(&key) {
         match existing {
-            // TODO: if the value itself is an array, we might want to recursively merge instead of
-            // nesting arrays.
+            // Collect values under the same key into an array.
             Value::Array(values) => values.push(value),
             existing => {
                 let first = std::mem::replace(existing, Value::Null);
@@ -797,11 +791,11 @@ mod tests {
                     "items".to_string(),
                     elements(vec![
                         elem(
-                            "item",
+                            "item1",
                             elements(vec![elem("sku", text("book-001")), elem("qty", text("2"))]),
                         ),
                         elem(
-                            "item",
+                            "item2",
                             elements(vec![elem("sku", text("pen-007")), elem("qty", text("5"))]),
                         ),
                     ]),
@@ -813,10 +807,6 @@ mod tests {
                 (
                     "duplicate_demo".to_string(),
                     elements(vec![elem("tag", text("a")), elem("tag", text("b"))]),
-                ),
-                (
-                    "schema_mismatch_array".to_string(),
-                    elements(vec![elem("x", text("1")), elem("x", text("2"))]),
                 ),
                 (
                     "closed_object".to_string(),
@@ -866,9 +856,6 @@ mod tests {
                 },
                 "duplicate_demo": {
                     "tag": ["a", "b"]
-                },
-                "schema_mismatch_array": {
-                    "x": ["1", "2"]
                 },
                 "closed_object": {
                     "unknown": "x"
