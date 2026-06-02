@@ -6987,12 +6987,9 @@ class GPUModelRunner(
         kernel_block_sizes: list[int],
         layout: KVCacheLayout | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Allocate and shape KV caches in one step.
+        """Allocate backing tensors and reshape into per-layer [B,H,N,C] views.
 
-        For each backing ``KVCacheTensor``, allocates a single contiguous
-        buffer and reshapes it into per-slot 4D ``[B, H, N, C]`` views
-        via ``reshape_kv_cache``.  This works uniformly for all
-        ``KVCacheSpec`` subclasses (attention and Mamba alike).
+        Returns: a dict mapping layer-name -> view of the backing tensor.
         """
         if layout is None:
             layout = resolve_kv_cache_layout()

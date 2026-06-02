@@ -32,7 +32,11 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     resolve_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, allocate_kv_cache
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+    reshape_kv_cache,
+)
 
 # ============================================================================
 # Backend Configuration
@@ -333,21 +337,15 @@ def _create_kv_cache(
         head_size=config.head_dim,
         dtype=dtype,
     )
+    layout = resolve_kv_cache_layout()
+    from math import prod
 
-    cache_dtype = dtype
-    if config.kv_cache_dtype == "fp8":
-        from vllm.platforms import current_platform
-
-        cache_dtype = current_platform.fp8_dtype()
-
-    return allocate_kv_cache(
-        spec=spec,
-        num_blocks=max_num_blocks,
-        num_layer_slots=config.num_layers,
-        layout=resolve_kv_cache_layout(),
-        device=device,
-        dtype=cache_dtype,
+    total_bytes = (
+        prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
+        * config.num_layers
     )
+    buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
+    return reshape_kv_cache(buf, spec, max_num_blocks, config.num_layers, layout)
 
 
 # ============================================================================

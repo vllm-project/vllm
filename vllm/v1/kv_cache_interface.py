@@ -183,10 +183,9 @@ class KVCacheLayout(Enum):
         if not self.is_layer_compact:
             compact = [m.name for m in KVCacheLayout if m.is_layer_compact]
             raise ValueError(
-                f"KVCacheLayout.{self.name} cannot produce a 4D "
-                f"layer_stride_order because the layer (L) dimension "
-                f"is not outermost in the physical layout. "
-                f"Use a layer-compact layout: {compact}"
+                f"KVCacheLayout.{self.name} cannot produce a 4D"
+                f" layer_stride_order because L is not outermost."
+                f" Use a layer-compact layout: {compact}"
             )
         return tuple(i - 1 for i in self.value if i != _DIM_L)
 
@@ -197,10 +196,7 @@ class KVCacheLayout(Enum):
 
     @property
     def is_block_contiguous(self) -> bool:
-        """True when [H, N, C] is contiguous within a block.
-
-        Required by the hybrid memory allocator when groups sharing a
-        physical tensor have mismatched H, N, or C dimensions."""
+        """True when [H, N, C] is contiguous within a block."""
         return self.value[-3:] == (_DIM_H, _DIM_N, _DIM_C)
 
 
@@ -216,12 +212,7 @@ def compute_layer_kv_cache_shape_bytes(
     num_blocks: int,
     block_size: int | None = None,
 ) -> tuple[int, ...]:
-    """Return the standard 4D logical shape ``(B, H, N, C)`` in bytes.
-
-    ``C`` is always ``state_content_size_bytes`` (bytes per state per head),
-    regardless of the spec's dtype.  Physical layout permutations are
-    applied separately via ``KVCacheLayout.layer_stride_order``.
-    """
+    """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
     bs = block_size if block_size is not None else spec.storage_block_size
     ns = num_states_for(bs, spec.tokens_per_state)
     return (num_blocks, spec.num_heads, ns, spec.state_content_size_bytes)
@@ -235,11 +226,10 @@ def reshape_kv_cache(
     layout: KVCacheLayout,
     block_size: int | None = None,
 ) -> list[torch.Tensor]:
-    """View a flat ``int8`` buffer as 4D ``[B, H, N, C]`` per slot.
+    """View a flat int8 buffer as 4D ``[B, H, N, C]`` per-slot views.
 
-    Works uniformly for all ``KVCacheSpec`` subclasses.  The buffer is
-    first shaped as int8 using :func:`compute_layer_kv_cache_shape_bytes` (C in bytes),
-    then reinterpreted as ``spec.dtype`` when the spec has one.
+    Works for all KVCacheSpec subclasses. Shapes as int8 via
+    compute_layer_kv_cache_shape_bytes, then reinterprets as spec.dtype.
     """
     dtype = getattr(spec, "dtype", None)
     logical_shape_bytes = (
@@ -264,28 +254,6 @@ def reshape_kv_cache(
     return [cache_logical[i] for i in range(num_layer_slots)]
 
 
-def allocate_kv_cache(
-    spec: AttentionSpec,
-    num_blocks: int,
-    num_layer_slots: int,
-    layout: KVCacheLayout,
-    device: torch.device | str = "cuda",
-    block_size: int | None = None,
-) -> list[torch.Tensor]:
-    """Allocate KV cache for a uniform group and return per-slot views.
-
-    Allocates a single contiguous ``int8`` buffer and uses
-    :func:`reshape_kv_cache` to produce per-slot 4D logical views
-    whose physical layout is determined by ``layout.stride_order``.
-    """
-    total_bytes = (
-        prod(compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size))
-        * num_layer_slots
-    )
-    buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
-    return reshape_kv_cache(buf, spec, num_blocks, num_layer_slots, layout)
-
-
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
@@ -298,12 +266,8 @@ class AttentionSpec(KVCacheSpec):
     def tokens_per_state(self) -> int:
         return 1
 
-    """
-    NOTE: for NVFP4, instead of interleaving K and V in the content dimension, i.e.
-       [L, B, H, N, 2 * head_dim] | k, v = torch.split(kv_cache, head_dim, dim=4)
-    we store K and V sequentially in the head dimension, i.e.
-       [L, B, 2 * H, N, head_dim] | k, v = torch.split(kv_cache, head_dim, dim=2)
-    """
+    # NVFP4: K and V are stored as separate head groups [L, B, 2*H, N, dim]
+    # rather than interleaved in content [L, B, H, N, 2*dim].
 
     @property
     def num_heads(self) -> int:
@@ -602,18 +566,9 @@ class MLAAttentionSpec(FullAttentionSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class HiddenStateCacheSpec(MLAAttentionSpec):
-    """Marker for hidden-state cache layers used by extract_hidden_states.
+    """Marker for hidden-state cache layers used by extract_hidden_states."""
 
-    Unlike standard MLA (which packs all heads into a single latent),
-    hidden-state caches have ``num_kv_heads`` independent heads — one per
-    extracted hidden layer.  Override the MLA default of ``num_heads=1``
-    so that the 4-D cache shape ``(B, H, N, C)`` reflects the true head
-    count.
-    """
-
-    @property
-    def num_heads(self) -> int:
-        return self.num_kv_heads
+    pass
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1054,21 +1009,11 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 
 @dataclass
 class KVCacheTensor:
-    """
-    Specifies how workers should initialize one KV cache backing tensor.
+    """One contiguous GPU allocation backing one or more layer slots.
 
-    Each ``KVCacheTensor`` corresponds to one contiguous GPU allocation
-    whose ``size`` is ``page_size * num_blocks * num_layer_slots`` bytes.
-
-    ``shared_by`` is a nested list:
-      - ``len(shared_by)`` = number of layer slots (the ``L`` dimension).
-      - ``shared_by[i]`` = layer names that alias the *same* block within
-        slot ``i`` (typically one per KV-cache group that uses this page
-        size).
-
-    Layers in the same inner list share memory because they belong to
-    different groups with independent block tables, so their block-id
-    namespaces never collide.
+    ``shared_by[slot_idx]`` lists the layer names aliasing slot ``slot_idx``.
+    Layers in the same inner list belong to different groups (independent
+    block tables) so their block-id namespaces never collide.
     """
 
     size: int  # total size in bytes

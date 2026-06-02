@@ -276,11 +276,11 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """
-    Transforms the layout of received KV cache to the local block_size and HNC.
-    (Only works for local blocksize > remote blocksize)
+    Transforms the layout of received KV cache to the local block_size
+    and LBHNC. (Only works for local blocksize > remote blocksize)
 
-    prefill is HNC, smaller block_size
-    decode(local) is NHC, larger block_size
+    prefill is LBHNC, smaller block_size
+    decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 

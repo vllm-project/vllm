@@ -647,7 +647,7 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2*head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -825,8 +825,7 @@ class FlashAttentionImpl(AttentionImpl):
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        k_cache, v_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
@@ -838,8 +837,8 @@ class FlashAttentionImpl(AttentionImpl):
         reshape_and_cache_flash(
             key,
             value,
-            key_cache,
-            value_cache,
+            k_cache,
+            v_cache,
             slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,

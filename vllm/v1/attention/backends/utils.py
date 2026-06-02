@@ -70,12 +70,7 @@ def get_flashinfer_layout_string() -> str:
 
 
 def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
-    """Override the KV cache layout (for tests and platform constraints).
-
-    .. deprecated::
-        Prefer setting ``VLLM_KV_CACHE_LAYOUT`` env var or using
-        :func:`resolve_kv_cache_layout` directly.
-    """
+    """Override the KV cache layout (for tests and platform constraints)."""
     global _KV_CACHE_LAYOUT_OVERRIDE
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
     resolve_kv_cache_layout.cache_clear()

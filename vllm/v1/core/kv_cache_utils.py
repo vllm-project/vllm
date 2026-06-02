@@ -1203,13 +1203,7 @@ def _validate_layout_compatibility(
     kv_cache_tensors: list[KVCacheTensor],
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> None:
-    """Validate that the KV cache layout is compatible with tensor shapes.
-
-    When a ``KVCacheTensor`` contains layers with different N (num_states),
-    H (num_heads), or C (state_content_size_bytes), the per-layer-per-block
-    content [H, N, C] must be contiguous in physical memory
-    (i.e. ``layout[0, 0, ...].is_contiguous()``).
-    """
+    """Ensure [H, N, C] is contiguous when layers sharing a tensor differ."""
     layout = resolve_kv_cache_layout()
 
     # The per-layer-per-block content [H, N, C] is contiguous therefore
@@ -1236,12 +1230,11 @@ def _validate_layout_compatibility(
         shapes = {(s.num_heads, s.state_content_size_bytes) for s in attn_specs}
         if len(shapes) > 1:
             raise ValueError(
-                f"Groups {kv_cache_groups} share a KVCacheTensor "
-                f"but have different (num_heads, "
-                f"state_content_size_bytes) for layers "
-                f"{all_layer_names}. Use a layout where [H, N, C]"
-                f" is contiguous (e.g. VLLM_KV_CACHE_LAYOUT=LBHNC"
-                f" or VLLM_KV_CACHE_LAYOUT=BLHNC)."
+                f"Groups {kv_cache_groups} share a KVCacheTensor but"
+                f" have different (num_heads, state_content_size_bytes)"
+                f" for layers {all_layer_names}. Use a layout where"
+                f" [H, N, C] is contiguous (e.g."
+                f" VLLM_KV_CACHE_LAYOUT=LBHNC or BLHNC)."
             )
 
 
@@ -1250,28 +1243,7 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """
-    Generate the KV cache configuration from the KV cache groups and spec
-    of each layer.
-
-    Produces one ``KVCacheTensor`` per unique page size across all groups.
-    Within each tensor, ``shared_by[slot_idx]`` lists the layer names from
-    different groups that alias the same block at that slot index.
-
-    This unified path handles:
-    - Simple models (1 group, uniform page size) -> 1 tensor
-    - HMA models (multiple groups, uniform page size) -> 1 tensor
-    - UniformTypeKVCacheSpecs (1 group, mixed page sizes) -> N tensors
-    - Multiple UniformTypeKVCacheSpecs (e.g. DeepseekV4)
-        (multiple groups, mixed page sizes) -> N tensors
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_groups: The KV cache groups
-        available_memory: Memory available for KV cache in bytes
-    Returns:
-        The generated KVCacheConfig
-    """
+    """Generate KVCacheConfig: one KVCacheTensor per unique page size."""
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
