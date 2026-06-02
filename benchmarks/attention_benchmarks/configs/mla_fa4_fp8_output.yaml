@@ -1,7 +1,7 @@
-# MLA prefill FP8-output microbenchmark, axis = FP8 write path.
-# Fixes the prefill backend (FA4) and compares the fused FP8 write against
-# bf16 attention + a standalone static-FP8 quant; the delta is the post-quant
-# kernel the fused path removes. DeepSeek-Coder-V2-Lite dims; FA4 needs SM100/110.
+# MLA prefill FP8-output microbenchmark (FA4).
+# Compares the fused FP8 write against bf16 attention + a standalone static-FP8
+# quant; the delta is the post-quant kernel the fused path removes.
+# DeepSeek-Coder-V2-Lite dims; FA4 needs SM100/110.
 #
 # Usage:
 #   python benchmark.py --config configs/mla_fa4_fp8_output.yaml
@@ -35,8 +35,7 @@ batch_specs:
 decode_backends:
   - CUTLASS_MLA
 
-# Fixed prefill backend; sweep the two FP8 write paths.
-prefill_backends: [fa4]
+# Sweep the two FP8 write paths (prefill backend is fixed to fa4).
 fp8_output_scale: 0.1
 fuse_quant_op: [false, true]
 

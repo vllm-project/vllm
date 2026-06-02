@@ -473,16 +473,15 @@ def main():
         "--fp8-output-scale",
         type=float,
         help="Static per-tensor scale enabling the MLA prefill FP8-output "
-        "benchmark. Sweeps whichever of --fuse-quant-op / --prefill-backends "
-        "is given multiple values; the other is held fixed.",
+        "comparison on FA4 (fused write vs standalone post-quant).",
     )
     parser.add_argument(
         "--fuse-quant-op",
         nargs="+",
         type=_str2bool,
-        help="FP8-output write path(s): false = bf16 attention + standalone "
-        "static-FP8 quant, true = prefill kernel writes FP8 directly. Give "
-        "both to compare them; give one to hold it fixed.",
+        help="FP8-output write path(s) to run: false = bf16 attention + "
+        "standalone static-FP8 quant, true = FA4 writes FP8 directly. "
+        "Default: both.",
     )
 
     # Batch specifications
@@ -693,40 +692,22 @@ def main():
     # Run benchmarks
     all_results = []
 
-    # MLA prefill FP8-output benchmark: sweep one axis, hold the other fixed.
-    #   fuse_quant_op as a list   -> compare fused write vs post-quant (one backend)
-    #   prefill_backends as a list -> compare backends (fixed fuse_quant_op)
+    # FA4 fused FP8 output vs standalone post-quant, on the same fa4 kernel:
+    # the delta is the post-quant kernel the fused path removes.
     fp8_output_scale = getattr(args, "fp8_output_scale", None)
     if fp8_output_scale is not None:
         decode_backend = backends[0]
-        fq = args.fuse_quant_op
-        fuse_list = [fq] if isinstance(fq, bool) else list(fq) if fq else [False]
-        pb_list = prefill_backends or []
+        fuse_variants = args.fuse_quant_op or [False, True]
         label_of = {False: "post_quant", True: "fused"}
-
-        if len(fuse_list) > 1:
-            if len(pb_list) != 1:
-                raise ValueError(
-                    "Sweeping fuse_quant_op needs exactly one prefill backend; "
-                    f"got prefill_backends={pb_list}"
-                )
-            # (label, prefill_backend, fuse_quant_op)
-            variants = [(label_of[f], pb_list[0], f) for f in fuse_list]
-        else:
-            if not pb_list:
-                raise ValueError("FP8 output benchmark requires prefill_backends")
-            fuse = fuse_list[0]
-            variants = [(pb, pb, fuse) for pb in pb_list]
-
         console.print(
-            f"[yellow]FP8 output benchmark @ scale={fp8_output_scale} "
-            f"(decode impl={decode_backend})[/]"
+            f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
+            f"(prefill=fa4, decode impl={decode_backend})[/]"
         )
         fp8_results = []
-        total = len(variants) * len(args.batch_specs)
+        total = len(fuse_variants) * len(args.batch_specs)
         with tqdm(total=total, desc="FP8 output benchmarking") as pbar:
             for spec in args.batch_specs:
-                for label, pb, fuse in variants:
+                for fuse in fuse_variants:
                     config = BenchmarkConfig(
                         backend=decode_backend,
                         batch_spec=spec,
@@ -741,11 +722,12 @@ def main():
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
                         use_cuda_graphs=args.cuda_graphs,
-                        prefill_backend=pb,
+                        prefill_backend="fa4",
                     )
                     result = run_benchmark(
                         config, output_scale=fp8_output_scale, fuse_quant_op=fuse
                     )
+                    label = label_of[fuse]
                     labeled_config = replace(result.config, backend=label)
                     result = replace(result, config=labeled_config)
                     fp8_results.append(result)
@@ -757,7 +739,7 @@ def main():
 
         console.print("\n[bold green]FP8 Output Results:[/]")
         formatter = ResultsFormatter(console)
-        labels = [label for label, _, _ in variants]
+        labels = [label_of[f] for f in fuse_variants]
         formatter.print_table(fp8_results, labels, compare_to_fastest=True)
         all_results = fp8_results
 
