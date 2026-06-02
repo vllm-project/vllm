@@ -52,6 +52,7 @@ class EagleSpeculator:
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.draft_max_seq_len = self.max_model_len
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -416,7 +417,7 @@ class EagleSpeculator:
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=1,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-            max_seq_len=self.max_model_len,
+            max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
@@ -494,6 +495,10 @@ class EagleSpeculator:
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
         max_query_len = input_batch.num_scheduled_tokens.max()
+        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        self.draft_max_seq_len = min(
+            max_seq_len + self.num_speculative_steps, self.max_model_len
+        )
 
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
