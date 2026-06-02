@@ -368,6 +368,8 @@ class LLFp8BlockGemm:
 
                 TILE_K_FP8: cutlass.Constexpr = self.tile_k_fp8
                 packed_k_tile = (k_tile * TILE_K_FP8 // 128) // 4
+                # Number of packed int32 scale groups along K for activation
+                num_packed_k_a = (k_tile_count * TILE_K_FP8 // 128) // 4
 
                 global_m0 = bid_m * bM + m_row_0
                 global_m1 = bid_m * bM + m_row_1
@@ -375,13 +377,13 @@ class LLFp8BlockGemm:
                 safe_m1 = global_m1 if global_m1 < M_out else M_out - 1
 
                 sa0_p = (mSA.iterator
-                         + packed_k_tile * M_out + safe_m0).align(4)
+                         + safe_m0 * num_packed_k_a + packed_k_tile).align(4)
                 sa0_t = cute.make_tensor(
                     sa0_p, cute.make_layout((1,)))
                 sa0_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
                 cute.autovec_copy(sa0_t, sa0_packed)
                 sa1_p = (mSA.iterator
-                         + packed_k_tile * M_out + safe_m1).align(4)
+                         + safe_m1 * num_packed_k_a + packed_k_tile).align(4)
                 sa1_t = cute.make_tensor(
                     sa1_p, cute.make_layout((1,)))
                 sa1_packed = cute.make_rmem_tensor((1,), cutlass.Int32)

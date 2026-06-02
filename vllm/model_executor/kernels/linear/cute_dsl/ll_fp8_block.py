@@ -73,7 +73,7 @@ def _stream():
 
 def _get_compiled(a_bf16, b_bf16, out, sa_flat, sb_flat):
     cute, from_dlpack, _, _ = _cute()
-    from ._ll_fp8_block import LLFp8BlockGemm
+    from ._ll_fp8_block_warpspecialized import LLFp8BlockGemm
 
     # TODO (roberto): add tile_n, tile_k, num_stages to autotuning space
     cache_key = ("fp8_block",)
