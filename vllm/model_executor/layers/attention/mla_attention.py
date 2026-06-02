@@ -949,6 +949,36 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # TurboQuant MLA: cache is packed bytes per slot, not bf16 elements.
+        # Per-token layout: [ kv_c_packed | k_pe (2 * qk_rope bytes, bf16) ].
+        # kv_c_packed size depends on the preset (FP8/MSE bits) and comes
+        # from TurboQuantConfig.key_packed_size. We expose head_size=
+        # packed_bytes and dtype=uint8 so that the default
+        # real_page_size_bytes formula (block * num_kv_heads * head_size *
+        # dtype_size) matches the physical byte allocation.
+        if self.kv_cache_dtype.startswith("turboquant_"):
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            # Single source of truth: k_pe_fp8 flag comes from envs.VLLM_TQ_KPE_FP8
+            # (registered in vllm/envs.py). The MLA TQ backend reads it from
+            # the config object (not the env var again).
+            k_pe_fp8 = envs.VLLM_TQ_KPE_FP8
+            tq_cfg = TurboQuantConfig.from_cache_dtype(
+                self.kv_cache_dtype,
+                head_dim=self.kv_lora_rank,
+                rope_head_dim=self.qk_rope_head_dim,
+                k_pe_fp8=k_pe_fp8,
+            )
+            packed_bytes = tq_cfg.mla_packed_bytes
+            return MLAAttentionSpec(
+                block_size=vllm_config.cache_config.block_size,
+                num_kv_heads=1,
+                head_size=packed_bytes,
+                dtype=torch.uint8,
+                cache_dtype_str=self.kv_cache_dtype,
+            )
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
