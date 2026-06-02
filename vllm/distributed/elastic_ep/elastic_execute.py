@@ -466,8 +466,8 @@ class ElasticEPScalingExecutor:
             self._commit_staged_moe_quant_methods()
             # Legacy modular methods need to be recreated for the new EP size.
             for module in moe_modules:
-                if getattr(module.quant_method, "wraps_legacy_quant_method", False):
-                    module._replace_quant_method(module.quant_method.old_quant_method)
+                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
+                    module._replace_quant_method(module._quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
         eplb_model_state.communicator = create_eplb_communicator(

@@ -66,6 +66,7 @@ class RoutedExperts(PluggableLayer):
         # Prefer getting these from other sources, e.g. moe_config or
         # router object
         #
+        renormalize: bool = True,
         use_grouped_topk: bool = False,
         num_expert_group: int | None = None,
         topk_group: int | None = None,
@@ -95,6 +96,7 @@ class RoutedExperts(PluggableLayer):
         # or some other config.
         self.top_k = self.moe_config.experts_per_token
         self.activation = self.moe_config.activation
+        self.renormalize = renormalize
         self.use_grouped_topk = use_grouped_topk
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group

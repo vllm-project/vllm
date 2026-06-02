@@ -340,6 +340,7 @@ def FusedMoE(
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
         # router object
+        renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
