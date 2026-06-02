@@ -124,7 +124,7 @@ class CPUModelRunner(GPUModelRunner):
             self.profile_run()
         logger.info("Warming up done.")
 
-    def _allocate_kv_caches(
+    def _allocate_and_reshape_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
@@ -136,7 +136,7 @@ class CPUModelRunner(GPUModelRunner):
         # [num_blocks, 2*num_kv_heads, block_size, head_size]. Assumes
         # content == 2*head_size (true for all CPU attention specs; MLA, which
         # differs, isn't supported).
-        kv_caches = super()._allocate_kv_caches(
+        kv_caches = super()._allocate_and_reshape_kv_cache(
             kv_cache_config,
             kernel_block_sizes,
             layout=KVCacheLayout.LBHNC,

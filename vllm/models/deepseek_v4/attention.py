@@ -594,6 +594,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         self.kv_cache = torch.tensor([])
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
 
@@ -643,6 +647,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding

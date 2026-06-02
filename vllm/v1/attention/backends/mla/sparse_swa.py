@@ -75,6 +75,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         self.block_size = 64
         assert self.dtype == torch.uint8
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return SlidingWindowMLASpec(
             block_size=self.block_size,

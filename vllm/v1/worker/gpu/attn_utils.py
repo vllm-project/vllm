@@ -185,7 +185,6 @@ def _allocate_and_reshape_kv_cache(
             spec, _ = layer_to_group[layer_names[0]]
             num_blocks = slot_bytes // spec.page_size_bytes
 
-            kernel_block_size = None
             if (
                 kernel_block_sizes is not None
                 and isinstance(spec, AttentionSpec)
@@ -193,13 +192,8 @@ def _allocate_and_reshape_kv_cache(
             ):
                 kernel_block_size = kernel_block_sizes[group_id]
                 num_blocks = num_blocks * spec.storage_block_size // kernel_block_size
-
-            if kernel_block_size is None:
-                shape_block_size = None
-            elif spec.storage_block_size != spec.block_size:
-                shape_block_size = spec.storage_block_size
             else:
-                shape_block_size = kernel_block_size
+                kernel_block_size = spec.storage_block_size
 
             views = reshape_kv_cache(
                 buf,
@@ -207,7 +201,7 @@ def _allocate_and_reshape_kv_cache(
                 num_blocks,
                 num_layer_slots=num_layer_slots,
                 layout=layout,
-                block_size=shape_block_size,
+                block_size=kernel_block_size,
             )
             for layer_name in layer_names:
                 kv_caches[layer_name] = views[layer_to_slot[layer_name]]

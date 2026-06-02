@@ -135,6 +135,10 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         else:
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,

@@ -519,6 +519,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        # [B, H=1, N, C] -> [B, N, C]
+        self.kv_cache = kv_cache.squeeze(1)
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:

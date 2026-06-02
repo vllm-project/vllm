@@ -4,6 +4,8 @@
 
 from abc import ABC, abstractmethod
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -19,6 +21,14 @@ class AttentionLayerBase(ABC):
     """
 
     impl: "AttentionImpl"
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Bind an allocated KV cache view to this layer.
+
+        Subclasses override to transform the standardized ``[B, H, N, C]``
+        view into whatever shape the backend kernels expect.
+        """
+        self.kv_cache = kv_cache
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:

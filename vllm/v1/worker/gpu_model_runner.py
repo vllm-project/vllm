@@ -6981,7 +6981,7 @@ class GPUModelRunner(
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
-    def _allocate_kv_caches(
+    def _allocate_and_reshape_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
@@ -7025,18 +7025,13 @@ class GPUModelRunner(
                 num_blocks_per_kv_block = spec.block_size // kernel_block_size
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                if spec.storage_block_size != spec.block_size:
-                    shape_block_size = spec.storage_block_size
-                else:
-                    shape_block_size = kernel_block_size
-
                 views = reshape_kv_cache(
                     buf,
                     spec,
                     kernel_num_blocks,
                     num_layer_slots=num_layer_slots,
                     layout=layout,
-                    block_size=shape_block_size,
+                    block_size=kernel_block_size,
                 )
                 for layer_name in layer_names:
                     kv_caches[layer_name] = views[layer_to_slot[layer_name]]
@@ -7058,7 +7053,9 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        kv_caches = self._allocate_kv_caches(kv_cache_config, kernel_block_sizes)
+        kv_caches = self._allocate_and_reshape_kv_cache(
+            kv_cache_config, kernel_block_sizes
+        )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
