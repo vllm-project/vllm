@@ -44,6 +44,24 @@ from .matcher_utils import MatcherQuantFP8
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
+_IR_RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
+_IR_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
+
+
+def _norm_input_weight_dtype_match(match: pm.Match) -> bool:
+    """Prevent fusion when the norm input and weight dtypes differ (e.g. a Gemma
+    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm."""
+    for node in match.nodes:
+        if node.target == _IR_RMS_NORM_OP:
+            x, weight = node.args[0], node.args[1]
+        elif node.target == _IR_FUSED_ADD_RMS_NORM_OP:
+            x, weight = node.args[0], node.args[2]
+        else:
+            continue
+        if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
+            return x.meta["val"].dtype == weight.meta["val"].dtype
+    return True
+
 
 # The empirical value for small batch
 PDL_ADVANCE_LAUNCH_TOKENS = 16
@@ -402,8 +420,14 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             # allreduce_in, residual
             return allreduce[1], allreduce[2]
 
+        # extra_check routes a Gemma fp32 gamma to AllReduceFusedAddGemmaRMSNormPattern.
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_norm_input_weight_dtype_match,
         )
 
         # Same pattern, but only return the output and not residual
@@ -416,13 +440,12 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
+            extra_check=_norm_input_weight_dtype_match,
         )
 
 
 class AllReduceGemmaRMSNormPattern(BasePattern):
-    """Gemma-style variant of AllReduceRMSNormPattern (no residual): matches the
-    `weight + 1` shift and passes `rms_gamma = weight + 1` to flashinfer.
-    """
+    """Gemma-style variant of AllReduceRMSNormPattern (no residual)."""
 
     def __init__(
         self,
@@ -443,7 +466,9 @@ class AllReduceGemmaRMSNormPattern(BasePattern):
             input: torch.Tensor, weight: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms = vllm.ir.ops.rms_norm(allreduce_output, weight + 1.0, self.epsilon)
+            rms = vllm.ir.ops.rms_norm(
+                allreduce_output, weight.float() + 1.0, self.epsilon
+            )
             return rms, allreduce_output
 
         def replacement(
@@ -459,9 +484,10 @@ class AllReduceGemmaRMSNormPattern(BasePattern):
                 norm_out=rms_result,
                 quant_out=None,
                 scale_out=None,
-                rms_gamma=weight + 1.0,
+                rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                weight_bias=1.0,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             return allreduce[3], allreduce[1]
@@ -476,9 +502,7 @@ class AllReduceGemmaRMSNormPattern(BasePattern):
 
 
 class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
-    """Gemma-style variant of AllReduceFusedAddRMSNormPattern (with residual):
-    matches the `weight + 1` shift and passes `rms_gamma = weight + 1`.
-    """
+    """Gemma-style variant of AllReduceFusedAddRMSNormPattern (with residual)."""
 
     def __init__(
         self,
@@ -503,7 +527,7 @@ class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
             rms, residual = vllm.ir.ops.fused_add_rms_norm(
-                allreduce_output, residual, weight + 1.0, self.epsilon
+                allreduce_output, residual, weight.float() + 1.0, self.epsilon
             )
             return rms, residual
 
@@ -518,9 +542,10 @@ class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
                 norm_out=None,
                 quant_out=None,
                 scale_out=None,
-                rms_gamma=weight + 1.0,
+                rms_gamma=weight,
                 rms_eps=self.epsilon,
                 pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
+                weight_bias=1.0,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             return allreduce[1], allreduce[2]

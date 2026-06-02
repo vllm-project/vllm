@@ -14,6 +14,7 @@ from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
 )
+from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )
@@ -456,4 +457,9 @@ def all_reduce_fusion_pass_on_test_model(
         )
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
+        if test_model_cls is TestAllReduceGemmaRMSNormModel:
+            fused_op = torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            fused_nodes = list(find_op_nodes(fused_op, backend.graph_post_pass))
+            assert fused_nodes
+            assert all(n.kwargs.get("weight_bias") == 1.0 for n in fused_nodes)
         del all_reduce_fusion_pass
