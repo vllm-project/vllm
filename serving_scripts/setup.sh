@@ -23,14 +23,42 @@ if [ "$PYTHON_PATH" != "$EXPECTED_PYTHON" ]; then
   exit 1
 fi
 
-python -m pip install -U pip
-python -m pip install -r "$REPO_ROOT/requirements/cuda.txt"
-python -m pip install -r "$REPO_ROOT/requirements/build/cuda.txt"
-(
-  cd "$REPO_ROOT" || exit 1
-  export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
-  python -m pip install -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}
-)
+INSTALL_DEPS="${INSTALL_DEPS:-0}"
+
+if [ "${INSTALL_DEPS}" = "1" ]; then
+  echo "INSTALL_DEPS=1; installing dependencies and editable vLLM..."
+
+  python -m pip install -U pip
+  python -m pip install -r "$REPO_ROOT/requirements/cuda.txt"
+  python -m pip install -r "$REPO_ROOT/requirements/build/cuda.txt"
+
+  (
+    cd "$REPO_ROOT" || exit 1
+    export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
+
+    # Avoid transient shared-filesystem Git/versioning failures.
+    export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-0.19.2.dev0}"
+    export SETUPTOOLS_SCM_PRETEND_VERSION="${SETUPTOOLS_SCM_PRETEND_VERSION:-0.19.2.dev0}"
+
+    install_ok=0
+    for attempt in 1 2 3; do
+      echo "Editable vLLM install attempt ${attempt}/3..."
+      if python -m pip install -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}; then
+        install_ok=1
+        break
+      fi
+      echo "Editable install failed on attempt ${attempt}; retrying in 30s..."
+      sleep 30
+    done
+
+    if [ "${install_ok}" != "1" ]; then
+      echo "Error: editable vLLM install failed after 3 attempts." >&2
+      exit 1
+    fi
+  )
+else
+  echo "INSTALL_DEPS=${INSTALL_DEPS}; skipping pip install steps and using existing venv."
+fi
 
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM=0

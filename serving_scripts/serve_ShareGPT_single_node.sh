@@ -37,7 +37,13 @@ if [ "${PYTHON_PATH}" != "${EXPECTED_PYTHON}" ]; then
   exit 1
 fi
 
-python -m pip install -U pip
+INSTALL_DEPS="${INSTALL_DEPS:-0}"
+if [ "${INSTALL_DEPS}" = "1" ]; then
+  echo "INSTALL_DEPS=1; upgrading pip in existing venv..."
+  python -m pip install -U pip
+else
+  echo "INSTALL_DEPS=${INSTALL_DEPS}; skipping pip install steps and using existing venv."
+fi
 
 DATASET_PATH="${DATASET_PATH:-${REPO_ROOT}/datasets/sharegpt_buckets/Qwen_Qwen3-30B-A3B-Instruct-2507/sharegpt_sp128.jsonl}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
