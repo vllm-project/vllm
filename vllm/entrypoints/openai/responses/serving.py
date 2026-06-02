@@ -46,7 +46,6 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
-    get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
     has_custom_tools,
@@ -221,13 +220,6 @@ class OpenAIServingResponses(OpenAIServing):
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
-            )
-            # OpenAI models have two EOS-like tokens: <|return|> and <|call|>.
-            # We need to add them to the stop token ids.
-            if "stop_token_ids" not in self.default_sampling_params:
-                self.default_sampling_params["stop_token_ids"] = []
-            self.default_sampling_params["stop_token_ids"].extend(
-                get_stop_tokens_for_assistant_actions()
             )
 
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
@@ -468,16 +460,13 @@ class OpenAIServingResponses(OpenAIServing):
                     context = ParsableContext(
                         response_messages=messages,
                         tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
+                        parser_cls=self.parser,
                         request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
                         available_tools=available_tools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
+                        enable_auto_tools=self.enable_auto_tools,
+                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
                     context = SimpleContext()
@@ -716,7 +705,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
-                    context.tool_parser_cls,
+                    context.parser_cls.tool_parser_cls if context.parser_cls else None,
                     context.chat_template,
                     context.chat_template_content_format,
                 )
