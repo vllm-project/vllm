@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
+    apply_moe_activation_supported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -319,12 +320,12 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-        ]
+        # Cutlass uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
+        # Non-gated layers are not supported yet by the moe kernel.
+        if not activation.is_gated:
+            return False
+        return apply_moe_activation_supported(activation)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -713,21 +714,9 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         # SILU uses a fused silu+mul+fp4_quant kernel path.
-        # Other gated activations use the generic apply_moe_activation()
-        # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
-        # Non-gated activations (_NO_MUL) are also supported for models
-        # like Nemotron-Nano that don't use gated MLP.
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        # Cutlass uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -1013,15 +1002,9 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        # Cutlass uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(
