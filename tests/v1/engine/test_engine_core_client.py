@@ -253,6 +253,8 @@ def test_apply_ready_response_syncs_block_size():
             num_gpu_blocks=100,
             block_size=1056,
             dp_stats_address=None,
+            dtype="bfloat16",
+            vllm_version="test",
         )
     )
     client._apply_ready_response(payload)
