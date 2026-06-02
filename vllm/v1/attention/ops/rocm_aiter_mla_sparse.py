@@ -62,10 +62,10 @@ def _get_fused_indexer_workspace(
             dtype=torch.float32,
             device=device,
         )
-    return (
-        _FUSED_INDEXER_Q_FP8_BUF[:num_tokens],
-        _FUSED_INDEXER_WEIGHTS_OUT_BUF[:num_tokens],
-    )
+    q_fp8_buf = _FUSED_INDEXER_Q_FP8_BUF
+    weights_buf = _FUSED_INDEXER_WEIGHTS_OUT_BUF
+    assert q_fp8_buf is not None and weights_buf is not None
+    return q_fp8_buf[:num_tokens], weights_buf[:num_tokens]
 
 
 @triton.jit
