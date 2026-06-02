@@ -435,9 +435,6 @@ class EngineCore:
             "groups": _serialize_kv_cache_groups(kv_cache_config),
         }
 
-    def get_device_info(self) -> list[dict]:
-        return self.model_executor.collective_rpc("get_device_info")
-
     def get_kv_cache_group_metadata(self) -> list[dict[str, int | str | None]]:
         """Return msgspec-serializable metadata for scheduler KV cache groups."""
         kv_cache_config = getattr(self.scheduler, "kv_cache_config", None)

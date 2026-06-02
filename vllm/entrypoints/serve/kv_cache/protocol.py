@@ -104,21 +104,3 @@ class KVCacheRuntimeInfo(BaseModel):
     num_gpu_blocks: int | None = None
     num_cpu_blocks: int | None = None
     groups: list[KVCacheGroupInfo] = Field(default_factory=list)
-
-
-# ---------------------------------------------------------------------------
-# Device info models (used by GET /v1/server/devices)
-# ---------------------------------------------------------------------------
-
-
-class ComputeCapability(BaseModel):
-    major: int
-    minor: int
-
-
-class DeviceInfo(BaseModel):
-    rank: int
-    name: str
-    total_memory_bytes: int
-    compute_capability: ComputeCapability | None = None
-    num_compute_units: int
