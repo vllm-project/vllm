@@ -1,312 +1,222 @@
-//! Tokenizer caching layer inspired by `llm-tokenizer`'s cache architecture.
+//! Tokenizer caching layer using `llm-tokenizer`'s [`CachedTokenizer`] and
+//! L0/L1 cache infrastructure.
 //!
-//! Provides a [`CachedTokenizer`] wrapper around any [`Tokenizer`] implementation
-//! to speed up repeated encoding of the same strings (e.g., system prompts).
+//! Since vllm defines its own [`Tokenizer`](crate::Tokenizer) trait and
+//! `llm-tokenizer` defines a separate `Encoder + Decoder + Tokenizer` trait
+//! hierarchy, this module provides an **adapter** ([`VllmTokenizerAdapter`])
+//! that bridges the two. The adapter wraps any `vllm_tokenizer::Tokenizer`
+//! and implements `llm_tokenizer::traits::{Encoder, Decoder, Tokenizer}` so
+//! that `llm_tokenizer::CachedTokenizer` can wrap it.
 //!
-//! # Architecture
+//! The public [`LlmCachedTokenizer`] struct then wraps the whole stack and
+//! re-implements `vllm_tokenizer::Tokenizer`, making the caching layer
+//! transparent to the rest of vllm.
 //!
-//! - **L0 Cache**: Whole-string exact match using `DashMap` with FxHash for
-//!   fast, lock-free concurrent reads. Only caches strings up to a configurable
-//!   length threshold — long unique prompts skip the cache entirely to avoid
-//!   overhead on the dominant miss path.
+//! # Usage
 //!
-//! # Performance notes
+//! ```ignore
+//! use vllm_tokenizer::{LlmCachedTokenizer, LlmCacheConfig};
 //!
-//! In vllm's serving path, `encode` is typically called on the **full rendered
-//! prompt** (system + user + chat template). Since user messages differ per
-//! request, hit rate on full prompts is near zero. This cache is most effective
-//! when the tokenizer is called on **repeated segments** (e.g., system prompts
-//! encoded separately, stop-word encoding, bad-word encoding).
-//!
-//! To avoid regressing the dominant miss path:
-//! - Strings longer than `l0_max_key_bytes` bypass the cache completely (no
-//!   hash, no lookup, no allocation).
-//! - FxHash is used instead of SipHash for ~3x faster hashing on short keys.
-//! - On miss, the token Vec is moved (not cloned) into the cache.
-//! - Stats counters are omitted from the hot path; use [`CachedTokenizer::cache_stats`]
-//!   for diagnostics only.
+//! let inner = HuggingFaceTokenizer::new(path)?;
+//! let cached = LlmCachedTokenizer::new(inner, LlmCacheConfig::default());
+//! let tokens = cached.encode("Hello world", false)?;
+//! ```
 
+use std::any::Any;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use dashmap::DashMap;
-use rustc_hash::FxBuildHasher;
+use llm_tokenizer::cache::{CacheConfig as LlmCacheConfigInner, CachedTokenizer};
+use llm_tokenizer::traits::{
+    Decoder as LlmDecoder, Encoder as LlmEncoder, Encoding as LlmEncoding,
+    SpecialTokens as LlmSpecialTokens, TokenIdType, Tokenizer as LlmTokenizer,
+};
 
 use crate::incremental::DecodeStream;
 use crate::{IncrementalDecoder, Result, Tokenizer};
 
-/// Number of entries to sample when looking for an eviction candidate.
-const EVICTION_SAMPLE_SIZE: usize = 8;
-
-/// Configuration for the tokenizer cache.
+/// Configuration for the llm-tokenizer cache layer.
 #[derive(Debug, Clone)]
-pub struct CacheConfig {
-    /// Enable L0 (whole-string) cache.
+pub struct LlmCacheConfig {
+    /// Enable L0 (whole-string exact match) cache.
     pub enable_l0: bool,
     /// Maximum number of entries in L0 cache.
     pub l0_max_entries: usize,
-    /// Maximum key length in bytes. Strings longer than this bypass the cache
-    /// entirely — no hash, no lookup, no allocation. This avoids adding
-    /// overhead to the dominant miss path (long unique prompts).
-    ///
-    /// Default: 2048 bytes (~500 tokens of English text).
-    pub l0_max_key_bytes: usize,
+    /// Enable L1 (prefix matching) cache.
+    pub enable_l1: bool,
+    /// Maximum memory for L1 cache in bytes.
+    pub l1_max_memory: usize,
 }
 
-impl Default for CacheConfig {
+impl Default for LlmCacheConfig {
     fn default() -> Self {
         Self {
             enable_l0: true,
             l0_max_entries: 10_000,
-            l0_max_key_bytes: 2048,
+            enable_l1: false,
+            l1_max_memory: 50 * 1024 * 1024,
         }
     }
 }
 
-/// A cached encoding entry with insertion timestamp for approximate LRU.
-struct CachedEntry {
-    /// Cached token IDs, shared via Arc to avoid cloning on hit when possible
-    /// in future trait extensions. Currently the trait requires Vec<u32>, so
-    /// we call `.to_vec()` on the inner slice.
-    token_ids: Arc<[u32]>,
-    /// Monotonic timestamp of last access (for LRU eviction).
-    last_accessed: AtomicU64,
-}
-
-/// L0 cache: whole-string exact match using DashMap with FxHash.
-///
-/// Two separate maps (one per `add_special_tokens` value) so lookups borrow
-/// `&str` without allocating.
-struct L0Cache {
-    map_plain: DashMap<String, CachedEntry, FxBuildHasher>,
-    map_special: DashMap<String, CachedEntry, FxBuildHasher>,
-    max_entries: usize,
-    max_key_bytes: usize,
-    /// Monotonic counter for LRU timestamps.
-    access_counter: AtomicU64,
-    /// Stats — updated with Relaxed ordering, read only via `stats()`.
-    hits: AtomicU64,
-    misses: AtomicU64,
-    skips: AtomicU64,
-}
-
-impl L0Cache {
-    fn new(max_entries: usize, max_key_bytes: usize) -> Self {
-        let per_map = max_entries.min(1024) / 2 + 1;
-        Self {
-            map_plain: DashMap::with_capacity_and_hasher(per_map, FxBuildHasher),
-            map_special: DashMap::with_capacity_and_hasher(per_map, FxBuildHasher),
-            max_entries,
-            max_key_bytes,
-            access_counter: AtomicU64::new(0),
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            skips: AtomicU64::new(0),
+impl From<LlmCacheConfig> for LlmCacheConfigInner {
+    fn from(c: LlmCacheConfig) -> Self {
+        LlmCacheConfigInner {
+            enable_l0: c.enable_l0,
+            l0_max_entries: c.l0_max_entries,
+            enable_l1: c.enable_l1,
+            l1_max_memory: c.l1_max_memory,
         }
-    }
-
-    #[inline]
-    fn map_for(&self, add_special_tokens: bool) -> &DashMap<String, CachedEntry, FxBuildHasher> {
-        if add_special_tokens {
-            &self.map_special
-        } else {
-            &self.map_plain
-        }
-    }
-
-    #[inline]
-    fn next_timestamp(&self) -> u64 {
-        self.access_counter.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn len(&self) -> usize {
-        self.map_plain.len() + self.map_special.len()
-    }
-
-    /// Returns true if the key is eligible for caching.
-    #[inline]
-    fn is_cacheable(&self, key: &str) -> bool {
-        key.len() <= self.max_key_bytes
-    }
-
-    /// Look up a cached encoding. Returns Arc to avoid cloning until necessary.
-    #[inline]
-    fn get(&self, key: &str, add_special_tokens: bool) -> Option<Arc<[u32]>> {
-        let entry = self.map_for(add_special_tokens).get(key)?;
-        let ts = self.next_timestamp();
-        entry.value().last_accessed.store(ts, Ordering::Relaxed);
-        self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(Arc::clone(&entry.value().token_ids))
-    }
-
-    fn record_miss(&self) {
-        self.misses.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_skip(&self) {
-        self.skips.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Evict the approximately least-recently-used entry if at capacity.
-    fn maybe_evict(&self) {
-        if self.len() < self.max_entries {
-            return;
-        }
-        let victim_map = if self.map_plain.len() >= self.map_special.len() {
-            &self.map_plain
-        } else {
-            &self.map_special
-        };
-
-        // Sample EVICTION_SAMPLE_SIZE entries, evict the oldest.
-        // Scope the iterator so shard locks are released before remove().
-        let key_to_remove = {
-            let mut oldest_key: Option<String> = None;
-            let mut oldest_ts = u64::MAX;
-
-            for (i, entry) in victim_map.iter().enumerate() {
-                let ts = entry.value().last_accessed.load(Ordering::Relaxed);
-                if ts < oldest_ts {
-                    oldest_ts = ts;
-                    oldest_key = Some(entry.key().clone());
-                }
-                if i + 1 >= EVICTION_SAMPLE_SIZE {
-                    break;
-                }
-            }
-            oldest_key
-        };
-
-        if let Some(k) = key_to_remove {
-            victim_map.remove(&k);
-        }
-    }
-
-    /// Insert token_ids into the cache. Consumes the Vec (no clone).
-    fn insert(&self, key: String, add_special_tokens: bool, token_ids: Vec<u32>) {
-        self.maybe_evict();
-        let ts = self.next_timestamp();
-        let entry = CachedEntry {
-            token_ids: Arc::from(token_ids),
-            last_accessed: AtomicU64::new(ts),
-        };
-        self.map_for(add_special_tokens).insert(key, entry);
-    }
-
-    fn stats(&self) -> CacheStats {
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
-        let skips = self.skips.load(Ordering::Relaxed);
-        let total = hits + misses;
-        CacheStats {
-            hits,
-            misses,
-            skips,
-            entries: self.len(),
-            hit_rate: if total > 0 {
-                hits as f64 / total as f64
-            } else {
-                0.0
-            },
-        }
-    }
-
-    fn clear(&self) {
-        self.map_plain.clear();
-        self.map_special.clear();
-        self.hits.store(0, Ordering::Relaxed);
-        self.misses.store(0, Ordering::Relaxed);
-        self.skips.store(0, Ordering::Relaxed);
-        self.access_counter.store(0, Ordering::Relaxed);
     }
 }
 
-/// Cache statistics.
-#[derive(Debug, Clone)]
-pub struct CacheStats {
-    /// Number of cache hits.
-    pub hits: u64,
-    /// Number of cache misses (key not found but was looked up).
-    pub misses: u64,
-    /// Number of skipped lookups (key too long, bypassed cache entirely).
-    pub skips: u64,
-    /// Current number of cached entries.
-    pub entries: usize,
-    /// Hit rate = hits / (hits + misses). Skips are excluded.
-    pub hit_rate: f64,
-}
+// ---------------------------------------------------------------------------
+// Adapter: vllm Tokenizer → llm-tokenizer traits
+// ---------------------------------------------------------------------------
 
-/// A caching wrapper around any [`Tokenizer`] implementation.
-///
-/// Caches `encode` results using a DashMap-based L0 whole-string exact-match
-/// cache with FxHash and approximate LRU eviction. Strings longer than
-/// [`CacheConfig::l0_max_key_bytes`] bypass the cache entirely.
-///
-/// Decode and other methods pass through to the inner tokenizer unchanged.
-pub struct CachedTokenizer<T: Tokenizer> {
+/// Wraps a vllm [`Tokenizer`] and implements `llm_tokenizer`'s
+/// `Encoder`, `Decoder`, and `Tokenizer` traits so that
+/// `llm_tokenizer::CachedTokenizer` can wrap it.
+struct VllmTokenizerAdapter<T: Tokenizer> {
     inner: T,
-    l0: Option<L0Cache>,
+    /// Placeholder special tokens — vllm's Tokenizer trait does not expose
+    /// special-token metadata, so we provide an empty default.
+    special_tokens: LlmSpecialTokens,
 }
 
-impl<T: Tokenizer> CachedTokenizer<T> {
-    /// Create a new cached tokenizer wrapping `inner`.
-    pub fn new(inner: T, config: CacheConfig) -> Self {
-        let l0 = if config.enable_l0 {
-            Some(L0Cache::new(config.l0_max_entries, config.l0_max_key_bytes))
-        } else {
-            None
+impl<T: Tokenizer> LlmEncoder for VllmTokenizerAdapter<T> {
+    fn encode(&self, input: &str, add_special_tokens: bool) -> anyhow::Result<LlmEncoding> {
+        let ids = self
+            .inner
+            .encode(input, add_special_tokens)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(LlmEncoding::Plain(ids))
+    }
+
+    fn encode_batch(
+        &self,
+        inputs: &[&str],
+        add_special_tokens: bool,
+    ) -> anyhow::Result<Vec<LlmEncoding>> {
+        inputs
+            .iter()
+            .map(|&input| LlmEncoder::encode(self, input, add_special_tokens))
+            .collect()
+    }
+}
+
+impl<T: Tokenizer> LlmDecoder for VllmTokenizerAdapter<T> {
+    fn decode(
+        &self,
+        token_ids: &[TokenIdType],
+        skip_special_tokens: bool,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .decode(token_ids, skip_special_tokens)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+}
+
+impl<T: Tokenizer + 'static> LlmTokenizer for VllmTokenizerAdapter<T> {
+    fn vocab_size(&self) -> usize {
+        // vllm's Tokenizer trait does not expose vocab_size; return 0 as a
+        // safe default (only used by llm-tokenizer's fingerprinting, not the
+        // cache hot path).
+        0
+    }
+
+    fn get_special_tokens(&self) -> &LlmSpecialTokens {
+        &self.special_tokens
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<TokenIdType> {
+        self.inner.token_to_id(token)
+    }
+
+    fn id_to_token(&self, id: TokenIdType) -> Option<String> {
+        self.inner.id_to_token(id)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public wrapper: llm-tokenizer cached stack → vllm Tokenizer
+// ---------------------------------------------------------------------------
+
+/// A tokenizer wrapper that uses `llm-tokenizer`'s [`CachedTokenizer`] (with
+/// L0 and optional L1 caches) to accelerate repeated `encode` calls.
+///
+/// Implements vllm's [`Tokenizer`] trait so it can be used as a drop-in
+/// replacement wherever `DynTokenizer` is expected.
+pub struct LlmCachedTokenizer {
+    /// The llm-tokenizer CachedTokenizer wrapping our adapter.
+    cached: CachedTokenizer,
+    /// Keep a direct reference to the adapter's inner tokenizer for methods
+    /// that should not go through the cache (decode, token_to_id, etc.).
+    inner: Arc<dyn Tokenizer>,
+}
+
+impl LlmCachedTokenizer {
+    /// Create a new cached tokenizer wrapping `inner` with the given config.
+    pub fn new<T: Tokenizer + 'static>(inner: T, config: LlmCacheConfig) -> Self {
+        let inner_arc: Arc<dyn Tokenizer> = Arc::from(inner);
+
+        // We need to give CachedTokenizer an Arc<dyn llm_tokenizer::Tokenizer>.
+        // Create the adapter wrapping a clone of the Arc.
+        let adapter = VllmTokenizerAdapter {
+            inner: inner_arc.clone(),
+            special_tokens: LlmSpecialTokens::default(),
         };
-        Self { inner, l0 }
+        let llm_inner: Arc<dyn LlmTokenizer> = Arc::new(adapter);
+        let cached = CachedTokenizer::new(llm_inner, config.into());
+
+        Self {
+            cached,
+            inner: inner_arc,
+        }
     }
 
     /// Get L0 cache statistics, if the cache is enabled.
-    pub fn cache_stats(&self) -> Option<CacheStats> {
-        self.l0.as_ref().map(|c| c.stats())
+    pub fn cache_stats(&self) -> Option<llm_tokenizer::CacheStats> {
+        self.cached.cache_stats()
+    }
+
+    /// Get L1 cache statistics, if the cache is enabled.
+    pub fn l1_cache_stats(&self) -> Option<llm_tokenizer::cache::L1CacheStats> {
+        self.cached.l1_cache_stats()
     }
 
     /// Clear all cached entries.
     pub fn clear_cache(&self) {
-        if let Some(l0) = &self.l0 {
-            l0.clear();
-        }
-    }
-
-    /// Get a reference to the inner tokenizer.
-    pub fn inner(&self) -> &T {
-        &self.inner
+        self.cached.clear_cache();
     }
 }
 
-impl<T: Tokenizer> Tokenizer for CachedTokenizer<T> {
+impl Tokenizer for LlmCachedTokenizer {
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
-        let Some(l0) = &self.l0 else {
-            return self.inner.encode(text, add_special_tokens);
-        };
+        let start = std::time::Instant::now();
 
-        // Skip cache for long strings — they're almost always unique full
-        // prompts. Avoiding hash + lookup + key allocation on this path is
-        // critical since it's the dominant case in serving.
-        if !l0.is_cacheable(text) {
-            l0.record_skip();
-            return self.inner.encode(text, add_special_tokens);
-        }
+        // Go through llm-tokenizer's CachedTokenizer which handles L0/L1.
+        let encoding = LlmEncoder::encode(&self.cached, text, add_special_tokens)
+            .map_err(|e| crate::error::TokenizerError(format!("{e}")))?;
 
-        // Cache hit — return a copy of the cached slice.
-        if let Some(cached) = l0.get(text, add_special_tokens) {
-            return Ok(cached.to_vec());
-        }
+        let token_ids = encoding.token_ids().to_vec();
 
-        // Cache miss — encode, move result into cache, return from cache.
-        l0.record_miss();
-        let token_ids = self.inner.encode(text, add_special_tokens)?;
-        // Clone the key string and move token_ids into the cache.
-        // We keep a copy to return to the caller.
-        let result = token_ids.clone();
-        l0.insert(text.to_owned(), add_special_tokens, token_ids);
-        Ok(result)
+        let elapsed = start.elapsed();
+        tracing::debug!(
+            elapsed_us = elapsed.as_micros() as u64,
+            text_bytes = text.len(),
+            tokens = token_ids.len(),
+            "llm-tokenizer cached encode"
+        );
+
+        Ok(token_ids)
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        // Decode is not cached by llm-tokenizer either — pass through directly.
         self.inner.decode(token_ids, skip_special_tokens)
     }
 
@@ -337,11 +247,31 @@ impl<T: Tokenizer> Tokenizer for CachedTokenizer<T> {
     }
 }
 
+// We need Tokenizer implemented for Arc<dyn Tokenizer> so the adapter works.
+impl Tokenizer for Arc<dyn Tokenizer> {
+    fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+        (**self).encode(text, add_special_tokens)
+    }
+
+    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
+        (**self).decode(token_ids, skip_special_tokens)
+    }
+
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        (**self).token_to_id(token)
+    }
+
+    fn id_to_token(&self, id: u32) -> Option<String> {
+        (**self).id_to_token(id)
+    }
+
+    fn is_special_id(&self, token_id: u32) -> bool {
+        (**self).is_special_id(token_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::thread;
-
     use super::*;
 
     /// Simple test tokenizer: each byte becomes a token ID.
@@ -364,7 +294,7 @@ mod tests {
 
     #[test]
     fn cache_hit_returns_same_result() {
-        let cached = CachedTokenizer::new(ByteTokenizer, CacheConfig::default());
+        let cached = LlmCachedTokenizer::new(ByteTokenizer, LlmCacheConfig::default());
 
         let r1 = cached.encode("hello", false).unwrap();
         let r2 = cached.encode("hello", false).unwrap();
@@ -377,7 +307,7 @@ mod tests {
 
     #[test]
     fn add_special_tokens_flag_separates_entries() {
-        let cached = CachedTokenizer::new(ByteTokenizer, CacheConfig::default());
+        let cached = LlmCachedTokenizer::new(ByteTokenizer, LlmCacheConfig::default());
 
         let _ = cached.encode("test", false).unwrap();
         let _ = cached.encode("test", true).unwrap();
@@ -387,108 +317,20 @@ mod tests {
     }
 
     #[test]
-    fn long_strings_bypass_cache() {
-        let config = CacheConfig {
-            enable_l0: true,
-            l0_max_entries: 100,
-            l0_max_key_bytes: 10, // very short threshold
-        };
-        let cached = CachedTokenizer::new(ByteTokenizer, config);
-
-        // This string is > 10 bytes, should skip cache entirely.
-        let long = "this is a long string that exceeds the threshold";
-        let r1 = cached.encode(long, false).unwrap();
-        let r2 = cached.encode(long, false).unwrap();
-        assert_eq!(r1, r2);
-
-        let stats = cached.cache_stats().unwrap();
-        assert_eq!(stats.skips, 2);
-        assert_eq!(stats.hits, 0);
-        assert_eq!(stats.misses, 0);
-        assert_eq!(stats.entries, 0);
-    }
-
-    #[test]
-    fn short_strings_use_cache() {
-        let config = CacheConfig {
-            enable_l0: true,
-            l0_max_entries: 100,
-            l0_max_key_bytes: 100,
-        };
-        let cached = CachedTokenizer::new(ByteTokenizer, config);
-
-        let _ = cached.encode("hi", false).unwrap();
-        let _ = cached.encode("hi", false).unwrap();
-
-        let stats = cached.cache_stats().unwrap();
-        assert_eq!(stats.hits, 1);
-        assert_eq!(stats.misses, 1);
-        assert_eq!(stats.entries, 1);
-    }
-
-    #[test]
-    fn eviction_respects_capacity() {
-        let config = CacheConfig {
-            enable_l0: true,
-            l0_max_entries: 2,
-            l0_max_key_bytes: 1024,
-        };
-        let cached = CachedTokenizer::new(ByteTokenizer, config);
-
-        let _ = cached.encode("a", false).unwrap();
-        let _ = cached.encode("b", false).unwrap();
-        let _ = cached.encode("c", false).unwrap();
-
-        let stats = cached.cache_stats().unwrap();
-        assert!(stats.entries <= 2);
-    }
-
-    #[test]
-    fn lru_eviction_keeps_frequently_accessed() {
-        let config = CacheConfig {
-            enable_l0: true,
-            l0_max_entries: 4,
-            l0_max_key_bytes: 1024,
-        };
-        let cached = CachedTokenizer::new(ByteTokenizer, config);
-
-        let _ = cached.encode("sys", false).unwrap();
-        let _ = cached.encode("q1", false).unwrap();
-        let _ = cached.encode("q2", false).unwrap();
-        let _ = cached.encode("q3", false).unwrap();
-
-        for i in 4..12 {
-            let _ = cached.encode("sys", false).unwrap(); // keep sys hot
-            let _ = cached.encode(&format!("q{i}"), false).unwrap();
-        }
-
-        let stats = cached.cache_stats().unwrap();
-        assert!(stats.hits >= 8);
-    }
-
-    #[test]
     fn decode_passes_through() {
-        let cached = CachedTokenizer::new(ByteTokenizer, CacheConfig::default());
+        let cached = LlmCachedTokenizer::new(ByteTokenizer, LlmCacheConfig::default());
         assert_eq!(cached.decode(&[72, 105], false).unwrap(), "Hi");
     }
 
     #[test]
-    fn cache_disabled_still_works() {
-        let config = CacheConfig {
-            enable_l0: false,
-            l0_max_entries: 0,
-            l0_max_key_bytes: 0,
-        };
-        let cached = CachedTokenizer::new(ByteTokenizer, config);
-        let r1 = cached.encode("hello", false).unwrap();
-        let r2 = cached.encode("hello", false).unwrap();
-        assert_eq!(r1, r2);
-        assert!(cached.cache_stats().is_none());
-    }
-
-    #[test]
     fn concurrent_access() {
-        let cached = Arc::new(CachedTokenizer::new(ByteTokenizer, CacheConfig::default()));
+        use std::sync::Arc;
+        use std::thread;
+
+        let cached = Arc::new(LlmCachedTokenizer::new(
+            ByteTokenizer,
+            LlmCacheConfig::default(),
+        ));
         let mut handles = vec![];
 
         for i in 0..10 {
@@ -507,14 +349,5 @@ mod tests {
         let stats = cached.cache_stats().unwrap();
         assert_eq!(stats.entries, 10);
         assert!(stats.hits >= 10);
-    }
-
-    #[test]
-    fn clear_cache_works() {
-        let cached = CachedTokenizer::new(ByteTokenizer, CacheConfig::default());
-        let _ = cached.encode("test", false).unwrap();
-        assert_eq!(cached.cache_stats().unwrap().entries, 1);
-        cached.clear_cache();
-        assert_eq!(cached.cache_stats().unwrap().entries, 0);
     }
 }

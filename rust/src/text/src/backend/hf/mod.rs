@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::info;
 use vllm_tokenizer::{
-    CacheConfig, CachedTokenizer, DynTokenizer, HuggingFaceTokenizer, TekkenTokenizer,
+    DynTokenizer, HuggingFaceTokenizer, LlmCacheConfig, LlmCachedTokenizer, TekkenTokenizer,
     TiktokenTokenizer,
 };
 
@@ -21,18 +21,17 @@ use crate::error::Result;
 
 /// Environment variable to enable the tokenizer encode cache.
 ///
-/// Set `VLLM_RS_ENABLE_TOKENIZER_CACHE=1` to wrap the tokenizer with a
-/// DashMap-based L0 whole-string cache (inspired by `llm-tokenizer`).
-/// Leave unset or set to `0` to use the original uncached tokenizer.
+/// Set `VLLM_RS_ENABLE_TOKENIZER_CACHE=1` to wrap the tokenizer with
+/// `llm-tokenizer`'s `CachedTokenizer` (L0 whole-string + optional L1
+/// prefix cache). Leave unset or set to `0` to use the original uncached
+/// tokenizer.
 ///
 /// Optional tuning knobs (only effective when the cache is enabled):
-/// - `VLLM_RS_TOKENIZER_CACHE_SIZE`: max entries (default 10 000)
-/// - `VLLM_RS_TOKENIZER_CACHE_MAX_KEY_BYTES`: strings longer than this
-///   bypass the cache entirely to avoid overhead on long unique prompts
-///   (default 2048).
+/// - `VLLM_RS_TOKENIZER_CACHE_SIZE`: max L0 entries (default 10 000)
+/// - `VLLM_RS_TOKENIZER_CACHE_ENABLE_L1=1`: enable L1 prefix cache
 const ENABLE_TOKENIZER_CACHE_ENV: &str = "VLLM_RS_ENABLE_TOKENIZER_CACHE";
 const TOKENIZER_CACHE_SIZE_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_SIZE";
-const TOKENIZER_CACHE_MAX_KEY_BYTES_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_MAX_KEY_BYTES";
+const TOKENIZER_CACHE_ENABLE_L1_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_ENABLE_L1";
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
     let enable_cache = std::env::var_os(ENABLE_TOKENIZER_CACHE_ENV)
@@ -44,30 +43,30 @@ fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10_000);
-        let max_key_bytes: usize = std::env::var(TOKENIZER_CACHE_MAX_KEY_BYTES_ENV)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(2048);
-        let cache_config = CacheConfig {
+        let enable_l1 = std::env::var_os(TOKENIZER_CACHE_ENABLE_L1_ENV)
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(false);
+        let cache_config = LlmCacheConfig {
             enable_l0: true,
             l0_max_entries: max_entries,
-            l0_max_key_bytes: max_key_bytes,
+            enable_l1,
+            l1_max_memory: 50 * 1024 * 1024,
         };
         tracing::info!(
             max_entries,
-            max_key_bytes,
-            "tokenizer encode cache enabled (set by {ENABLE_TOKENIZER_CACHE_ENV})"
+            enable_l1,
+            "llm-tokenizer cache enabled (set by {ENABLE_TOKENIZER_CACHE_ENV})"
         );
         match tokenizer {
-            TokenizerSource::HuggingFace(path) => Ok(Arc::new(CachedTokenizer::new(
+            TokenizerSource::HuggingFace(path) => Ok(Arc::new(LlmCachedTokenizer::new(
                 HuggingFaceTokenizer::new(path)?,
                 cache_config,
             ))),
-            TokenizerSource::Tiktoken(path) => Ok(Arc::new(CachedTokenizer::new(
+            TokenizerSource::Tiktoken(path) => Ok(Arc::new(LlmCachedTokenizer::new(
                 TiktokenTokenizer::new(path)?,
                 cache_config,
             ))),
-            TokenizerSource::Tekken(path) => Ok(Arc::new(CachedTokenizer::new(
+            TokenizerSource::Tekken(path) => Ok(Arc::new(LlmCachedTokenizer::new(
                 TekkenTokenizer::new(path)?,
                 cache_config,
             ))),

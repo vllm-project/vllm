@@ -2442,6 +2442,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "llm-tokenizer"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4992c0d29fdf0e964a5a1446c4b61b74ce7148b064b18feabfb375f7717e5d96"
+dependencies = [
+ "aho-corasick",
+ "anyhow",
+ "base64 0.22.1",
+ "blake3",
+ "dashmap",
+ "futures",
+ "hf-hub 0.5.0",
+ "minijinja",
+ "minijinja-contrib",
+ "rayon",
+ "rustc-hash 1.1.0",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tiktoken-rs 0.9.1",
+ "tokenizers",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5562,6 +5589,7 @@ checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
@@ -5880,11 +5908,12 @@ dependencies = [
 name = "vllm-tokenizer"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "criterion",
- "dashmap",
  "fastokens",
  "hf-hub 0.5.0",
+ "llm-tokenizer",
  "riptoken",
  "rustc-hash 1.1.0",
  "serde",

@@ -6,8 +6,9 @@ license.workspace = true
 
 [dependencies]
 base64.workspace = true
-dashmap.workspace = true
+anyhow.workspace = true
 fastokens.workspace = true
+llm-tokenizer.workspace = true
 riptoken.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true

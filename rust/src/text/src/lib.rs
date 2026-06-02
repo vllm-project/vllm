@@ -122,7 +122,18 @@ impl TextLlm {
 
         let tokenizer = self.backend.tokenizer();
         let prompt_token_ids = match take(&mut request.prompt) {
-            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
+            Prompt::Text(text) => {
+                let start = std::time::Instant::now();
+                let ids = tokenizer.encode(&text, request.add_special_tokens)?;
+                let elapsed = start.elapsed();
+                tracing::debug!(
+                    elapsed_us = elapsed.as_micros() as u64,
+                    text_bytes = text.len(),
+                    tokens = ids.len(),
+                    "prompt tokenizer encode total"
+                );
+                ids
+            }
             // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
             // and infra workloads bypass chat rendering and tokenizer overhead entirely.
             Prompt::TokenIds(token_ids) => token_ids,

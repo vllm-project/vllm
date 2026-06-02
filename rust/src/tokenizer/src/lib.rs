@@ -11,7 +11,7 @@ mod incremental;
 mod tekken;
 mod tiktoken;
 
-pub use cached::{CacheConfig, CacheStats, CachedTokenizer};
+pub use cached::{LlmCacheConfig, LlmCachedTokenizer};
 pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
 pub use incremental::IncrementalDecoder;
