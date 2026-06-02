@@ -146,10 +146,10 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/model_executor/layers/fused_moe/router/ll_router_gemm.py
-  - vllm/model_executor/layers/fused_moe/router/_ll_router_gemm_kernels.py
-  - vllm/model_executor/layers/fused_moe/router/_ll_router_splitk_kernels.py
-  - tests/kernels/test_ll_router_gemm.py
+  - vllm/model_executor/kernels/cute_dsl/ll_bf16.py
+  - vllm/model_executor/kernels/cute_dsl/_ll_bf16_dotprod.py
+  - vllm/model_executor/kernels/cute_dsl/_ll_bf16_splitk.py
+  - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
@@ -177,7 +177,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-    - pytest -v -s tests/kernels/test_ll_router_gemm.py
+    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 

@@ -24,7 +24,7 @@ def is_available() -> bool:
         _cutedsl_available = True
     except ImportError:
         _cutedsl_available = False
-        logger.info("cuteDSL (CUTLASS Python) not available, ll_router_gemm disabled")
+        logger.info("cuteDSL (CUTLASS Python) not available, ll_bf16_gemm disabled")
     return _cutedsl_available
 
 
@@ -69,7 +69,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
         return _compiled_cache[key]
 
     # cache check before any expensive work.
-    from ._ll_router_gemm_kernels import make_host_bf16
+    from ._ll_bf16_dotprod import make_host_bf16
 
     host_fn = make_host_bf16(K)  # creates a new kernel closure with K baked
     # into all loop bounds as Constexpr
@@ -99,14 +99,14 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
         options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",  # caps register usage. Found empirically.
     )
     _compiled_cache[key] = compiled
-    logger.debug("Compiled ll_router_gemm: M=%d, K=%d", M, K)
+    logger.debug("Compiled ll_bf16_dotprod: M=%d, K=%d", M, K)
     return compiled
 
 
 # Takes full 2D tensors (not flattened) as opposed to _get_compiled_dotprod.
 def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     cute, from_dlpack, CUstream, current_stream = _cute()
-    from ._ll_router_splitk_kernels import LLRouterSplitK
+    from ._ll_bf16_splitk import LLBf16SplitK
 
     # fully shape-dynamic - one binary (same split_k and num_stages) works for all shapes.
     cache_key = (split_k, num_stages)
@@ -136,18 +136,18 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     )
 
     # TODO (roberto): add tile_n, tile_k and num_dma_warps to the tuning space.
-    gemm = LLRouterSplitK(
+    gemm = LLBf16SplitK(
         tile_n=16, tile_k=256, num_stages=num_stages, num_dma_warps=4, split_k=split_k
     )
     compiled = cute.compile(
         gemm.call_splitk, mA, mB, mC, _stream(), options="--enable-tvm-ffi"
     )
     _splitk_cache[cache_key] = compiled
-    logger.debug("Compiled ll_router_splitk: sk=%d ns=%d", split_k, num_stages)
+    logger.debug("Compiled ll_bf16_splitk: sk=%d ns=%d", split_k, num_stages)
     return compiled
 
 
-def ll_router_gemm(
+def ll_bf16_gemm(
     hidden_states: torch.Tensor,  # [M, K] bf16
     router_weight: torch.Tensor,  # [N, K] bf16
     output_dtype: torch.dtype = torch.float32,

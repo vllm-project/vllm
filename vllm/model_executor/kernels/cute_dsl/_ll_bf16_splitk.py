@@ -129,7 +129,7 @@ def _make_pred(tXcX, dim_limit, k_base, K_total):
 
 
 @dsl_user_op
-class LLRouterSplitK:
+class LLBf16SplitK:
     """Warp specialization split: half DMA, half MMA."""
 
     def __init__(

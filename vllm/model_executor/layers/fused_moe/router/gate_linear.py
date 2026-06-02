@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with four-tier GEMM dispatch:
 
-    1. cuteDSL ll_router_gemm (SM90+, batch<=16, any dims)
+    1. cuteDSL ll_bf16_gemm (SM90+, batch<=16, any dims)
     2. DSV3 specialized kernel (SM90+, batch<=16, supported dims only)
     3. cuBLAS bf16xbf16→fp32 (SM90+ + bf16 + fp32 out_dtype)
     4. F.linear via ReplicatedLinear (ultimate fallback)
@@ -73,16 +73,16 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
-        # cuteDSL ll_router_gemm eligibility. Any dims supported, but SM90+ required bc:
+        # cuteDSL ll_bf16_gemm eligibility. Any dims supported, but SM90+ required bc:
         # 1. PDL support. Both dot-product and split-K kernels.
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
-        self.allow_ll_router_gemm = False
+        self.allow_ll_bf16_gemm = False
         if can_use_specialized_kernels:
-            from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
+            from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
                 is_available,
             )
 
-            self.allow_ll_router_gemm = is_available()
+            self.allow_ll_bf16_gemm = is_available()
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -106,13 +106,13 @@ class GateLinear(ReplicatedLinear):
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         import vllm._custom_ops as ops
 
-        # Tier 1: cuteDSL ll_router_gemm (SM90+, any dims)
-        if self.allow_ll_router_gemm and x.shape[0] <= 16:
-            from vllm.model_executor.layers.fused_moe.router.ll_router_gemm import (
-                ll_router_gemm,
+        # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
+        if self.allow_ll_bf16_gemm and x.shape[0] <= 16:
+            from vllm.model_executor.kernels.cute_dsl.ll_bf16 import (
+                ll_bf16_gemm,
             )
 
-            output = ll_router_gemm(x, self.weight)
+            output = ll_bf16_gemm(x, self.weight)
             return output, None
 
         # Tier 2: DSV3 specialized kernel (fallback for when cuteDSL unavailable)
