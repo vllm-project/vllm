@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Protocol
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -29,6 +29,120 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class BlockPoolProtocol(Protocol):
+    """Basic allocation contract shared by all KV cache block pools.
+
+    Implementations must reserve ``block_id=0`` as the null sentinel. Allocation
+    methods must never return the null block, and backing tensors must be sized
+    so that block index 0 is always valid.
+    """
+
+    num_gpu_blocks: int
+    null_block: KVCacheBlock
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]: ...
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None: ...
+
+    def get_num_free_blocks(self) -> int: ...
+
+    def get_usage(self) -> float: ...
+
+    def take_events(self) -> list[KVCacheEvent]: ...
+
+
+class CacheableBlockPoolProtocol(BlockPoolProtocol, Protocol):
+    """Block-pool contract for pools that also support prefix caching."""
+
+    def get_cached_block(
+        self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+    ) -> list[KVCacheBlock] | None: ...
+
+    def cache_full_blocks(
+        self,
+        request: Request,
+        blocks: list[KVCacheBlock],
+        num_cached_blocks: int,
+        num_full_blocks: int,
+        block_size: int,
+        kv_cache_group_id: int,
+        block_mask: list[bool] | None = None,
+    ) -> None: ...
+
+    def touch(self, blocks: Sequence[KVCacheBlock]) -> None: ...
+
+    def evict_blocks(self, block_ids: set[int]) -> None: ...
+
+    def reset_prefix_cache(self) -> bool: ...
+
+
+class CompactBlockPool:
+    """Compact allocation-only pool for request-constant KV-cache specs.
+
+    Invariants enforced by this pool:
+      (1) ``block_id=0`` is reserved as the null sentinel.
+      (2) Backing tensors must be sized for ``num_allocatable + 1`` blocks.
+      (3) Allocation never returns the null block.
+      (4) ``ref_cnt`` is binary: 0 when free, 1 when allocated.
+      (5) ``get_new_blocks(0)`` returns ``[]`` and ``free_blocks([])`` is a no-op.
+      (6) Freeing a null block or a non-allocated block is rejected.
+
+    This pool deliberately does not implement prefix-caching APIs such as
+    ``touch``, ``get_cached_block``, or ``cache_full_blocks``.
+    """
+
+    def __init__(self, num_allocatable: int) -> None:
+        assert isinstance(num_allocatable, int) and num_allocatable >= 0
+        self._num_allocatable = num_allocatable
+        self.num_gpu_blocks = num_allocatable + 1
+        self.null_block = KVCacheBlock(block_id=0)
+        self.null_block.is_null = True
+        self._free: list[KVCacheBlock] = [
+            KVCacheBlock(block_id=i) for i in range(1, num_allocatable + 1)
+        ]
+
+    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+        if num_blocks == 0:
+            return []
+        if num_blocks > self.get_num_free_blocks():
+            raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
+
+        blocks = [self._free.pop() for _ in range(num_blocks)]
+        for block in blocks:
+            assert block.block_id != 0
+            assert not block.is_null
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
+            assert block.ref_cnt == 1
+        return blocks
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        blocks = list(ordered_blocks)
+        if not blocks:
+            return
+        for block in blocks:
+            assert block.block_id != 0, "null block must never be freed"
+            assert not block.is_null, "null block must never be freed"
+            assert block.ref_cnt == 1, (
+                "CompactBlockPool expects binary ref_cnt semantics"
+            )
+            block.ref_cnt -= 1
+            assert block.ref_cnt == 0
+        self._free.extend(blocks)
+
+    def get_num_free_blocks(self) -> int:
+        return len(self._free)
+
+    def get_usage(self) -> float:
+        if self._num_allocatable == 0:
+            return 0
+        return 1.0 - (self.get_num_free_blocks() / self._num_allocatable)
+
+    def take_events(self) -> list[KVCacheEvent]:
+        """Compact pools do not emit prefix-cache events."""
+        return []
 
 
 class BlockHashToBlockMap:

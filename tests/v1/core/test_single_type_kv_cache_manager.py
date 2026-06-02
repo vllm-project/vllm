@@ -6,7 +6,7 @@ import random
 import pytest
 import torch
 
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, CompactBlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
@@ -14,9 +14,16 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    FullAttentionManager,
+    MambaManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    FullAttentionSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -44,6 +51,198 @@ def get_chunked_local_attention_manager(
         scheduler_block_size=chunked_local_attention_spec.block_size,
         max_admission_blocks_per_request=10**9,
     )
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_spec", "manager_cls", "should_record"),
+    [
+        (
+            FullAttentionSpec(
+                block_size=2,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+            ),
+            FullAttentionManager,
+            True,
+        ),
+        (
+            SlidingWindowSpec(
+                block_size=2,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                sliding_window=4,
+            ),
+            SlidingWindowManager,
+            False,
+        ),
+        (
+            ChunkedLocalAttentionSpec(
+                block_size=2,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.float32,
+                attention_chunk_size=4,
+            ),
+            ChunkedLocalAttentionManager,
+            False,
+        ),
+        (
+            MambaSpec(
+                block_size=2,
+                shapes=((1,),),
+                dtypes=(torch.float32,),
+            ),
+            MambaManager,
+            False,
+        ),
+    ],
+)
+def test_legacy_new_block_ids_for_zeroing_behavior(
+    kv_cache_spec, manager_cls, should_record
+):
+    block_pool = BlockPool(
+        num_gpu_blocks=10,
+        enable_caching=False,
+        hash_block_size=kv_cache_spec.block_size,
+    )
+    manager = manager_cls(
+        kv_cache_spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=kv_cache_spec.block_size,
+    )
+
+    new_blocks = manager.allocate_new_blocks(
+        request_id="request",
+        num_tokens=4,
+        num_tokens_main_model=4,
+    )
+
+    if should_record:
+        assert manager.take_new_block_ids() == [b.block_id for b in new_blocks]
+    else:
+        assert manager.take_new_block_ids() == []
+    assert manager.take_new_block_ids() == []
+
+
+def test_mamba_manager_accepts_allocation_only_pool_when_caching_disabled():
+    kv_cache_spec = MambaSpec(
+        block_size=2,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+    )
+    block_pool = CompactBlockPool(num_allocatable=2)
+    manager = MambaManager(
+        kv_cache_spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=kv_cache_spec.block_size,
+    )
+
+    new_blocks = manager.allocate_new_blocks(
+        request_id="request",
+        num_tokens=4,
+        num_tokens_main_model=4,
+    )
+
+    assert [block.block_id for block in new_blocks] == [2]
+    assert block_pool.get_num_free_blocks() == 1
+    manager.free("request")
+    assert block_pool.get_num_free_blocks() == 2
+
+
+def test_mamba_manager_request_constant_none_allocates_once():
+    kv_cache_spec = MambaSpec(
+        block_size=2,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=1,
+    )
+    block_pool = CompactBlockPool(num_allocatable=4)
+    manager = MambaManager(
+        kv_cache_spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=kv_cache_spec.block_size,
+    )
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "request",
+            num_tokens=100,
+            new_computed_blocks=[],
+            total_computed_tokens=0,
+            num_tokens_main_model=100,
+        )
+        == kv_cache_spec.blocks_per_request
+    )
+    new_blocks = manager.allocate_new_blocks(
+        request_id="request",
+        num_tokens=100,
+        num_tokens_main_model=100,
+    )
+
+    assert len(new_blocks) == kv_cache_spec.blocks_per_request
+    assert all(block.block_id != 0 for block in new_blocks)
+    assert block_pool.get_num_free_blocks() == 2
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "request",
+            num_tokens=200,
+            new_computed_blocks=[],
+            total_computed_tokens=100,
+            num_tokens_main_model=200,
+        )
+        == 0
+    )
+    assert (
+        manager.allocate_new_blocks(
+            request_id="request",
+            num_tokens=200,
+            num_tokens_main_model=200,
+        )
+        == []
+    )
+
+    manager.remove_skipped_blocks("request", num_computed_tokens=100)
+    assert block_pool.get_num_free_blocks() == 2
+    manager.free("request")
+    assert block_pool.get_num_free_blocks() == 4
+
+
+def test_mamba_manager_request_constant_align_free_filters_null_blocks():
+    kv_cache_spec = MambaSpec(
+        block_size=2,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = CompactBlockPool(num_allocatable=4)
+    manager = MambaManager(
+        kv_cache_spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=kv_cache_spec.block_size,
+    )
+
+    new_blocks = manager.allocate_new_blocks(
+        request_id="request",
+        num_tokens=6,
+        num_tokens_main_model=6,
+    )
+
+    assert len(new_blocks) == 3
+    assert sum(not block.is_null for block in manager.req_to_blocks["request"]) == 1
+    assert block_pool.get_num_free_blocks() == 3
+    manager.free("request")
+    assert block_pool.get_num_free_blocks() == 4
 
 
 def test_chunked_local_attention_possible_cached_prefix():

@@ -628,6 +628,16 @@ class Platform:
             else None
         )
 
+        if cache_config.mamba_cache_mode != "all":
+            # REQUEST_CONSTANT Mamba modes use a separate compact pool sized by
+            # the physical Mamba state page. They no longer require attention
+            # pages to be inflated to match Mamba pages, nor Mamba pages to be
+            # padded to the attention page size.
+            if cache_config.mamba_cache_mode == "align":
+                cache_config.mamba_block_size = cache_config.block_size
+            cache_config.mamba_page_size_padded = None
+            return
+
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
             kernel_block_alignment_size = max(

@@ -1324,6 +1324,43 @@ class CompilationConfig:
         assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
 
+    @staticmethod
+    def _has_request_constant_kv_pools(kv_cache_config: "KVCacheConfig") -> bool:
+        from vllm.v1.kv_cache_interface import MemoryModel
+
+        return any(
+            pool.memory_model == MemoryModel.REQUEST_CONSTANT
+            for pool in kv_cache_config.pool_configs
+        )
+
+    @staticmethod
+    def _validate_request_constant_cudagraph_capacity(
+        kv_cache_config: "KVCacheConfig",
+        max_num_reqs: int,
+    ) -> None:
+        from vllm.v1.kv_cache_interface import MemoryModel
+
+        for pool in kv_cache_config.pool_configs:
+            if pool.memory_model != MemoryModel.REQUEST_CONSTANT:
+                continue
+
+            blocks_per_request = 0
+            for group_id in pool.group_ids:
+                spec = kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+                blocks_per_request += spec.blocks_per_request
+            required_blocks = max_num_reqs * blocks_per_request
+            usable_blocks = pool.num_blocks - 1
+            if required_blocks <= usable_blocks:
+                continue
+
+            raise ValueError(
+                f"max_num_seqs ({max_num_reqs}) requires "
+                f"{required_blocks} REQUEST_CONSTANT KV cache blocks for "
+                f"pool {pool.pool_id}, but only {usable_blocks} are available. "
+                "Full CUDA graph capture cannot proceed. Please lower "
+                "max_num_seqs or increase gpu_memory_utilization."
+            )
+
     def resolve_cudagraph_mode_and_sizes(
         self,
         min_cg_support: "AttentionCGSupport",
@@ -1443,6 +1480,26 @@ class CompilationConfig:
                 tensor_parallel_size,
             )
 
+        has_request_constant_pools = (
+            kv_cache_config is not None
+            and self._has_request_constant_kv_pools(kv_cache_config)
+        )
+
+        if (
+            kv_cache_config is not None
+            and cudagraph_mode.has_full_cudagraphs()
+            and not is_profiling
+            and has_request_constant_pools
+        ):
+            if max_num_reqs is None:
+                raise ValueError(
+                    "Full CUDA graph capture with REQUEST_CONSTANT KV cache "
+                    "requires max_num_seqs for capacity validation."
+                )
+            self._validate_request_constant_cudagraph_capacity(
+                kv_cache_config, max_num_reqs
+            )
+
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just
@@ -1456,6 +1513,7 @@ class CompilationConfig:
             and cudagraph_mode.has_full_cudagraphs()
             and not is_profiling
             and kv_cache_config.has_mamba_layers
+            and not has_request_constant_pools
             and max_num_reqs > kv_cache_config.num_blocks
         ):
             raise ValueError(
