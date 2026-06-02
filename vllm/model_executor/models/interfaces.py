@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
     )
 else:
     VllmConfig = object
@@ -207,7 +208,8 @@ class SupportsMultiModal(Protocol):
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
-            "You should initialize it via `_mark_language_model`."
+            "You should initialize it via `_mark_language_model`, "
+            "and make sure `embed_input_ids` is implemented."
         )
 
     @contextmanager
@@ -1548,30 +1550,15 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        """Return the number of items (e.g. images) in the batch."""
-        ...
+    ) -> list["EncoderItemSpec"]:
+        """Return specs describing each item in the batch.
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return output token count for each item.
-
-        Used for greedy packing and DP load balancing.
-        """
-        ...
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return input size (e.g. patch count) for each item.
-
-        Used for input tensor slicing offsets.
+        Replaces the former separate methods for num_items,
+        per_item_output_tokens, and per_item_input_sizes.
+        The manager derives all three from this single return value.
         """
         ...
 
@@ -1592,6 +1579,27 @@ class SupportsEncoderCudaGraph(Protocol):
         - Batched models (CLIP): index pixel_values along dim 0.
         """
         ...
+
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Post-process encoder output, directly call scatter_output_slices by default.
+
+        By default, delegates directly to scatter_output_slices.
+        Override this for models that require additional processing on the raw
+        encoder output prior to scattering, e.g. Step3-VL, which merges features
+        according to dynamic patch counts before scattering.
+        """
+        from vllm.model_executor.models.utils import scatter_output_slices
+
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1615,8 +1623,7 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 

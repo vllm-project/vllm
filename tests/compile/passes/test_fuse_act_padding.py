@@ -7,7 +7,7 @@ import torch
 
 import vllm.config
 from tests.compile.backend import TestBackend
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -72,9 +72,8 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [2880])
 @pytest.mark.parametrize("num_local_experts", [128])
 @pytest.mark.parametrize("x_pad_to_multiple", [256])
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
+@pytest.mark.skip(
+    reason="Skipping for now because of the accuracy issue. See: https://github.com/ROCm/aiter/issues/2614"
 )
 def test_fuse_act_padding(
     dtype: torch.dtype,
@@ -116,7 +115,6 @@ def test_fuse_act_padding(
 
         x = torch.rand(1, hidden_size)
         torch._dynamo.mark_dynamic(x, 0)
-
         outputs_unfused = model(x)
 
         model_fused = torch.compile(model, backend=backend)

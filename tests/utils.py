@@ -19,10 +19,10 @@ import threading
 import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
-from contextlib import ExitStack, contextmanager, suppress
-from multiprocessing import Process
+from contextlib import ExitStack, contextmanager
+from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -33,6 +33,8 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -44,6 +46,7 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
@@ -61,7 +64,28 @@ from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
+logger = init_logger(__name__)
+
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
+    """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
+    trust_remote_code modules would otherwise fetch from third-party CDNs
+    (often unreachable from US-based CI)."""
+    if HF_HUB_OFFLINE:
+        return
+    for repo_id, filename in assets:
+        try:
+            hf_hub_download(repo_id=repo_id, filename=filename)
+        except Exception as e:
+            logger.warning(
+                "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
+                repo_id,
+                filename,
+                e,
+            )
+
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -125,6 +149,21 @@ ROCM_ENGINE_KWARGS: dict = (
     if current_platform.is_rocm()
     else {}
 )
+
+
+def requires_spawn_multiprocessing() -> bool:
+    """Whether this platform requires spawn instead of fork for test processes."""
+    return current_platform.is_rocm() or current_platform.is_xpu()
+
+
+def _run_in_new_process_group(
+    child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
+    env_dict: dict[str, str] | None,
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    os.setsid()
+    child_process_fxn(env_dict, model, vllm_serve_args)
 
 
 class RemoteVLLMServer:
@@ -621,7 +660,8 @@ class RemoteVLLMServer:
         )
 
     def url_for(self, *parts: str) -> str:
-        return self.url_root + "/" + "/".join(parts)
+        path = "/".join(part.strip("/") for part in parts if part)
+        return f"{self.url_root}/{path}"
 
     def get_client(self, **kwargs):
         if "timeout" not in kwargs:
@@ -738,8 +778,11 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
-        self.proc: Process = Process(
-            target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
+        ctx = get_context(method)
+        self.proc: Process = cast(Any, ctx).Process(
+            target=_run_in_new_process_group,
+            args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
         )  # type: ignore[assignment]
         self.proc.start()
 
@@ -769,12 +812,40 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _poll(self) -> int | None:
         return self.proc.exitcode
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
+    def _terminate_process_tree(self) -> None:
+        pid = self.proc.pid
+        if pid is None:
+            return
+
+        pgid: int | None
+        try:
+            pgid = os.getpgid(pid)
+            # _run_in_new_process_group should make the child the group
+            # leader. Avoid signaling pytest's process group if startup failed
+            # before os.setsid() ran.
+            if pgid != pid:
+                pgid = None
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self.proc.terminate()
+            print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
+
+        self.proc.join(15)
         if self.proc.is_alive():
-            # force kill if needed
-            self.proc.kill()
+            print(
+                f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+            self.proc.join(10)
+
+        self._kill_process_group_survivors(pgid)
 
 
 def _test_completion(
@@ -1046,6 +1117,7 @@ def compare_two_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -1059,6 +1131,9 @@ def compare_two_settings(
         env2: The second set of environment variables to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
 
     compare_all_settings(
@@ -1068,6 +1143,7 @@ def compare_two_settings(
         method=method,
         max_wait_seconds=max_wait_seconds,
         include_seeded_sampling=include_seeded_sampling,
+        force_v1_runner=force_v1_runner,
     )
 
 
@@ -1079,6 +1155,7 @@ def compare_all_settings(
     method: str = "generate",
     max_wait_seconds: float | None = None,
     include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
 ) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -1089,7 +1166,15 @@ def compare_all_settings(
         all_envs: A list of environment dictionaries to pass to the API server.
         include_seeded_sampling: Whether to include temperature=1.0 seeded
             sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
     """
+
+    if force_v1_runner:
+        all_envs = [
+            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
+        ]
 
     trust_remote_code = False
     for args in all_args:
@@ -1278,43 +1363,38 @@ def multi_process_parallel(
 ) -> None:
     import ray
 
-    # Using ray helps debugging the error when it failed
-    # as compared to multiprocessing.
-    # NOTE: We need to set working_dir for distributed tests,
-    # otherwise we may get import errors on ray workers
-    # NOTE: Force ray not to use gitignore file as excluding, otherwise
-    # it will not move .so files to working dir.
-    # So we have to manually add some of large directories
-    os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
+    # Using ray helps debugging the error when it failed as compared to
+    # multiprocessing. For local Ray workers, putting the repo root on
+    # PYTHONPATH is enough and avoids uploading the full source tree, which
+    # exceeds Ray's working_dir package size limit on CI.
+    env_vars = {
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+        ),
+        **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
+    }
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes": [
-                "build",
-                ".git",
-                "cmake-build-*",
-                "shellcheck",
-                "dist",
-                "ep_kernels_workspace",
-            ],
+            "env_vars": env_vars,
         }
     )
 
     distributed_init_port = get_open_port()
-    refs = []
-    for rank in range(tp_size * pp_size):
-        refs.append(
-            test_target.remote(
-                monkeypatch,
-                tp_size,
-                pp_size,
-                rank,
-                distributed_init_port,
-            ),
-        )
-    ray.get(refs)
-
-    ray.shutdown()
+    try:
+        refs = []
+        for rank in range(tp_size * pp_size):
+            refs.append(
+                test_target.remote(
+                    monkeypatch,
+                    tp_size,
+                    pp_size,
+                    rank,
+                    distributed_init_port,
+                ),
+            )
+        ray.get(refs)
+    finally:
+        ray.shutdown()
 
 
 @contextmanager
@@ -1511,53 +1591,110 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
+def _format_subprocess_exit(returncode: int) -> str:
+    """Render a subprocess exit code, naming the signal for negative codes."""
+    if returncode >= 0:
+        return f"exit code {returncode}"
+    try:
+        return f"killed by {signal.Signals(-returncode).name} ({returncode})"
+    except ValueError:
+        return f"exit code {returncode}"
+
+
+# Set on the spawn-child interpreter so the wrapper short-circuits when the
+# child resolves `module.qualname` back to its own decorated form, instead of
+# launching another subprocess.
+_SPAWN_CHILD_ENV = "VLLM_TEST_SPAWN_CHILD"
+
+
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
-    """Decorator to spawn a new process for each test function."""
+    """Decorator to spawn a new process for each test function.
+
+    Uses subprocess to run each test in a fresh interpreter and propagates
+    exceptions back to the parent, so test failures are never silently
+    swallowed (fixes https://github.com/vllm-project/vllm/issues/41415).
+
+    The child resolves the test function by importing its module and looking
+    it up by qualified name, rather than reconstructing it from a cloudpickle
+    blob. Pickling the function by value would also pickle its ``__globals__``
+    by value — turning module-level singletons (e.g.
+    ``vllm.compilation.counter.compilation_counter``) into stale clones in
+    the child, so increments performed by the production code in the child
+    would never be observable to the test.
+
+    The child inherits the parent's stdout/stderr so its output (engine
+    cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
+    traceback is serialized to ``tb_file`` for structured re-raising. A
+    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    the inherited subprocess output.
+    """
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Check if we're already in a subprocess
-        if os.environ.get("RUNNING_IN_SUBPROCESS") == "1":
-            # If we are, just run the function directly
+        if os.environ.get(_SPAWN_CHILD_ENV) == "1":
             return f(*args, **kwargs)
 
-        import torch.multiprocessing as mp
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tb", mode="wb") as tmp:
+            tb_file = tmp.name
 
-        with suppress(RuntimeError):
-            mp.set_start_method("spawn")
-
-        # Get the module
-        module_name = f.__module__
-
-        # Create a process with environment variable set
-        env = os.environ.copy()
-        env["RUNNING_IN_SUBPROCESS"] = "1"
-
-        with tempfile.TemporaryDirectory() as tempdir:
-            output_filepath = os.path.join(tempdir, "new_process.tmp")
-
-            # `cloudpickle` allows pickling complex functions directly
-            input_bytes = cloudpickle.dumps((f, output_filepath))
-
-            repo_root = str(VLLM_PATH.resolve())
-
-            env = dict(env or os.environ)
-            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
-
-            cmd = [sys.executable, "-m", f"{module_name}"]
-
-            returned = subprocess.run(
-                cmd, input=input_bytes, capture_output=True, env=env
+        try:
+            payload = cloudpickle.dumps(
+                {
+                    "module": f.__module__,
+                    "qualname": f.__qualname__,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "tb_file": tb_file,
+                }
             )
 
-            # check if the subprocess is successful
-            try:
-                returned.check_returncode()
-            except Exception as e:
-                # wrap raised exception to provide more information
+            child_script = (
+                "import sys, importlib, cloudpickle, traceback\n"
+                "try:\n"
+                "    from _pytest.outcomes import Skipped\n"
+                "except ImportError:\n"
+                "    class Skipped(BaseException): pass\n"
+                "data = cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "mod = importlib.import_module(data['module'])\n"
+                "target = mod\n"
+                "for name in data['qualname'].split('.'):\n"
+                "    target = getattr(target, name)\n"
+                "try:\n"
+                "    target(*data['args'], **data['kwargs'])\n"
+                "except Skipped:\n"
+                "    sys.exit(0)\n"
+                "except BaseException:\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                "        fp.write(traceback.format_exc())\n"
+                "    sys.exit(1)\n"
+            )
+
+            repo_root = str(VLLM_PATH.resolve())
+            env = os.environ.copy()
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+            env[_SPAWN_CHILD_ENV] = "1"
+
+            result = subprocess.run(
+                [sys.executable, "-c", child_script],
+                input=payload,
+                env=env,
+            )
+
+            if result.returncode != 0:
+                try:
+                    with open(tb_file) as fp:
+                        tb = fp.read()
+                except OSError:
+                    tb = ""
+                if not tb:
+                    tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
-                    f"Error raised in subprocess:\n{returned.stderr.decode()}"
-                ) from e
+                    f"Test subprocess '{f.__name__}' failed "
+                    f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tb_file)
 
     return wrapper
 
@@ -1576,8 +1713,7 @@ def create_new_process_for_each_test(
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
-        method = "spawn" if use_spawn else "fork"
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
 
     assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
@@ -1808,7 +1944,7 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     elif current_platform.is_rocm():
         attn_backend_list = ["TRITON_ATTN"]
         try:

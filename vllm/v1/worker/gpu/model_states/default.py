@@ -178,7 +178,7 @@ class DefaultModelState(ModelState):
             # Capture with worst-case max_seq_len so the graph is valid at any replay.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -194,5 +194,6 @@ class DefaultModelState(ModelState):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
+            for_cudagraph_capture=for_capture,
         )
         return attn_metadata
