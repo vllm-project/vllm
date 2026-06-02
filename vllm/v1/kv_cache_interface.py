@@ -78,6 +78,23 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
+def get_attn_backend_cache_dtype_str(kv_cache_spec: AttentionSpec) -> str:
+    """Return the per-spec dtype string used by backend KV shape helpers."""
+    if isinstance(kv_cache_spec, MLAAttentionSpec | SlidingWindowMLASpec):
+        return kv_cache_spec.cache_dtype_str or "auto"
+    if isinstance(kv_cache_spec, TQFullAttentionSpec):
+        return kv_cache_spec.cache_dtype_str or "auto"
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.NVFP4:
+        return "nvfp4"
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD:
+        return "int8_per_token_head"
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
+        return "fp8_per_token_head"
+    if kv_cache_spec.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
+        return "fp8"
+    return "auto"
+
+
 class KVCacheSpecKind(str, Enum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
@@ -317,6 +334,7 @@ class TQFullAttentionSpec(FullAttentionSpec):
     """
 
     tq_slot_size: int = 0
+    cache_dtype_str: str | None = None
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -330,7 +348,15 @@ class TQFullAttentionSpec(FullAttentionSpec):
         assert all(s.tq_slot_size == specs[0].tq_slot_size for s in specs), (
             "All TQ layers in the same KV cache group must use the same tq_slot_size."
         )
-        return replace(merged, tq_slot_size=specs[0].tq_slot_size)
+        cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
+        assert len(cache_dtype_str_set) == 1, (
+            "All TQ layers in the same KV cache group must use the same cache dtype."
+        )
+        return replace(
+            merged,
+            tq_slot_size=specs[0].tq_slot_size,
+            cache_dtype_str=cache_dtype_str_set.pop(),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

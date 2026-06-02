@@ -34,21 +34,81 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    KVQuantMode,
+    TQFullAttentionSpec,
+    get_attn_backend_cache_dtype_str,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+class _DTypeSensitiveAttentionBackend:
+    seen_cache_dtype_strs: list[str] = []
+
+    @classmethod
+    def get_kv_cache_shape(
+        cls,
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, int, int, int, int]:
+        cls.seen_cache_dtype_strs.append(cache_dtype_str)
+        last_dim = head_size + 1 if cache_dtype_str == "nvfp4" else head_size
+        return (2, num_blocks, block_size, num_kv_heads, last_dim)
+
+    @staticmethod
+    def get_kv_cache_block_dim(
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> int:
+        return 1
+
+    @staticmethod
+    def get_kv_cache_stride_order():
+        return tuple(range(5))
+
+
+def _reshape_kv_cache_tensor_for_test(
+    kv_cache_spec,
+    raw_tensor: torch.Tensor,
+    layer_name: str = "layer.0",
+    *,
+    backend=_DTypeSensitiveAttentionBackend,
+    cache_dtype: str = "auto",
+):
+    group = AttentionGroup(
+        backend,
+        [layer_name],
+        kv_cache_spec,
+        0,
+    )
+    runner_stub = SimpleNamespace(
+        runner_only_attn_layers=set(),
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        _kv_cache_spec_attn_group_iterator=lambda: iter([group]),
+    )
+    return GPUModelRunner._reshape_kv_cache_tensors(
+        runner_stub,
+        {layer_name: raw_tensor},
+        [kv_cache_spec.block_size],
+    )
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -1195,6 +1255,120 @@ def test_hybrid_attention_mamba_tensor_shapes():
             expected_ssm = ssm_blocks_constant[i]
             assert torch.equal(actual_conv, expected_conv)
             assert torch.equal(actual_ssm, expected_ssm)
+
+
+def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride():
+    ambiguous_cache = torch.empty((2, 2, BLOCK_SIZE, 1, 8), dtype=torch.float16)
+    hidden_size = ambiguous_cache.shape[2:].numel()
+    assert ambiguous_cache.stride()[:2] == (2 * hidden_size, hidden_size)
+
+    attention_spec = AttentionSpec(
+        block_size=BLOCK_SIZE, num_kv_heads=1, head_size=8, dtype=torch.float16
+    )
+    runner_stub = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        _kv_cache_spec_attn_group_iterator=lambda: iter(
+            [
+                AttentionGroup(
+                    _DTypeSensitiveAttentionBackend,
+                    ["attn"],
+                    attention_spec,
+                    0,
+                )
+            ]
+        ),
+    )
+    GPUModelRunner._update_hybrid_attention_mamba_layout(
+        runner_stub, {"attn": ambiguous_cache}, [BLOCK_SIZE]
+    )
+
+    assert ambiguous_cache.stride()[:2] == (hidden_size, 2 * hidden_size)
+
+
+def test_attn_backend_cache_dtype_str_uses_spec_quant_mode():
+    base_kwargs = dict(block_size=2, num_kv_heads=1, head_size=16)
+
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(**base_kwargs, dtype=torch.float16)
+        )
+        == "auto"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            )
+        )
+        == "fp8"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.int8,
+                kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+            )
+        )
+        == "int8_per_token_head"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
+            )
+        )
+        == "fp8_per_token_head"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            FullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                kv_quant_mode=KVQuantMode.NVFP4,
+            )
+        )
+        == "nvfp4"
+    )
+    assert (
+        get_attn_backend_cache_dtype_str(
+            TQFullAttentionSpec(
+                **base_kwargs,
+                dtype=torch.uint8,
+                tq_slot_size=12,
+                cache_dtype_str="turboquant_k3v4_nc",
+            )
+        )
+        == "turboquant_k3v4_nc"
+    )
+
+
+def test_reshape_skipped_attention_uses_spec_dtype_not_global_cache_dtype():
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.NONE,
+    )
+    num_blocks = 2
+    raw_tensor = torch.empty(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+
+    _DTypeSensitiveAttentionBackend.seen_cache_dtype_strs.clear()
+    kv_caches = _reshape_kv_cache_tensor_for_test(
+        spec,
+        raw_tensor,
+        "attn",
+        backend=_DTypeSensitiveAttentionBackend,
+        cache_dtype="nvfp4",
+    )
+
+    assert _DTypeSensitiveAttentionBackend.seen_cache_dtype_strs == ["auto"]
+    assert kv_caches["attn"].shape == (2, num_blocks, spec.block_size, 1, 8)
 
 
 def test_hybrid_block_table_initialization():
