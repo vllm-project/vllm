@@ -127,6 +127,7 @@ class SimpleCPUOffloadScheduler:
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
+            scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
