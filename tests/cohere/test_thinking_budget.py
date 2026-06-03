@@ -132,9 +132,6 @@ async def gen(
         f"{sampling_params.thinking_token_budget}"
     )
 
-    if continue_thinking:
-        sampling_params.continue_thinking = True
-
     prompt_str = _build_prompt_string_with_chat_template(
         tokenizer, engine, example_input
     )
