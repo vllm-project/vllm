@@ -15,8 +15,8 @@ loading and feeds decoded frames to the processor.
 """
 
 import math
-import re
 
+import regex as re
 import torch
 from torchvision.transforms import InterpolationMode
 from transformers import AutoTokenizer, BatchFeature

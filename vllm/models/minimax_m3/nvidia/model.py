@@ -358,13 +358,20 @@ class MiniMaxM3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        # Fused per-head Gemma QK-norm + partial NeoX RoPE on q/k, in place.
+
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.rotary_emb.cos_sin_cache,
+            positions,
+            self.num_heads,
+            self.num_kv_heads,
+            self.rotary_emb.rotary_dim,
+            self.q_norm.variance_epsilon,
+        )
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
-        q_by_head = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
-        q = self.q_norm(q_by_head).view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)
-        k = self.k_norm(k_by_head).view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -562,36 +569,68 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # Single fused projection: q, k, v, index_q, index_k.
+        # Single fused projection emitting [q | k | v | index_q | index_k].
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, index_q, index_k = qkv.split(
-            [
-                self.q_size,
-                self.kv_size,
-                self.kv_size,
-                self.index_q_size,
-                self.idx_head_dim,
-            ],
-            dim=-1,
-        )
-        # Per-head QK norm (qk_norm_type == "per_head", use_gemma_norm).
-        q = self.q_norm(q.view(*q.shape[:-1], self.num_heads, self.head_dim)).view(
-            q.shape
-        )
-        k = self.k_norm(k.view(*k.shape[:-1], self.num_kv_heads, self.head_dim)).view(
-            k.shape
-        )
-        q, k = self.rotary_emb(positions, q, k)
 
-        # Lightning-indexer branch: per-head norm, RoPE (projection already done).
-        index_q = self.index_q_norm(
-            index_q.view(*index_q.shape[:-1], self.num_idx_heads, self.idx_head_dim)
-        ).view(index_q.shape)
-        index_k = self.index_k_norm(index_k)  # single shared index head
-        index_q, index_k = self.index_rotary_emb(positions, index_q, index_k)
+        # Horizontally-fused per-head Gemma QK-norm + partial NeoX RoPE on the
+        # main (q/k) and index (index_q/index_k) branches, all read straight out
+        # of the single fused ``qkv`` tensor (the "5 results").  In the serving
+        # path (attn_metadata is a dict) the kernel also inserts k/v and the
+        # index key into their paged caches; during the profiling run it only
+        # does norm+RoPE so the downstream shapes are produced.  Replaces the
+        # q_norm/k_norm/rotary_emb/index_*_norm/index_rotary_emb/_insert_kv
+        # sequence.  k/v and index_k are rewritten in place inside qkv (and
+        # scatter-inserted into the caches); q and index_q are de-interleaved
+        # straight into the dedicated contiguous ``q``/``index_q`` buffers below.
 
-        # Pre-insert K/V and index-K; the sparse attention reads them from cache.
-        self._insert_kv(k, v, index_k)
+        attn_metadata = get_forward_context().attn_metadata
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+        rotary_dim = self.rotary_emb.rotary_dim
+        eps = self.q_norm.variance_epsilon
+        num_tokens = qkv.shape[0]
+        q = qkv.new_empty((num_tokens, self.q_size))
+        index_q = qkv.new_empty((num_tokens, self.index_q_size))
+        if isinstance(attn_metadata, dict):
+            main_meta = attn_metadata[self.layer_name]
+            assert isinstance(main_meta, MiniMaxM3SparseMetadata)
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                rotary_dim,
+                eps,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                self.num_idx_heads,
+                main_meta.slot_mapping,
+                self.kv_cache,
+                self.index_cache.kv_cache,
+                self.kv_cache.size(2),  # paged-cache block size
+                q,
+                index_q,
+            )
+        else:
+            # Profiling run: caches not yet bound; norm+RoPE only.
+            ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                qkv,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                cos_sin_cache,
+                positions,
+                self.num_heads,
+                self.num_kv_heads,
+                rotary_dim,
+                eps,
+                self.index_q_norm.weight,
+                self.index_k_norm.weight,
+                self.num_idx_heads,
+                q_out=q,
+                index_q_out=index_q,
+            )
 
         output = torch.empty_like(q)
         attn_output = self.impl.forward(

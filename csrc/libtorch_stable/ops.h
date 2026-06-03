@@ -231,6 +231,23 @@ void fused_qk_norm_rope(torch::stable::Tensor& qkv, int64_t num_heads_q,
                         torch::stable::Tensor& position_ids,
                         int64_t forced_token_heads_per_warp);
 
+// Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE (+ optional KV /
+// index-cache insert). Dense layer: norm+RoPE only; sparse layer: also packs
+// the index branch and scatters k/v/index_k into their paged caches.
+void fused_minimax_m3_qknorm_rope_kv_insert(
+    torch::stable::Tensor& qkv, torch::stable::Tensor const& q_norm_weight,
+    torch::stable::Tensor const& k_norm_weight,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& positions, int64_t num_heads,
+    int64_t num_kv_heads, int64_t rotary_dim, double eps,
+    std::optional<torch::stable::Tensor> index_q_norm_weight,
+    std::optional<torch::stable::Tensor> index_k_norm_weight,
+    int64_t num_index_heads, std::optional<torch::stable::Tensor> slot_mapping,
+    std::optional<torch::stable::Tensor> kv_cache,
+    std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
+    std::optional<torch::stable::Tensor> q_out,
+    std::optional<torch::stable::Tensor> index_q_out);
+
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
     torch::stable::Tensor& logits, const torch::stable::Tensor& prompt_mask,
