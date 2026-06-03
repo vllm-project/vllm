@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 if current_platform.is_xpu():
-    from vllm_xpu_kernels.fused_moe_interface import XpuFusedMoe
+    from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 
 def prepare_fp8_moe_layer_for_xpu(
@@ -63,7 +63,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         self.is_int4 = False
         self.is_mxfp4 = False
         self.is_mxfp8 = False
-        self.fused_moe_impl: XpuFusedMoe | None = None
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -153,31 +152,27 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             f"got is_fp8={self.is_fp8}, is_int4={self.is_int4}, "
             f"is_mxfp4={self.is_mxfp4}."
         )
-        if self.fused_moe_impl is None:
-            topk = topk_ids.size(-1)
-            self.fused_moe_impl = XpuFusedMoe(
-                w13=w1,
-                w13_scales=self.w1_scale,
-                w13_bias=self.w1_bias,
-                w2=w2,
-                w2_scales=self.w2_scale,
-                w2_bias=self.w2_bias,
-                n_experts_per_token=topk,
-                activation=activation.value,
-                num_experts=self.moe_config.num_local_experts,
-                ep_rank=self.moe_config.ep_rank,
-                ep_size=self.moe_config.ep_size,
-                is_fp8=self.is_fp8,
-                is_int4=self.is_int4,
-                is_mxfp4=self.is_mxfp4,
-                is_mxfp8=self.is_mxfp8,
-            )
-        assert self.fused_moe_impl is not None
-        self.fused_moe_impl.apply(
-            output=output,
+        topk = topk_ids.size(-1)
+        xpu_fused_moe(
             hidden_states=hidden_states,
+            w13=w1,
+            w13_scales=self.w1_scale,
+            w13_bias=self.w1_bias,
+            w2=w2,
+            w2_scales=self.w2_scale,
+            w2_bias=self.w2_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            n_experts_per_token=topk,
+            activation=activation.value,
+            num_experts=self.moe_config.num_local_experts,
+            ep_rank=self.moe_config.ep_rank,
+            ep_size=self.moe_config.ep_size,
+            expert_map=expert_map,
+            output=output,
+            is_fp8=self.is_fp8,
+            is_int4=self.is_int4,
+            is_mxfp4=self.is_mxfp4,
         )
 
 
