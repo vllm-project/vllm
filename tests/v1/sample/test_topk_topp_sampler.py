@@ -5,6 +5,7 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
 
 DEVICE_TYPE = current_platform.device_type
@@ -151,7 +152,7 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif("cpu" in DEVICE_TYPE, reason="CUDA/XPU not available")
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available on this platform")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 
