@@ -132,6 +132,7 @@ if flashinfer_comm is not None:
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
+        weight_bias: float = 0.0,
     ) -> None:
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
@@ -209,6 +210,7 @@ if flashinfer_comm is not None:
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
             trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            weight_bias=weight_bias,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(
@@ -225,6 +227,7 @@ if flashinfer_comm is not None:
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
+        weight_bias: float = 0.0,
     ) -> None:
         pass
 

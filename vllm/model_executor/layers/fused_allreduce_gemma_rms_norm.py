@@ -119,8 +119,6 @@ def fused_allreduce_gemma_rms_norm(
 
     ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
     if ok:
-        # Gemma uses x * (1 + weight); the kernel applies plain x * gamma.
-        gamma = (norm.weight.float() + 1.0).to(hidden_states.dtype)
         norm_out = torch.empty_like(hidden_states)
         # With norm_out provided, the kernel writes the new residual
         # (all_reduce(hidden_states) + residual) into the hidden_states buffer
@@ -128,9 +126,10 @@ def fused_allreduce_gemma_rms_norm(
         flashinfer_trtllm_fused_allreduce_norm(
             allreduce_in=hidden_states,
             residual=residual,
-            rms_gamma=gamma,
+            rms_gamma=norm.weight,
             rms_eps=norm.variance_epsilon,
             world_size=tp_size,
+            weight_bias=1.0,  # GemmaRMSNorm-style
             launch_with_pdl=True,
             fp32_acc=True,
             max_token_num=max_token_num,
