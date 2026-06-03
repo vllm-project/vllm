@@ -820,12 +820,6 @@ class TritonAttentionImpl(AttentionImpl):
                 ):
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
-                # int8 cache on ROCm → route Q·Kᵀ through native int8
-                # WMMA/MFMA (~2× bf16 throughput). fp8 cache keeps the
-                # bf16 path (no fp8 MMA on RDNA3; MI300X fp8 path TBD).
-                use_qk_int8_wmma = (
-                    key_cache.dtype == torch.int8 and current_platform.is_rocm()
-                )
                 num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1
                 triton_per_token_head_prefill(
                     query=query[:num_actual_tokens],
@@ -840,7 +834,6 @@ class TritonAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     num_reqs=num_reqs_pref,
                     max_query_len=attn_metadata.max_query_len,
-                    use_qk_int8_wmma=use_qk_int8_wmma,
                     kv_quant_mode=self._kv_quant_mode,
                 )
                 return output
@@ -899,9 +892,6 @@ class TritonAttentionImpl(AttentionImpl):
 
                 pref_qsl = attn_metadata.query_start_loc[num_dec:] - num_dec_tok
                 num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1 - num_dec
-                use_qk_int8_wmma = (
-                    key_cache.dtype == torch.int8 and current_platform.is_rocm()
-                )
                 triton_per_token_head_prefill(
                     query=query[num_dec_tok:num_actual_tokens],
                     output=output[num_dec_tok:num_actual_tokens],
@@ -915,7 +905,6 @@ class TritonAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     num_reqs=num_reqs_pref,
                     max_query_len=attn_metadata.max_query_len,
-                    use_qk_int8_wmma=use_qk_int8_wmma,
                     kv_quant_mode=self._kv_quant_mode,
                 )
                 return output
@@ -957,9 +946,6 @@ class TritonAttentionImpl(AttentionImpl):
                 mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
                 output_buf = getattr(layer, "_pth_output_buf", None)
                 lse_buf = getattr(layer, "_pth_lse_buf", None)
-                use_qk_int8_wmma = (
-                    key_cache.dtype == torch.int8 and current_platform.is_rocm()
-                )
                 triton_per_token_head_attention(
                     query=query[:num_actual_tokens],
                     key_cache=key_cache,
@@ -976,7 +962,6 @@ class TritonAttentionImpl(AttentionImpl):
                     output_buf=output_buf,
                     lse_buf=lse_buf,
                     buf_holder=layer,
-                    use_qk_int8_wmma=use_qk_int8_wmma,
                     kv_quant_mode=self._kv_quant_mode,
                 )
                 return output

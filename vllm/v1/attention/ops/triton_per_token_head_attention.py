@@ -374,219 +374,6 @@ def _pth_attn_stage1_packed(
 
 
 # ------------------------------------------------------------------ #
-#  Stage 1 — GQA/MQA grouped Q-heads with int8 WMMA/MFMA              #
-# ------------------------------------------------------------------ #
-
-
-@triton.jit
-def _pth_attn_stage1_gqa_wmma(
-    Q_ptr,
-    K_ptr,
-    V_ptr,
-    K_scale_ptr,
-    V_scale_ptr,
-    Block_table_ptr,
-    Q_to_req_ptr,
-    Q_to_klen_ptr,
-    Mid_o_ptr,
-    stride_q_tok,
-    stride_q_h,
-    stride_kc_blk,
-    stride_kc_slot,
-    stride_kc_head,
-    stride_vc_blk,
-    stride_vc_slot,
-    stride_vc_head,
-    stride_ks_blk,
-    stride_ks_slot,
-    stride_ks_head,
-    stride_vs_blk,
-    stride_vs_slot,
-    stride_vs_head,
-    stride_bt_r,
-    stride_mid_q,
-    stride_mid_h,
-    stride_mid_s,
-    HQ: tl.constexpr,
-    HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    NUM_KV_SPLITS: tl.constexpr,
-    KV_GROUP_SIZE: tl.constexpr,
-    ATTN_SCALE: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_KV: tl.constexpr,
-    QK_INT8_WMMA: tl.constexpr = False,
-):
-    """Split-KV stage1 that groups the ``KV_GROUP_SIZE`` Q-heads sharing a
-    KV head into a single ``BLOCK_M × HEAD_DIM`` tile.
-
-    Grouping amortizes the K/V loads across the group (each K tile feeds
-    all ``KV_GROUP_SIZE`` Q-heads instead of being reloaded per head) and
-    — more importantly — lets the Q·Kᵀ dot be issued as a real ``tl.dot``
-    of shape ``[BLOCK_M, HEAD_DIM] × [HEAD_DIM, BLOCK_KV]``, which lowers
-    to RDNA3/4 WMMA or CDNA2/3 MFMA. The non-grouped ``_pth_attn_stage1``
-    kernel uses an elementwise multiply-reduce that bypasses the matrix
-    units entirely.
-
-    ``BLOCK_M`` is padded to ≥16 (the smallest WMMA/MFMA M dimension).
-    Rows beyond ``KV_GROUP_SIZE`` are masked to -inf before the softmax
-    and zeroed in the store. Stage 2 (``_fwd_kernel_stage2``) consumes
-    the same ``mid_o`` layout as the non-grouped kernel.
-
-    P·V stays bf16/fp16: the gfx1100 measurement in the unified-attention
-    PR showed per-tile P quantization regresses PV throughput.
-    """
-    q_id = tl.program_id(0)
-    kv_head = tl.program_id(1)
-    sid = tl.program_id(2)
-
-    k_len = tl.load(Q_to_klen_ptr + q_id)
-    if k_len <= 0:
-        return
-
-    split_len = tl.cdiv(k_len, NUM_KV_SPLITS)
-    split_start = split_len * sid
-    split_end = tl.minimum(split_start + split_len, k_len)
-    if split_start >= split_end:
-        return
-
-    req_id = tl.load(Q_to_req_ptr + q_id)
-
-    m_offs = tl.arange(0, BLOCK_M)
-    h_offs = kv_head * KV_GROUP_SIZE + m_offs
-    h_mask = (m_offs < KV_GROUP_SIZE) & (h_offs < HQ)
-
-    d_offs = tl.arange(0, BLOCK_D)
-    d_mask = d_offs < HEAD_DIM
-    kv_range = tl.arange(0, BLOCK_KV)
-
-    q_off = q_id * stride_q_tok + h_offs[:, None] * stride_q_h + d_offs[None, :]
-    Q = tl.load(
-        Q_ptr + q_off,
-        mask=h_mask[:, None] & d_mask[None, :],
-        other=0.0,
-    )
-    q_dtype = Q.dtype
-
-    if QK_INT8_WMMA:
-        Q_f32 = Q.to(tl.float32)
-        q_absmax = tl.max(tl.abs(Q_f32), axis=1)
-        q_scale = tl.maximum(q_absmax * (1.0 / 127.0), 1e-6)
-        Q_q = tl.clamp(Q_f32 * (1.0 / q_scale)[:, None], -128.0, 127.0).to(tl.int8)
-
-    m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
-    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
-
-    bt_base = req_id * stride_bt_r
-
-    for start_n in range(split_start, split_end, BLOCK_KV):
-        kv_offs = start_n + kv_range
-        kv_mask = kv_offs < split_end
-
-        page_idx = kv_offs // BLOCK_SIZE
-        page_off = kv_offs % BLOCK_SIZE
-        block_nums = tl.load(
-            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
-        )
-
-        # K : (BLOCK_D, BLOCK_KV) — transposed so tl.dot(Q, K) works.
-        k_addrs = (
-            block_nums[None, :] * stride_kc_blk
-            + page_off[None, :] * stride_kc_slot
-            + kv_head * stride_kc_head
-            + d_offs[:, None]
-        )
-        if QK_INT8_WMMA:
-            K = tl.load(
-                K_ptr + k_addrs,
-                mask=kv_mask[None, :] & d_mask[:, None],
-                other=0,
-            )
-        else:
-            K = tl.load(
-                K_ptr + k_addrs,
-                mask=kv_mask[None, :] & d_mask[:, None],
-                other=0.0,
-            )
-
-        k_sc_addrs = (
-            block_nums * stride_ks_blk
-            + page_off * stride_ks_slot
-            + kv_head * stride_ks_head
-        )
-        k_scales = tl.load(K_scale_ptr + k_sc_addrs, mask=kv_mask, other=0.0)
-
-        if QK_INT8_WMMA:
-            qk_i32 = tl.dot(Q_q, K, out_dtype=tl.int32)
-            qk = qk_i32.to(tl.float32) * (
-                ATTN_SCALE * q_scale[:, None] * k_scales[None, :]
-            )
-        else:
-            qk = tl.dot(Q, K.to(q_dtype))
-            qk = qk * k_scales[None, :] * ATTN_SCALE
-
-        # Mask padded K columns and padded Q-head rows to -inf.
-        qk = tl.where(kv_mask[None, :] & h_mask[:, None], qk, -float("inf"))
-
-        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-        qk = qk - m_ij[:, None]
-        p = tl.exp(qk)
-        l_ij = tl.sum(p, axis=1)
-
-        alpha = tl.exp(m_i - m_ij)
-        l_i = l_i * alpha + l_ij
-        acc = acc * alpha[:, None]
-
-        # V : (BLOCK_KV, BLOCK_D)
-        v_addrs = (
-            block_nums[:, None] * stride_vc_blk
-            + page_off[:, None] * stride_vc_slot
-            + kv_head * stride_vc_head
-            + d_offs[None, :]
-        )
-        v = tl.load(
-            V_ptr + v_addrs,
-            mask=kv_mask[:, None] & d_mask[None, :],
-            other=0.0,
-        )
-
-        v_sc_addrs = (
-            block_nums * stride_vs_blk
-            + page_off * stride_vs_slot
-            + kv_head * stride_vs_head
-        )
-        v_scales = tl.load(V_scale_ptr + v_sc_addrs, mask=kv_mask, other=0.0)
-
-        p_casted = (p * v_scales[None, :]).to(q_dtype)
-        v_casted = v.to(q_dtype)
-        acc = tl.dot(p_casted, v_casted, acc)
-
-        m_i = m_ij
-
-    # Store per-row output and LSE for BLOCK_M Q-heads sharing this KV head.
-    safe_l = tl.where(l_i > 0.0, l_i, 1.0)
-    out_addrs = (
-        q_id * stride_mid_q
-        + h_offs[:, None] * stride_mid_h
-        + sid * stride_mid_s
-        + d_offs[None, :]
-    )
-    tl.store(
-        Mid_o_ptr + out_addrs,
-        acc / safe_l[:, None],
-        mask=h_mask[:, None] & d_mask[None, :],
-    )
-
-    lse_addrs = (
-        q_id * stride_mid_q + h_offs * stride_mid_h + sid * stride_mid_s + HEAD_DIM
-    )
-    lse = m_i + tl.log(safe_l)
-    tl.store(Mid_o_ptr + lse_addrs, lse, mask=h_mask)
-
-
-# ------------------------------------------------------------------ #
 #  Stage 1 — GQA grouped Q-heads, sub-byte packed (INT4)               #
 # ------------------------------------------------------------------ #
 
@@ -633,11 +420,10 @@ def _pth_attn_stage1_packed_gqa(
 ):
     """Split-KV stage1 for INT4 packed cache, with GQA grouping.
 
-    Mirrors :func:`_pth_attn_stage1_gqa_wmma` (groups ``KV_GROUP_SIZE``
-    Q-heads into one ``BLOCK_M × HEAD_DIM`` tile, lets QK / PV land as
-    real ``tl.dot`` calls onto WMMA / MFMA / Tensor Cores) but reads the
-    cache as packed bytes and runs the dot split across ``PACKING_FACTOR``
-    interleaved streams, like :func:`_attn_packed` and
+    Groups ``KV_GROUP_SIZE`` Q-heads into one ``BLOCK_M × HEAD_DIM`` tile so
+    QK / PV land as real ``tl.dot`` calls onto WMMA / MFMA / Tensor Cores,
+    reading the cache as packed bytes and running the dot split across
+    ``PACKING_FACTOR`` interleaved streams, like :func:`_attn_packed` and
     :func:`_pth_attn_stage1_packed`.
 
     Q is expected pre-rotated (RHT for INT4);
@@ -862,7 +648,6 @@ def triton_per_token_head_attention(
     output_buf: torch.Tensor | None = None,
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
-    use_qk_int8_wmma: bool = False,
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
 ) -> torch.Tensor:
     """Per-token-head split-KV attention.
@@ -874,16 +659,14 @@ def triton_per_token_head_attention(
 
     Dispatch by ``kv_quant_mode``:
 
-    * INT8 / FP8 per-token-head — flat head slot.  When
-      ``use_qk_int8_wmma`` is true and ``kv_group >= 2``, the grouped
-      Q-heads WMMA kernel is used (int8 tensor cores).  Otherwise the
-      per-query elementwise kernel.
+    * INT8 / FP8 per-token-head — flat head slot, per-query elementwise
+      kernel.
     * INT4 per-token-head — sub-byte packed cache.  Q is rotated
       (RHT) before the kernel; the
       packed kernel reads one byte per (slot, packed_offs) and runs the
       QK / PV dots split across PACKING_FACTOR streams; output is
-      un-rotated in place after stage 2.  No int8 WMMA in this path —
-      the dot lives in fp32 after the unpack/dequant.
+      un-rotated in place after stage 2.  The dot lives in fp32 after the
+      unpack/dequant.
     """
     packing_factor = _packing_factor_for(kv_quant_mode)
     if packing_factor > 1:
@@ -901,13 +684,7 @@ def triton_per_token_head_attention(
     BLOCK_D = triton.next_power_of_2(D)
     NUM_KV_SPLITS = max_num_kv_splits
 
-    # WMMA/MFMA path needs at least 16 rows in the M dimension; for
-    # kv_group < 2 the waste dominates and the original per-query kernel
-    # is preferred. kv_group > 32 not handled (unusual; would need an
-    # inner loop over groups).  Disabled outright for packed modes — the
-    # int8 dot doesn't apply when K is sub-byte packed.
-    use_grouped_wmma = use_qk_int8_wmma and 2 <= kv_group <= 32 and packing_factor == 1
-    # Packed modes: same grouping trick to land tl.dot onto WMMA / MFMA /
+    # Packed modes: grouping trick to land tl.dot onto WMMA / MFMA /
     # Tensor Cores after the unpack.  Per-query packed kernel is the
     # vector mul-reduce fallback for MHA models (kv_group < 2).
     use_packed_gqa = packing_factor > 1 and 2 <= kv_group <= 32
@@ -942,54 +719,10 @@ def triton_per_token_head_attention(
 
     # Stage 1 — four dispatches, all write the same mid_o layout consumed
     # by _fwd_kernel_stage2:
-    #   * grouped-WMMA: int8 tensor cores (INT8 cache, kv_group >= 2)
     #   * packed-GQA: sub-byte unpack + tl.dot tile (INT4 + GQA)
     #   * packed (per-query): mul-reduce fallback for MHA + INT4
     #   * elementwise: bf16/fp16/int8/fp8 flat head slot (everything else)
-    if use_grouped_wmma:
-        BLOCK_M = max(16, triton.next_power_of_2(kv_group))
-        _pth_attn_stage1_gqa_wmma[(total_q, Hk, NUM_KV_SPLITS)](
-            query,
-            key_cache,
-            value_cache,
-            k_scale_cache,
-            v_scale_cache,
-            block_table,
-            q_to_req,
-            q_to_klen,
-            mid_o,
-            query.stride(0),
-            query.stride(1),
-            key_cache.stride(0),
-            key_cache.stride(1),
-            key_cache.stride(2),
-            value_cache.stride(0),
-            value_cache.stride(1),
-            value_cache.stride(2),
-            k_scale_cache.stride(0),
-            k_scale_cache.stride(1),
-            k_scale_cache.stride(2),
-            v_scale_cache.stride(0),
-            v_scale_cache.stride(1),
-            v_scale_cache.stride(2),
-            block_table.stride(0),
-            mid_o.stride(0),
-            mid_o.stride(1),
-            mid_o.stride(2),
-            HQ=Hq,
-            HEAD_DIM=D,
-            BLOCK_SIZE=block_size,
-            NUM_KV_SPLITS=NUM_KV_SPLITS,
-            KV_GROUP_SIZE=kv_group,
-            ATTN_SCALE=scale,
-            BLOCK_D=BLOCK_D,
-            BLOCK_M=BLOCK_M,
-            BLOCK_KV=block_kv,
-            QK_INT8_WMMA=True,
-            num_warps=4,
-            num_stages=2,
-        )
-    elif use_packed_gqa:
+    if use_packed_gqa:
         # GQA-grouped sub-byte packed kernel.  BLOCK_M padded to ≥16 (the
         # tl.dot M dimension floor); rows beyond ``KV_GROUP_SIZE`` are
         # masked to -inf and zeroed in the store.
@@ -1186,7 +919,6 @@ def _pth_prefill_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     HEAD_DIM: tl.constexpr,
-    QK_INT8_WMMA: tl.constexpr = False,
 ):
     """Prefill attention over paged KV cache with per-token-head dequant.
 
@@ -1199,14 +931,6 @@ def _pth_prefill_kernel(
     ``q_pos = cached_len + offs_m`` where ``cached_len = seq_len - q_len``,
     so queries attend to the cached prefix plus their own prefix within the
     current chunk.
-
-    When ``QK_INT8_WMMA`` is set, Q is dynamically quantized per-row to int8
-    once (outside the K loop) and the Q·Kᵀ dot is issued as
-    ``tl.dot(int8, int8, out_dtype=int32)`` — Triton lowers this to
-    ``v_wmma_i32_16x16x16_iu8`` on RDNA3/4 and ``v_mfma_i32_16x16x16i8`` on
-    CDNA2/3, which run at ~2× bf16 throughput. Requires an int8 cache.
-    P·V stays in bf16: per-tile P quantization measured as a regression on
-    gfx1100 (see the unified-attention PR that validated this approach).
     """
     req_id = tl.program_id(0)
     head_id = tl.program_id(1)
@@ -1244,16 +968,6 @@ def _pth_prefill_kernel(
     )
     q_dtype = q.dtype
 
-    # Per-row symmetric int8 quantization of Q, reused across all K tiles.
-    # Lifting this out of the loop turns a per-tile int8→bf16 cast on K into
-    # a single per-Q-tile fp32→int8 cast on Q, and the int32 accumulator of
-    # the WMMA/MFMA int8 instruction carries full precision.
-    if QK_INT8_WMMA:
-        q_f32 = q.to(tl.float32)
-        q_absmax = tl.max(tl.abs(q_f32), axis=1)
-        q_scale_pt = tl.maximum(q_absmax * (1.0 / 127.0), 1e-6)
-        q_i8 = tl.clamp(q_f32 * (1.0 / q_scale_pt)[:, None], -128.0, 127.0).to(tl.int8)
-
     m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
@@ -1282,20 +996,11 @@ def _pth_prefill_kernel(
             + kv_head * stride_kc_head
             + offs_d[:, None]
         )
-        # `other` must stay integer in the int8 path so Triton doesn't promote
-        # the load result to float and break the int8 tl.dot.
-        if QK_INT8_WMMA:
-            k = tl.load(
-                K_cache_ptr + k_addrs,
-                mask=valid_k[None, :] & d_mask[:, None],
-                other=0,
-            )
-        else:
-            k = tl.load(
-                K_cache_ptr + k_addrs,
-                mask=valid_k[None, :] & d_mask[:, None],
-                other=0.0,
-            )
+        k = tl.load(
+            K_cache_ptr + k_addrs,
+            mask=valid_k[None, :] & d_mask[:, None],
+            other=0.0,
+        )
 
         k_sc_addrs = (
             block_nums * stride_ks_blk
@@ -1304,15 +1009,8 @@ def _pth_prefill_kernel(
         )
         k_scales = tl.load(K_scale_ptr + k_sc_addrs, mask=valid_k, other=0.0)
 
-        if QK_INT8_WMMA:
-            # Fused rescale: softmax_scale * q_scale(per row) * k_scale(per col).
-            qk_i32 = tl.dot(q_i8, k, out_dtype=tl.int32)
-            qk = qk_i32.to(tl.float32) * (
-                SM_SCALE * q_scale_pt[:, None] * k_scales[None, :]
-            )
-        else:
-            qk = tl.dot(q, k.to(q_dtype))
-            qk = qk * k_scales[None, :] * SM_SCALE
+        qk = tl.dot(q, k.to(q_dtype))
+        qk = qk * k_scales[None, :] * SM_SCALE
 
         causal = k_pos[None, :] <= q_pos[:, None]
         full_mask = causal & valid_k[None, :]
@@ -1625,7 +1323,6 @@ def triton_per_token_head_prefill(
     softmax_scale: float,
     num_reqs: int,
     max_query_len: int,
-    use_qk_int8_wmma: bool = False,
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
 ) -> torch.Tensor:
     """Flash-attention prefill with paged per-token-head dequant.
@@ -1641,15 +1338,13 @@ def triton_per_token_head_prefill(
 
     Dispatch by ``kv_quant_mode``:
 
-    * INT8 / FP8 per-token-head — flat head slot.  ``use_qk_int8_wmma``
-      routes the QKᵀ dot through native int8 matrix instructions
-      (RDNA3/4 WMMA, CDNA2/3 MFMA) for ~2× throughput on int8 caches.
+    * INT8 / FP8 per-token-head — flat head slot; QKᵀ dot in bf16.
     * INT4 per-token-head — sub-byte packed cache.  Q is rotated
       (RHT) before the kernel; the
       packed kernel reads one byte per (slot, packed_offs) and runs the
       QK / PV dots split across PACKING_FACTOR streams; output is
-      un-rotated in place after the kernel.  ``use_qk_int8_wmma`` is
-      ignored — the dot lives in fp32 after the unpack/dequant.
+      un-rotated in place after the kernel.  The dot lives in fp32 after
+      the unpack/dequant.
     """
     if query.shape[0] == 0:
         return output
@@ -1761,7 +1456,6 @@ def triton_per_token_head_prefill(
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         HEAD_DIM=D,
-        QK_INT8_WMMA=use_qk_int8_wmma,
         num_warps=4 if D <= 64 else 8,
         num_stages=2,
     )

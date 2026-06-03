@@ -259,8 +259,6 @@ def kernel_unified_attention(
     # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4=4 uses the triton_quant_kv
     # factory, not this kernel.
     KV_QUANT_MODE: tl.constexpr = 0,
-    # Use int8 WMMA/MFMA for the QK dot (requires KV_QUANT_MODE==2 and int8 cache)
-    QK_INT8_WMMA: tl.constexpr = False,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
     # Chunked / block-local attention.  ``CHUNK_LOOKBACK >= 0`` enables
@@ -353,14 +351,6 @@ def kernel_unified_attention(
             mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
             other=0.0,
         )
-
-    # Per-row symmetric int8 quantization of Q, reused across all K tiles.
-    # Enables int8 WMMA/MFMA for the QK dot when the K cache is also int8.
-    if QK_INT8_WMMA:
-        Q_f32 = Q.to(tl.float32)
-        q_absmax = tl.max(tl.abs(Q_f32), axis=1)
-        q_scale = tl.maximum(q_absmax * (1.0 / 127.0), 1e-6)
-        Q_q = tl.clamp(Q_f32 * (1.0 / q_scale)[:, None], -128.0, 127.0).to(tl.int8)
 
     block_table_offset = seq_idx * block_table_stride
 
@@ -468,19 +458,12 @@ def kernel_unified_attention(
                 + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
             )
             # K : (HEAD_SIZE, TILE_SIZE)
-            if QK_INT8_WMMA:
-                K = tl.load(
-                    key_cache_ptr + k_offset,
-                    mask=dim_mask[:, None] & tile_mask[None, :],
-                    other=0,
-                )
-            else:
-                K_load = tl.load(
-                    key_cache_ptr + k_offset,
-                    mask=dim_mask[:, None] & tile_mask[None, :],
-                    other=0.0,
-                )
-                K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
+            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
             V_load = tl.load(
                 value_cache_ptr + v_offset,
                 mask=dim_mask[None, :] & tile_mask[:, None],
@@ -522,13 +505,7 @@ def kernel_unified_attention(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        if QK_INT8_WMMA:
-            # int8 WMMA/MFMA QK: fused rescale = softmax_scale * q_scale * k_scale
-            qk_i32 = tl.dot(Q_q, K, out_dtype=tl.int32)
-            S += qk_i32.to(tl.float32) * (
-                scale * q_scale[:, None] * k_token_head_scales[None, :]
-            )
-        elif USE_PER_TOKEN_HEAD_SCALES:
+        if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
             S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
@@ -935,10 +912,6 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
-    use_rocm_int8_wmma_qk = (
-        kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
-    )
-
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
     # size (32) is larger than a common ``block_size=16``, so clamp it
@@ -1098,9 +1071,6 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
-        # Enable the int8 WMMA/MFMA QK fast-path only for the 2D (prefill) path:
-        # the 3D (decode) path has too few Q rows to benefit from the int8 dot.
-        QK_INT8_WMMA=use_rocm_int8_wmma_qk and not use_3d,
         Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
