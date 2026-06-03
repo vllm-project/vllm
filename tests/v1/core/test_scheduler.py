@@ -4474,3 +4474,24 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
         f"Expected only {HASH_FUTURE!r} from future mm feature filtering, "
         f"got {future_hashes!r}. Past/boundary features must be filtered out."
     )
+
+
+def test_new_attn_block_ids_drained_every_step():
+    # Regression test for issue #44175: for a non-mamba model
+    # (needs_kv_cache_zeroing is False) the scheduler must drain the per-step
+    # new attention block ids every step, otherwise the manager-side
+    # new_block_ids list grows unboundedly (one entry per allocated
+    # full-attention block per request) and leaks host memory.
+    scheduler = create_scheduler(enable_prefix_caching=False)
+    assert not scheduler.needs_kv_cache_zeroing
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+
+    requests = create_requests(num_requests=5, num_tokens=48)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    # The step actually allocated blocks, so without draining new_block_ids
+    # would be non-empty here.
+    assert output.total_num_scheduled_tokens > 0
+    assert manager.new_block_ids == []
