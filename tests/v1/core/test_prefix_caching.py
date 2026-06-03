@@ -1856,6 +1856,80 @@ def test_prefix_cache_stats_disabled():
     assert manager.prefix_cache_stats is None
 
 
+def test_prefix_cache_stats_record_block_lookup_and_cache_population():
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    req0 = make_request("0", common_token_ids + [9] * 7, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert not computed_blocks.blocks[0]
+    assert num_computed_tokens == 0
+
+    manager.allocate_slots(
+        req0, 55, len(computed_blocks.blocks[0]) * block_size, computed_blocks
+    )
+    manager.cache_blocks(req0, req0.num_tokens)
+
+    req1 = make_request("1", common_token_ids + [8] * 5, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert computed_blocks.get_block_ids() == ([1, 2, 3],)
+    assert num_computed_tokens == 3 * block_size
+
+    stats = manager.make_prefix_cache_stats()
+    assert stats is not None
+    assert stats.requests == 2
+    assert stats.queries == 55 + 53
+    assert stats.hits == 3 * block_size
+    assert stats.block_queries == 6
+    assert stats.block_hits == 3
+    assert stats.blocks_cached == 3
+
+
+def test_prefix_cache_trace_logs_lookup_and_commit(monkeypatch, caplog):
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        log_stats=True,
+    )
+    monkeypatch.setenv("VLLM_DEBUG_PREFIX_CACHE_TRACE", "1")
+
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    req0 = make_request("0", common_token_ids + [9] * 7, block_size, sha256)
+
+    with caplog.at_level("INFO", logger="vllm.v1.core.kv_cache_manager"):
+        computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+        manager.allocate_slots(
+            req0,
+            req0.num_tokens,
+            num_computed_tokens,
+            computed_blocks,
+        )
+        manager.cache_blocks(req0, req0.num_tokens)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Prefix cache trace lookup request_id=0" in message
+        and "matched_blocks=0" in message
+        and "matched_tokens=0" in message
+        for message in messages
+    )
+    assert any(
+        "Prefix cache trace commit request_id=0" in message
+        and "cached_blocks=3" in message
+        for message in messages
+    )
+
+
 def test_maybe_evict_cached_block():
     pool = BlockPool(num_gpu_blocks=4, enable_caching=True, hash_block_size=16)
     block_hash0 = make_block_hash_with_group_id(BlockHash(b"10"), 1000)

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+from vllm import envs
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
@@ -16,6 +17,23 @@ from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+def _prefix_cache_trace_enabled() -> bool:
+    return envs.VLLM_DEBUG_PREFIX_CACHE_TRACE
+
+
+def _count_block_groups(block_groups: Sequence[Sequence[KVCacheBlock]]) -> int:
+    return sum(len(group) for group in block_groups)
+
+
+def _summarize_block_hashes(block_hashes: Sequence[bytes], limit: int = 3) -> str:
+    if not block_hashes:
+        return "-"
+    summary = [block_hash.hex()[:16] for block_hash in block_hashes[:limit]]
+    if len(block_hashes) > limit:
+        summary.append("...")
+    return ",".join(summary)
 
 
 @dataclass
@@ -126,6 +144,7 @@ class KVCacheManager:
             max_num_batched_tokens = max_model_len
 
         self.enable_caching = enable_caching
+        self.hash_block_size = hash_block_size
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
@@ -215,12 +234,32 @@ class KVCacheManager:
             )
         )
 
+        if _prefix_cache_trace_enabled():
+            logger.info(
+                "Prefix cache trace lookup request_id=%s num_tokens=%d "
+                "block_hashes=%d max_cache_hit_length=%d matched_blocks=%d "
+                "matched_tokens=%d skip_read=%s cache_salt=%s hash_sample=%s",
+                request.request_id,
+                request.num_tokens,
+                len(request.block_hashes),
+                max_cache_hit_length,
+                _count_block_groups(computed_blocks),
+                num_new_computed_tokens,
+                request.skip_reading_prefix_cache,
+                request.cache_salt,
+                _summarize_block_hashes(request.block_hashes),
+            )
+
         if self.log_stats:
             assert self.prefix_cache_stats is not None
             self.prefix_cache_stats.record(
                 num_tokens=request.num_tokens,
                 num_hits=num_new_computed_tokens,
                 preempted=request.num_preemptions > 0,
+            )
+            self.prefix_cache_stats.record_block_lookup(
+                num_queries=len(request.block_hashes),
+                num_hits=num_new_computed_tokens // self.hash_block_size,
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
@@ -454,7 +493,7 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
-        self.coordinator.cache_blocks(request, num_tokens_to_cache)
+        self.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
 
@@ -564,7 +603,25 @@ class KVCacheManager:
                 that are already cached and tokens to be cached.
         """
         if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+            num_cached_blocks = self.coordinator.cache_blocks(
+                request, num_computed_tokens
+            )
+            if _prefix_cache_trace_enabled():
+                logger.info(
+                    "Prefix cache trace commit request_id=%s num_tokens=%d "
+                    "num_computed_tokens=%d block_hashes=%d cached_blocks=%d "
+                    "cache_salt=%s hash_sample=%s",
+                    request.request_id,
+                    request.num_tokens,
+                    num_computed_tokens,
+                    len(request.block_hashes),
+                    num_cached_blocks,
+                    request.cache_salt,
+                    _summarize_block_hashes(request.block_hashes),
+                )
+            if self.log_stats and num_cached_blocks > 0:
+                assert self.prefix_cache_stats is not None
+                self.prefix_cache_stats.record_blocks_cached(num_cached_blocks)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

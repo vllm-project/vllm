@@ -170,6 +170,15 @@ class OpenAIServing:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
 
+    def build_routing_headers(self, model_name: str | None = None) -> dict[str, str]:
+        resolved_model_name = model_name or self.models.model_name()
+        return {
+            "x-vllm-backend-id": resolved_model_name,
+            "x-vllm-endpoint-pool-id": f"single-endpoint:{resolved_model_name}",
+            "x-vllm-backend-scope": "local",
+            "x-vllm-route-outcome": "local_only",
+        }
+
     async def beam_search(
         self,
         prompt: EngineInput,

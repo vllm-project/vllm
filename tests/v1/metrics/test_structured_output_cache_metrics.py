@@ -8,8 +8,12 @@ import pytest
 
 from vllm.config import ObservabilityConfig
 from vllm.v1.metrics.loggers import LoggingStatLogger, PrometheusStatLogger
-from vllm.v1.metrics.reader import Counter, get_metrics_snapshot
-from vllm.v1.metrics.stats import SchedulerStats, StructuredOutputCacheStats
+from vllm.v1.metrics.reader import Counter, Gauge, get_metrics_snapshot
+from vllm.v1.metrics.stats import (
+    PrefixCacheStats,
+    SchedulerStats,
+    StructuredOutputCacheStats,
+)
 
 pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
@@ -35,6 +39,12 @@ def stats_vllm_config():
 def _get_counter_value(metrics: list[Counter], name: str) -> int:
     metric = next(m for m in metrics if m.name == name)
     assert isinstance(metric, Counter)
+    return metric.value
+
+
+def _get_gauge_value(metrics: list[Counter | Gauge], name: str) -> float:
+    metric = next(m for m in metrics if m.name == name)
+    assert isinstance(metric, Gauge)
     return metric.value
 
 
@@ -82,3 +92,40 @@ def test_prometheus_stat_logger_records_structured_output_cache_counters(
     metrics = get_metrics_snapshot()
     assert _get_counter_value(metrics, "vllm:structured_output_cache_queries") == 3
     assert _get_counter_value(metrics, "vllm:structured_output_cache_hits") == 2
+
+
+def test_prometheus_stat_logger_records_available_kv_cache_memory(
+    stats_vllm_config,
+):
+    logger = PrometheusStatLogger(stats_vllm_config)
+    scheduler_stats = SchedulerStats(available_kv_cache_memory_bytes=8589934592)
+
+    logger.record(scheduler_stats=scheduler_stats, iteration_stats=None)
+
+    metrics = get_metrics_snapshot()
+    assert (
+        _get_gauge_value(metrics, "vllm:available_kv_cache_memory_bytes") == 8589934592
+    )
+
+
+def test_prometheus_stat_logger_records_prefix_cache_block_counters(
+    stats_vllm_config,
+):
+    logger = PrometheusStatLogger(stats_vllm_config)
+    scheduler_stats = SchedulerStats(
+        prefix_cache_stats=PrefixCacheStats(
+            requests=2,
+            queries=108,
+            hits=48,
+            block_queries=6,
+            block_hits=3,
+            blocks_cached=3,
+        )
+    )
+
+    logger.record(scheduler_stats=scheduler_stats, iteration_stats=None)
+
+    metrics = get_metrics_snapshot()
+    assert _get_counter_value(metrics, "vllm:prefix_cache_block_queries") == 6
+    assert _get_counter_value(metrics, "vllm:prefix_cache_block_hits") == 3
+    assert _get_counter_value(metrics, "vllm:prefix_cache_blocks_cached") == 3

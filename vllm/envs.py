@@ -721,6 +721,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, vllm will trace function calls
     # Useful for debugging
     "VLLM_TRACE_FUNCTION": lambda: int(os.getenv("VLLM_TRACE_FUNCTION", "0")),
+    # If set to 1, emit prefix cache lookup/commit trace lines.
+    "VLLM_DEBUG_PREFIX_CACHE_TRACE": lambda: bool(
+        int(os.getenv("VLLM_DEBUG_PREFIX_CACHE_TRACE", "0"))
+    ),
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
         int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
