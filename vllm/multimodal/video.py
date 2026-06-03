@@ -604,6 +604,103 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         )
 
 
+def gpu_decode_roundtrip(frames: npt.NDArray) -> npt.NDArray:
+    """Route decoded frames through device memory under the GPU memory pool.
+
+    This acquires ``frames.nbytes`` from the process-global
+    :class:`~vllm.multimodal.gpu_ipc_memory.MultiModalGPUMemoryPool` (blocking
+    until the budget is free), moves the frames to the GPU, then copies them
+    straight back to host so the device buffer can be released immediately.
+
+    It is a stand-in for true hardware decoding (e.g. NVDEC): it exercises the
+    acquire -> VRAM -> CPU -> release admission-control flow and the byte
+    accounting, while leaving downstream preprocessing on the existing CPU
+    path. When the pool is disabled (``mm_ipc_gpu_memory_gb=0``) it is a no-op.
+    """
+    from vllm.multimodal.gpu_ipc_memory import get_mm_gpu_ipc_pool
+
+    pool = get_mm_gpu_ipc_pool()
+    if pool is None or frames.size == 0:
+        return frames
+
+    import torch
+
+    with pool.acquire(int(frames.nbytes)):
+        device_frames = torch.from_numpy(np.ascontiguousarray(frames)).to("cuda")
+        try:
+            # Copy back to host immediately so the VRAM buffer is freed before
+            # the lease is released on exiting the context.
+            host_frames = device_frames.cpu().numpy()
+        finally:
+            del device_frames
+    return host_frames
+
+
+def profile_gpu_decoder(
+    num_frames: int,
+    height: int,
+    width: int,
+    channels: int = 3,
+) -> None:
+    """Allocate a worst-case decoded-video buffer on the GPU during profiling.
+
+    Video decoders need device working memory (codec context, reference-frame
+    pools, scratch) that is not captured by the decoded-frame byte count and is
+    not exercised by the encoder profiling pass. Calling this from the worker's
+    ``profile_run`` while memory profiling is active makes that working set
+    visible to the memory snapshot that sizes the KV cache.
+
+    This bypasses the frontend memory pool (which only exists in the API-server
+    process) and allocates directly so the peak is observed in the worker.
+    """
+    import torch
+
+    frames = torch.empty(
+        (num_frames, height, width, channels), dtype=torch.uint8, device="cuda"
+    )
+    # Exercise the device->host copy path a real decoder hands off through.
+    host_frames = frames.cpu()
+    del frames, host_frames
+
+
+@VIDEO_LOADER_REGISTRY.register("gpu")
+class GPUVideoBackend(VideoBackend):
+    """Stub GPU-decode video backend.
+
+    Decodes frames on CPU (reusing :class:`VideoBackend`'s uniform sampling),
+    then routes them through device memory via :func:`gpu_decode_roundtrip`
+    under the multimodal GPU memory pool before returning a host array. This
+    exercises the GPU memory admission-control flow that a real hardware
+    decoder will use; it is opt-in (select via
+    ``VLLM_VIDEO_LOADER_BACKEND=gpu`` or
+    ``--media-io-kwargs '{"video": {"video_backend": "gpu"}}'``) and is not yet
+    a true GPU decoder.
+    """
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        frames, metadata = super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+        return gpu_decode_roundtrip(frames), metadata
+
+
 @VIDEO_LOADER_REGISTRY.register(
     "opencv_dynamic",
     video_processor="Glm4vVideoProcessor",

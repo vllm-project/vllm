@@ -388,7 +388,7 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
-            return kv_cache_memory_bytes
+            return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -510,7 +510,39 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
 
-        return int(self.available_kv_cache_memory_bytes)
+        return self._reserve_mm_ipc_gpu_memory(
+            int(self.available_kv_cache_memory_bytes)
+        )
+
+    def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
+        """Carve the frontend multimodal GPU-IPC budget out of the KV cache.
+
+        The frontend (API-server) process allocates GPU memory for hardware
+        multimodal decoding bounded by ``mm_ipc_gpu_memory_gb``. We subtract
+        that amount here so the engine leaves it physically unallocated on the
+        device. Returns the reduced KV-cache memory in bytes.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None or mm_config.mm_ipc_gpu_memory_gb <= 0:
+            return available_kv_cache_memory_bytes
+
+        reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * (1 << 30))
+        remaining = available_kv_cache_memory_bytes - reserved_bytes
+        if remaining <= 0:
+            raise ValueError(
+                f"mm_ipc_gpu_memory_gb={mm_config.mm_ipc_gpu_memory_gb} reserves "
+                f"{format_gib(reserved_bytes)} GiB for frontend multimodal GPU "
+                f"decoding, but only {format_gib(available_kv_cache_memory_bytes)} "
+                "GiB is available for the KV cache. Reduce mm_ipc_gpu_memory_gb or "
+                "increase gpu_memory_utilization."
+            )
+        logger.info_once(
+            "Reserving %s GiB of GPU memory for frontend multimodal GPU-IPC "
+            "decoding; KV cache memory reduced to %s GiB.",
+            format_gib(reserved_bytes),
+            format_gib(remaining),
+        )
+        return remaining
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
         """Get KV connector metadata from this worker if available."""

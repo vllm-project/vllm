@@ -223,6 +223,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.config.multimodal import MultiModalConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -6217,6 +6218,10 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
+                # Reserve GPU video decoder working memory by exercising it on a
+                # worst-case video, so it is captured by this profiling pass.
+                self._maybe_profile_gpu_video_decoder(mm_config, mm_budget)
+
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
@@ -6232,6 +6237,47 @@ class GPUModelRunner(
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+
+    def _maybe_profile_gpu_video_decoder(
+        self,
+        mm_config: "MultiModalConfig | None",
+        mm_budget: "MultiModalBudget",
+    ) -> None:
+        """Allocate a worst-case GPU video-decode buffer during profiling.
+
+        Frontend GPU video decoding (gated by ``mm_ipc_gpu_memory_gb``) uses
+        device working memory that the encoder profiling pass never exercises.
+        When the feature is enabled and the model supports video, decode a
+        worst-case video on the GPU so that working set is reflected in the
+        profiled peak and reserved out of the KV cache. Sized from the existing
+        ``VideoDummyOptions`` (``--limit-mm-per-prompt`` video options).
+        """
+        if mm_config is None or mm_config.mm_ipc_gpu_memory_gb <= 0:
+            return
+        if mm_budget.mm_max_items_per_batch.get("video", 0) <= 0:
+            return
+
+        from vllm.config.multimodal import VideoDummyOptions
+        from vllm.multimodal.video import profile_gpu_decoder
+
+        # Worst-case dummy video dimensions, defaulting when unspecified.
+        video_opts = mm_config.limit_per_prompt.get("video")
+        num_frames = 32
+        height = 512
+        width = 512
+        if isinstance(video_opts, VideoDummyOptions):
+            num_frames = video_opts.num_frames or num_frames
+            height = video_opts.height or height
+            width = video_opts.width or width
+
+        logger.info_once(
+            "Profiling GPU video decoder working memory with a worst-case "
+            "%dx%dx%d (frames x H x W) video.",
+            num_frames,
+            height,
+            width,
+        )
+        profile_gpu_decoder(num_frames, height, width)
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
