@@ -29,7 +29,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
-    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -249,7 +248,8 @@ class RocmAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -414,6 +414,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # Packed logical (B, H, N, 2*C); split_kv_cache permutes internally.
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size
         )
@@ -467,43 +468,20 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+        # Packed logical (B, H, N, 2*C) -> (B, N, H, 2*C); split K/V on the
+        # content dim and write via the stride-aware Triton kernel.
+        kv_cache_transposed = kv_cache.transpose(1, 2)
+        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        triton_reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
         )
-
-        # Reshape the input keys and values and store them in the cache.
-        # Get the actual block_size from value_cache
-        # value_cache shape: [num_blocks, num_heads, head_size, block_size]
-        block_size = value_cache.shape[3]
-        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-
-        if block_size in (16, 32) and has_native_layout:
-            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-        else:
-            # Non-standard blocks and hybrid attention/Mamba layouts need the
-            # stride-aware Triton writer. The native reshape_and_cache kernel
-            # assumes contiguous block storage and writes to the wrong hybrid
-            # cache blocks.
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
@@ -522,12 +500,11 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
-        )
-        flash_layout = False
+        # Packed logical (B, H, N, 2*C) -> (B, N, H, 2*C); split K/V on the
+        # content dim (flash layout) for the fused rope+cache kernel.
+        kv_cache_transposed = kv_cache.transpose(1, 2)
+        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:

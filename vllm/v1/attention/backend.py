@@ -121,11 +121,11 @@ class AttentionBackend(ABC):
     ) -> tuple[int, ...]:
         """
         Get the physical (memory layout) ordering of the kv cache dimensions.
-        e.g. if the KV cache shape is
-        [2, num_blocks, block_size, num_heads, head_size],
-        and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
+        Standard attention backends pack K and V into the content dim, giving
+        the logical shape [num_blocks, num_heads, block_size, 2 * head_size].
+        e.g. if get_kv_cache_stride_order returns (0, 2, 1, 3) then the physical
         ordering of dimensions is
-        [num_blocks, num_heads, 2, block_size, head_size].
+        [num_blocks, block_size, num_heads, 2 * head_size].
 
         If this function is unimplemented / raises NotImplementedError,
         the physical layout of the KV cache will match the logical shape.
@@ -134,9 +134,9 @@ class AttentionBackend(ABC):
             include_num_layers_dimension: if True, includes an additional
                 num_layers dimension, which is assumed to be prepended
                 to the logical KV cache shape.
-                With the above example, a return value (2, 4, 0, 1, 3, 5)
+                With the above example, a return value (1, 0, 3, 2, 4)
                 corresponds to
-                [num_blocks, num_heads, num_layers, 2, block_size, head_size].
+                [num_blocks, num_layers, block_size, num_heads, 2 * head_size].
 
                 If an additional dimension is NOT included in the returned
                 tuple, the physical layout will not include a layers dimension.

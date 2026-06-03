@@ -47,7 +47,7 @@ from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
-    nvfp4_kv_cache_split_views,
+    nvfp4_split_data_scale,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -281,7 +281,7 @@ class BatchDCPPrefillWrapper:
         self,
         layer: torch.nn.Module,
         prefill_query: torch.Tensor,
-        kv_cache_permute: torch.Tensor,
+        kv_cache_tuple: tuple[torch.Tensor, torch.Tensor],
         key: torch.Tensor,
         value: torch.Tensor,
         out: torch.Tensor,
@@ -291,7 +291,7 @@ class BatchDCPPrefillWrapper:
         )
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
-            kv_cache_permute,
+            kv_cache_tuple,
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             return_lse=True,
@@ -361,28 +361,34 @@ class FlashInferBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if cache_dtype_str == "nvfp4":
-            # Packed layout: fp4 data + fp8 block scales in last dim
-            last_dim = nvfp4_kv_cache_full_dim(head_size)
-            return (num_blocks, 2, block_size, num_kv_heads, last_dim)
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+            # nvfp4 stores K and V as separate head groups: 2*num_kv_heads
+            # heads in dim 1, each a self-contained nvfp4 block (fp4 data +
+            # fp8 block scales) in the content dim.
+            full_dim = nvfp4_kv_cache_full_dim(head_size)
+            return (num_blocks, 2 * num_kv_heads, block_size, full_dim)
+        # Other dtypes pack K and V into the content dim: logical (B, H, N, 2*C).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` to the actual memory layout we want.
+        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
+        # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
-            # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
-            return (1, 0, 2, 3, 4, 5)
+            # (num_blocks, num_layers, block_size, num_kv_heads, 2*head_size)
+            return (1, 0, 3, 2, 4)
         elif cache_layout == "NHD":
-            stride_order = (0, 1, 2, 3, 4)
+            # (num_blocks, block_size, num_kv_heads, 2*head_size)
+            stride_order = (0, 2, 1, 3)
         elif cache_layout == "HND" and include_num_layers_dimension:
-            # (num_blocks, 2, num_kv_heads, num_layers, block_size, head_size)
-            return (1, 2, 4, 0, 3, 5)
+            # (num_blocks, num_kv_heads, num_layers, block_size, 2*head_size)
+            return (1, 2, 0, 3, 4)
         elif cache_layout == "HND":
-            stride_order = (0, 1, 3, 2, 4)
+            # (num_blocks, num_kv_heads, block_size, 2*head_size)
+            stride_order = (0, 1, 2, 3)
         else:
             raise ValueError(f"Unknown cache layout format {cache_layout}.")
         return stride_order
@@ -1477,7 +1483,15 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
-            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache))
+            stride_order = FlashInferBackend.get_kv_cache_stride_order()
+            kv_perm = kv_cache.permute(*stride_order)
+            hs_c = self.head_size
+            output.copy_(
+                attn_metadata.cascade_wrapper.run(
+                    query,
+                    (kv_perm[..., :hs_c], kv_perm[..., hs_c:]),
+                )
+            )
             return output
 
         # When using spec decoding, num_decodes can be < num_decode_tokens
@@ -1503,14 +1517,22 @@ class FlashInferImpl(AttentionImpl):
             )
         kv_cache_permute = fixed
 
-        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
-        # Split into correctly-strided data and scale views.
+        # Split K/V — zero-copy views. FlashInfer accepts non-contiguous K/V
+        # tensors through its tuple API.
+        # For nvfp4, K and V are stored as separate head groups (2*num_kv_heads
+        # heads in dim 1); for other dtypes K and V are packed in the content
+        # dim and split there.
+        hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
-            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                kv_cache_permute
-            )
+            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=1)
+            k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
+            v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
+            nvfp4_kv_data = (k_data, v_data)
+            nvfp4_kv_block_scales = (k_sf, v_sf)
+        else:
+            kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
         use_dcp = self.dcp_world_size > 1
 
@@ -1542,7 +1564,7 @@ class FlashInferImpl(AttentionImpl):
                     prefill_wrapper.run(
                         layer,
                         prefill_query,
-                        kv_cache_permute,
+                        kv_cache_tuple,
                         key[num_decode_tokens:],
                         value[num_decode_tokens:],
                         out=output[num_decode_tokens:],
@@ -1559,7 +1581,9 @@ class FlashInferImpl(AttentionImpl):
                     assert prefill_wrapper._causal
 
                     if self.is_kvcache_nvfp4:
-                        kv_cache_permute = nvfp4_kv_data
+                        kv_cache_for_fi = nvfp4_kv_data
+                    else:
+                        kv_cache_for_fi = kv_cache_tuple
                     kv_cache_sf = (
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     )
@@ -1577,7 +1601,7 @@ class FlashInferImpl(AttentionImpl):
 
                     prefill_wrapper.run(
                         prefill_query,
-                        kv_cache_permute,
+                        kv_cache_for_fi,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_prefill,
@@ -1643,28 +1667,25 @@ class FlashInferImpl(AttentionImpl):
                     # TRTLLM prefill attention does not support BF16 Q
                     # and fp8 kv cache. So to enable prefill attention
                     # with fp8 kv cache, we can construct a mock block
-                    # and mock kv cache with BF16 KV involved in the prefill
-                    #
-                    kv_cache_permute = canonicalize_singleton_dim_strides(
-                        kv_cache_permute
-                    )
-                    kv_strides = kv_cache_permute.stride()
-                    assert (
-                        kv_strides[-1] == 1
-                        and kv_strides[-2] == kv_cache_permute.shape[-1]
-                    ), (
-                        "KV cache inner dims (block_size, head_size) must be "
-                        f"contiguous, got strides {kv_strides}"
+                    # and mock kv cache with BF16 KV involved in the prefill.
+                    # The dequant kernel needs a contiguous 5D tensor
+                    # (B, 2, H, N, hs); the assert above guarantees HND so the
+                    # packed content dim splits cleanly into (2, hs).
+                    B_kv, H_kv, N_kv = kv_cache_permute.shape[:3]
+                    kv_cache_5d = (
+                        kv_cache_permute.view(B_kv, H_kv, N_kv, 2, hs)
+                        .permute(0, 3, 1, 2, 4)
+                        .contiguous()
                     )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
-                        kv_cache_permute,
+                        kv_cache_5d,
                         block_tables_prefill,
                         layer._k_scale,
                         layer._v_scale,
                         attn_metadata.q_data_type,
                     )
                 else:
-                    mock_kv_cache = kv_cache_permute
+                    mock_kv_cache = kv_cache_tuple
                     mock_block_table = block_tables_prefill
 
                 trtllm_batch_context_with_kv_cache(
@@ -1705,7 +1726,9 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if self.is_kvcache_nvfp4:
-                    kv_cache_permute = nvfp4_kv_data
+                    kv_cache_for_fi = nvfp4_kv_data
+                else:
+                    kv_cache_for_fi = kv_cache_tuple
                 kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
 
                 # NVFP4 kernel only supports FP8 output.
@@ -1728,7 +1751,7 @@ class FlashInferImpl(AttentionImpl):
                     )
                     decode_wrapper.run(
                         decode_query,
-                        kv_cache_permute,
+                        kv_cache_for_fi,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output_tmp,
@@ -1744,7 +1767,7 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     decode_wrapper.run(
                         decode_query,
-                        kv_cache_permute,
+                        kv_cache_for_fi,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
@@ -1771,14 +1794,6 @@ class FlashInferImpl(AttentionImpl):
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
                 assert is_strictly_contiguous(seq_lens_decode)
-                kv_cache_permute = canonicalize_singleton_dim_strides(kv_cache_permute)
-                kv_strides = kv_cache_permute.stride()
-                assert (
-                    kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
-                ), (
-                    "KV cache inner dims (block_size, head_size) must be "
-                    f"contiguous, got strides {kv_strides}"
-                )
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
@@ -1808,7 +1823,7 @@ class FlashInferImpl(AttentionImpl):
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
-                        nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_permute
+                        nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_tuple
                     ),
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
@@ -1846,8 +1861,12 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            k_cache = kv_cache[:, 0]
-            v_cache = kv_cache[:, 1]
+            kv_cache = kv_cache.transpose(1, 2)
+            if self.is_kvcache_nvfp4:
+                # nvfp4: K/V are separate head groups in the head dim.
+                k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=-2)
+            else:
+                k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
