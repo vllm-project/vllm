@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import logging
 import math
 import queue
+import re
 import threading
 import time
 from collections import defaultdict
@@ -303,22 +305,64 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id[transfer_id] = request_id
         self.request_id_to_transfer_id[request_id] = transfer_id
 
+    # Per-transfer suffix that MoRI-IO appends to ``request.request_id``
+    # between ``update_state_after_alloc`` (alloc-time) and
+    # ``request_finished`` (finish-time) on the sidecar-fronted decode
+    # path. Used by ``unmap_request_id`` to strip the suffix when the
+    # exact-match lookup misses.
+    _MORIIO_RID_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$")
+
     def unmap_request_id(self, request_id: ReqId):
-        if request_id in self.request_id_to_transfer_id:
-            transfer_id = self.request_id_to_transfer_id[request_id]
-            del self.request_id_to_transfer_id[request_id]
+        # In multi-pod disagg routing, MoRI-IO can append a
+        # "-[0-9a-f]{8}" per-transfer suffix to ``request.request_id``
+        # between the call that populated ``request_id_to_transfer_id``
+        # (``update_state_after_alloc``) and the call that drains it
+        # (``request_finished``). The dict lookup is exact-match, so the
+        # suffix mutation produces a spurious
+        #
+        #   "Could not find <rid> in transfer_id_to_request_id lookup
+        #    table.  This could lead to a possible hang."
+        #
+        # warning, leaks the dict entry, and ships stale state to the
+        # worker via ``meta.transfer_id_to_request_id`` -- causing
+        # rank-asymmetric MoRI-IO transfer-id lookup failures in worker
+        # logs on the pod where the suffix gets appended (decode-master
+        # in Wide-EP DP=16, ranks 0..7).
+        #
+        # Resolution: try exact match first (preserves the no-suffix
+        # fast path -- zero overhead and bit-identical to the
+        # pre-patch behaviour for callers that already pass the
+        # canonical rid), then fall back to stripping a trailing
+        # "-[0-9a-f]{8}" suffix and retrying.
+        lookup_id = request_id
+        if lookup_id not in self.request_id_to_transfer_id:
+            base = self._MORIIO_RID_SUFFIX_RE.sub("", str(request_id))
+            if base != request_id and base in self.request_id_to_transfer_id:
+                logger.debug(
+                    "MoRI-IO unmap suffix-strip: %r -> %r",
+                    request_id,
+                    base,
+                )
+                lookup_id = base
+        if lookup_id in self.request_id_to_transfer_id:
+            transfer_id = self.request_id_to_transfer_id[lookup_id]
+            del self.request_id_to_transfer_id[lookup_id]
             if transfer_id in self.transfer_id_to_request_id:
                 del self.transfer_id_to_request_id[transfer_id]
             else:
                 logger.warning(
-                    "transfer id not in transfer_id_to_request_id lookup"
-                    "table. there is likely a bug!"
+                    "MoRI-IO unmap: transfer_id %s not in "
+                    "transfer_id_to_request_id for rid %s",
+                    transfer_id,
+                    lookup_id,
                 )
         else:
             logger.warning(
-                "Could not find %s  in transfer_id_to_request_id"
-                "lookup table.  This could lead to a possible hang.",
+                "MoRI-IO unmap MISS: rid=%r table_size=%d "
+                "(suffix-strip fallback also missed; map_request_id "
+                "likely never fired for this request)",
                 request_id,
+                len(self.request_id_to_transfer_id),
             )
 
     def get_num_new_matched_tokens(
@@ -387,7 +431,14 @@ class MoRIIOConnectorScheduler:
         params = request.kv_transfer_params
         if not params:
             return
-        transfer_id = params["transfer_id"]
+        # LLM-D sidecar compat: the routing-sidecar (--kv-connector=nixlv2)
+        # emits NIXL-shaped kv_transfer_params that do not include MoRI-IO's
+        # transfer_id. Synthesize one deterministically from request_id so the
+        # producer and consumer (both downstream of the same sidecar fan-out)
+        # observe the same transfer_id without requiring a wire-protocol
+        # change in the sidecar.
+        transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
+        params.setdefault("transfer_id", transfer_id)
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode"):
@@ -430,6 +481,67 @@ class MoRIIOConnectorScheduler:
                 )
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
+
+                # Wide-EP DP>1 fix: the disagg routing sidecar injects a
+                # STATIC ``remote_dp_rank`` (e.g. always 0) into
+                # ``kv_transfer_params``. With DP>1, that pins every
+                # decode->prefill notify to a single prefill DP rank, so
+                # all prefill ranks other than that one never receive
+                # their ``done_remote_allocate`` notify and their
+                # deferred-write tasks expire after
+                # ``VLLM_MORIIO_DEFERRED_TIMEOUT_S``. Most requests hang.
+                #
+                # Compute a per-request prefill DP rank from a stable
+                # hash of ``request_id``. The matching helper on
+                # ``AsyncLLM.add_request`` uses the same blake2s scheme,
+                # so both legs (prefill dispatch + decode notify) agree.
+                #
+                # When ``remote_dp_size_local`` is set and smaller than
+                # ``remote_dp_size`` (multi-pod DP, "Wide-EP"), cap the
+                # modulus to the per-pod size so the notify lands on the
+                # same pod that the producer dispatch routes to.
+                #
+                # By the time we reach ``request_finished``, MoRI-IO has
+                # appended a per-transfer suffix ``-<8 hex>`` to
+                # ``request.request_id`` (it isn't on the AsyncLLM rid
+                # that the dispatcher hashes). Strip that suffix so both
+                # legs hash the same canonical base id.
+                _dp_size = int(
+                    request.kv_transfer_params.get("remote_dp_size", 1) or 1
+                )
+                try:
+                    _dp_local = int(
+                        request.kv_transfer_params.get("remote_dp_size_local", 0)
+                        or 0
+                    )
+                    if _dp_local > 0:
+                        _dp_size = min(_dp_size, _dp_local)
+                except (TypeError, ValueError):
+                    pass
+                # Defense-in-depth handshake with the llm-d routing
+                # sidecar (patch 0013, shipped in
+                # pd-sidecar-moriio-write-widep-v0.8.0+): when the
+                # sidecar is in path it already pins the prefill DP rank
+                # via its own pickDPRank(uuid, dpSize) and stamps both
+                # ``remote_dp_rank`` and ``remote_dp_rank_override=True``
+                # on the kv_transfer_params. Honouring that sentinel
+                # makes this branch dormant in production while still
+                # acting as a fail-safe for sidecar-less debug runs and
+                # for any future sidecar regression that drops the
+                # override stamp. Avoids cross-language hash divergence
+                # (Go blake2s-256 vs Python blake2s-8) when both sides
+                # would otherwise hash independently.
+                if (
+                    _dp_size > 1
+                    and "remote_dp_rank_override" not in request.kv_transfer_params
+                ):
+                    _base_rid = re.sub(
+                        r"-[0-9a-f]{8}$", "", str(request.request_id)
+                    )
+                    _digest = hashlib.blake2s(
+                        _base_rid.encode("utf-8"), digest_size=8
+                    ).digest()
+                    remote_dp_rank = int.from_bytes(_digest, "big") % _dp_size
 
                 peer_zmq = get_peer_zmq_from_request_id(
                     request.request_id, is_producer=False
@@ -499,6 +611,15 @@ class MoRIIOConnectorScheduler:
                     if new_block_ids is not None:
                         block_ids = new_block_ids[0]
                         # TODO : hybrid attn, etc
+                        # A request that arrived without ``kv_transfer_params``
+                        # (smoke test, mis-routed gateway request, ...) is
+                        # scheduled normally but is never registered in
+                        # ``_reqs_need_pending_save``. The unconditional dict
+                        # access below would raise ``KeyError`` and crash the
+                        # EngineCore, taking the whole replica down. Skip
+                        # silently for non-disagg requests on a producer pod.
+                        if req_id not in self._reqs_need_pending_save:
+                            continue
                         req, existing_blocks = self._reqs_need_pending_save[req_id]
                         updated_blocks = list(existing_blocks) + (block_ids)
                         self._reqs_need_pending_save[req_id] = (req, updated_blocks)
