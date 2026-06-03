@@ -28,7 +28,7 @@ BLOCK_SIZES = [16, 64]
 DTYPES = [torch.bfloat16, torch.float16]
 FP8_DTYPE = current_platform.fp8_dtype()
 
-# (query_len, kv_len) per sequence; 2D kernel path (no 3D segment buffers)
+# (query_len, kv_len) per sequence
 MIXED_SEQ_LENS = [
     [(1, 128), (5, 18), (129, 463)],
     [(10, 256), (5, 64), (32, 128)],
