@@ -552,6 +552,7 @@ class DeepseekV4MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.n_shared_experts = config.n_shared_experts or 0
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
@@ -570,7 +571,6 @@ class DeepseekV4MoE(nn.Module):
         eplb_config = vllm_config.parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_routed_experts = config.n_routed_experts
-        self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         assert self.n_physical_experts % self.ep_size == 0, (
@@ -644,6 +644,14 @@ class DeepseekV4MoE(nn.Module):
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
         )
+        self._sync_fused_moe_metadata()
+
+    def _sync_fused_moe_metadata(self) -> None:
+        self.n_logical_experts = self.experts.logical_num_experts
+        self.n_physical_experts = self.experts.global_num_experts
+        self.n_local_physical_experts = self.experts.local_num_experts
+        self.n_local_experts = self.n_local_physical_experts
+        self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
