@@ -37,12 +37,11 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.streaming import (
     extract_named_tool_call_streaming,
     extract_required_tool_call_streaming,
 )
-from vllm.tool_parsers.utils import Tool
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tool_parser
 
@@ -91,18 +90,24 @@ class Parser:
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
-        """
-        Initialize the Parser.
-
-        Args:
-            tokenizer: The tokenizer used by the model. This is required for
-                token-based parsing operations.
-        """
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+        *args,
+        **kwargs,
+    ):
         self.model_tokenizer = tokenizer
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
         self._stream_state = StreamState()
+
+        if self.__class__.reasoning_parser_cls is not None:
+            self._reasoning_parser = self.__class__.reasoning_parser_cls(
+                tokenizer, *args, **kwargs
+            )
+        if self.__class__.tool_parser_cls is not None:
+            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -893,34 +898,3 @@ class DelegatingParser(Parser):
             self._append_unstreamed_tool_args(delta_message)
 
         return delta_message
-
-
-class _WrappedParser(DelegatingParser):
-    """
-    A DelegatingParser subclass that instantiates parsers from class attributes.
-
-    This class is used to dynamically create a parser that wraps individual
-    ReasoningParser and ToolParser classes. The class attributes
-    `reasoning_parser_cls` and `tool_parser_cls` should be set before
-    instantiation.
-
-    Usage:
-        _WrappedParser.reasoning_parser_cls = MyReasoningParser
-        _WrappedParser.tool_parser_cls = MyToolParser
-        parser = _WrappedParser(tokenizer)
-    """
-
-    reasoning_parser_cls: type[ReasoningParser] | None = None
-    tool_parser_cls: type[ToolParser] | None = None
-
-    def __init__(
-        self, tokenizer: TokenizerLike, tools: list[Tool] | None = None, **kwargs
-    ):
-        super().__init__(tokenizer)
-        # Instantiate the underlying parsers from class attributes
-        if self.__class__.reasoning_parser_cls is not None:
-            self._reasoning_parser = self.__class__.reasoning_parser_cls(
-                tokenizer, **kwargs
-            )
-        if self.__class__.tool_parser_cls is not None:
-            self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
