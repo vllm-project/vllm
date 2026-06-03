@@ -30,7 +30,12 @@
   }()
 
 namespace {
-enum class FusedMOEAct { SiluAndMul, SwigluOAIAndMul, GeluAndMul };
+enum class FusedMOEAct {
+  SiluAndMul,
+  SwigluOAIAndMul,
+  GeluAndMul,
+  GeluTanhAndMul,
+};
 
 FusedMOEAct get_act_type(const std::string& act) {
   if (act == "silu") {
@@ -39,6 +44,8 @@ FusedMOEAct get_act_type(const std::string& act) {
     return FusedMOEAct::SwigluOAIAndMul;
   } else if (act == "gelu") {
     return FusedMOEAct::GeluAndMul;
+  } else if (act == "gelu_tanh") {
+    return FusedMOEAct::GeluTanhAndMul;
   } else {
     TORCH_CHECK(false, "Invalid act type: " + act);
   }
@@ -144,6 +151,44 @@ void gelu_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
 }
 
 template <typename scalar_t>
+void gelu_tanh_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
+                       const int32_t m_size, const int32_t n_size,
+                       const int32_t input_stride,
+                       const int32_t output_stride) {
+  using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
+  const int32_t dim = n_size / 2;
+  float* __restrict__ gate = input;
+  float* __restrict__ up = input + dim;
+  vec_op::FP32Vec16 one_vec(1.0);
+  vec_op::FP32Vec16 w1_vec(0.7978845608028654);
+  vec_op::FP32Vec16 w2_vec(0.5);
+  vec_op::FP32Vec16 w3_vec(0.044715);
+  alignas(64) float temp[16];
+
+  for (int32_t m = 0; m < m_size; ++m) {
+    for (int32_t n = 0; n < dim; n += 16) {
+      vec_op::FP32Vec16 gate_vec(gate + n);
+      vec_op::FP32Vec16 up_vec(up + n);
+      auto gate_pow3_vec = gate_vec * gate_vec * gate_vec;
+      auto inner_vec = w1_vec * (gate_vec + w3_vec * gate_pow3_vec);
+
+      inner_vec.save(temp);
+      for (int32_t i = 0; i < 16; ++i) {
+        temp[i] = std::tanh(temp[i]);
+      }
+      vec_op::FP32Vec16 tanh_vec(temp);
+      auto gelu_tanh = gate_vec * w2_vec * (one_vec + tanh_vec);
+      auto gated_output_fp32 = up_vec * gelu_tanh;
+      scalar_vec_t gated_output = scalar_vec_t(gated_output_fp32);
+      gated_output.save(output + n);
+    }
+    gate += input_stride;
+    up += input_stride;
+    output += output_stride;
+  }
+}
+
+template <typename scalar_t>
 FORCE_INLINE void apply_gated_act(const FusedMOEAct act,
                                   float* __restrict__ input,
                                   scalar_t* __restrict__ output,
@@ -159,6 +204,9 @@ FORCE_INLINE void apply_gated_act(const FusedMOEAct act,
       return;
     case FusedMOEAct::GeluAndMul:
       gelu_and_mul(input, output, m, n, input_stride, output_stride);
+      return;
+    case FusedMOEAct::GeluTanhAndMul:
+      gelu_tanh_and_mul(input, output, m, n, input_stride, output_stride);
       return;
     default:
       TORCH_CHECK(false, "Unsupported act type.");

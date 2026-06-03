@@ -66,7 +66,13 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "Qwen3ForCausalLM",
+    }
+)
 
 
 class OptimizationLevel(IntEnum):
@@ -486,6 +492,19 @@ class VllmConfig:
             :10
         ]
         return hash_str
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        # Async scheduling requires 2 concurrent batches to overlap.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if self.scheduler_config.async_scheduling:
+            if self.use_v2_model_runner:
+                return pp_size + 1
+            # V1 Model Runner does not fully support async scheduling with PP.
+            if pp_size <= 1:
+                return 2
+        return pp_size
 
     @property
     def num_speculative_tokens(self) -> int:
