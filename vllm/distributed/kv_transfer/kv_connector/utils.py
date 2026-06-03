@@ -481,6 +481,9 @@ class TransferTopology:
     ) -> EngineTransferInfo:
         return self._engines[(remote_engine_id, remote_pp_rank)]
 
+    def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
+        self._engines.pop(remote_engine_id, None)
+
     # ============================================================
     # Layout properties
     # ============================================================
