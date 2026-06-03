@@ -49,6 +49,7 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
+from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -1083,11 +1084,11 @@ class GPUModelRunner(
     def _init_kv_zero_meta(self) -> None:
         """One-time precomputation for _zero_block_ids.
 
-        Delegates to KVBlockZeroer.init_meta with the runner's state.
         Called from gpu_worker.py outside the CuMem pool context.
         """
-        self._kv_block_zeroer = KVBlockZeroer(self.device, self.pin_memory)
-        self._kv_block_zeroer.init_meta(
+        self._kv_block_zeroer = KVBlockZeroer(
+            self.device,
+            self.pin_memory,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
@@ -3189,6 +3190,44 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
+    def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
+        """Apply sparse flat-index patches directly to existing model params."""
+        model = self.get_model()
+        for patch in patches:
+            param = model.get_parameter(patch.name)
+            if not param.data.is_contiguous():
+                raise NotImplementedError(
+                    "Sparse weight updates currently require contiguous params: "
+                    f"{patch.name}"
+                )
+
+            if patch.indices.dtype != torch.int32:
+                raise ValueError(
+                    "Sparse weight updates currently require int32 indices: "
+                    f"{patch.name}"
+                )
+            if patch.indices.ndim != 1 or patch.values.ndim != 1:
+                raise ValueError(
+                    f"Sparse weight patches must be 1D flattened updates: {patch.name}"
+                )
+            if patch.indices.numel() != patch.values.numel():
+                raise ValueError(
+                    "`indices` and `values` must have matching lengths for "
+                    f"{patch.name}"
+                )
+            if patch.values.dtype != param.dtype:
+                raise ValueError(
+                    f"Sparse values dtype {patch.values.dtype} does not match "
+                    f"parameter dtype {param.dtype} for {patch.name}"
+                )
+
+            flat_param = param.data.view(-1)
+            flat_param.index_copy_(
+                0,
+                patch.indices.to(device=flat_param.device, dtype=torch.long),
+                patch.values.to(device=flat_param.device),
+            )
+
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
@@ -4323,6 +4362,21 @@ class GPUModelRunner(
 
         return None
 
+    def _input_fits_in_drafter(
+        self, common_attn_metadata: CommonAttentionMetadata | None
+    ) -> bool:
+        if common_attn_metadata is None:
+            return False
+        assert self.speculative_config is not None
+        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
+        num_drafter_query_tokens = self.num_spec_tokens + (
+            1 if self.speculative_config.use_dflash() else 0
+        )
+        return (
+            common_attn_metadata.max_seq_len + num_drafter_query_tokens
+            <= self.effective_drafter_max_model_len
+        )
+
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -4402,9 +4456,8 @@ class GPUModelRunner(
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
             # Decide whether to run the drafter or zero out draft tokens.
-            input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
-                <= self.effective_drafter_max_model_len
+            input_fits_in_drafter = self._input_fits_in_drafter(
+                spec_decode_common_attn_metadata
             )
             use_gpu_toks = (
                 spec_config.use_eagle()
@@ -6225,11 +6278,21 @@ class GPUModelRunner(
 
         # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
+        if current_platform.is_rocm():
+            # Drop captured graphs before distributed teardown. On ROCm, delayed
+            # graph destruction can surface HSA faults in the next engine startup.
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
+        if current_platform.is_rocm():
+            gc.collect()
+            torch.accelerator.empty_cache()
+            torch.accelerator.synchronize()
 
     def _cleanup_profiling_kv_cache(self) -> None:
         torch.accelerator.synchronize()
@@ -6266,6 +6329,42 @@ class GPUModelRunner(
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
     @torch.inference_mode()
+    def _create_encoder_cudagraph_manager(self) -> "EncoderCudaGraphManager | None":
+        if not (
+            self.compilation_config.cudagraph_mm_encoder and self.supports_mm_inputs
+        ):
+            return None
+
+        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper, because
+        # @runtime_checkable Protocol isinstance() checks do not work through
+        # __getattr__ forwarding.
+        from vllm.model_executor.models.interfaces import (
+            SupportsEncoderCudaGraph,
+            supports_encoder_cudagraph,
+        )
+        from vllm.v1.worker.encoder_cudagraph import (
+            EncoderCudaGraphManager,
+        )
+
+        raw_model = self.get_model()
+        if not supports_encoder_cudagraph(raw_model):
+            return None
+
+        return EncoderCudaGraphManager(
+            vllm_config=self.vllm_config,
+            device=self.device,
+            dtype=self.dtype,
+            model=cast(SupportsEncoderCudaGraph, raw_model),
+        )
+
+    @torch.inference_mode()
+    def _maybe_init_encoder_cudagraph_manager(self) -> None:
+        if self.encoder_cudagraph_manager is None:
+            self.encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
+            if self.encoder_cudagraph_manager is not None:
+                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+
+    @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
@@ -6273,24 +6372,40 @@ class GPUModelRunner(
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+        # Use a temporary manager for memory profiling. The persistent manager
+        # is initialized later so it does not keep profiling-only graph state.
+        encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
 
-        total_graphs = sum(len(descs) for _, descs in capture_descs)
+        decoder_graphs = sum(len(descs) for _, descs in capture_descs)
+        encoder_graphs = (
+            encoder_cudagraph_manager.get_num_graphs_to_capture()
+            if encoder_cudagraph_manager is not None
+            else 0
+        )
+        total_graphs = decoder_graphs + encoder_graphs
         if total_graphs == 0:
             logger.debug("No CUDA graphs will be captured, skipping profiling")
             self._cleanup_profiling_kv_cache()
             return 0
 
-        logger.info(
-            "Profiling CUDA graph memory: %s",
-            ", ".join(
+        graph_groups = [
+            *(
                 f"{mode.name}={len(descs)} (largest={descs[0].num_tokens})"
                 for mode, descs in capture_descs
                 if descs
             ),
-        )
+        ]
+        if encoder_graphs > 0:
+            graph_groups.append(
+                f"ENCODER={encoder_graphs} "
+                f"(largest={encoder_cudagraph_manager.token_budgets[-1]})"
+            )
+
+        logger.info("Profiling CUDA graph memory: %s", ", ".join(graph_groups))
 
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
+        encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
         all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
             BreakableCUDAGraphWrapper._all_instances
@@ -6299,73 +6414,98 @@ class GPUModelRunner(
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
-        set_cudagraph_capturing_enabled(True)
-        with self._freeze_gc(), graph_capture(device=self.device):
-            shared_memory_estimate = {}
-            per_graph_estimate = {}
-            torch.accelerator.synchronize()
-            torch.accelerator.empty_cache()
+        shared_memory_estimate = {}
+        per_graph_estimate = {}
+        encoder_memory_estimate = 0
 
-            for mode, descs in capture_descs:
-                profile_descs = descs[:2]
-                mem_samples: list[int] = []
+        # Cleanup-only guard: CUDA graph capture errors should still propagate
+        # because encoder graph capture is opt-in.
+        try:
+            set_cudagraph_capturing_enabled(True)
+            with self._freeze_gc(), graph_capture(device=self.device):
+                torch.accelerator.synchronize()
+                torch.accelerator.empty_cache()
 
-                for i, desc in enumerate(profile_descs):
-                    mem_before = torch.cuda.mem_get_info()[0]
-                    self._warmup_and_capture(
-                        desc,
-                        cudagraph_runtime_mode=mode,
-                        profile_seq_lens=(
-                            min(
-                                self.max_model_len,
-                                self.max_num_tokens // desc.num_tokens,
-                            )
-                            if mode == CUDAGraphMode.FULL and i == 0
-                            else None
-                        ),
+                for mode, descs in capture_descs:
+                    profile_descs = descs[:2]
+                    mem_samples: list[int] = []
+
+                    for i, desc in enumerate(profile_descs):
+                        mem_before = torch.cuda.mem_get_info()[0]
+                        self._warmup_and_capture(
+                            desc,
+                            cudagraph_runtime_mode=mode,
+                            profile_seq_lens=(
+                                min(
+                                    self.max_model_len,
+                                    self.max_num_tokens // desc.num_tokens,
+                                )
+                                if mode == CUDAGraphMode.FULL and i == 0
+                                else None
+                            ),
+                        )
+                        torch.accelerator.synchronize()
+                        free_after = torch.cuda.mem_get_info()[0]
+                        mem_samples.append(mem_before - free_after)
+
+                    first_capture = mem_samples[0]
+                    # Use at least 1 MiB per graph for driver overhead
+                    per_graph = max(
+                        mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )
+
+                    shared_memory_estimate[mode] = first_capture
+                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+
+                    logger.debug(
+                        "Estimated %s CUDA graph memory: "
+                        "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
+                        mode.name,
+                        first_capture / (1 << 20),
+                        len(descs),
+                        per_graph / (1 << 20),
+                    )
+
+                if encoder_cudagraph_manager is not None:
+                    mem_before = torch.cuda.mem_get_info()[0]
+                    encoder_cudagraph_manager.capture(graph_pool=encoder_profiling_pool)
                     torch.accelerator.synchronize()
                     free_after = torch.cuda.mem_get_info()[0]
-                    mem_samples.append(mem_before - free_after)
+                    encoder_memory_estimate = max(mem_before - free_after, 0)
 
-                first_capture = mem_samples[0]
-                # Use at least 1 MiB per graph for driver overhead
-                per_graph = max(mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20)
-
-                shared_memory_estimate[mode] = first_capture
-                per_graph_estimate[mode] = per_graph * (len(descs) - 1)
-
-                logger.debug(
-                    "Estimated %s CUDA graph memory: "
-                    "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
-                    mode.name,
-                    first_capture / (1 << 20),
-                    len(descs),
-                    per_graph / (1 << 20),
-                )
-
-        set_cudagraph_capturing_enabled(False)
-        CUDAGraphWrapper.clear_all_graphs()
-        BreakableCUDAGraphWrapper.clear_all_graphs()
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
-        )
-        for instance in all_wrappers:
-            if id(instance) in original_pools:
-                instance.graph_pool = original_pools[id(instance)]
-        for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
-            key_set.clear()
-        self.cudagraph_dispatcher.keys_initialized = False
-        self.maybe_remove_all_loras(self.lora_config)
-        self._cleanup_profiling_kv_cache()
-        compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+                    logger.debug(
+                        "Estimated encoder CUDA graph memory: %.2f MiB for %d graphs",
+                        encoder_memory_estimate / (1 << 20),
+                        encoder_graphs,
+                    )
+        finally:
+            set_cudagraph_capturing_enabled(False)
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+            if encoder_cudagraph_manager is not None:
+                encoder_cudagraph_manager.clear()
+            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
+                BreakableCUDAGraphWrapper._all_instances
+            )
+            for instance in all_wrappers:
+                if id(instance) in original_pools:
+                    instance.graph_pool = original_pools[id(instance)]
+            for key_set in self.cudagraph_dispatcher.cudagraph_keys.values():
+                key_set.clear()
+            self.cudagraph_dispatcher.keys_initialized = False
+            self.maybe_remove_all_loras(self.lora_config)
+            self._cleanup_profiling_kv_cache()
+            compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
 
         # FULL and PIECEWISE graphs share the global pool at runtime and are
         # never replayed concurrently, so the pool overlays their memory.
         # Take the max to avoid double-counting the overlap.
-        total_estimate = max(shared_memory_estimate.values()) + sum(
+        decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
             per_graph_estimate.values()
         )
+        # Encoder graphs use a manager-local pool at runtime, separate from the
+        # decoder pool, so add their estimate instead of overlaying it.
+        total_estimate = decoder_estimate + encoder_memory_estimate
         logger.info(
             "Estimated CUDA graph memory: %.2f GiB total",
             total_estimate / (1 << 30),
@@ -6383,31 +6523,7 @@ class GPUModelRunner(
             return 0
 
         # Initialize encoder CUDA graph manager if enabled.
-        # Use get_model() to unwrap CUDAGraphWrapper/UBatchWrapper,
-        # because @runtime_checkable Protocol isinstance() checks do not
-        # work through __getattr__ forwarding.
-        if (
-            self.compilation_config.cudagraph_mm_encoder
-            and self.supports_mm_inputs
-            and self.encoder_cudagraph_manager is None
-        ):
-            from vllm.model_executor.models.interfaces import (
-                SupportsEncoderCudaGraph,
-                supports_encoder_cudagraph,
-            )
-            from vllm.v1.worker.encoder_cudagraph import (
-                EncoderCudaGraphManager,
-            )
-
-            raw_model = self.get_model()
-            if supports_encoder_cudagraph(raw_model):
-                self.encoder_cudagraph_manager = EncoderCudaGraphManager(
-                    vllm_config=self.vllm_config,
-                    device=self.device,
-                    dtype=self.dtype,
-                    model=cast(SupportsEncoderCudaGraph, raw_model),
-                )
-                logger.info("Initialized EncoderCudaGraphManager for vision encoder")
+        self._maybe_init_encoder_cudagraph_manager()
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
@@ -6434,7 +6550,8 @@ class GPUModelRunner(
 
             # Capture encoder CUDA graphs if enabled
             if self.encoder_cudagraph_manager is not None:
-                self.encoder_cudagraph_manager.capture()
+                encoder_graph_pool = current_platform.graph_pool_handle()
+                self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
