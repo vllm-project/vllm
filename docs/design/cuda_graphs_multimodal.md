@@ -76,7 +76,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 * `postprocess_encoder_output(...)` — post-process encoder output, delegates to `scatter_output_slices` by default.
 
 !!! note
-    Despite the name "CudaGraph", the `SupportsEncoderCudaGraph` protocol is actually accelerator-agnostic. It focuses on describing the computation on fixed-shape tensors — the CUDA-specific parts live only in `EncoderCudaGraphManager`. This design allows other accelerators (e.g. TPU via `torchax.interop.jax_jit`) to trace `encoder_cudagraph_forward` directly to generate a compiled graph. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
+    The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
 **Supported models:**
 
