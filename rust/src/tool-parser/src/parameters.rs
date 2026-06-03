@@ -321,15 +321,21 @@ mod tests {
 
         assert_eq!(converted_number_text(&params, "5"), "5");
         assert_eq!(converted_number_text(&params, "5.0"), "5.0");
-        assert_eq!(converted_number_text(&params, "5.00"), "5.00");
-        assert_eq!(converted_number_text(&params, "1e0"), "1e+0");
         assert_eq!(converted_number_text(&params, "5."), "5.0");
         assert_eq!(converted_number_text(&params, "+1"), "1");
         assert_eq!(converted_number_text(&params, "+1.0"), "1.0");
-        assert_eq!(
-            converted_number_text(&params, "9223372036854775807.5"),
-            "9223372036854775807.5"
-        );
+
+        // TODO: we cannot preserve the original number precision by enabling `serde_json`'s
+        // `arbitrary_precision` feature, otherwise the test
+        // `serialized_json_numbers_do_not_leak_serde_private_representation` will fail.
+        // See issue: https://github.com/mitsuhiko/minijinja/issues/641
+
+        // assert_eq!(converted_number_text(&params, "5.00"), "5.00");
+        // assert_eq!(converted_number_text(&params, "1e0"), "1e+0");
+        // assert_eq!(
+        //     converted_number_text(&params, "9223372036854775807.5"),
+        //     "9223372036854775807.5"
+        // );
     }
 
     fn converted_number_text(params: &ToolSchema, value: &str) -> String {
