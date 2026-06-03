@@ -1,7 +1,6 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/csrc/stable/ops.h>
 #include <torch/csrc/stable/accelerator.h>
-#include <torch/csrc/stable/version.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/csrc/stable/device.h>
 #include <cuda_runtime.h>
@@ -34,23 +33,15 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   cudaError_t err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
   if (err == cudaSuccess) {
     // Host memory is pinned/mapped; reuse the UVA device pointer.
-#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_11_0
     return torch::stable::from_blob(
         device_ptr, cpu_tensor.sizes(), cpu_tensor.strides(), cuda_dev, dtype,
         [base = cpu_tensor](void*) {});  // keep cpu tensor alive
-#else
-    // TORCH_TARGET_VERSION 2.10: no from_blob deleter; caller must keep
-    // cpu_tensor alive while the view is used.
-    return torch::stable::from_blob(device_ptr, cpu_tensor.sizes(),
-                                    cpu_tensor.strides(), cuda_dev, dtype);
-#endif
   }
 
   // If CPU tensor is not pinned, allocate a new pinned memory buffer.
   torch::stable::Tensor contiguous_cpu = torch::stable::contiguous(cpu_tensor);
   size_t nbytes = contiguous_cpu.numel() * contiguous_cpu.element_size();
 
-#if TORCH_FEATURE_VERSION >= TORCH_VERSION_2_11_0
   host_ptr = nullptr;
   err = cudaHostAlloc(&host_ptr, nbytes, cudaHostAllocMapped);
   if (err != cudaSuccess) {
@@ -77,18 +68,4 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   return torch::stable::from_blob(device_ptr, contiguous_cpu.sizes(),
                                   contiguous_cpu.strides(), cuda_dev,
                                   contiguous_cpu.scalar_type(), deleter);
-#else
-  // TORCH_TARGET_VERSION 2.10: no from_blob deleter; copy into device memory.
-  torch::stable::Tensor cuda_tensor =
-      torch::stable::empty(contiguous_cpu.sizes(), contiguous_cpu.scalar_type(),
-                           contiguous_cpu.layout(), cuda_dev);
-
-  err = cudaMemcpy(cuda_tensor.mutable_data_ptr(),
-                   contiguous_cpu.const_data_ptr(), nbytes,
-                   cudaMemcpyHostToDevice);
-  STD_TORCH_CHECK(err == cudaSuccess,
-                  "cudaMemcpy failed: ", cudaGetErrorString(err));
-
-  return cuda_tensor;
-#endif
 }
