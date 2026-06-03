@@ -125,7 +125,8 @@ class FlexAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def get_kv_cache_stride_order(
@@ -1063,7 +1064,9 @@ class FlexAttentionImpl(AttentionImpl):
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
-        key_cache, value_cache = kv_cache.unbind(1)
+        kv_cache = kv_cache.transpose(1, 2)
+        hs = self.head_size
+        key_cache, value_cache = kv_cache.split(hs, dim=-1)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
@@ -1094,7 +1097,7 @@ class FlexAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1168,11 +1171,14 @@ class FlexAttentionImpl(AttentionImpl):
 
         else:
             assert self.attn_type == AttentionType.DECODER
-            key_cache, value_cache = kv_cache.unbind(1)
+            kv_cache = kv_cache.transpose(1, 2)
+            hs = self.head_size
+            key_cache, value_cache = kv_cache.split(hs, dim=-1)
 
-            # Flatten (num_blocks, block_size) into a single token dim
-            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
+            # Flatten (num_blocks, block_size) into a single token dim.
+            # The transposed views are non-contiguous, so use reshape.
+            key_cache = key_cache.reshape(-1, self.num_kv_heads, self.head_size)
+            value_cache = value_cache.reshape(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
