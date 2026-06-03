@@ -11,6 +11,9 @@ ECProducer = Literal["ec_producer", "ec_both"]
 ECConsumer = Literal["ec_consumer", "ec_both"]
 ECRole = Literal[ECProducer, ECConsumer]
 
+EC_CONNECTOR_CAPACITY_EMBEDS_KEY = "ec_connector_capacity_embeds"
+DEFAULT_EC_CONNECTOR_CAPACITY_EMBEDS = 11468800
+
 
 @config
 class ECTransferConfig:
@@ -105,3 +108,9 @@ class ECTransferConfig:
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)
+
+    def get_ec_connector_capacity_embeds(self) -> int:
+        return self.get_from_extra_config(
+            EC_CONNECTOR_CAPACITY_EMBEDS_KEY,
+            DEFAULT_EC_CONNECTOR_CAPACITY_EMBEDS,
+        )

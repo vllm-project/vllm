@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -213,6 +213,9 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+    # mm_hash strings whose EC connector physical storage should be dropped
+    # on workers (shm unlink, network cache entry, etc.).
+    free_ec_connector_mm_hashes: list[str] = field(default_factory=list)
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
@@ -252,6 +255,7 @@ class SchedulerOutput:
             num_common_prefix_blocks=[],
             finished_req_ids=set(),
             free_encoder_mm_hashes=[],
+            free_ec_connector_mm_hashes=[],
         )
 
 
