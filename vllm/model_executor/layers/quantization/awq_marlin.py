@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
     select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
@@ -521,7 +522,8 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         self.input_dtype = None
         self.use_marlin = True
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
-            moe, kInt4Static, quant_config.weight_bits
+            moe,
+            kInt4Static,
         )
 
     def create_weights(
@@ -706,15 +708,11 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
-        from vllm.model_executor.layers.fused_moe.config import (
-            awq_marlin_moe_quant_config,
-        )
-
-        return awq_marlin_moe_quant_config(
+        return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
-            weight_bits=self.quant_config.weight_bits,
             group_size=self.quant_config.group_size,
+            num_bits=self.quant_config.weight_bits,
             w1_zp=getattr(layer, "w13_qzeros", None)
             if self.quant_config.zero_point
             else None,
