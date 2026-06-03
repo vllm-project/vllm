@@ -94,7 +94,9 @@ def with_cancellation(handler_func):
 
         if handler_task in done:
             return handler_task.result()
-        return None
+        # The client disconnected before the handler completed. Raise
+        # cancellation instead of letting FastAPI serialize a 200/null response.
+        raise asyncio.CancelledError("Client disconnected")
 
     return wrapper
 
