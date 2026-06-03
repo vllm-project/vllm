@@ -1712,11 +1712,16 @@ class Qwen3VLForConditionalGeneration(
     def _get_deepstack_input_embeds(
         self,
         num_tokens: int,
+        inputs_embeds: torch.Tensor,
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
-        if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self._resize_deepstack_input_embeds(num_tokens)
+        if (
+            num_tokens > self.deepstack_input_embeds[0].size(0)
+            or self.deepstack_input_embeds[0].device != inputs_embeds.device
+            or self.deepstack_input_embeds[0].dtype != inputs_embeds.dtype
+        ):
+            self._resize_deepstack_input_embeds(num_tokens, inputs_embeds)
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1728,13 +1733,15 @@ class Qwen3VLForConditionalGeneration(
             }
         )
 
-    def _resize_deepstack_input_embeds(self, num_tokens: int) -> None:
+    def _resize_deepstack_input_embeds(
+        self, num_tokens: int, reference: torch.Tensor
+    ) -> None:
         self.deepstack_input_embeds = [
             torch.zeros(
                 num_tokens,
                 self.config.text_config.hidden_size,
-                device=self.deepstack_input_embeds[0].device,
-                dtype=self.deepstack_input_embeds[0].dtype,
+                device=reference.device,
+                dtype=reference.dtype,
             )
             for _ in range(self.deepstack_num_level)
         ]
@@ -1745,8 +1752,12 @@ class Qwen3VLForConditionalGeneration(
 
         # set deepstack_input_embeds to buffer
         num_tokens = deepstack_input_embeds.size(1)
-        if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self._resize_deepstack_input_embeds(num_tokens)
+        if (
+            num_tokens > self.deepstack_input_embeds[0].size(0)
+            or self.deepstack_input_embeds[0].device != deepstack_input_embeds.device
+            or self.deepstack_input_embeds[0].dtype != deepstack_input_embeds.dtype
+        ):
+            self._resize_deepstack_input_embeds(num_tokens, deepstack_input_embeds)
         for idx in range(self.deepstack_num_level):
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
@@ -2822,7 +2833,7 @@ class Qwen3VLForConditionalGeneration(
 
         if inputs_embeds is not None and get_pp_group().is_first_rank:
             deepstack_input_embeds = self._get_deepstack_input_embeds(
-                inputs_embeds.size(0)
+                inputs_embeds.size(0), inputs_embeds
             )
         else:
             deepstack_input_embeds = None
