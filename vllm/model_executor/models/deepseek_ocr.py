@@ -522,30 +522,30 @@ class DeepseekOCRForCausalLM(
         """Assemble projected patches into a 2-D tile grid with newline columns.
 
         Args:
-            patches: Projected patch features ``[num_patches, hw, n_embed]``
+            patches: Projected patch features ``[num_patches, hw, dim]``
                 where ``hw = patch_side * patch_side`` (typically 100).
             crop_shape: ``[width_tiles, height_tiles]`` tile layout for
                 this image.
 
         Returns:
             Flattened tile grid with one newline column per grid row:
-            ``[(Ht * ps) * (Wt * ps + 1), n_embed]``.
+            ``[(Ht * ps) * (Wt * ps + 1), dim]``.
         """
-        n_embed = patches.shape[-1]
-        patch_side = int(patches.shape[1] ** 0.5)
+        _, hw, dim = patches.shape
+        patch_side = int(hw**0.5)
         width_tiles = int(crop_shape[0].item())
         height_tiles = int(crop_shape[1].item())
 
-        grid = patches.reshape(
-            height_tiles, width_tiles, patch_side, patch_side, n_embed
-        )
-        grid = grid.permute(0, 2, 1, 3, 4).reshape(
-            height_tiles * patch_side, width_tiles * patch_side, n_embed
+        features = (
+            patches.view(height_tiles, width_tiles, patch_side, patch_side, dim)
+            .permute(0, 2, 1, 3, 4)
+            .reshape(height_tiles * patch_side, width_tiles * patch_side, dim)
         )
         newline = self.image_newline[None, None, :].expand(
-            height_tiles * patch_side, 1, n_embed
+            height_tiles * patch_side, 1, dim
         )
-        return torch.cat([grid, newline], dim=1).reshape(-1, n_embed)
+        features = torch.cat([features, newline], dim=1)
+        return features.reshape(-1, dim)
 
     def _pixel_values_to_embedding(
         self,
@@ -646,6 +646,9 @@ class DeepseekOCRForCausalLM(
         self,
         image_spatial_crop: torch.Tensor | None = None,
     ) -> tuple[int, int]:
+        """
+        Init fixed spatial constants, which will be used later.
+        """
         base_size = BASE_SIZE  # 1024
         image_size = IMAGE_SIZE  # 640
         patch_size = 16
@@ -681,9 +684,7 @@ class DeepseekOCRForCausalLM(
         return num_input_tokens, num_output_tokens
 
     def get_encoder_cudagraph_config(self):
-        # Init fixed spatial constants, which will be used later.
         self._get_num_input_output_tokens()
-
         return EncoderCudaGraphConfig(
             modalities=["image"],
             buffer_keys=["pixel_values"],
@@ -700,7 +701,7 @@ class DeepseekOCRForCausalLM(
         self,
         vllm_config,
     ) -> tuple[int, int]:
-        # Min budget to hold at least one global image with newline tokens.
+        # Min budget: at least one global image with newline tokens (without patches).
         min_budget = self.global_image_output_token
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -813,23 +814,25 @@ class DeepseekOCRForCausalLM(
         """
         pixel_values = values["pixel_values"]
 
-        global_feat_1 = self.sam_model(pixel_values)
-        global_feat_2 = self.vision_model(pixel_values, global_feat_1)
-        global_feat = torch.cat(
+        global_features_1 = self.sam_model(pixel_values)
+        global_features_2 = self.vision_model(pixel_values, global_features_1)
+        features = torch.cat(
             (
-                global_feat_2[:, 1:],
-                global_feat_1.flatten(2).permute(0, 2, 1),
+                global_features_2[:, 1:],
+                global_features_1.flatten(2).permute(0, 2, 1),
             ),
             dim=-1,
         )
-        global_proj = self.projector(global_feat)
+        features = self.projector(features)
 
-        B = pixel_values.shape[0]
-        n_embed = global_proj.shape[-1]
+        bsz = pixel_values.shape[0]
         side = self.image_side
-        global_2d = global_proj.reshape(B, side, side, n_embed)
-        newline = self.image_newline.view(1, 1, 1, n_embed).expand(B, side, 1, n_embed)
-        return torch.cat([global_2d, newline], dim=2).reshape(-1, n_embed)
+        dim = features.shape[-1]
+
+        features = features.view(bsz, side, side, dim)
+        newline = self.image_newline.view(1, 1, 1, dim).expand(bsz, side, 1, dim)
+        features = torch.cat([features, newline], dim=2)
+        return features.view(-1, dim)
 
     def encoder_eager_forward(
         self,
@@ -873,36 +876,35 @@ class DeepseekOCRForCausalLM(
            grid via ``crop_shape``, adds ONE newline per grid row.
         4. Merges: local_tiled + global + ``view_seperator``.
         """
-        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
-        n_embed = output.shape[-1]
         bsz = len(indices)
+        n_embed = output.shape[-1]
 
+        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
         is_tiled = (images_spatial_crop[:, 0] > 1) | (images_spatial_crop[:, 1] > 1)
         num_patches = [
             int(np) for np in torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         ]
         total_patches = sum(num_patches)
 
-        global_per_image = self.image_side * (self.image_side + 1)
-        global_part = output[: bsz * global_per_image].reshape(
-            bsz, global_per_image, n_embed
+        global_part = output[: bsz * self.global_image_output_token].reshape(
+            bsz, self.global_image_output_token, n_embed
         )
 
         # Eagerly encode all local patches in one batched call.
         local_flat = None
         if total_patches > 0:
             images_crop = batch_mm_kwargs["images_crop"]
-            local_feat_1 = self.sam_model(images_crop)
-            local_feat_2 = self.vision_model(images_crop, local_feat_1)
-            local_feat = torch.cat(
+            local_features_1 = self.sam_model(images_crop)
+            local_features_2 = self.vision_model(images_crop, local_features_1)
+            features = torch.cat(
                 (
-                    local_feat_2[:, 1:],
-                    local_feat_1.flatten(2).permute(0, 2, 1),
+                    local_features_2[:, 1:],
+                    local_features_1.flatten(2).permute(0, 2, 1),
                 ),
                 dim=-1,
             )
-            local_proj = self.projector(local_feat)
-            local_flat = local_proj.reshape(
+            features = self.projector(features)
+            local_flat = features.reshape(
                 total_patches, self.single_patch_output_token, n_embed
             )
 
@@ -912,7 +914,7 @@ class DeepseekOCRForCausalLM(
             single_image_output: list[torch.Tensor] = []
 
             # 1. Process local patches: assemble tile grid, add 1 newline per row.
-            if num_patch > 0 and local_flat is not None:
+            if num_patch > 0:  # and local_flat is not None
                 patches = local_flat[cur_patch : cur_patch + num_patch]
                 cur_patch += num_patch
                 single_image_output.append(
