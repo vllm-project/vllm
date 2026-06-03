@@ -34,11 +34,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         super().__init__(moe_kernel.moe_config)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = moe_kernel
-        self.disable_expert_map = getattr(
-            old_quant_method,
-            "disable_expert_map",
-            not self.moe_kernel.supports_expert_map(),
-        )
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
@@ -103,7 +98,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            expert_map=None if self.disable_expert_map else layer.expert_map,
+            expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )

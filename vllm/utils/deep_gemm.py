@@ -140,6 +140,7 @@ _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
+@functools.cache
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
