@@ -505,6 +505,7 @@ class Platform:
 
         backend_cls = cls._find_non_ssm_backend(vllm_config)
         if backend_cls is None:
+            cls._ensure_batch_invariant_chunk_alignment(vllm_config)
             return
 
         # Phase 1: Pick block size from backend (skip if user set --block-size)
@@ -525,6 +526,8 @@ class Platform:
         # (may override user settings).
         if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
+        else:
+            cls._ensure_batch_invariant_chunk_alignment(vllm_config)
 
     @classmethod
     def _align_hybrid_block_size(
@@ -676,6 +679,8 @@ class Platform:
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
 
+        cls._ensure_batch_invariant_chunk_alignment(vllm_config)
+
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
@@ -697,6 +702,49 @@ class Platform:
                 "exactly equal.",
                 mamba_padding_pct,
             )
+
+    @classmethod
+    def _ensure_batch_invariant_chunk_alignment(cls, vllm_config: "VllmConfig") -> None:
+        from math import lcm
+
+        import vllm.envs as envs
+
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        if not (
+            envs.VLLM_BATCH_INVARIANT
+            and cache_config.enable_prefix_caching
+            and model_config.has_inner_state
+        ):
+            return
+
+        effective_mamba_block_size = cache_config.mamba_block_size
+        if effective_mamba_block_size is None:
+            return
+
+        chunk_size = model_config.get_mamba_chunk_size()
+        assert chunk_size is not None
+
+        # The mamba cache block must land on mamba chunk boundaries, while also
+        # remaining divisible by the attention/hash block size used for prefix
+        # cache block-hash conversion. LCM preserves both constraints.
+        aligned = lcm(effective_mamba_block_size, chunk_size)
+        if aligned % cache_config.block_size != 0:
+            aligned = lcm(aligned, cache_config.block_size)
+
+        if aligned == effective_mamba_block_size:
+            return
+
+        logger.info(
+            "Batch-invariant mode: adjusting mamba_block_size from %d "
+            "to %d to align with mamba_chunk_size=%d.",
+            effective_mamba_block_size,
+            aligned,
+            chunk_size,
+        )
+        cache_config.mamba_block_size = aligned
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.block_size = aligned
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
