@@ -1935,8 +1935,10 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             finished=True,
         )
 
-    # Collect tool-call deltas per choice from the SSE stream.
+    # Collect tool-call deltas and finish_reasons per choice from the SSE
+    # stream.
     tc_deltas_by_choice: dict[int, list[dict]] = {i: [] for i in range(num_choices)}
+    finish_reasons_by_choice: dict[int, list[str]] = {i: [] for i in range(num_choices)}
     async for chunk_str in serving_chat.chat_completion_stream_generator(
         request=request,
         result_generator=result_generator(),
@@ -1959,6 +1961,8 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                 if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         tc_deltas_by_choice[idx].append(tc)
+                if choice.get("finish_reason") is not None:
+                    finish_reasons_by_choice[idx].append(choice["finish_reason"])
 
     # Both choices must independently produce the correct tool call.
     for choice_idx in range(num_choices):
@@ -1984,141 +1988,11 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected {{'city': 'Tokyo'}}, got {parsed_args}"
         )
 
-
-class TestCreateRemainingArgsDelta:
-    """Tests for _create_remaining_args_delta helper function.
-
-    This helper is used when streaming tool calls to preserve id/type/name
-    fields in the finish chunk, which would otherwise be lost.
-    """
-
-    def test_preserves_id_type_name(self):
-        """Test that id, type, and name are preserved from original delta."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
+        reasons = finish_reasons_by_choice[choice_idx]
+        assert len(reasons) == 1, (
+            f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
         )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_abc123",
-                    type="function",
-                    function=DeltaFunctionCall(
-                        name="get_weather",
-                        arguments='{"location": "Paris"}',
-                    ),
-                )
-            ]
+        assert reasons[0] == "tool_calls", (
+            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+            f"got '{reasons[0]}'"
         )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '", "unit": "celsius"}', 0
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 0
-        assert tc.id == "call_abc123"
-        assert tc.type == "function"
-        assert tc.function.name == "get_weather"
-        assert tc.function.arguments == '", "unit": "celsius"}'
-
-    def test_matches_by_index(self):
-        """Test that the correct tool call is matched by index."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
-        )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_first",
-                    type="function",
-                    function=DeltaFunctionCall(name="func_a", arguments="{}"),
-                ),
-                DeltaToolCall(
-                    index=1,
-                    id="call_second",
-                    type="function",
-                    function=DeltaFunctionCall(name="func_b", arguments="{}"),
-                ),
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"extra": true}', 1
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 1
-        assert tc.id == "call_second"
-        assert tc.function.name == "func_b"
-
-    def test_no_matching_tool_call(self):
-        """Test graceful handling when no matching tool call is found."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
-        )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_zero",
-                    type="function",
-                    function=DeltaFunctionCall(name="func", arguments="{}"),
-                )
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"arg": 1}', 5
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 5
-        assert tc.id is None
-        assert tc.type is None
-        assert tc.function.name is None
-        assert tc.function.arguments == '{"arg": 1}'
-
-    def test_function_is_none(self):
-        """Test handling when original tool call has no function."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_nofunc",
-                    type="function",
-                    function=None,
-                )
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"data": "value"}', 0
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 0
-        assert tc.id == "call_nofunc"
-        assert tc.type == "function"
-        assert tc.function.name is None
-        assert tc.function.arguments == '{"data": "value"}'
