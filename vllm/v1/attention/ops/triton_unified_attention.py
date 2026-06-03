@@ -75,9 +75,10 @@ def _decode_e2m1_nibble(nibble):
 
 
 @triton.jit
-def _e4m3fn_bits_to_float(bits):
-    bits_i32 = bits.to(tl.int32)
-    payload = bits_i32 & 0x7F
+def _nvfp4_scale_bits_to_float(bits):
+    # NVFP4 block scales are produced from absmax values, so the sign bit
+    # is not used on the Triton KV cache path.
+    payload = bits.to(tl.int32) & 0x7F
     exp_bits = (payload >> 3) & 0x0F
     mant = payload & 0x07
 
@@ -85,8 +86,7 @@ def _e4m3fn_bits_to_float(bits):
     normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
     subnormal = mant.to(tl.float32) / 512.0
     value = tl.where(exp_bits == 0, subnormal, normal)
-    value = tl.where(payload == 0, 0.0, value)
-    return tl.where((bits_i32 & 0x80) != 0, -value, value)
+    return tl.where(payload == 0, 0.0, value)
 
 
 @triton.jit
@@ -159,7 +159,7 @@ def _load_k_tile_nvfp4(
         mask=dim_mask[:, None] & tile_mask[None, :],
         other=0,
     )
-    block_scale = _e4m3fn_bits_to_float(block_scale_bits)
+    block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
     return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
         Q.dtype
     )
@@ -223,7 +223,7 @@ def _load_v_tile_nvfp4(
         mask=tile_mask[:, None] & dim_mask[None, :],
         other=0,
     )
-    block_scale = _e4m3fn_bits_to_float(block_scale_bits)
+    block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
     return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
         Q.dtype
     )
