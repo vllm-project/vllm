@@ -4475,6 +4475,7 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
         f"got {future_hashes!r}. Past/boundary features must be filtered out."
     )
 
+
 # ==============================================================================
 # Lateral preemption: skipped_waiting head-of-line wedge resolution
 # ==============================================================================
