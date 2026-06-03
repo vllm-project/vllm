@@ -326,15 +326,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
 
-    /// If True, enable handling of LoRA adapters.
-    #[arg(
-        long,
-        visible_alias = "no-enable-lora",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_lora: Option<Unsupported>,
-
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
@@ -619,15 +610,6 @@ pub struct ServerUnsupportedArgs {
     /// add it to the server using `app.add_middleware()`.
     #[arg(long)]
     pub middleware: Option<Unsupported>,
-
-    /// If specified, API server will add X-Request-Id header to responses.
-    #[arg(
-        long,
-        visible_alias = "no-enable-request-id-headers",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_request_id_headers: Option<Unsupported>,
 
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
     #[arg(
