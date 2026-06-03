@@ -61,6 +61,8 @@ pub struct Config {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// When `true`, set `X-Request-Id` on every HTTP response.
+    pub enable_request_id_headers: bool,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
