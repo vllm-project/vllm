@@ -4,16 +4,19 @@
 // https://github.com/sgl-project/sglang/blob/ded068a76e00878881d52d5bfb791e0f60d7311b/sgl-kernel/csrc/expert_specialization/es_sm100_mxfp8_blockscaled_group_quant.cuh
 
 #pragma once
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
-#include <torch/all.h>
+
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cuda/ptx>
 
 #include "cute/tensor.hpp"
+#include "libtorch_stable/torch_utils.h"
 
 namespace expert_specialization {
 
@@ -356,12 +359,12 @@ __global__ void mxfp8_experts_quant_kernel(
 }
 
 template <typename T_IN>
-void launch_mxfp8_experts_quant(const torch::Tensor& input,
-                                const torch::Tensor& problem_sizes,
-                                const torch::Tensor& expert_offsets,
-                                const torch::Tensor& blockscale_offsets,
-                                torch::Tensor& quant_output,
-                                torch::Tensor& scale_factor) {
+void launch_mxfp8_experts_quant(const torch::stable::Tensor& input,
+                                const torch::stable::Tensor& problem_sizes,
+                                const torch::stable::Tensor& expert_offsets,
+                                const torch::stable::Tensor& blockscale_offsets,
+                                torch::stable::Tensor& quant_output,
+                                torch::stable::Tensor& scale_factor) {
   ThrLayout thr_layout{};
   ValLayout val_layout{};
   SfR2SThrLayout r2s_thr_layout{};
@@ -386,19 +389,18 @@ void launch_mxfp8_experts_quant(const torch::Tensor& input,
       CopyAtomR2S{}, r2s_thr_layout, r2s_val_layout);  // Tiler_MN: (16, 4)
 
   int max_active_blocks_per_sm = -1;
-  AT_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+  STD_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &max_active_blocks_per_sm,
       mxfp8_experts_quant_kernel<T_IN, decltype(tiled_copy_g2r),
                                  decltype(tiled_copy_r2g),
                                  decltype(tiled_copy_r2s)>,
       THREAD_BLOCK_SIZE, 0));
 
-  dim3 grid(at::cuda::getCurrentDeviceProperties()->multiProcessorCount *
-                max_active_blocks_per_sm,
+  dim3 grid(get_device_prop()->multiProcessorCount * max_active_blocks_per_sm,
             1, 1);
   dim3 block(THREAD_BLOCK_SIZE, 1, 1);
-  int num_experts = (int)problem_sizes.size(0);
-  auto stream = at::cuda::getCurrentCUDAStream();
+  int num_experts = static_cast<int>(problem_sizes.size(0));
+  auto stream = get_current_cuda_stream(input.get_device_index());
   mxfp8_experts_quant_kernel<T_IN, decltype(tiled_copy_g2r),
                              decltype(tiled_copy_r2g), decltype(tiled_copy_r2s)>
       <<<grid, block, 0, stream>>>(

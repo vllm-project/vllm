@@ -7,6 +7,11 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
+    flashinfer_sample,
+    flashinfer_sampler_supported,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -45,6 +50,7 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
+        self.use_flashinfer = flashinfer_sampler_supported()
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -77,6 +83,13 @@ class Sampler:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
+
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
+            idx_mapping_np
+        )
+        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
+
         sampled, processed_logits = self.sample(
             logits,
             expanded_idx_mapping,
@@ -84,13 +97,10 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            return_logprobs=return_logprobs,
         )
 
-        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
-            idx_mapping_np
-        )
-        if max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0:
+        if return_logprobs:
             if self.logprobs_mode == "processed_logprobs":
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
@@ -128,6 +138,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -163,6 +174,9 @@ class Sampler:
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
 
+        if skip_top_k_top_p:
+            return logits
+
         # Apply top_k and/or top_p. This might or might not return a new tensor.
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
@@ -176,6 +190,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -184,16 +199,33 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            skip_top_k_top_p=True,
+        )
+        top_k, top_p = self.sampling_states.get_top_k_top_p(
+            expanded_idx_mapping, idx_mapping_np
+        )
+        use_flashinfer = self.use_flashinfer and not (
+            # Don't use FI sampler if no requests use top_k/top_p, if there are
+            # any greedy requests or per-request seeds, or if post-processed
+            # logprobs need to be returned for any requests.
+            (top_k is None and top_p is None)
+            or (return_logprobs and self.logprobs_mode == "processed_logprobs")
+            or self.sampling_states.any_greedy(idx_mapping_np)
+            or self.sampling_states.any_explicit_seed(idx_mapping_np)
         )
 
         # Sample the next token.
-        sampled = gumbel_sample(
-            processed_logits,
-            expanded_idx_mapping,
-            self.sampling_states.temperature.gpu,
-            self.sampling_states.seeds.gpu,
-            pos,
-            apply_temperature=False,
-            use_fp64=self.use_fp64_gumbel,
-        )
+        if use_flashinfer:
+            sampled = flashinfer_sample(processed_logits, top_k, top_p).to(torch.int64)
+        else:
+            processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+            sampled = gumbel_sample(
+                processed_logits,
+                expanded_idx_mapping,
+                self.sampling_states.temperature.gpu,
+                self.sampling_states.seeds.gpu,
+                pos,
+                apply_temperature=False,
+                use_fp64=self.use_fp64_gumbel,
+            )
         return sampled, processed_logits
