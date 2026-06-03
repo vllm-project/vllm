@@ -12,6 +12,7 @@ from vllm.models.deepseek_v4.nvidia.flashmla import (
     DeepseekV4FlashMLASparseBackend,
     DeepseekV4SparseMLAAttentionImpl,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -793,6 +794,11 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
         kv = workspace_manager.get_simultaneous(
             ((cls.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
+        # TODO: workspace is torch.empty() and only the compressed-K prefix +
+        # SWA window are written per chunk row; the indexer's topK can land in
+        # the unwritten holes for short sequences. Proper fix is to mask invalid
+        # rows in the indexer (score = -inf) or in rocm_sparse_attn_prefill.
+        kv.zero_()
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * cls.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + cls.PREFILL_CHUNK_SIZE, num_prefills)
@@ -801,6 +807,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
+                # compressed_k_cache is OCP on every platform (Triton encoder).
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,
@@ -809,6 +816,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // layer.compress_ratio,
                     offset=0,
+                    use_fnuz=False,
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -820,6 +828,7 @@ class DeepseekV4ROCMAiterMLASparseImpl(DeepseekV4SparseMLAAttentionImpl):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
             query_start = (
