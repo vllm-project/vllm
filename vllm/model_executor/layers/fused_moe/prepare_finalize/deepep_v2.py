@@ -315,14 +315,13 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def _finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> Callable | None:
+    ) -> torch.Tensor:
         a2a_idx = dbo_current_ubatch_id()
         handle = self.handles[a2a_idx]
         assert handle is not None
@@ -331,7 +330,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
             fused_expert_output = weight_and_reduce_impl.apply(
-                output=None,
                 fused_expert_output=fused_expert_output,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -351,20 +349,19 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             async_with_compute_stream=False,
         )
 
-        output.copy_(combined_x, non_blocking=True)
-        return None
+        # combine allocates combined_x ((M, K) bf16); return it directly
+        # instead of copying into a caller-provided buffer.
+        return combined_x
 
     def finalize_async(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
-            output,
+        output = self._finalize(
             fused_expert_output,
             topk_weights,
             topk_ids,
@@ -372,19 +369,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             False,
         )
-        return lambda: None
+        return lambda: output
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        self._finalize(
-            output,
+    ) -> torch.Tensor:
+        return self._finalize(
             fused_expert_output,
             topk_weights,
             topk_ids,
