@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
+import time
+
 import torch
 import torch.distributed as dist
 
@@ -13,6 +16,53 @@ from vllm.v1.worker.ubatch_utils import (
 )
 
 logger = init_logger(__name__)
+
+_dp_sync_stats_lock = threading.Lock()
+_dp_sync_stats: list[float] = []
+
+_ucx_init_attempted = False
+
+
+def _maybe_init_ucx(parallel_config: ParallelConfig) -> None:
+    """Lazily initialize the UCX DP communicator on first use.
+
+    Gated on VLLM_DP_SYNC_BACKEND=ucx. Falls back to Gloo on
+    failure.
+    """
+    global _ucx_init_attempted
+    if _ucx_init_attempted:
+        return
+    _ucx_init_attempted = True
+
+    import os
+
+    if os.environ.get("VLLM_DP_SYNC_BACKEND", "").lower() != "ucx":
+        return
+
+    try:
+        from vllm.distributed.device_communicators.ucx_dp_communicator import (
+            try_init_ucx_dp,
+        )
+
+        gloo_group = get_dp_group().cpu_group
+        try_init_ucx_dp(
+            rank=parallel_config.data_parallel_rank,
+            world_size=parallel_config.data_parallel_size,
+            gloo_group=gloo_group,
+            max_msg_bytes=1024,
+        )
+    except Exception:
+        logger.warning("UCX DP init failed, using Gloo", exc_info=True)
+
+
+def get_dp_sync_stats() -> list[float] | None:
+    """Return and clear the list of DP sync latencies."""
+    with _dp_sync_stats_lock:
+        if not _dp_sync_stats:
+            return None
+        result = list(_dp_sync_stats)
+        _dp_sync_stats.clear()
+        return result
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -40,17 +90,37 @@ def _run_ar(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
+    _maybe_init_ucx(parallel_config)
+
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
-    device, group = _get_device_and_group(parallel_config)
+
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
-    tensor = tensor_cpu.to(device, non_blocking=True)
-    dist.all_reduce(tensor, group=group)
+
+    t0 = time.monotonic()
+
+    from vllm.distributed.device_communicators.ucx_dp_communicator import (
+        get_ucx_dp_communicator,
+    )
+
+    ucx = get_ucx_dp_communicator()
+    if ucx is not None:
+        ucx.allreduce_inplace(tensor_cpu)
+        tensor = tensor_cpu
+    else:
+        device, group = _get_device_and_group(parallel_config)
+        tensor = tensor_cpu.to(device, non_blocking=True)
+        dist.all_reduce(tensor, group=group)
+
+    elapsed = time.monotonic() - t0
+    with _dp_sync_stats_lock:
+        _dp_sync_stats.append(elapsed)
+
     return tensor
 
 

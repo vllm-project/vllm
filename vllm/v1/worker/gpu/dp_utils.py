@@ -2,15 +2,54 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import os
+import time
+
 import torch
 import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.logger import init_logger
+from vllm.v1.worker.dp_utils import _dp_sync_stats, _dp_sync_stats_lock
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
+
+logger = init_logger(__name__)
+
+_ucx_init_attempted = False
+
+
+def _maybe_init_ucx(dp_rank: int, dp_size: int) -> None:
+    """Lazily initialize the UCX DP communicator on first use.
+
+    Gated on VLLM_DP_SYNC_BACKEND=ucx. Falls back to Gloo on
+    failure.
+    """
+    global _ucx_init_attempted
+    if _ucx_init_attempted:
+        return
+    _ucx_init_attempted = True
+
+    if os.environ.get("VLLM_DP_SYNC_BACKEND", "").lower() != "ucx":
+        return
+
+    try:
+        from vllm.distributed.device_communicators.ucx_dp_communicator import (
+            try_init_ucx_dp,
+        )
+
+        gloo_group = get_dp_group().cpu_group
+        try_init_ucx_dp(
+            rank=dp_rank,
+            world_size=dp_size,
+            gloo_group=gloo_group,
+            max_msg_bytes=1024,
+        )
+    except Exception:
+        logger.warning("UCX DP init failed, using Gloo", exc_info=True)
 
 
 def sync_cudagraph_and_dp_padding(
@@ -28,12 +67,30 @@ def sync_cudagraph_and_dp_padding(
     Returns (synced_batch_desc, num_tokens_across_dp).
     """
     assert dp_size > 1, "DP size must be greater than 1"
-    group = get_dp_group().cpu_group
+
+    _maybe_init_ucx(dp_rank, dp_size)
+
     tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
-    dist.all_reduce(tensor, group=group)
+
+    t0 = time.monotonic()
+
+    from vllm.distributed.device_communicators.ucx_dp_communicator import (
+        get_ucx_dp_communicator,
+    )
+
+    ucx = get_ucx_dp_communicator()
+    if ucx is not None:
+        ucx.allreduce_inplace(tensor)
+    else:
+        group = get_dp_group().cpu_group
+        dist.all_reduce(tensor, group=group)
+
+    elapsed = time.monotonic() - t0
+    with _dp_sync_stats_lock:
+        _dp_sync_stats.append(elapsed)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
