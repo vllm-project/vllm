@@ -39,8 +39,10 @@ def sync_openai(
     Perform synchronous transcription using OpenAI-compatible API.
 
     The optional ``prompt`` is the OpenAI-API ``prompt`` field (style /
-    vocabulary hint). Supported by Qwen3-ASR (mapped to the chat-template
-    ``system`` turn); other ASR models accept it as a no-op.
+    vocabulary hint). It is wired through model-by-model: Whisper uses it
+    as a ``<|prev|>`` continuation hint, Qwen3-ASR maps it into the
+    chat-template ``system`` turn. Models that do not consume it accept
+    it without effect.
     """
     with open(audio_path, "rb") as f:
         transcription = client.audio.transcriptions.create(
@@ -212,8 +214,9 @@ if __name__ == "__main__":
         default=None,
         help=(
             "Optional `prompt` (OpenAI transcription API: style/vocabulary "
-            "hint). Supported by Qwen3-ASR — mapped into the chat-template "
-            "system turn. Other ASR models accept it as a no-op."
+            "hint). Wired model-by-model: Whisper uses it as a `<|prev|>` "
+            "continuation hint, Qwen3-ASR maps it into the chat-template "
+            "system turn."
         ),
     )
     args = parser.parse_args()
