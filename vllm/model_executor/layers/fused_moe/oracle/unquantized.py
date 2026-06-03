@@ -150,17 +150,10 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
 
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
-    weight_key: "QuantKey | None" = None,
-    activation_key: "QuantKey | None" = None,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
-
-    `weight_key` / `activation_key` are accepted to match the
-    `MoEKernelOracle.select_backend` contract; they are ignored here
-    because the unquantized oracle has no quantization scheme to
-    disambiguate.
     """
 
     if current_platform.is_cpu():
@@ -414,7 +407,10 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         weight_key: "QuantKey | None" = None,
         activation_key: "QuantKey | None" = None,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        return select_unquantized_moe_backend(moe_config, weight_key, activation_key)
+        assert weight_key is None and activation_key is None, (
+            "Weights and activations will never be quantized for UnquantizedMoEKernelOracle"
+        )
+        return select_unquantized_moe_backend(moe_config)
 
     def convert_to_kernel_format(
         self,
