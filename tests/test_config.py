@@ -1341,6 +1341,20 @@ def test_scheduler_config_init():
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
 
+    # Regression: max_num_scheduled_tokens must reject non-positive values at
+    # construction time (matches behavior of sibling max_num_batched_tokens
+    # and the existing <= 0 check on the speculative-decoding path; see #44123).
+    sched_kwargs = dict(max_model_len=2048, is_encoder_decoder=False)
+    # None is the sentinel meaning "default to max_num_batched_tokens".
+    SchedulerConfig(max_num_scheduled_tokens=None, **sched_kwargs)
+    # Positive integers are accepted.
+    SchedulerConfig(max_num_scheduled_tokens=4096, **sched_kwargs)
+    # Zero and negative integers are rejected by the field constraint.
+    with pytest.raises(ValidationError):
+        SchedulerConfig(max_num_scheduled_tokens=0, **sched_kwargs)
+    with pytest.raises(ValidationError):
+        SchedulerConfig(max_num_scheduled_tokens=-1, **sched_kwargs)
+
 
 @pytest.mark.parametrize(
     (
