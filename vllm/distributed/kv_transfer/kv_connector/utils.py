@@ -426,11 +426,13 @@ class TransferTopology:
                 head_size=1,
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
+        # In the standardized layout K and V are packed into the content dim,
+        # so attention caches are 4D [num_blocks, num_kv_heads, block_size,
+        # 2*head_size] with num_blocks leading (blocks-first). We mock
+        # num_blocks to 1 for the dimension check below. Hybrid SSM models also
+        # assume a blocks-first layout.
         self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+            len(kv_cache_shape) == 4 and kv_cache_shape[0] == 1
         )
 
         self._cross_layers_blocks = False
@@ -495,19 +497,13 @@ class TransferTopology:
 
     @property
     def virtually_split_kv_in_blocks(self) -> bool:
-        # Whether to logically split each block into K and V halves.
-        # Applies when K/V are interleaved within each block (blocks-first),
-        # but NOT when cross-layer blocks are used — cross-layer blocks have
-        # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
-        # simple half-split does not separate K from V.
-        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
-
-    @property
-    def split_k_and_v(self) -> bool:
-        # Whether to register regions for K and V separately (when present).
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
+        # Whether to logically split each block into two separately-indexable
+        # sub-regions. With K and V packed into the content dim, an attention
+        # block transfers as a single unit — no K/V sub-split is needed. Only
+        # Mamba still needs this, to index its two state regions (conv/ssm)
+        # separately. Not applicable to cross-layer blocks (per-layer
+        # interleaving means a simple half-split does not separate the parts).
+        return self.is_mamba and not self._cross_layers_blocks
 
     # ============================================================
     # Common methods
@@ -611,8 +607,9 @@ class TransferTopology:
             # Swap [2<>num_blocks] dims for hybrid SSM layout.
             cache = cache.transpose(0, 1)
 
-        # Regular case: backends like FA register K/V in separate regions
-        return cache if self.split_k_and_v else [cache]
+        # K and V are packed into one tensor (content dim), so each layer
+        # registers as a single region.
+        return [cache]
 
     def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""
