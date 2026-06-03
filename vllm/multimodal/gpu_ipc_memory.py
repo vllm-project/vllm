@@ -19,10 +19,9 @@ amount out of its KV-cache budget so the headroom physically exists.
 import threading
 
 from vllm.logger import init_logger
+from vllm.utils.mem_constants import GiB_bytes
 
 logger = init_logger(__name__)
-
-GiB_bytes = 1 << 30
 
 
 class MultiModalGPUMemoryLease:
