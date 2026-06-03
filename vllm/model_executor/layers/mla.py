@@ -121,6 +121,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
+        topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -165,8 +166,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.indexer and self.is_sparse:
+            if not self.skip_topk:
+                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+            elif topk_indices is not None and self.topk_indices_buffer is not None:
+                # MTP steps 1+: indices already in buffer from step 0
+                # (topk_indices IS self.topk_indices_buffer — same tensor).
+                # The copy is intentionally a self-copy: it selects this
+                # branch instead of the else-branch (which would recompute).
+                n = topk_indices.shape[0]
+                self.topk_indices_buffer[:n].copy_(topk_indices[:n])
+            else:
+                # MTP step 0: no prior indices available. Run the indexer
+                # to compute indices into our buffer. Only safe for layers
+                # that have indexer weights.
+                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling

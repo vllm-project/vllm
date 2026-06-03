@@ -86,6 +86,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         else:
             topk_indices_buffer = None
 
+        self.topk_indices_buffer = topk_indices_buffer
+
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -94,6 +96,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             prefix,
             config=self.config,
             topk_indices_buffer=topk_indices_buffer,
+            is_mtp=True,
         )
 
     def forward(
@@ -103,6 +106,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
+        topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -115,7 +119,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         )
 
         hidden_states, residual = self.mtp_block(
-            positions=positions, hidden_states=hidden_states, residual=None
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=None,
+            topk_indices=topk_indices,
         )
         hidden_states = residual + hidden_states
         return hidden_states
@@ -140,6 +147,11 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 )
             }
         )
+        # Expose topk_indices_buffer for MTP index sharing.
+        # The proposer reads this to pass draft's own indices to
+        # subsequent MTP steps (self-copy → reuse step 0's indices).
+        first_layer = next(iter(self.layers.values()))
+        self.topk_indices_buffer = first_layer.topk_indices_buffer
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -157,6 +169,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
+        topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -167,6 +180,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
             previous_hidden_states,
             inputs_embeds,
             current_step_idx,
+            topk_indices=topk_indices,
         )
 
     def compute_logits(
@@ -223,9 +237,15 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
+        topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
+            input_ids,
+            positions,
+            hidden_states,
+            inputs_embeds,
+            spec_step_idx,
+            topk_indices=topk_indices,
         )
         return hidden_states
 

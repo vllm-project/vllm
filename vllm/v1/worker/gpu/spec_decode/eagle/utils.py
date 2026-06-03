@@ -76,10 +76,4 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                     del sh.head
                     sh.head = target_lm_head
 
-    # MTP also shares a topk_indices_buffer between target and draft.
-    if hasattr(target_inner, "topk_indices_buffer"):
-        if hasattr(draft_inner, "topk_indices_buffer"):
-            del draft_inner.topk_indices_buffer
-        draft_inner.topk_indices_buffer = target_inner.topk_indices_buffer
-
     return eagle_model

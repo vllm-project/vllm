@@ -612,6 +612,11 @@ class SpecDecodeBaseProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+            # Steps 1+: pass draft's own topk_indices_buffer so the
+            # elif-branch in mla.py is taken (skips indexer recompute).
+            # This is a self-copy — same tensor, no data movement.
+            if self._draft_topk_indices_buffer is not None:
+                model_kwargs["topk_indices"] = self._draft_topk_indices_buffer
 
             with set_forward_context(
                 per_layer_attn_metadata,
@@ -857,6 +862,9 @@ class SpecDecodeBaseProposer:
         }
         if self.pass_hidden_states_to_model:
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+        # Step 0: do NOT pass topk_indices. MTP layers have skip_topk=True,
+        # so the else-branch in mla.py runs the indexer to compute the
+        # draft's own indices into its topk_indices_buffer.
 
         return model_kwargs, num_input_tokens
 
@@ -1409,15 +1417,13 @@ class SpecDecodeBaseProposer:
                             "Shared target model lm_head with MTP shared_head.head."
                         )
 
-        if hasattr(target_language_model.model, "topk_indices_buffer"):
-            if hasattr(self.model.model, "topk_indices_buffer"):
-                del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = (
-                target_language_model.model.topk_indices_buffer
-            )
+        self._draft_topk_indices_buffer = getattr(
+            self.model.model, "topk_indices_buffer", None
+        )
+        if self._draft_topk_indices_buffer is not None:
             logger.info(
-                "Detected MTP model with topk_indices_buffer. "
-                "Sharing target model topk_indices_buffer with the draft model."
+                "MTP sparse attention: draft model will compute its own "
+                "topk indices on first step and reuse for subsequent steps."
             )
 
         if self.use_local_argmax_reduction:
