@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
+use serde::Serialize;
 use serde_json::{Value, json};
 use vllm_engine_core_client::TransportMode;
 
@@ -25,9 +26,7 @@ pub(crate) struct ServerInfoSnapshot {
 
 impl ServerInfoSnapshot {
     pub(crate) fn from_served_model_names(served_model_names: &[String]) -> Self {
-        let vllm_config_json = json!({
-            "served_model_name": served_model_names,
-        });
+        let vllm_config_json = serialize_value(ServedModelNamesConfig { served_model_names });
 
         Self {
             vllm_config_text: render_config_text(&vllm_config_json),
@@ -39,24 +38,7 @@ impl ServerInfoSnapshot {
 
     /// Capture the runtime configuration fields available to the Rust frontend.
     pub(crate) fn from_config(config: &Config) -> Self {
-        let vllm_config_json = json!({
-            "transport_mode": transport_mode_config(&config.transport_mode),
-            "coordinator_mode": coordinator_mode_config(&config.coordinator_mode),
-            "model": config.model.clone(),
-            "served_model_name": config.served_model_name.clone(),
-            "listener_mode": listener_mode_config(&config.listener_mode),
-            "tool_call_parser": config.tool_call_parser.to_string(),
-            "reasoning_parser": config.reasoning_parser.to_string(),
-            "renderer": config.renderer.to_string(),
-            "chat_template": config.chat_template.clone(),
-            "default_chat_template_kwargs": config.default_chat_template_kwargs.clone(),
-            "chat_template_content_format": config.chat_template_content_format.to_string(),
-            "enable_log_requests": config.enable_log_requests,
-            "disable_log_stats": config.disable_log_stats,
-            "grpc_port": config.grpc_port,
-            "shutdown_timeout_secs": config.shutdown_timeout.as_secs_f64(),
-            "engine_count": config.engine_count(),
-        });
+        let vllm_config_json = serialize_value(RuntimeServerInfoConfig::from(config));
 
         Self {
             vllm_config_text: render_config_text(&vllm_config_json),
@@ -80,66 +62,166 @@ impl ServerInfoSnapshot {
     }
 }
 
-fn transport_mode_config(transport_mode: &TransportMode) -> Value {
-    match transport_mode {
-        TransportMode::HandshakeOwner {
-            handshake_address,
-            advertised_host,
-            engine_count,
-            ready_timeout,
-            local_input_address,
-            local_output_address,
-        } => json!({
-            "mode": "handshake_owner",
-            "handshake_address": handshake_address,
-            "advertised_host": advertised_host,
-            "engine_count": engine_count,
-            "ready_timeout_secs": ready_timeout.as_secs_f64(),
-            "local_input_address": local_input_address,
-            "local_output_address": local_output_address,
-        }),
-        TransportMode::Bootstrapped {
-            input_address,
-            output_address,
-            engine_count,
-            ready_timeout,
-        } => json!({
-            "mode": "bootstrapped",
-            "input_address": input_address,
-            "output_address": output_address,
-            "engine_count": engine_count,
-            "ready_timeout_secs": ready_timeout.as_secs_f64(),
-        }),
+#[derive(Debug, Serialize)]
+struct ServedModelNamesConfig<'a> {
+    #[serde(rename = "served_model_name")]
+    served_model_names: &'a [String],
+}
+
+#[derive(Debug, Serialize)]
+struct RuntimeServerInfoConfig {
+    transport_mode: TransportModeInfo,
+    coordinator_mode: CoordinatorModeInfo,
+    model: String,
+    served_model_name: Vec<String>,
+    listener_mode: HttpListenerModeInfo,
+    tool_call_parser: String,
+    reasoning_parser: String,
+    renderer: String,
+    chat_template: Option<String>,
+    default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    chat_template_content_format: String,
+    enable_log_requests: bool,
+    disable_log_stats: bool,
+    grpc_port: Option<u16>,
+    shutdown_timeout_secs: f64,
+    engine_count: usize,
+}
+
+impl From<&Config> for RuntimeServerInfoConfig {
+    fn from(config: &Config) -> Self {
+        Self {
+            transport_mode: TransportModeInfo::from(&config.transport_mode),
+            coordinator_mode: CoordinatorModeInfo::from(&config.coordinator_mode),
+            model: config.model.clone(),
+            served_model_name: config.served_model_name.clone(),
+            listener_mode: HttpListenerModeInfo::from(&config.listener_mode),
+            tool_call_parser: config.tool_call_parser.to_string(),
+            reasoning_parser: config.reasoning_parser.to_string(),
+            renderer: config.renderer.to_string(),
+            chat_template: config.chat_template.clone(),
+            default_chat_template_kwargs: config.default_chat_template_kwargs.clone(),
+            chat_template_content_format: config.chat_template_content_format.to_string(),
+            enable_log_requests: config.enable_log_requests,
+            disable_log_stats: config.disable_log_stats,
+            grpc_port: config.grpc_port,
+            shutdown_timeout_secs: config.shutdown_timeout.as_secs_f64(),
+            engine_count: config.engine_count(),
+        }
     }
 }
 
-fn coordinator_mode_config(coordinator_mode: &CoordinatorMode) -> Value {
-    match coordinator_mode {
-        CoordinatorMode::None => json!("none"),
-        CoordinatorMode::MaybeInProc => json!("maybe_in_proc"),
-        CoordinatorMode::External { address } => json!({
-            "mode": "external",
-            "address": address,
-        }),
+#[derive(Debug, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum TransportModeInfo {
+    HandshakeOwner {
+        handshake_address: String,
+        advertised_host: String,
+        engine_count: usize,
+        ready_timeout_secs: f64,
+        local_input_address: Option<String>,
+        local_output_address: Option<String>,
+    },
+    Bootstrapped {
+        input_address: String,
+        output_address: String,
+        engine_count: usize,
+        ready_timeout_secs: f64,
+    },
+}
+
+impl From<&TransportMode> for TransportModeInfo {
+    fn from(transport_mode: &TransportMode) -> Self {
+        match transport_mode {
+            TransportMode::HandshakeOwner {
+                handshake_address,
+                advertised_host,
+                engine_count,
+                ready_timeout,
+                local_input_address,
+                local_output_address,
+            } => Self::HandshakeOwner {
+                handshake_address: handshake_address.clone(),
+                advertised_host: advertised_host.clone(),
+                engine_count: *engine_count,
+                ready_timeout_secs: ready_timeout.as_secs_f64(),
+                local_input_address: local_input_address.clone(),
+                local_output_address: local_output_address.clone(),
+            },
+            TransportMode::Bootstrapped {
+                input_address,
+                output_address,
+                engine_count,
+                ready_timeout,
+            } => Self::Bootstrapped {
+                input_address: input_address.clone(),
+                output_address: output_address.clone(),
+                engine_count: *engine_count,
+                ready_timeout_secs: ready_timeout.as_secs_f64(),
+            },
+        }
     }
 }
 
-fn listener_mode_config(listener_mode: &HttpListenerMode) -> Value {
-    match listener_mode {
-        HttpListenerMode::BindTcp { host, port } => json!({
-            "mode": "bind_tcp",
-            "host": host,
-            "port": port,
-        }),
-        HttpListenerMode::BindUnix { path } => json!({
-            "mode": "bind_unix",
-            "path": path,
-        }),
-        HttpListenerMode::InheritedFd { fd } => json!({
-            "mode": "inherited_fd",
-            "fd": fd,
-        }),
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum CoordinatorModeInfo {
+    Named(CoordinatorModeName),
+    External {
+        mode: CoordinatorModeExternalTag,
+        address: String,
+    },
+}
+
+impl From<&CoordinatorMode> for CoordinatorModeInfo {
+    fn from(coordinator_mode: &CoordinatorMode) -> Self {
+        match coordinator_mode {
+            CoordinatorMode::None => Self::Named(CoordinatorModeName::None),
+            CoordinatorMode::MaybeInProc => Self::Named(CoordinatorModeName::MaybeInProc),
+            CoordinatorMode::External { address } => Self::External {
+                mode: CoordinatorModeExternalTag::External,
+                address: address.clone(),
+            },
+        }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CoordinatorModeName {
+    None,
+    MaybeInProc,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CoordinatorModeExternalTag {
+    External,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum HttpListenerModeInfo {
+    BindTcp { host: String, port: u16 },
+    BindUnix { path: String },
+    InheritedFd { fd: i32 },
+}
+
+impl From<&HttpListenerMode> for HttpListenerModeInfo {
+    fn from(listener_mode: &HttpListenerMode) -> Self {
+        match listener_mode {
+            HttpListenerMode::BindTcp { host, port } => Self::BindTcp {
+                host: host.clone(),
+                port: *port,
+            },
+            HttpListenerMode::BindUnix { path } => Self::BindUnix { path: path.clone() },
+            HttpListenerMode::InheritedFd { fd } => Self::InheritedFd { fd: *fd },
+        }
+    }
+}
+
+fn serialize_value(value: impl Serialize) -> Value {
+    serde_json::to_value(value).expect("server info value must serialize")
 }
 
 fn render_config_text(config: &Value) -> String {
