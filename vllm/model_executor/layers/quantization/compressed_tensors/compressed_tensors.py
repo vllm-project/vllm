@@ -675,7 +675,13 @@ class CompressedTensorsConfig(QuantizationConfig):
             and output_quant.num_bits == 8
             and not output_quant.dynamic
         )
-        needs_wNa8o8 = is_intN_weight and is_static_int8_in and is_static_int8_out
+        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
+        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
+        # weight-only (no activations) falls through to WNA16.
+        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
+        needs_wNa8o8 = is_intN_weight and (
+            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
+        )
         return needs_wNa8o8
 
     def _get_scheme_from_parts(
@@ -793,7 +799,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_symmetric=input_quant.symmetric,
                 )
 
-        raise NotImplementedError("No compressed-tensors compatible scheme was found.")
+        raise NotImplementedError(
+            f"No compressed-tensors compatible scheme was found for {layer_name=}, "
+            f"{weight_quant=}, {input_quant=}, {output_quant=}, {format=}"
+        )
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
