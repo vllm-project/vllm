@@ -19,6 +19,7 @@ import math
 import sys
 from pathlib import Path
 
+EXPECTED_SPEC_ID = "perfgate-ascend-qwen25-05b-910b3"
 path = Path(sys.argv[1])
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -42,6 +43,18 @@ for name in ("throughput_tps", "ttft_ms", "tbt_ms"):
 if missing:
     print(
         f"Invalid perfgate baseline JSON: {path}: missing/non-null finite metrics: {', '.join(missing)}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+same_spec = payload.get("same_spec")
+if not isinstance(same_spec, dict):
+    print(f"Invalid perfgate baseline JSON: {path}: missing object key same_spec", file=sys.stderr)
+    sys.exit(2)
+spec_id = str(same_spec.get("spec_id") or "").strip()
+spec_hash = str(same_spec.get("resolved_spec_hash") or "").strip()
+if spec_id != EXPECTED_SPEC_ID or not spec_hash:
+    print(
+        f"Invalid perfgate baseline JSON: {path}: expected same_spec.spec_id={EXPECTED_SPEC_ID!r} and non-empty resolved_spec_hash",
         file=sys.stderr,
     )
     sys.exit(2)

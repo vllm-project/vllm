@@ -66,7 +66,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
@@ -94,7 +94,7 @@ jobs:
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
       HF_REPO_ID: intellistream/vllm-hust-benchmark-results
       MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-0.5B-Instruct' }}
       BENCH_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online' }}
@@ -132,7 +132,7 @@ jobs:
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_HUST_BENCHMARK_GH_TOKEN }}
-      BENCHMARK_REPO_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
+      BENCHMARK_REPO_SSH_KEY: ${{ github.event_name != 'pull_request' && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || '' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
@@ -729,6 +729,11 @@ jobs:
             exit "$rc"
           done
 
+      - name: Performance gate - Stage 1 comparison
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
+
       - name: Performance gate - store main baseline
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         shell: bash
@@ -737,7 +742,7 @@ jobs:
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
         shell: bash
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
@@ -751,7 +756,7 @@ jobs:
           bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
 
       - name: Performance gate - two-stage comparison
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
         shell: bash
         run: bash .github/workflows/scripts/perfgate_compare.sh
 
