@@ -238,23 +238,6 @@ class Worker(WorkerBase):
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
-            # MegaMoE uses CUDA symmetric memory for cross-GPU NVLink
-            # communication. The symmetric memory allocator identifies
-            # GPUs by their CUDA device index. When the launcher sets
-            # CUDA_VISIBLE_DEVICES to a single GPU, every process sees
-            # device 0, causing the allocator to reject the rendezvous
-            # as "overlapping devices." Fix: before CUDA init, expand
-            # visibility to all GPUs and pin via local_rank instead.
-            if (self.vllm_config.kernel_config is not None
-                    and self.vllm_config.kernel_config.moe_backend
-                    == "deep_gemm_mega_moe"):
-                cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-                gpu_ids = ([int(x) for x in cvd.split(",") if x.strip()]
-                           if cvd else [])
-                if len(gpu_ids) == 1:
-                    self.local_rank = gpu_ids[0]
-                    os.environ.pop("CUDA_VISIBLE_DEVICES")
-
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
