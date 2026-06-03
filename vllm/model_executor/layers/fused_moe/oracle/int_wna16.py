@@ -36,7 +36,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_zero_points,
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
-    moe_packed_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -505,8 +504,6 @@ def _process_weights_marlin(
     w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-    w13_qzeros_out: torch.Tensor | None = None
-    w2_qzeros_out: torch.Tensor | None = None
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
@@ -601,20 +598,14 @@ def _process_weights_marlin(
             )
 
     # --- Permute zero points ---
-    if w13_qzeros is not None and w2_qzeros is not None:
-        w13_qzeros = moe_packed_to_marlin_zero_points(
-            w13_qzeros,
-            size_k=w13_qzeros.shape[1],
-            size_n=w13_qzeros.shape[2] * pack_factor,
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
+    if w13_qzeros is not None:
+        w13_qzeros = _marlin_moe_process_zero_points(
+            w13_qzeros, pack_factor, num_bits, is_a_8bit
         )
-        w2_qzeros = moe_packed_to_marlin_zero_points(
-            w2_qzeros,
-            size_k=w2_qzeros.shape[1],
-            size_n=w2_qzeros.shape[2] * pack_factor,
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
+
+    if w2_qzeros is not None:
+        w2_qzeros = _marlin_moe_process_zero_points(
+            w2_qzeros, pack_factor, num_bits, is_a_8bit
         )
 
     # --- Permute bias ---
@@ -622,16 +613,6 @@ def _process_weights_marlin(
         w13_bias_out = marlin_permute_bias(w13_bias)
     if w2_bias is not None:
         w2_bias_out = marlin_permute_bias(w2_bias)
-
-    if w13_qzeros is not None:
-        w13_qzeros_out = _marlin_moe_process_zero_points(
-            w13_qzeros, pack_factor, num_bits, is_a_8bit
-        )
-
-    if w2_qzeros is not None:
-        w2_qzeros_out = _marlin_moe_process_zero_points(
-            w2_qzeros, pack_factor, num_bits, is_a_8bit
-        )
 
     return (
         marlin_w13_qweight,
@@ -642,8 +623,8 @@ def _process_weights_marlin(
         w2_g_idx,
         w13_g_idx_sort_indices,
         w2_g_idx_sort_indices,
-        w13_qzeros_out,
-        w2_qzeros_out,
+        w13_qzeros,
+        w2_qzeros,
         w13_input_global_scale,
         w2_input_global_scale,
         w13_bias_out,
