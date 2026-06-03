@@ -28,7 +28,20 @@
  *   [bs*576,       bs*576 + bs*8):   UE8M0 scales, 7 real + 1 pad per token
  */
 
+#include "torch_utils.h"
+
+#include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/csrc/stable/device.h>
+
 #include <cmath>
+#include "cuda_compat.h"
+#include "dispatch_utils.h"
+#include "type_convert.cuh"
+
 #ifndef USE_ROCM
   #include <cuda_fp8.h>
 #else
@@ -36,14 +49,6 @@
 #endif
 #include <cuda_runtime.h>
 #include <type_traits>
-
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/cuda.h>
-
-#include "cuda_compat.h"
-#include "dispatch_utils.h"
-#include "type_convert.cuh"
 
 #ifndef FINAL_MASK
   #ifdef USE_ROCM
@@ -70,7 +75,7 @@ namespace deepseek_v4_fused_ops {
 
 namespace {
 inline int getSMVersion() {
-  auto* props = at::cuda::getCurrentDeviceProperties();
+  auto* props = get_device_prop();
   return props->major * 10 + props->minor;
 }
 }  // namespace
@@ -564,7 +569,7 @@ static void launchFusedDeepseekV4Templated(
   // bf16 on pre-Ampere (sm_70/sm_75) because _typeConvert<BFloat16> is
   // unavailable there.  Refuse the launch loudly instead of silently
   // skipping the work.
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       sm_version >= 80,
       "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert requires sm_80+ "
       "(Ampere or newer); got sm_",
@@ -635,7 +640,7 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
     DISPATCH(64)
     DISPATCH(128)
     default:
-      TORCH_CHECK(false,
+      STD_TORCH_CHECK(false,
                   "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert: "
                   "unsupported num_heads_q_padded=",
                   num_heads_q_padded,
@@ -650,71 +655,80 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 // ────────────────────────────────────────────────────────────────────────────
 // Torch op wrapper
 // ────────────────────────────────────────────────────────────────────────────
-torch::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-    torch::Tensor const& q_in,           // [N, num_heads_q, 512] bf16
-    torch::Tensor const& kv,             // [N, 512] bf16 (read-only)
-    torch::Tensor& k_cache,              // [num_blocks, block_bytes] uint8
-    torch::Tensor const& slot_mapping,   // [N] int64
-    torch::Tensor const& position_ids,   // [N] int64
-    torch::Tensor const& cos_sin_cache,  // [max_pos, rope_dim] bf16
-    int64_t q_head_padded,               // padded Q head count for output
+torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+    torch::stable::Tensor const& q_in,           // [N, num_heads_q, 512] bf16
+    torch::stable::Tensor const& kv,             // [N, 512] bf16 (read-only)
+    torch::stable::Tensor& k_cache,              // [num_blocks, block_bytes] uint8
+    torch::stable::Tensor const& slot_mapping,   // [N] int64
+    torch::stable::Tensor const& position_ids,   // [N] int64
+    torch::stable::Tensor const& cos_sin_cache,  // [max_pos, rope_dim] bf16
+    int64_t q_head_padded,                       // padded Q head count for output
     double eps, int64_t cache_block_size) {
-  TORCH_CHECK(q_in.is_cuda() && q_in.is_contiguous(),
-              "q_in must be contiguous CUDA");
-  TORCH_CHECK(kv.is_cuda() && kv.is_contiguous(), "kv must be contiguous CUDA");
-  TORCH_CHECK(k_cache.is_cuda(), "k_cache must be CUDA");
-  TORCH_CHECK(slot_mapping.is_cuda() && slot_mapping.dtype() == torch::kInt64,
-              "slot_mapping must be int64 CUDA");
-  TORCH_CHECK(position_ids.is_cuda() && position_ids.dtype() == torch::kInt64,
-              "position_ids must be int64 CUDA");
-  TORCH_CHECK(cos_sin_cache.is_cuda(), "cos_sin_cache must be CUDA");
-  TORCH_CHECK(q_in.dim() == 3 && q_in.size(2) == 512,
-              "q_in shape [N, num_heads_q, 512]");
-  TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
-  TORCH_CHECK(q_in.dtype() == kv.dtype(), "q_in and kv dtype must match");
-  TORCH_CHECK(q_head_padded >= q_in.size(1),
-              "q_head_padded must be >= q_in.size(1) (num_heads_q)");
-  TORCH_CHECK(k_cache.dtype() == torch::kUInt8, "k_cache must be uint8");
-  TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
-              "cos_sin_cache shape [max_pos, 64]");
-  TORCH_CHECK(cos_sin_cache.dtype() == torch::kFloat32,
-              "cos_sin_cache must be float32");
+  STD_TORCH_CHECK(q_in.device().is_cuda() && q_in.is_contiguous(),
+                  "q_in must be contiguous CUDA");
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
+                  "kv must be contiguous CUDA");
+  STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() ==
+                          torch::headeronly::ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                      position_ids.scalar_type() ==
+                          torch::headeronly::ScalarType::Long,
+                  "position_ids must be int64 CUDA");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda(), "cos_sin_cache must be CUDA");
+  STD_TORCH_CHECK(q_in.dim() == 3 && q_in.size(2) == 512,
+                  "q_in shape [N, num_heads_q, 512]");
+  STD_TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
+  STD_TORCH_CHECK(q_in.scalar_type() == kv.scalar_type(),
+                  "q_in and kv dtype must match");
+  STD_TORCH_CHECK(q_head_padded >= q_in.size(1),
+                  "q_head_padded must be >= q_in.size(1) (num_heads_q)");
+  STD_TORCH_CHECK(k_cache.scalar_type() == torch::headeronly::ScalarType::Byte,
+                  "k_cache must be uint8");
+  STD_TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
+                  "cos_sin_cache shape [max_pos, 64]");
+  STD_TORCH_CHECK(cos_sin_cache.scalar_type() ==
+                      torch::headeronly::ScalarType::Float,
+                  "cos_sin_cache must be float32");
 
   // With DP padding, slot_mapping can be shorter than q/kv/positions.
   // Q-norm+RoPE runs on all q.size(0) rows (downstream attention uses them);
   // KV quant+insert runs only on the first slot_mapping.size(0) rows.
   int const num_tokens_full = static_cast<int>(q_in.size(0));
   int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
-  TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_full &&
-                  static_cast<int>(position_ids.size(0)) == num_tokens_full,
-              "q/kv/position_ids row counts must match");
-  TORCH_CHECK(num_tokens_insert <= num_tokens_full,
-              "slot_mapping must not exceed q row count");
+  STD_TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_full &&
+                      static_cast<int>(position_ids.size(0)) == num_tokens_full,
+                  "q/kv/position_ids row counts must match");
+  STD_TORCH_CHECK(num_tokens_insert <= num_tokens_full,
+                  "slot_mapping must not exceed q row count");
   int const num_heads_q = static_cast<int>(q_in.size(1));
   int const num_heads_q_padded = static_cast<int>(q_head_padded);
   int const cache_block_size_i = static_cast<int>(cache_block_size);
   int const kv_block_stride = static_cast<int>(k_cache.stride(0));
 
-  at::cuda::OptionalCUDAGuard device_guard(device_of(q_in));
-  auto stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      q_in.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(q_in.get_device_index());
 
   // Allocate the padded q output.  The kernel writes every element (live
   // region gets RMSNorm+RoPE; pad region gets zeros), so `empty` is safe.
-  torch::Tensor q_out = torch::empty(
-      {q_in.size(0), q_head_padded, q_in.size(2)}, q_in.options());
+  auto q_out = torch::stable::new_empty(
+      q_in, {q_in.size(0), q_head_padded, q_in.size(2)}, q_in.scalar_type());
 
-  VLLM_DISPATCH_HALF_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       q_in.scalar_type(), "fused_deepseek_v4_qnorm_rope_kv_insert", [&] {
         using qkv_scalar_t = scalar_t;
         vllm::deepseek_v4_fused_ops::
             launchFusedDeepseekV4QNormRopeKVRopeQuantInsert<qkv_scalar_t>(
-                reinterpret_cast<qkv_scalar_t const*>(q_in.data_ptr()),
-                reinterpret_cast<qkv_scalar_t*>(q_out.data_ptr()),
-                reinterpret_cast<qkv_scalar_t const*>(kv.data_ptr()),
-                reinterpret_cast<uint8_t*>(k_cache.data_ptr()),
-                reinterpret_cast<int64_t const*>(slot_mapping.data_ptr()),
-                reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
-                cos_sin_cache.data_ptr<float>(), static_cast<float>(eps),
+                reinterpret_cast<qkv_scalar_t const*>(q_in.const_data_ptr()),
+                reinterpret_cast<qkv_scalar_t*>(q_out.mutable_data_ptr()),
+                reinterpret_cast<qkv_scalar_t const*>(kv.const_data_ptr()),
+                reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+                slot_mapping.const_data_ptr<int64_t>(),
+                position_ids.const_data_ptr<int64_t>(),
+                cos_sin_cache.const_data_ptr<float>(), static_cast<float>(eps),
                 num_tokens_full, num_tokens_insert, num_heads_q,
                 num_heads_q_padded, cache_block_size_i, kv_block_stride,
                 stream);

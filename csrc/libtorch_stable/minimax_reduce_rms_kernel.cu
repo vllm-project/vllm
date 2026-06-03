@@ -15,16 +15,19 @@
  * limitations under the License.
  */
 
+#include "torch_utils.h"
+
+#include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/csrc/stable/device.h>
+
 #include <cooperative_groups.h>
 #include <cuda_runtime.h>
 
-#include <torch/cuda.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-
 #include "cuda_compat.h"
-#include "cuda_utils.h"
-#include "core/registration.h"
 #include "minimax_reduce_rms_kernel.h"
 
 #include <algorithm>
@@ -611,7 +614,7 @@ int get_sm_count() {
   static int sm_count = 0;
   if (sm_count == 0) {
     int device_id;
-    CUDA_CHECK(cudaGetDevice(&device_id));
+    STD_CUDA_CHECK(cudaGetDevice(&device_id));
     cudaDeviceProp device_prop;
     cudaGetDeviceProperties(&device_prop, device_id);
     sm_count = device_prop.multiProcessorCount;
@@ -621,13 +624,13 @@ int get_sm_count() {
 
 inline int getSMVersion(bool queryRealSmArch = false) {
   int device{-1};
-  CUDA_CHECK(cudaGetDevice(&device));
+  STD_CUDA_CHECK(cudaGetDevice(&device));
   int sm_major = 0;
   int sm_minor = 0;
-  CUDA_CHECK(cudaDeviceGetAttribute(&sm_major,
-                                    cudaDevAttrComputeCapabilityMajor, device));
-  CUDA_CHECK(cudaDeviceGetAttribute(&sm_minor,
-                                    cudaDevAttrComputeCapabilityMinor, device));
+  STD_CUDA_CHECK(cudaDeviceGetAttribute(
+      &sm_major, cudaDevAttrComputeCapabilityMajor, device));
+  STD_CUDA_CHECK(cudaDeviceGetAttribute(
+      &sm_minor, cudaDevAttrComputeCapabilityMinor, device));
   int sm = sm_major * 10 + sm_minor;
   if (sm == 121 && !queryRealSmArch) {
     return 120;
@@ -639,7 +642,7 @@ template <typename KernelFunc>
 int get_max_active_blocks(KernelFunc kernel, int block_size,
                           int dynamic_smem = 0) {
   int max_active = 0;
-  CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+  STD_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &max_active, kernel, block_size, dynamic_smem));
   return std::max(max_active, 1);
 }
@@ -678,27 +681,27 @@ void minimax_reduce_rms_kernel_launcher(MiniMaxReduceRMSParams const& params) {
   cfg.attrs = attribute;
   cfg.numAttrs = SM >= 90 ? 2 : 0;
 
-  CUDA_CHECK(cudaLaunchKernelEx(
+  STD_CUDA_CHECK(cudaLaunchKernelEx(
       &cfg, minimax_reduce_rms_kernel_lamport<DType, NRanks>, params));
 }
 
 template <typename DType, int NRanks, int OriginQDim, int OriginKDim>
 void minimax_reduce_rms_kernel_launcher_float4(
     MiniMaxReduceRMSParams const& params) {
-  TORCH_CHECK(params.size_q % params.hidden_dim == 0);
-  TORCH_CHECK(params.hidden_dim % kElemsPerAccess<DType> == 0);
+  STD_TORCH_CHECK(params.size_q % params.hidden_dim == 0);
+  STD_TORCH_CHECK(params.hidden_dim % kElemsPerAccess<DType> == 0);
   if (params.stride_q > 0) {
-    TORCH_CHECK(params.stride_q % kElemsPerAccess<DType> == 0);
+    STD_TORCH_CHECK(params.stride_q % kElemsPerAccess<DType> == 0);
   }
-  TORCH_CHECK(params.allreduce_in_k != nullptr,
-              "float4 QK kernel requires K input");
-  TORCH_CHECK(params.hidden_dim >= params.hidden_dim_k);
-  TORCH_CHECK(params.size_k % params.hidden_dim_k == 0);
-  TORCH_CHECK(params.hidden_dim_k % kElemsPerAccess<DType> == 0);
-  TORCH_CHECK(params.size_q / params.hidden_dim ==
-              params.size_k / params.hidden_dim_k);
+  STD_TORCH_CHECK(params.allreduce_in_k != nullptr,
+                  "float4 QK kernel requires K input");
+  STD_TORCH_CHECK(params.hidden_dim >= params.hidden_dim_k);
+  STD_TORCH_CHECK(params.size_k % params.hidden_dim_k == 0);
+  STD_TORCH_CHECK(params.hidden_dim_k % kElemsPerAccess<DType> == 0);
+  STD_TORCH_CHECK(params.size_q / params.hidden_dim ==
+                  params.size_k / params.hidden_dim_k);
   if (params.stride_k > 0) {
-    TORCH_CHECK(params.stride_k % kElemsPerAccess<DType> == 0);
+    STD_TORCH_CHECK(params.stride_k % kElemsPerAccess<DType> == 0);
   }
 
   int token_num = params.size_q / params.hidden_dim;
@@ -746,7 +749,7 @@ void minimax_reduce_rms_kernel_launcher_float4(
   cfg.attrs = attribute;
   cfg.numAttrs = SM >= 90 ? 2 : 0;
 
-  CUDA_CHECK(cudaLaunchKernelEx(&cfg, kfn, params));
+  STD_CUDA_CHECK(cudaLaunchKernelEx(&cfg, kfn, params));
 }
 
 template <int NRanks>
@@ -759,21 +762,21 @@ void dispatch_dtype(MiniMaxReduceRMSParams const& params) {
                     (params.hidden_dim * params.nranks == 6144) &&
                     (params.hidden_dim_k * params.nranks == 1024);
 
-  if (params.dtype == at::ScalarType::Half) {
+  if (params.dtype == torch::headeronly::ScalarType::Half) {
     if (use_float4) {
       minimax_reduce_rms_kernel_launcher_float4<half, NRanks, 6144, 1024>(
           params);
     } else {
       minimax_reduce_rms_kernel_launcher<half, NRanks>(params);
     }
-  } else if (params.dtype == at::ScalarType::BFloat16) {
+  } else if (params.dtype == torch::headeronly::ScalarType::BFloat16) {
     if (use_float4) {
       minimax_reduce_rms_kernel_launcher_float4<__nv_bfloat16, NRanks, 6144,
                                                 1024>(params);
     } else {
       minimax_reduce_rms_kernel_launcher<__nv_bfloat16, NRanks>(params);
     }
-  } else if (params.dtype == at::ScalarType::Float) {
+  } else if (params.dtype == torch::headeronly::ScalarType::Float) {
     if (use_float4) {
       minimax_reduce_rms_kernel_launcher_float4<float, NRanks, 6144, 1024>(
           params);
@@ -781,7 +784,7 @@ void dispatch_dtype(MiniMaxReduceRMSParams const& params) {
       minimax_reduce_rms_kernel_launcher<float, NRanks>(params);
     }
   } else {
-    TORCH_CHECK(false, "Unsupported data type for minimax_reduce_rms_op");
+    STD_TORCH_CHECK(false, "Unsupported data type for minimax_reduce_rms_op");
   }
 }
 
@@ -795,16 +798,18 @@ void minimax_reduce_rms_op(MiniMaxReduceRMSParams const& params) {
   } else if (params.nranks == 16) {
     dispatch_dtype<16>(params);
   } else {
-    TORCH_CHECK(false, "minimax_reduce_rms_op: unsupported ranks number!");
+    STD_TORCH_CHECK(false, "minimax_reduce_rms_op: unsupported ranks number!");
   }
 }
 }  // namespace tensorrt_llm
 }  // namespace vllm
 
-torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
-                                    torch::Tensor const& norm_weight,
-                                    torch::Tensor workspace, int64_t const rank,
-                                    int64_t const nranks, double const eps) {
+torch::stable::Tensor minimax_allreduce_rms(
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
+    int64_t const rank, int64_t const nranks, double const eps) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   auto allreduce_params = vllm::tensorrt_llm::MiniMaxReduceRMSParams();
 
   allreduce_params.nranks = static_cast<int>(nranks);
@@ -815,12 +820,12 @@ torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
   allreduce_params.stride_q = allreduce_params.hidden_dim;
   allreduce_params.workspace =
       reinterpret_cast<void**>(workspace.mutable_data_ptr());
-  allreduce_params.allreduce_in = input.data_ptr();
-  allreduce_params.rms_gamma = norm_weight.data_ptr();
+  allreduce_params.allreduce_in = const_cast<void*>(input.const_data_ptr());
+  allreduce_params.rms_gamma = const_cast<void*>(norm_weight.const_data_ptr());
   allreduce_params.rms_eps = static_cast<float>(eps);
-  allreduce_params.stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  allreduce_params.stream = get_current_cuda_stream(input.get_device_index());
 
-  torch::Tensor rms_norm_out = torch::empty_like(input);
+  torch::stable::Tensor rms_norm_out = torch::stable::empty_like(input);
   allreduce_params.rms_norm_out = rms_norm_out.mutable_data_ptr();
 
   vllm::tensorrt_llm::minimax_reduce_rms_op(allreduce_params);
@@ -828,26 +833,33 @@ torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
   return rms_norm_out;
 }
 
-std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
-    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
-    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
-    int64_t const q_size, int64_t const kv_size, int64_t const rank,
-    int64_t const nranks, double const eps) {
-  TORCH_CHECK(qkv.dim() == 2, "minimax_allreduce_rms_qk: qkv must be 2D");
-  TORCH_CHECK(qkv.is_contiguous(),
-              "minimax_allreduce_rms_qk: qkv must be contiguous");
+std::tuple<torch::stable::Tensor, torch::stable::Tensor>
+minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
+                         torch::stable::Tensor const& norm_weight_q,
+                         torch::stable::Tensor const& norm_weight_k,
+                         torch::stable::Tensor workspace, int64_t const q_size,
+                         int64_t const kv_size, int64_t const rank,
+                         int64_t const nranks, double const eps) {
+  STD_TORCH_CHECK(qkv.dim() == 2, "minimax_allreduce_rms_qk: qkv must be 2D");
+  STD_TORCH_CHECK(qkv.is_contiguous(),
+                  "minimax_allreduce_rms_qk: qkv must be contiguous");
   int64_t qkv_dim = qkv.size(-1);
-  TORCH_CHECK(qkv_dim == q_size + 2 * kv_size,
-              "minimax_allreduce_rms_qk: qkv last dim must equal "
-              "q_size + 2 * kv_size");
-  TORCH_CHECK(rank < nranks,
-              "minimax_allreduce_rms_qk: rank must be less than nranks");
+  STD_TORCH_CHECK(qkv_dim == q_size + 2 * kv_size,
+                  "minimax_allreduce_rms_qk: qkv last dim must equal "
+                  "q_size + 2 * kv_size");
+  STD_TORCH_CHECK(rank < nranks,
+                  "minimax_allreduce_rms_qk: rank must be less than nranks");
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      qkv.get_device_index());
 
   int64_t num_tokens = qkv.size(0);
   int elem_bytes = qkv.element_size();
 
-  torch::Tensor q_out = torch::empty({num_tokens, q_size}, qkv.options());
-  torch::Tensor k_out = torch::empty({num_tokens, kv_size}, qkv.options());
+  torch::stable::Tensor q_out =
+      torch::stable::new_empty(qkv, {num_tokens, q_size}, qkv.scalar_type());
+  torch::stable::Tensor k_out =
+      torch::stable::new_empty(qkv, {num_tokens, kv_size}, qkv.scalar_type());
 
   auto params = vllm::tensorrt_llm::MiniMaxReduceRMSParams();
   params.nranks = static_cast<int>(nranks);
@@ -863,13 +875,14 @@ std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
   params.stride_k_out = 0;  // k_out is contiguous; kernel uses hidden_dim_k
   params.workspace = reinterpret_cast<void**>(workspace.mutable_data_ptr());
 
-  uint8_t* base = static_cast<uint8_t*>(qkv.data_ptr());
+  uint8_t* base =
+      const_cast<uint8_t*>(static_cast<const uint8_t*>(qkv.const_data_ptr()));
   params.allreduce_in = base;
   params.allreduce_in_k = base + q_size * elem_bytes;
-  params.rms_gamma = norm_weight_q.data_ptr();
-  params.rms_gamma_k = norm_weight_k.data_ptr();
+  params.rms_gamma = const_cast<void*>(norm_weight_q.const_data_ptr());
+  params.rms_gamma_k = const_cast<void*>(norm_weight_k.const_data_ptr());
   params.rms_eps = static_cast<float>(eps);
-  params.stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
+  params.stream = get_current_cuda_stream(qkv.get_device_index());
 
   params.rms_norm_out = q_out.mutable_data_ptr();
   params.rms_norm_out_k = k_out.mutable_data_ptr();
