@@ -153,7 +153,7 @@ mod tests {
 
         let prepared = prepare_generate_request(
             request,
-            &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
