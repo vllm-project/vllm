@@ -13,7 +13,7 @@ namespace vllm {
 // Logic: one thread block per (token, group) pair
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_transposed,
-          int32_t group_size>
+          bool use_ue8m0, int32_t group_size>
 __global__ void silu_and_mul_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // Output: [num_tokens, hidden_size] in
                                      // FP8/INT8
@@ -86,8 +86,12 @@ __global__ void silu_and_mul_per_block_quant_kernel(
       group_scale = fminf(group_scale, *scale_ub);
     }
 
-    // Use minimum safe scaling factor
-    group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    if constexpr (use_ue8m0) {
+      group_scale = exp2f(ceilf(log2f(fmaxf(fabsf(group_scale), 1e-10f))));
+    } else {
+      // Use minimum safe scaling factor
+      group_scale = fmaxf(group_scale, min_scaling_factor<scalar_out_t>::val());
+    }
 
     // Store scale to global memory
     *group_scale_ptr = group_scale;
@@ -110,7 +114,7 @@ void silu_and_mul_per_block_quant(torch::Tensor& out,
                                   torch::Tensor const& input,
                                   torch::Tensor& scales, int64_t group_size,
                                   std::optional<torch::Tensor> scale_ub,
-                                  bool is_scale_transposed) {
+                                  bool is_scale_transposed, bool use_ue8m0) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -123,6 +127,8 @@ void silu_and_mul_per_block_quant(torch::Tensor& out,
   TORCH_CHECK(scales.dtype() == torch::kFloat32, "Scales must be FP32");
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
+  TORCH_CHECK(!use_ue8m0 || out.dtype() == kFp8Type,
+              "use_ue8m0 is only supported for FP8 output");
 
   if (scale_ub.has_value()) {
     TORCH_CHECK(out.dtype() == kFp8Type);
@@ -153,15 +159,18 @@ void silu_and_mul_per_block_quant(torch::Tensor& out,
 
               VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
                 VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
-                  vllm::silu_and_mul_per_block_quant_kernel<
-                      scalar_in_t, scalar_out_t, transpose_scale, gs>
-                      <<<grid, block, 0, stream>>>(
-                          out.data_ptr<scalar_out_t>(),
-                          scales.data_ptr<float>(),
-                          input.data_ptr<scalar_in_t>(),
-                          scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                               : nullptr,
-                          hidden_size);
+                  VLLM_DISPATCH_BOOL(use_ue8m0, scale_ue8m0, [&] {
+                    vllm::silu_and_mul_per_block_quant_kernel<
+                        scalar_in_t, scalar_out_t, transpose_scale,
+                        scale_ue8m0, gs>
+                        <<<grid, block, 0, stream>>>(
+                            out.data_ptr<scalar_out_t>(),
+                            scales.data_ptr<float>(),
+                            input.data_ptr<scalar_in_t>(),
+                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
+                                                 : nullptr,
+                            hidden_size);
+                  });
                 });
               });
             });
