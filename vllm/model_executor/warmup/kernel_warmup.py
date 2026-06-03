@@ -43,12 +43,12 @@ _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 # value via _clamp_warmup_tokens at the call site, smaller caps clamp
 # down naturally.
 _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 8192
-# Steady-state MTP decode shapes to warm. Keep this bounded to the edge
-# deployment range we expect to optimize; warming the scheduler's raw
-# max_num_seqs (often 1024) can consume multiple GiB of temporary workspace
-# on long-context SM12x serves before the first request.
+# Steady-state MTP decode shapes to warm. Keep this bounded to high-concurrency
+# SM12x gates while still avoiding the scheduler's raw max_num_seqs (often 1024),
+# which can consume multiple GiB of temporary workspace on long-context serves
+# before the first request.
 _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2, 4, 8, 16, 24, 32)
-_DEEPSEEK_V4_MTP_UNIFORM_DECODE_MAX_WARMUP_REQUESTS = 32
+_DEEPSEEK_V4_MTP_UNIFORM_DECODE_MAX_WARMUP_REQUESTS = 256
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
     64,
