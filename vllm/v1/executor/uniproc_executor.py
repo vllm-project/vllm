@@ -3,7 +3,6 @@
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
-from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
 
@@ -76,10 +75,6 @@ class UniProcExecutor(Executor):
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
         return distributed_init_method, 0, local_rank
-
-    @cached_property
-    def max_concurrent_batches(self) -> int:
-        return 2 if self.scheduler_config.async_scheduling else 1
 
     def collective_rpc(  # type: ignore[override]
         self,
