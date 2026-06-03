@@ -737,6 +737,20 @@ class SamplingParams(
                     parameter="logprob_token_ids",
                     value=n,
                 )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in logprob_token_ids "
+                    f"contain out-of-vocab token ids. Vocabulary size: "
+                    f"{vocab_size}",
+                    parameter="logprob_token_ids",
+                    value=invalid_token_ids,
+                )
             if self.logprobs is not None and self.logprobs != n:
                 raise VLLMValidationError(
                     f"When both logprobs and logprob_token_ids are set, "

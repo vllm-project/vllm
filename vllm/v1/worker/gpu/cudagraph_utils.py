@@ -319,7 +319,6 @@ class CudaGraphManager:
             self.breakable_cg_runner = BreakableCUDAGraphWrapper(
                 model, self.vllm_config
             )
-            self.breakable_cg_runner.graph_pool = self.pool
 
     def run_pw_graph(self, model: nn.Module, model_inputs: dict[str, Any]) -> Any:
         if not self.use_breakable_cg:
