@@ -17,11 +17,11 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.v1.attention.ops.deepseek_v4_ops import (
+from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
-from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
+from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
 )

@@ -23,7 +23,6 @@ import huggingface_hub.constants
 import numpy as np
 import regex as re
 import torch
-from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -46,6 +45,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 )
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
+from vllm.transformers_utils.repo_utils import hf_api, hf_fs
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -373,7 +373,7 @@ def get_quant_config(
     if not is_local:
         # Download the config files.
         with get_lock(model_config.model, load_config.download_dir):
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_config.model,
                 revision=model_config.revision,
                 allow_patterns="*.json",
@@ -431,7 +431,7 @@ def get_sparse_attention_config(
     if not is_local:
         # Download the config files.
         with get_lock(model_name_or_path, load_config.download_dir):
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_name_or_path,
                 revision=model_config.revision,
                 allow_patterns="*.json",
@@ -534,7 +534,7 @@ def download_weights_from_hf(
         # Attempt to reduce allow_patterns to a single pattern
         # so we only have to call snapshot_download once.
         try:
-            fs = HfFileSystem()
+            fs = hf_fs()
             file_list = fs.ls(
                 os.path.join(model_name_or_path, subfolder or ""),
                 detail=False,
@@ -546,7 +546,7 @@ def download_weights_from_hf(
             # unnecessary files (e.g., from subdirectories like "original/").
             index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
             if "*.safetensors" in allow_patterns and index_file in file_list:
-                index_path = hf_hub_download(
+                index_path = hf_api().hf_hub_download(
                     repo_id=model_name_or_path,
                     filename=SAFE_WEIGHTS_INDEX_NAME,
                     cache_dir=cache_dir,
@@ -582,7 +582,7 @@ def download_weights_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
         for allow_pattern in allow_patterns:
-            hf_folder = snapshot_download(
+            hf_folder = hf_api().snapshot_download(
                 model_name_or_path,
                 allow_patterns=allow_pattern,
                 ignore_patterns=ignore_patterns,
@@ -631,7 +631,7 @@ def download_safetensors_index_file_from_hf(
     with get_lock(model_name_or_path, cache_dir):
         try:
             # Download the safetensors index file.
-            hf_hub_download(
+            hf_api().hf_hub_download(
                 repo_id=model_name_or_path,
                 filename=index_file,
                 cache_dir=cache_dir,
@@ -1090,7 +1090,8 @@ def runai_safetensors_weights_iterator(
             mininterval=2,
         )
 
-        yield from tensor_iter
+        for name, tensor in tensor_iter:
+            yield name, tensor.clone()
 
 
 def _init_fastsafetensors_loader(
