@@ -45,6 +45,8 @@ def postprocess_mamba_fused_kernel(
     state_group_indices_ptr,  # maps state_idx to group index in block table
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
+    # Optional: batch_idx -> req_idx mapping (for V2 model runner / PP)
+    idx_mapping_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
     num_reqs,
     # Compile-time constants (fixed after model initialization)
@@ -52,35 +54,52 @@ def postprocess_mamba_fused_kernel(
     block_size: tl.constexpr,
     # COPY_BLOCK_SIZE: fixed tuning parameter for memory copy loop
     COPY_BLOCK_SIZE: tl.constexpr,
+    # HAS_IDX_MAPPING: when True, use idx_mapping_ptr for indirection
+    HAS_IDX_MAPPING: tl.constexpr = False,
+    # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already
+    # contains the final new_num_computed value (V2 semantics)
+    PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
     Grid: (num_reqs, num_layers * num_state_types)
-    - program_id(0) = request index
+    - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
     using program_id(1). The grid dimensions encode the total state count.
     """
-    req_idx = tl.program_id(0)
+    batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
 
     # Bounds check
-    if req_idx >= num_reqs:
+    if batch_idx >= num_reqs:
         return
+
+    if HAS_IDX_MAPPING:
+        req_idx = tl.load(idx_mapping_ptr + batch_idx)
+        if req_idx < 0:
+            return
+    else:
+        req_idx = batch_idx
 
     # Compute decision logic (mirrors postprocess_mamba Python reference)
     num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
     src_block_idx = tl.load(mamba_state_idx_ptr + req_idx)
-    num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
-    num_computed = tl.load(num_computed_tokens_ptr + req_idx)
-    num_draft = tl.load(num_draft_tokens_ptr + req_idx)
 
-    num_tokens_running_state = num_computed + num_scheduled - num_draft
-    new_num_computed = num_tokens_running_state + num_accepted - 1
+    if PRECOMPUTED_NEW_COMPUTED:
+        new_num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_tokens_running_state = new_num_computed - num_accepted + 1
+    else:
+        num_scheduled = tl.load(num_scheduled_tokens_ptr + req_idx)
+        num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+        num_draft = tl.load(num_draft_tokens_ptr + req_idx)
+        num_tokens_running_state = num_computed + num_scheduled - num_draft
+        new_num_computed = num_tokens_running_state + num_accepted - 1
+
     aligned_new_computed = (new_num_computed // block_size) * block_size
 
     needs_copy = aligned_new_computed >= num_tokens_running_state
@@ -108,7 +127,8 @@ def postprocess_mamba_fused_kernel(
     # block table). Reinterpret as int32* since block ids are int32.
     group_base_addr = tl.load(block_table_ptrs_ptr + group_idx)
     block_table_typed = group_base_addr.to(tl.pointer_type(tl.int32))
-    block_table_base = block_table_typed + req_idx * block_table_stride_req
+    bt_row_idx = batch_idx if HAS_IDX_MAPPING else req_idx
+    block_table_base = block_table_typed + bt_row_idx * block_table_stride_req
 
     # Widen block ids to int64 before they reach `block_id * state_block_stride`
     # below: state_block_stride can exceed 2**31 bytes for large mamba caches,
@@ -156,7 +176,10 @@ def postprocess_mamba_fused_kernel(
     # This runs whether or not the copy below is skipped (it's per-request, so
     # only state_idx == 0 writes).
     if src_block_idx == dest_block_idx and state_idx == 0:
-        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+        if HAS_IDX_MAPPING:
+            tl.store(num_accepted_tokens_ptr + req_idx, 1)
+        else:
+            tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
 
     # Mirror collect_mamba_copy_meta's early return: src==dst with no token
     # bias means source and destination ranges coincide, so the copy is a
@@ -522,9 +545,12 @@ class MambaSpecDecodeGPUContext:
             self.state_conv_widths,
             self.state_group_indices,
             self.num_accepted_tokens_out,
+            None,
             num_reqs,
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
+            HAS_IDX_MAPPING=False,
+            PRECOMPUTED_NEW_COMPUTED=False,
         )
 
 
