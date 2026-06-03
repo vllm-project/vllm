@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde_json::{Number, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::Tool;
 
@@ -21,6 +21,29 @@ pub(super) struct ToolSchema {
     params: BTreeMap<String, JsonParamType>,
 }
 
+/// Parameter input for schema-aware conversion.
+///
+/// It can be either a raw text string, or a structured input with named child elements.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ParamInput {
+    Text(String),
+    #[allow(dead_code)]
+    Elements(Vec<ParamElement>),
+}
+
+impl From<String> for ParamInput {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+/// One named structured parameter child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ParamElement {
+    pub name: String,
+    pub value: ParamInput,
+}
+
 /// Normalized JSON parameter type used for raw string coercion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum JsonParamType {
@@ -28,8 +51,13 @@ pub(super) enum JsonParamType {
     Integer,
     Number,
     Boolean,
-    Object,
-    Array,
+    Object {
+        properties: BTreeMap<String, JsonParamType>,
+        additional_properties: Option<Box<JsonParamType>>,
+    },
+    Array {
+        items: Option<Box<JsonParamType>>,
+    },
     Null,
     OneOf(Vec<JsonParamType>),
 }
@@ -45,33 +73,39 @@ impl ToolSchemas {
         Self { tools }
     }
 
-    /// Convert raw string parameter values for one named tool.
+    /// Convert parameter values for one named tool.
     ///
     /// Unknown tool names use an empty schema, so all parameters fall back to
-    /// strings.
-    pub(super) fn convert_params_with_schema(
+    /// strings or object-like JSON for structured inputs.
+    pub(super) fn convert_params_with_schema<P>(
         &self,
         function_name: &str,
-        params: Vec<(String, String)>,
-    ) -> serde_json::Map<String, Value> {
+        params: Vec<(String, P)>,
+    ) -> Map<String, Value>
+    where
+        P: Into<ParamInput>,
+    {
         let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
-        let mut converted = serde_json::Map::with_capacity(params.len());
+        let mut converted = Map::with_capacity(params.len());
         for (name, value) in params {
-            let value = tool_schema.convert(&name, &value);
+            let value = tool_schema.convert(&name, value.into());
             converted.insert(name, value);
         }
         converted
     }
 
-    /// Convert one raw string parameter value for one named tool.
-    pub(super) fn convert_param_with_schema(
+    /// Convert one parameter value for one named tool.
+    pub(super) fn convert_param_with_schema<P>(
         &self,
         function_name: &str,
         name: &str,
-        value: &str,
-    ) -> Value {
+        value: P,
+    ) -> Value
+    where
+        P: Into<ParamInput>,
+    {
         let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
-        tool_schema.convert(name, value)
+        tool_schema.convert(name, value.into())
     }
 }
 
@@ -101,21 +135,13 @@ impl ToolSchema {
         Self { params }
     }
 
-    /// Convert one raw parameter value using its normalized schema type.
+    /// Convert one parameter value using its normalized schema type.
     ///
     /// If the parameter name is unknown, or we don't have a schema for it, or
     /// the value fails to convert, this falls back to returning the raw
-    /// string as a JSON string value.
-    fn convert(&self, name: &str, value: &str) -> Value {
-        if value.eq_ignore_ascii_case("null") {
-            return Value::Null;
-        }
-
-        let Some(param_type) = self.params.get(name) else {
-            return Value::String(value.to_string());
-        };
-
-        convert_value(param_type, value).unwrap_or_else(|| Value::String(value.to_string()))
+    /// string as a JSON string value, or object-like JSON for structured input.
+    fn convert(&self, name: &str, input: ParamInput) -> Value {
+        convert_with_optional_schema(self.params.get(name), &input)
     }
 }
 
@@ -125,7 +151,7 @@ impl JsonParamType {
         let schema = schema.as_object()?;
 
         if let Some(type_value) = schema.get("type") {
-            return Self::from_type_value(type_value);
+            return Self::from_type_value(type_value, schema);
         }
 
         if let Some(composite) = schema.get("anyOf").or_else(|| schema.get("oneOf")) {
@@ -134,32 +160,34 @@ impl JsonParamType {
                 .map(|schemas| schemas.iter().filter_map(Self::from_schema).collect::<Vec<_>>())
                 .filter(|types| !types.is_empty())
                 .map(Self::one_of)
-                .unwrap_or(Self::Object);
+                .unwrap_or_else(|| Self::object_from_schema(Some(schema)));
             return Some(param_type);
         }
 
+        // Typically, these types are already handled by checking the "type" field, but
+        // we can also infer them from their characteristic fields if "type" is missing.
         if schema.contains_key("enum") {
             return Some(Self::String);
         }
         if schema.contains_key("items") {
-            return Some(Self::Array);
+            return Some(Self::array_from_schema(Some(schema)));
         }
-        if schema.contains_key("properties") {
-            return Some(Self::Object);
+        if schema.contains_key("properties") || schema.contains_key("additionalProperties") {
+            return Some(Self::object_from_schema(Some(schema)));
         }
 
         None
     }
 
     /// Normalize a JSON schema `type` value.
-    fn from_type_value(type_value: &Value) -> Option<Self> {
+    fn from_type_value(type_value: &Value, schema: &Map<String, Value>) -> Option<Self> {
         match type_value {
-            Value::String(kind) => Self::from_type_name(kind),
+            Value::String(kind) => Self::from_type_name(kind, Some(schema)),
             Value::Array(kinds) => {
                 let types = kinds
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter_map(Self::from_type_name)
+                    .filter_map(|kind| Self::from_type_name(kind, Some(schema)))
                     .collect::<Vec<_>>();
                 if types.is_empty() {
                     None
@@ -172,15 +200,15 @@ impl JsonParamType {
     }
 
     /// Normalize one JSON schema type name.
-    fn from_type_name(kind: &str) -> Option<Self> {
+    fn from_type_name(kind: &str, schema: Option<&Map<String, Value>>) -> Option<Self> {
         let kind = kind.trim().to_ascii_lowercase();
         match kind.as_str() {
             "string" | "str" | "text" | "varchar" | "char" | "enum" => Some(Self::String),
             "integer" | "int" => Some(Self::Integer),
-            "number" | "float" => Some(Self::Number),
+            "number" | "float" | "double" => Some(Self::Number),
             "boolean" | "bool" | "binary" => Some(Self::Boolean),
-            "object" => Some(Self::Object),
-            "array" | "arr" | "sequence" => Some(Self::Array),
+            "object" | "dict" | "map" => Some(Self::object_from_schema(schema)),
+            "array" | "arr" | "list" | "sequence" => Some(Self::array_from_schema(schema)),
             "null" => Some(Self::Null),
             _ if kind.starts_with("int")
                 || kind.starts_with("uint")
@@ -191,10 +219,50 @@ impl JsonParamType {
                 Some(Self::Integer)
             }
             _ if kind.starts_with("num") || kind.starts_with("float") => Some(Self::Number),
-            _ if kind.starts_with("dict") => Some(Self::Object),
-            _ if kind.starts_with("list") => Some(Self::Array),
+            _ if kind.starts_with("dict") => Some(Self::object_from_schema(schema)),
+            _ if kind.starts_with("list") => Some(Self::array_from_schema(schema)),
             _ => None,
         }
+    }
+
+    /// Normalize object schema fields.
+    fn object_from_schema(schema: Option<&Map<String, Value>>) -> Self {
+        let properties = schema
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .filter_map(|(name, schema)| {
+                        Self::from_schema(schema).map(|param_type| (name.clone(), param_type))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let additional_properties =
+            schema.and_then(|schema| schema.get("additionalProperties")).and_then(|schema| {
+                if schema.is_object() {
+                    Self::from_schema(schema).map(Box::new)
+                } else {
+                    None
+                }
+            });
+
+        Self::Object {
+            properties,
+            additional_properties,
+        }
+    }
+
+    /// Normalize array schema fields.
+    fn array_from_schema(schema: Option<&Map<String, Value>>) -> Self {
+        let items = schema
+            .and_then(|schema| schema.get("items"))
+            .and_then(Self::from_schema)
+            .map(Box::new);
+
+        Self::Array { items }
     }
 
     /// Collapse a candidate type list into one normalized type.
@@ -207,31 +275,135 @@ impl JsonParamType {
     }
 }
 
-/// Convert one raw string value to a normalized JSON type.
-fn convert_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
-    match param_type {
-        JsonParamType::String => Some(Value::String(value.to_string())),
-        JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
-        JsonParamType::Number => convert_number(value),
-        JsonParamType::Boolean => convert_boolean(value),
-        JsonParamType::Object | JsonParamType::Array => serde_json::from_str(value).ok(),
-        JsonParamType::Null => value.eq_ignore_ascii_case("null").then_some(Value::Null),
-        JsonParamType::OneOf(types) => {
-            types.iter().find_map(|param_type| convert_value(param_type, value))
+/// Convert one parameter input to a normalized JSON value.
+fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
+    // For literal `null`, always convert to JSON null value.
+    if let ParamInput::Text(value) = input
+        && value.eq_ignore_ascii_case("null")
+    {
+        return Value::Null;
+    }
+
+    // If we have a schema, try to convert the value using it.
+    if let Some(param_type) = param_type
+        && let Some(value) = try_convert_value(param_type, input)
+    {
+        return value;
+    }
+    // We don't have a schema, or conversion failed, use fallback logic.
+    match input {
+        ParamInput::Text(value) => Value::String(value.clone()),
+        ParamInput::Elements(elements) => {
+            // Convert structured input to object without a schema.
+            Value::Object(convert_elements_to_object(elements, &BTreeMap::new(), None))
         }
     }
 }
 
-/// Convert one raw string value to a JSON number.
-fn convert_number(value: &str) -> Option<Value> {
-    if let Ok(parsed) = value.parse::<i64>() {
-        return Some(Value::Number(Number::from(parsed)));
+/// Convert one parameter input to a normalized JSON type.
+fn try_convert_value(param_type: &JsonParamType, input: &ParamInput) -> Option<Value> {
+    match input {
+        ParamInput::Text(value) => try_convert_text_value(param_type, value),
+        ParamInput::Elements(elements) => try_convert_elements_value(param_type, elements),
     }
-    Number::from_f64(value.parse::<f64>().ok()?).map(Value::Number)
+}
+
+/// Convert one raw string value to a normalized JSON type.
+fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Value> {
+    match param_type {
+        JsonParamType::String => Some(Value::String(value.to_string())),
+        JsonParamType::Integer => value.parse::<i64>().ok().map(Number::from).map(Value::Number),
+        JsonParamType::Number => try_convert_number(value),
+        JsonParamType::Boolean => try_convert_boolean(value),
+        JsonParamType::Object { .. } if value.is_empty() => Some(Value::Object(Map::new())),
+        JsonParamType::Array { .. } if value.is_empty() => Some(Value::Array(Vec::new())),
+        JsonParamType::Object { .. } | JsonParamType::Array { .. } => {
+            // For composite types with string input, simply interpret the string as JSON.
+            serde_json::from_str(value).ok()
+        }
+        JsonParamType::Null => value.eq_ignore_ascii_case("null").then_some(Value::Null),
+        JsonParamType::OneOf(types) => {
+            types.iter().find_map(|param_type| try_convert_text_value(param_type, value))
+        }
+    }
+}
+
+/// Convert one structured parameter input to a normalized JSON type.
+fn try_convert_elements_value(
+    param_type: &JsonParamType,
+    elements: &[ParamElement],
+) -> Option<Value> {
+    match param_type {
+        JsonParamType::Object {
+            properties,
+            additional_properties,
+        } => Some(Value::Object(convert_elements_to_object(
+            elements,
+            properties,
+            additional_properties.as_deref(),
+        ))),
+        JsonParamType::Array { items } => Some(Value::Array(
+            // Collect all child elements into an array, regardless of their names.
+            elements
+                .iter()
+                .map(|element| convert_with_optional_schema(items.as_deref(), &element.value))
+                .collect(),
+        )),
+        JsonParamType::OneOf(types) => types
+            .iter()
+            .find_map(|param_type| try_convert_elements_value(param_type, elements)),
+
+        // Primitive types can't be converted from structured input.
+        JsonParamType::String
+        | JsonParamType::Integer
+        | JsonParamType::Number
+        | JsonParamType::Boolean
+        | JsonParamType::Null => None,
+    }
+}
+
+/// Convert structured elements to an object, using field schemas when present.
+fn convert_elements_to_object(
+    elements: &[ParamElement],
+    properties: &BTreeMap<String, JsonParamType>,
+    additional_properties: Option<&JsonParamType>,
+) -> Map<String, Value> {
+    let mut object = Map::with_capacity(elements.len());
+    for element in elements {
+        let param_type = properties.get(&element.name).or(additional_properties);
+        let value = convert_with_optional_schema(param_type, &element.value);
+        insert_object_value(&mut object, element.name.clone(), value);
+    }
+    object
+}
+
+/// Insert an object field while preserving duplicate keys as arrays.
+fn insert_object_value(object: &mut Map<String, Value>, key: String, value: Value) {
+    if let Some(existing) = object.get_mut(&key) {
+        match existing {
+            // Collect values under the same key into an array.
+            Value::Array(values) => values.push(value),
+            existing => {
+                let first = std::mem::replace(existing, Value::Null);
+                *existing = Value::Array(vec![first, value]);
+            }
+        }
+    } else {
+        object.insert(key, value);
+    }
+}
+
+/// Convert one raw string value to a JSON number.
+fn try_convert_number(value: &str) -> Option<Value> {
+    serde_json::from_str::<Number>(value)
+        .or_else(|_| value.parse::<i64>().map(Number::from))
+        .or_else(|_| value.parse::<f64>().ok().and_then(Number::from_f64).ok_or(()))
+        .ok()
+        .map(Value::Number)
 }
 
 /// Convert one raw string value to a boolean.
-fn convert_boolean(value: &str) -> Option<Value> {
+fn try_convert_boolean(value: &str) -> Option<Value> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "1" => Some(Value::Bool(true)),
         "false" | "0" => Some(Value::Bool(false)),
@@ -241,9 +413,9 @@ fn convert_boolean(value: &str) -> Option<Value> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
 
-    use super::{ToolSchema, ToolSchemas};
+    use super::{ParamElement, ParamInput, ToolSchema, ToolSchemas};
     use crate::Tool;
 
     fn test_tool(name: &str, parameters: serde_json::Value) -> Tool {
@@ -259,8 +431,8 @@ mod tests {
     fn invalid_schema_converts_everything_as_string() {
         let params = ToolSchema::from_schema(&json!({ "type": "object" }));
 
-        assert_eq!(params.convert("count", "42"), json!("42"));
-        assert_eq!(params.convert("count", "null"), json!(null));
+        assert_eq!(params.convert("count", text("42")), json!("42"));
+        assert_eq!(params.convert("count", text("null")), json!(null));
     }
 
     #[test]
@@ -274,9 +446,9 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("unknown_schema", "42"), json!("42"));
-        assert_eq!(params.convert("unknown_type", "42"), json!("42"));
-        assert_eq!(params.convert("known", "42"), json!(42));
+        assert_eq!(params.convert("unknown_schema", text("42")), json!("42"));
+        assert_eq!(params.convert("unknown_type", text("42")), json!("42"));
+        assert_eq!(params.convert("known", text("42")), json!(42));
     }
 
     #[test]
@@ -287,24 +459,39 @@ mod tests {
                 "text": { "type": "string" },
                 "count": { "type": "integer" },
                 "size": { "type": "number" },
+                "ratio": { "type": "double" },
                 "enabled": { "type": "boolean" },
                 "payload": { "type": "object" },
+                "mapping": { "type": "map" },
                 "items": { "type": "array" },
+                "names": { "type": "list" },
                 "nothing": { "type": "null" }
             }
         }));
 
-        assert_eq!(params.convert("text", "42"), json!("42"));
-        assert_eq!(params.convert("count", "42"), json!(42));
-        assert_eq!(params.convert("size", "5.0"), json!(5.0));
-        assert_eq!(params.convert("enabled", "1"), json!(true));
-        assert_eq!(params.convert("payload", r#"{"k":1}"#), json!({ "k": 1 }));
-        assert_eq!(params.convert("items", "[1,2]"), json!([1, 2]));
-        assert_eq!(params.convert("nothing", "null"), json!(null));
+        assert_eq!(params.convert("text", text("42")), json!("42"));
+        assert_eq!(params.convert("count", text("42")), json!(42));
+        assert_eq!(params.convert("size", text("5.0")), json!(5.0));
+        assert_eq!(params.convert("ratio", text("2.5")), json!(2.5));
+        assert_eq!(params.convert("enabled", text("1")), json!(true));
+        assert_eq!(
+            params.convert("payload", text(r#"{"k":1}"#)),
+            json!({ "k": 1 })
+        );
+        assert_eq!(
+            params.convert("mapping", text(r#"{"k":1}"#)),
+            json!({ "k": 1 })
+        );
+        assert_eq!(params.convert("items", text("[1,2]")), json!([1, 2]));
+        assert_eq!(
+            params.convert("names", text(r#"["a","b"]"#)),
+            json!(["a", "b"])
+        );
+        assert_eq!(params.convert("nothing", text("null")), json!(null));
     }
 
     #[test]
-    fn number_conversion_parses_int_then_float() {
+    fn number_conversion_preserves_json_number_spelling_with_legacy_fallback() {
         let params = ToolSchema::from_schema(&json!({
             "type": "object",
             "properties": {
@@ -312,15 +499,42 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("value", "5"), json!(5));
-        assert_eq!(params.convert("value", "5.0"), json!(5.0));
-        assert_eq!(params.convert("value", "5."), json!(5.0));
-        assert_eq!(params.convert("value", "+1"), json!(1));
-        assert_eq!(params.convert("value", "+1.0"), json!(1.0));
-        assert_eq!(
-            params.convert("value", "9223372036854775807.5"),
-            json!(9223372036854775808.0)
-        );
+        assert_eq!(converted_number_text(&params, "5"), "5");
+        assert_eq!(converted_number_text(&params, "5.0"), "5.0");
+        assert_eq!(converted_number_text(&params, "5."), "5.0");
+        assert_eq!(converted_number_text(&params, "+1"), "1");
+        assert_eq!(converted_number_text(&params, "+1.0"), "1.0");
+
+        // TODO: we cannot preserve the original number precision by enabling `serde_json`'s
+        // `arbitrary_precision` feature, otherwise the test
+        // `serialized_json_numbers_do_not_leak_serde_private_representation` will fail.
+        // See issue: https://github.com/mitsuhiko/minijinja/issues/641
+
+        // assert_eq!(converted_number_text(&params, "5.00"), "5.00");
+        // assert_eq!(converted_number_text(&params, "1e0"), "1e+0");
+        // assert_eq!(
+        //     converted_number_text(&params, "9223372036854775807.5"),
+        //     "9223372036854775807.5"
+        // );
+    }
+
+    fn converted_number_text(params: &ToolSchema, value: &str) -> String {
+        serde_json::to_string(&params.convert("value", text(value))).unwrap()
+    }
+
+    fn text(value: &str) -> ParamInput {
+        ParamInput::Text(value.to_string())
+    }
+
+    fn elem(name: &str, value: ParamInput) -> ParamElement {
+        ParamElement {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    fn elements(elements: Vec<ParamElement>) -> ParamInput {
+        ParamInput::Elements(elements)
     }
 
     #[test]
@@ -337,12 +551,12 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("s", "x"), json!("x"));
-        assert_eq!(params.convert("i", "7"), json!(7));
-        assert_eq!(params.convert("n", "7.5"), json!(7.5));
-        assert_eq!(params.convert("b", "true"), json!(true));
-        assert_eq!(params.convert("a", "[1]"), json!([1]));
-        assert_eq!(params.convert("o", r#"{"x":1}"#), json!({ "x": 1 }));
+        assert_eq!(params.convert("s", text("x")), json!("x"));
+        assert_eq!(params.convert("i", text("7")), json!(7));
+        assert_eq!(params.convert("n", text("7.5")), json!(7.5));
+        assert_eq!(params.convert("b", text("true")), json!(true));
+        assert_eq!(params.convert("a", text("[1]")), json!([1]));
+        assert_eq!(params.convert("o", text(r#"{"x":1}"#)), json!({ "x": 1 }));
     }
 
     #[test]
@@ -360,8 +574,8 @@ mod tests {
             }
         }));
 
-        assert_eq!(integer_first.convert("value", "42"), json!(42));
-        assert_eq!(string_first.convert("value", "42"), json!("42"));
+        assert_eq!(integer_first.convert("value", text("42")), json!(42));
+        assert_eq!(string_first.convert("value", text("42")), json!("42"));
     }
 
     #[test]
@@ -383,9 +597,9 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("choice", "42"), json!(42));
+        assert_eq!(params.convert("choice", text("42")), json!(42));
         assert_eq!(
-            params.convert("fallback_object", r#"{"x":1}"#),
+            params.convert("fallback_object", text(r#"{"x":1}"#)),
             json!({ "x": 1 })
         );
     }
@@ -401,9 +615,12 @@ mod tests {
             }
         }));
 
-        assert_eq!(params.convert("choice", "a"), json!("a"));
-        assert_eq!(params.convert("items", "[1,2]"), json!([1, 2]));
-        assert_eq!(params.convert("payload", r#"{"x":1}"#), json!({ "x": 1 }));
+        assert_eq!(params.convert("choice", text("a")), json!("a"));
+        assert_eq!(params.convert("items", text("[1,2]")), json!([1, 2]));
+        assert_eq!(
+            params.convert("payload", text(r#"{"x":1}"#)),
+            json!({ "x": 1 })
+        );
     }
 
     #[test]
@@ -504,5 +721,163 @@ mod tests {
         assert_eq!(converted.get("query"), Some(&json!("rust")));
         assert_eq!(converted.get("topn"), Some(&json!("5")));
         assert_eq!(converted.get("nullish"), Some(&json!(null)));
+    }
+
+    #[test]
+    fn converts_structured_inputs_with_recursive_schema() {
+        let schemas = ToolSchemas::from_tools(&[test_tool(
+            "create_order",
+            json!({
+                "type": "object",
+                "properties": {
+                    "user_id": { "type": "integer" },
+                    "urgent": { "type": "boolean" },
+                    "note": { "type": "string" },
+                    "nil": { "type": "string" },
+                    "shipping": {
+                        "type": "object",
+                        "properties": {
+                            "city": { "type": "string" },
+                            "zip": { "type": "integer" }
+                        }
+                    },
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sku": { "type": "string" },
+                                "qty": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "metadata": {
+                        "type": "object",
+                        "additionalProperties": { "type": "integer" }
+                    },
+                    "duplicate_demo": {
+                        "type": "object",
+                        "properties": {
+                            "tag": { "type": "string" }
+                        }
+                    },
+                    "schema_mismatch_array": {
+                        "type": "array",
+                        "items": { "type": "integer" }
+                    },
+                    "closed_object": {
+                        "type": "object",
+                        "additionalProperties": false
+                    },
+                    "open_object": {
+                        "type": "object",
+                        "additionalProperties": true
+                    },
+                    "payload_text": { "type": "object" },
+                    "items_text": { "type": "array" }
+                }
+            }),
+        )]);
+
+        let converted = schemas.convert_params_with_schema(
+            "create_order",
+            vec![
+                ("user_id".to_string(), text("42")),
+                ("urgent".to_string(), text("true")),
+                ("note".to_string(), text("Please leave at front desk.")),
+                ("nil".to_string(), text("NULL")),
+                (
+                    "shipping".to_string(),
+                    elements(vec![
+                        elem("city", text("Singapore")),
+                        elem("zip", text("018956")),
+                    ]),
+                ),
+                (
+                    "items".to_string(),
+                    elements(vec![
+                        elem(
+                            "item1",
+                            elements(vec![elem("sku", text("book-001")), elem("qty", text("2"))]),
+                        ),
+                        elem(
+                            "item2",
+                            elements(vec![elem("sku", text("pen-007")), elem("qty", text("5"))]),
+                        ),
+                    ]),
+                ),
+                (
+                    "metadata".to_string(),
+                    elements(vec![elem("score", text("42")), elem("rank", text("7"))]),
+                ),
+                (
+                    "duplicate_demo".to_string(),
+                    elements(vec![elem("tag", text("a")), elem("tag", text("b"))]),
+                ),
+                (
+                    "closed_object".to_string(),
+                    elements(vec![elem("unknown", text("x"))]),
+                ),
+                (
+                    "open_object".to_string(),
+                    elements(vec![elem("unknown", text("y"))]),
+                ),
+                ("payload_text".to_string(), text(r#"{"x":1}"#)),
+                ("items_text".to_string(), text("[1,2]")),
+                (
+                    "unknown_struct".to_string(),
+                    elements(vec![
+                        elem("a", text("1")),
+                        elem("a", text("2")),
+                        elem("nil", text("null")),
+                    ]),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            Value::Object(converted),
+            json!({
+                "user_id": 42,
+                "urgent": true,
+                "note": "Please leave at front desk.",
+                "nil": null,
+                "shipping": {
+                    "city": "Singapore",
+                    "zip": 18956
+                },
+                "items": [
+                    {
+                        "sku": "book-001",
+                        "qty": 2
+                    },
+                    {
+                        "sku": "pen-007",
+                        "qty": 5
+                    }
+                ],
+                "metadata": {
+                    "score": 42,
+                    "rank": 7
+                },
+                "duplicate_demo": {
+                    "tag": ["a", "b"]
+                },
+                "closed_object": {
+                    "unknown": "x"
+                },
+                "open_object": {
+                    "unknown": "y"
+                },
+                "payload_text": {
+                    "x": 1
+                },
+                "items_text": [1, 2],
+                "unknown_struct": {
+                    "a": ["1", "2"],
+                    "nil": null
+                }
+            })
+        );
     }
 }

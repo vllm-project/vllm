@@ -110,7 +110,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             self._scheduler_mmap = scheduler_mmap
 
             # Create primary tier (CPU-based)
-            assert len(self.gpu_block_size) == 1
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
