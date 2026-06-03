@@ -6985,55 +6985,53 @@ class GPUModelRunner(
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
-        layout: KVCacheLayout | None = None,
+        layout: KVCacheLayout,
     ) -> dict[str, torch.Tensor]:
         """Allocate backing tensors and reshape into per-layer [B,H,N,C] views.
 
         Returns: a dict mapping layer-name -> view of the backing tensor.
         """
-        if layout is None:
-            layout = resolve_kv_cache_layout(
-                tuple(g.backend for g in self._attn_group_iterator())
-            )
-
         kv_caches: dict[str, torch.Tensor] = {}
 
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            num_layer_slots = len(kv_cache_tensor.shared_by)
             buf = torch.zeros(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
 
-            layer_to_slot: dict[str, int] = {}
+            layer_to_slot_idx: dict[str, int] = {}
+
             for slot_idx, slot_layers in enumerate(kv_cache_tensor.shared_by):
                 for layer_name in slot_layers:
-                    layer_to_slot[layer_name] = slot_idx
+                    layer_to_slot_idx[layer_name] = slot_idx
 
-            tensor_layers = set(layer_to_slot)
-            slot_bytes = kv_cache_tensor.size // num_layer_slots
-            for group in self._kv_cache_spec_attn_group_iterator():
-                if group.kv_cache_group_id >= len(kernel_block_sizes):
+            num_slots = len(kv_cache_tensor.shared_by)
+            bytes_per_slot = kv_cache_tensor.size // num_slots
+
+            layers_shared_by_tensor = set(layer_to_slot_idx.keys())
+            for g in self._kv_cache_spec_attn_group_iterator():
+                if g.kv_cache_group_id >= len(kernel_block_sizes):
                     continue
-                layer_names = [n for n in group.layer_names if n in tensor_layers]
+                layer_names = [n for n in g.layer_names if n in layers_shared_by_tensor]
                 if not layer_names:
                     continue
-                spec = group.kv_cache_spec
-                kernel_block_size = kernel_block_sizes[group.kv_cache_group_id]
+                spec = g.kv_cache_spec
+                kernel_block_size = kernel_block_sizes[g.kv_cache_group_id]
 
-                num_blocks = slot_bytes // spec.page_size_bytes
+                num_blocks = bytes_per_slot // spec.page_size_bytes
                 num_blocks_per_kv_block = spec.block_size // kernel_block_size
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                views = reshape_kv_cache(
+                multi_slot_kv_cache = reshape_kv_cache(
                     buf,
                     spec,
                     kernel_num_blocks,
-                    num_layer_slots=num_layer_slots,
+                    num_layer_slots=num_slots,
                     layout=layout,
                     block_size=kernel_block_size,
                 )
                 for layer_name in layer_names:
-                    kv_caches[layer_name] = views[layer_to_slot[layer_name]]
+                    layer_view = multi_slot_kv_cache[layer_to_slot_idx[layer_name]]
+                    kv_caches[layer_name] = layer_view
 
         return kv_caches
 
@@ -7052,8 +7050,11 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
+        layout = resolve_kv_cache_layout(
+            tuple(g.backend for g in self._attn_group_iterator())
+        )
         kv_caches = self._allocate_and_reshape_kv_cache(
-            kv_cache_config, kernel_block_sizes
+            kv_cache_config, kernel_block_sizes, layout=layout
         )
 
         # Set up cross-layer KV cache sharing
@@ -7179,9 +7180,9 @@ class GPUModelRunner(
         self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
         self._bind_routed_experts_capturer(self.routed_experts_capturer)
 
-        # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on the
-        # sync scheduling path. Shape/dtype mirror the device capturer
-        # exactly so ``copy_`` is a straight memcpy.
+        # Pinned CPU buffer for non-blocking D2H of ``routing_data`` on
+        # the sync scheduling path. Shape / dtype mirror the device
+        # capturer exactly so ``copy_`` is a straight memcpy.
         self.routed_experts_cpu = torch.empty(
             self.routed_experts_capturer.device_buffer.shape,
             dtype=self.routed_experts_capturer.device_buffer.dtype,

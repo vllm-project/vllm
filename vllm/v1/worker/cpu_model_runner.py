@@ -128,7 +128,7 @@ class CPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int],
-        layout: KVCacheLayout | None = None,
+        layout: KVCacheLayout = KVCacheLayout.LBHNC,
     ) -> dict[str, torch.Tensor]:
         # Re-view the interleaved K|V content dim as separate head groups so
         # the backend can slice contiguous per-head K/V:

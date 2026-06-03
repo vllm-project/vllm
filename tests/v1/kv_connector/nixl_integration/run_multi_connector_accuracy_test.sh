@@ -8,7 +8,9 @@
 # wrapping NixlConnector and OffloadingConnector, then runs gsm8k accuracy via
 # test_accuracy.py.
 #
-# Runs the MultiConnector configuration with standard KV layout.
+# Runs two configurations:
+#   1. Standard KV layout (LBHNC)
+#   2. Cross-layer KV layout (BLHNC) via VLLM_KV_CACHE_LAYOUT
 #
 # Usage:
 #   bash tests/v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
@@ -174,7 +176,14 @@ run_tests_for_model() {
 # ── Main ─────────────────────────────────────────────────────────────────
 
 for model in "${MODELS[@]}"; do
-  run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector layout"
+  if [[ -z "${SKIP_NORMAL_LAYOUT:-}" ]]; then
+    run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector normal layout"
+  fi
+
+  if [[ -z "${SKIP_CROSS_LAYERS:-}" ]]; then
+    VLLM_KV_CACHE_LAYOUT=BLHNC \
+      run_tests_for_model "$model" "$KV_CONFIG_NORMAL" "MultiConnector cross-layer layout"
+  fi
 done
 
 echo "All MultiConnector accuracy tests passed!"

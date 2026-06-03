@@ -492,7 +492,6 @@ class MLAAttentionSpec(FullAttentionSpec):
     alignment: int | None = None  # Default to None for no padding.
     tokens_per_state: int = 1
     model_version: str | None = None
-    num_heads: int = 1
 
     def __post_init__(self):
         super().__post_init__()
@@ -531,11 +530,11 @@ class MLAAttentionSpec(FullAttentionSpec):
             "All attention layers in the same KV cache group must be MLAAttentionSpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.tokens_per_state for spec in specs)
+        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
+            and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
@@ -549,7 +548,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             cache_dtype_str=cache_dtype_str_set.pop(),
-            tokens_per_state=compress_ratio_set.pop(),
+            tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
         )
 
@@ -661,7 +660,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     alignment: int | None = None  # Default to None for no padding.
     tokens_per_state: int = 1
     model_version: str | None = None
-    num_heads: int = 1
 
     def __post_init__(self):
         super().__post_init__()
@@ -699,12 +697,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             "SlidingWindowMLASpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.tokens_per_state for spec in specs)
+        tokens_per_state_set = set(spec.tokens_per_state for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
-            and len(compress_ratio_set) == 1
+            and len(tokens_per_state_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
         ), (
@@ -720,7 +718,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
-            tokens_per_state=compress_ratio_set.pop(),
+            tokens_per_state=tokens_per_state_set.pop(),
             model_version=model_version_set.pop(),
         )
 

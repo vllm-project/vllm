@@ -77,13 +77,13 @@ def make_nvfp4_kv_cache(
     # Production layout: 4D (B, 2*H, N, full_dim) where K heads occupy
     # the first H heads and V heads occupy the second H heads.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
-    kv_cache_hnc = torch.zeros(
+    kv_cache_hnd = torch.zeros(
         (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=kv_bf16_hnd.device,
     )
-    kv_cache_nhc = kv_cache_hnc.permute(0, 2, 1, 3)
-    k_view_nhc, v_view_nhc = kv_cache_nhc.split(num_kv_heads, dim=-2)
+    kv_cache_nhd = kv_cache_hnd.permute(0, 2, 1, 3)
+    k_view_nhd, v_view_nhd = kv_cache_nhd.split(num_kv_heads, dim=-2)
 
     # Flatten input KV → token tensors [B*N, H, head_size] for the kernel.
     num_tokens = num_blocks * block_size
@@ -102,8 +102,8 @@ def make_nvfp4_kv_cache(
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         k_tokens,
         v_tokens,
-        k_view_nhc,
-        v_view_nhc,
+        k_view_nhd,
+        v_view_nhd,
         slot_mapping,
         "nvfp4",
         kv_scale_tensor,
@@ -111,7 +111,7 @@ def make_nvfp4_kv_cache(
     )
 
     # Split into data/scale views in HNC order for trtllm kernel.
-    k_cache_hnc, v_cache_hnc = kv_cache_hnc.split(num_kv_heads, dim=1)
+    k_cache_hnc, v_cache_hnc = kv_cache_hnd.split(num_kv_heads, dim=1)
     k_data, k_scales = nvfp4_split_data_scale(k_cache_hnc)
     v_data, v_scales = nvfp4_split_data_scale(v_cache_hnc)
 
