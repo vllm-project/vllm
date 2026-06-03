@@ -16,10 +16,10 @@ from cuda.bindings.driver import CUstream
 # The closure captures all K-derived constants, so the kernel has zero runtime
 # loop overhead
 # TODO (roberto): add 256-bit instructions support.
-def make_host_bf16(k_val: int):
+def make_host_bf16(k_val: int, bs: int = 128):
     # Main loop constants
     _VPT = 8  # vectors per thread: 8 × bf16 (2 bytes) = 16 bytes = 128-bit load
-    _BS = 256  # block size: 256 threads
+    _BS = bs  # block size: 256 threads
     _KPI = _VPT * _BS  # = 2048 K elements processed per main-loop iteration
     _k_main = k_val // _KPI  # main loop iters
 
@@ -84,22 +84,17 @@ def make_host_bf16(k_val: int):
                 (VPT,), elem
             )  # allocates 8 registers for the loaded data
             cute.autovec_copy(bt, br)  # GMEM -> RF
-            # Batch-load all A tokens into registers
-            ar_all = cute.make_rmem_tensor((M, VPT), elem)
+            # Convert B to fp32 once, reuse across all M tokens
+            br_f32 = cute.make_rmem_tensor((VPT,), cutlass.Float32)
+            for v in cutlass.range_constexpr(VPT):
+                br_f32[v] = br[v].to(cutlass.Float32)
             for m in cutlass.range_constexpr(M):
                 ap = (gA.iterator + (m * K_dim + kb)).align(16)
                 at = cute.make_tensor(ap, cute.make_layout((VPT,)))
                 ar = cute.make_rmem_tensor((VPT,), elem)
                 cute.autovec_copy(at, ar)
-                # This indirection exists because autovec_copy needs a 1D target
                 for v in cutlass.range_constexpr(VPT):
-                    ar_all[m, v] = ar[v]  # register-to-register copy
-            # FMA Compute (all data in registers)
-            for m in cutlass.range_constexpr(M):
-                for v in cutlass.range_constexpr(VPT):
-                    acc[m] = acc[m] + ar_all[m, v].to(cutlass.Float32) * br[v].to(
-                        cutlass.Float32
-                    )  # upcast from bf16 to FP32 before multiply-add — no tensor cores
+                    acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
 
         VPT_T: cutlass.Constexpr = _VPT_T
         KPT: cutlass.Constexpr = _KPT
@@ -199,10 +194,11 @@ def make_host_bf16(k_val: int):
     ):
         dotprod_bf16_lf(gA, gB, gC, M, K_dim, N_dim).launch(
             grid=[N_dim, 1, 1],  # one CTA per expert
-            block=[256, 1, 1],
-            smem=M * 4 * 8,
+            block=[bs, 1, 1],
+            smem=M * 4 * (bs // 32),
             stream=stream,
-            use_pdl=True,
+            use_pdl=True, 
+            min_blocks_per_mp=1,
         )
 
     return host_bf16_lf

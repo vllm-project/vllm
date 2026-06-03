@@ -35,6 +35,11 @@ _compiled_cache: dict[tuple[int, int], object] = {}
 # Split-K: keyed on (split_k, num_stages) -> compiled callable, fully shape-dynamic.
 _splitk_cache: dict = {}
 
+# Per-model tuned configs: (K, N) -> {M: ("dotprod", bs) | ("splitk", sk, stages)}
+_TUNED_CONFIGS: dict[tuple[int, int], dict[int, tuple]] = {
+    (7168, 384): {M: ("splitk", 4, 3) for M in range(5, 16)},
+}
+
 # lazy import helper - deferred until first actual kernel call.
 _cute_ctx = None
 
@@ -59,19 +64,17 @@ def _stream():
 
 # Takes flattened 1D tensors. The dot-product kernel uses raw pointer
 # arithmetic, not cute's tiled layout system.
-def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat):
+def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, bs: int = 128):
     cute, from_dlpack, CUstream, current_stream = _cute()
 
-    # N is not in the key.
-    # the kernel handles any N at runtime (one CTA per expert, grid size = N).
-    key = (M, K)
+    key = (M, K, bs)
     if key in _compiled_cache:
         return _compiled_cache[key]
 
     # cache check before any expensive work.
     from ._ll_bf16_dotprod import make_host_bf16
 
-    host_fn = make_host_bf16(K)  # creates a new kernel closure with K baked
+    host_fn = make_host_bf16(K, bs=bs)  # creates a new kernel closure with K baked
     # into all loop bounds as Constexpr
 
     a_c = from_dlpack(
@@ -147,6 +150,17 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     return compiled
 
 
+def _get_config(M: int, K: int, N: int) -> tuple:
+    """Look up tuned config, fall back to default dispatch."""
+    # TODO (roberto): increase search space - autotuning system
+    model_configs = _TUNED_CONFIGS.get((K, N))
+    if model_configs and M in model_configs:
+        return model_configs[M]
+    if M > 4 and K >= 2048:
+        return ("splitk", 8, 2)
+    return ("dotprod", 128)
+
+
 def ll_bf16_gemm(
     hidden_states: torch.Tensor,  # [M, K] bf16
     router_weight: torch.Tensor,  # [N, K] bf16
@@ -157,23 +171,21 @@ def ll_bf16_gemm(
     stream = _stream()
     output = torch.empty(M, N, dtype=output_dtype, device=hidden_states.device)
 
-    # see https://github.com/vllm-project/vllm/pull/42562 for more details.
-    if M > 4 and K >= 2048:
-        # TODO (roberto): increase search space - autotuning system
+    config = _get_config(M, K, N)
+
+    if config[0] == "splitk":
+        _, split_k, num_stages = config
         compiled = _get_compiled_splitk(
-            hidden_states,
-            router_weight,
-            output,
-            split_k=8,
-            num_stages=2,
+            hidden_states, router_weight, output,
+            split_k=split_k, num_stages=num_stages,
         )
         compiled(hidden_states, router_weight, output, stream, 1.0)
     else:
-        # Dot-product path: flattened to 1D, N passed as runtime argument.
+        _, bs = config
         a_flat = hidden_states.reshape(-1)
         b_flat = router_weight.reshape(-1)
         c_flat = output.reshape(-1)
-        compiled = _get_compiled_dotprod(M, K, N, a_flat, b_flat, c_flat)
+        compiled = _get_compiled_dotprod(M, K, N, a_flat, b_flat, c_flat, bs=bs)
         compiled(a_flat, b_flat, c_flat, N, stream)
 
     return output
