@@ -4,6 +4,7 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -77,6 +78,31 @@ DEVICES = (
 
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
+
+
+def test_replicated_linear_lora_preserves_clipped_linear_order():
+    lora_linear = ReplicatedLinearWithLoRA.__new__(ReplicatedLinearWithLoRA)
+    lora_linear.base_layer = SimpleNamespace(
+        use_clipped_linears=True,
+        input_min=torch.tensor(-1.0),
+        input_max=torch.tensor(1.0),
+        output_min=torch.tensor(-0.5),
+        output_max=torch.tensor(0.5),
+    )
+
+    seen_inputs: list[torch.Tensor] = []
+
+    def apply_sync(x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        seen_inputs.append(x)
+        return torch.tensor([[-2.0, 0.25, 2.0]])
+
+    lora_linear._apply_sync = apply_sync
+
+    output = lora_linear.apply(torch.tensor([[-2.0, 0.25, 2.0]]))
+
+    torch.testing.assert_close(seen_inputs[0], torch.tensor([[-1.0, 0.25, 1.0]]))
+    torch.testing.assert_close(output, torch.tensor([[-0.5, 0.25, 0.5]]))
+
 
 NUM_RANDOM_SEEDS = 2
 

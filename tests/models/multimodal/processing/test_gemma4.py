@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import pytest
 import torch
 from PIL import Image as PILImage
 
-from vllm.model_executor.models.gemma4_mm import Gemma4ImagePixelInputs
+from vllm.model_executor.models.gemma4_mm import (
+    Gemma4ForConditionalGeneration,
+    Gemma4ImagePixelInputs,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
@@ -46,6 +50,47 @@ def test_gemma4_image_batching_keeps_variable_patch_counts_unstacked():
         torch.Size([10080, 768]),
         torch.Size([2520, 768]),
     ]
+
+
+def _make_gemma4_model_for_lora_counts():
+    model = Gemma4ForConditionalGeneration.__new__(Gemma4ForConditionalGeneration)
+    model.config = SimpleNamespace(
+        vision_config=SimpleNamespace(
+            pooling_kernel_size=3,
+            default_output_length=280,
+        ),
+    )
+    model.multimodal_config = SimpleNamespace(mm_processor_kwargs={})
+    return model
+
+
+def test_gemma4_mm_lora_runtime_counts_use_padded_tower_tokens():
+    model = _make_gemma4_model_for_lora_counts()
+    mm_kwargs = {
+        "pixel_values": SimpleNamespace(data=torch.empty(2520, 768)),
+    }
+
+    counts = model.get_mm_lora_token_counts(
+        modality="image",
+        mm_kwargs=mm_kwargs,
+        num_mm_embeds=256,
+    )
+
+    assert counts.tower == 2520
+    assert counts.connector == 256
+
+
+def test_gemma4_mm_lora_init_budget_covers_padded_image_batches():
+    model = _make_gemma4_model_for_lora_counts()
+
+    counts = model.get_mm_lora_token_counts(
+        modality="image",
+        mm_kwargs=None,
+        num_mm_embeds=16450,
+    )
+
+    assert counts.tower >= 151200
+    assert counts.connector == 16450
 
 
 @pytest.mark.parametrize(

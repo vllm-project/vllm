@@ -213,17 +213,21 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        modality = mm_budget.get_modality_with_max_tokens()
         max_lora_tokens = min(
             mm_budget.get_encoder_budget(),
             max_num_batched_tokens,
         )
-        lora_token_counts = self.model.get_mm_lora_token_counts(
-            modality=modality,
-            mm_kwargs=None,
-            num_mm_embeds=max_lora_tokens,
+        lora_token_counts_by_modality = [
+            self.model.get_mm_lora_token_counts(
+                modality=modality,
+                mm_kwargs=None,
+                num_mm_embeds=max_lora_tokens,
+            )
+            for modality in mm_budget.mm_max_toks_per_item
+        ]
+        num_encoder_tokens = max(
+            counts.tower for counts in lora_token_counts_by_modality
         )
-        num_encoder_tokens = lora_token_counts.tower
 
         # Tower wrappers
         tower_punica_wrapper = get_punica_wrapper(
@@ -237,7 +241,14 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            connector_tokens = lora_token_counts.connector
+            connector_tokens = max(
+                (
+                    counts.connector
+                    for counts in lora_token_counts_by_modality
+                    if counts.connector is not None
+                ),
+                default=None,
+            )
             if connector_tokens is not None:
                 connector_punica_wrapper = get_punica_wrapper(
                     connector_tokens,
@@ -367,12 +378,18 @@ class LoRAModelManager:
             #  - given an input 'x' return ''
             return module_name.rpartition(".")[0]
 
+        # wrapped_modules_by_id: dict[int, BaseLayerWithLoRA] = {}
+
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
                 continue
 
             if not self._match_target_modules(module_name):
                 continue
+
+            # if (wrapped_module := wrapped_modules_by_id.get(id(module))) is not None:
+            #     replace_submodule(self.model, module_name, wrapped_module)
+            #     continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
@@ -460,6 +477,8 @@ class LoRAModelManager:
                 logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
+            # wrapped_modules_by_id[id(module)] = new_module
+            # wrapped_modules_by_id[id(new_module)] = new_module
 
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.

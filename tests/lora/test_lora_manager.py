@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -28,6 +29,8 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
 from vllm.model_executor.layers.fused_moe import GateLinear
+from vllm.model_executor.models.interfaces import MultiModalLoRATokenCounts
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -159,6 +162,94 @@ def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy
     )
 
 
+def test_shared_lora_module_alias_reuses_wrapper(default_vllm_config, dist_init):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class SelfDecoderAlias(nn.Module):
+        def __init__(self, proj: nn.Module) -> None:
+            super().__init__()
+            self.proj = proj
+
+    class SharedProjectionModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace()
+            self.proj = ReplicatedLinear(10, 10, bias=False)
+            self.self_decoder = SelfDecoderAlias(self.proj)
+
+    model = SharedProjectionModel()
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["proj"],
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert manager.model.proj is manager.model.self_decoder.proj
+    assert isinstance(manager.model.proj, ReplicatedLinearWithLoRA)
+    assert "proj" in manager.modules
+    assert "self_decoder.proj" not in manager.modules
+
+
+def test_nested_shared_lora_alias_does_not_reset_weights(
+    default_vllm_config, dist_init
+):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class DecoderAlias(nn.Module):
+        def __init__(self, layers: nn.ModuleList) -> None:
+            super().__init__()
+            self.decoder_layers = layers
+
+    class SharedLayerModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace()
+            self.layers = nn.ModuleList(
+                [nn.ModuleDict({"proj": ReplicatedLinear(10, 10, bias=False)})]
+            )
+            self.self_decoder = DecoderAlias(self.layers)
+
+    device = torch.device(DEVICES[0])
+    model = SharedLayerModel()
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["proj"],
+        ),
+        device,
+    )
+
+    assert (
+        manager.model.layers[0]["proj"]
+        is manager.model.self_decoder.decoder_layers[0]["proj"]
+    )
+    assert isinstance(manager.model.layers[0]["proj"], ReplicatedLinearWithLoRA)
+    assert "layers.0.proj" in manager.modules
+    assert "self_decoder.decoder_layers.0.proj" not in manager.modules
+
+    lora = create_lora(1, manager.model, ["layers.0.proj"], device)
+    manager.add_adapter(lora)
+    manager.activate_adapter(1)
+
+    assert manager.model.layers[0]["proj"].lora_a_stacked[0][0].abs().sum() > 0
+
+
 def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
     model = dummy_model
     model.add_module("router_gate", GateLinear(10, 4, bias=False))
@@ -261,6 +352,85 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     }
 
     assert manager.get_dummy_lora_warmup_rank(8) == 32
+
+
+def test_mm_lora_init_uses_largest_tower_token_budget(monkeypatch):
+    import vllm.lora.model_manager as model_manager_module
+
+    wrapper_calls: list[tuple[int, int]] = []
+
+    def fake_get_punica_wrapper(
+        num_tokens: int,
+        *,
+        max_batches: int,
+        device: torch.device,
+        lora_config: object,
+    ):
+        wrapper_calls.append((num_tokens, max_batches))
+        return object()
+
+    class FakeBudget:
+        mm_max_items_per_prompt = {"image": 1, "video": 1}
+        mm_max_toks_per_item = {"image": 280, "video": 2496}
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def get_encoder_budget(self) -> int:
+            return 16384
+
+        def get_modality_with_max_tokens(self) -> str:
+            return "video"
+
+    class FakeModel:
+        def get_mm_mapping(self) -> MultiModelKeys:
+            return MultiModelKeys.from_string_field(
+                language_model="language_model",
+                connector="connector",
+                tower_model="tower",
+            )
+
+        def get_num_mm_encoder_tokens(self, num_mm_embeds: int) -> int:
+            return num_mm_embeds
+
+        def get_mm_lora_token_counts(
+            self,
+            *,
+            modality: str,
+            mm_kwargs: object,
+            num_mm_embeds: int,
+        ) -> MultiModalLoRATokenCounts:
+            assert mm_kwargs is None
+            assert num_mm_embeds == 16384
+            if modality == "image":
+                return MultiModalLoRATokenCounts(tower=592200, connector=16384)
+            if modality == "video":
+                return MultiModalLoRATokenCounts(tower=148050, connector=16384)
+            raise AssertionError(f"unexpected modality: {modality}")
+
+    monkeypatch.setattr(
+        model_manager_module,
+        "get_punica_wrapper",
+        fake_get_punica_wrapper,
+    )
+    monkeypatch.setattr(model_manager_module, "MultiModalBudget", FakeBudget)
+
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.model = FakeModel()
+    manager.supports_mm = True
+    manager.max_num_seqs = 1024
+    manager.device = torch.device("cpu")
+    manager.lora_config = SimpleNamespace(enable_tower_connector_lora=True)
+    manager.punica_wrapper_mapping = {}
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+    )
+
+    manager._maybe_init_mm(vllm_config, max_num_batched_tokens=16384)
+
+    assert wrapper_calls[1][0] == 592200
+    assert wrapper_calls[1][0] != 1024 * 9 * 2520
 
 
 @pytest.mark.parametrize("device", DEVICES)
