@@ -169,6 +169,7 @@ python benchmark.py \
 
 # Benchmark settings
 --device DEVICE                     # Device (default: cuda:0)
+--warmup-ms N                       # Warmup window in ms for triton do_bench
 --profile-memory                    # Profile memory usage
 
 # Parameter sweeps

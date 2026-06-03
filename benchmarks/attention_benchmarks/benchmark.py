@@ -497,6 +497,15 @@ def main():
 
     # Benchmark settings
     parser.add_argument("--device", default="cuda:0", help="Device")
+    parser.add_argument(
+        "--warmup-ms",
+        type=int,
+        default=None,
+        help=(
+            "Warmup window in ms for triton's do_bench (default: triton's own). "
+            "Has no effect with CUDA graphs; pass --no-cuda-graphs to use it."
+        ),
+    )
     parser.add_argument("--profile-memory", action="store_true", help="Profile memory")
     parser.add_argument(
         "--kv-cache-dtype",
@@ -666,6 +675,8 @@ def main():
         # Benchmark settings (top-level keys)
         if "device" in yaml_config:
             args.device = yaml_config["device"]
+        if "warmup_ms" in yaml_config:
+            args.warmup_ms = yaml_config["warmup_ms"]
         if "profile_memory" in yaml_config:
             args.profile_memory = yaml_config["profile_memory"]
         if "kv_cache_dtype" in yaml_config:
@@ -736,6 +747,12 @@ def main():
     console.print(f"Batch specs: {', '.join(args.batch_specs)}")
     console.print(f"KV cache dtype: {args.kv_cache_dtype}")
     console.print(f"CUDA graphs: {args.cuda_graphs}")
+    if args.warmup_ms is not None and args.cuda_graphs:
+        console.print(
+            "[yellow]Warning: --warmup-ms is ignored with CUDA graphs "
+            "(do_bench_cudagraph warms up internally). Pass --no-cuda-graphs "
+            "to use it.[/]"
+        )
     console.print()
 
     init_workspace_manager(args.device)
@@ -793,6 +810,7 @@ def main():
                         kv_cache_dtype=args.kv_cache_dtype,
                         use_cuda_graphs=args.cuda_graphs,
                         ncu_profile=args.ncu_profile,
+                        warmup_ms=args.warmup_ms,
                     )
 
                     # Add decode pipeline config
@@ -949,6 +967,7 @@ def main():
             "kv_cache_dtype": args.kv_cache_dtype,
             "use_cuda_graphs": args.cuda_graphs,
             "ncu_profile": args.ncu_profile,
+            "warmup_ms": args.warmup_ms,
             "num_splits": getattr(args, "num_splits", None),
             "swap_ab": getattr(args, "swap_ab", False),
             "kv_lora_rank": getattr(args, "kv_lora_rank", None),
@@ -978,6 +997,7 @@ def main():
             "kv_cache_dtype": args.kv_cache_dtype,
             "use_cuda_graphs": args.cuda_graphs,
             "ncu_profile": args.ncu_profile,
+            "warmup_ms": args.warmup_ms,
             "num_splits": getattr(args, "num_splits", None),
             "swap_ab": getattr(args, "swap_ab", False),
         }
@@ -1012,6 +1032,7 @@ def main():
                             kv_cache_dtype=args.kv_cache_dtype,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
+                            warmup_ms=args.warmup_ms,
                             num_splits=getattr(args, "num_splits", None),
                             swap_ab=getattr(args, "swap_ab", False),
                         )
@@ -1054,6 +1075,7 @@ def main():
                             block_size=args.block_size,
                             device=args.device,
                             profile_memory=args.profile_memory,
+                            warmup_ms=args.warmup_ms,
                             prefill_backend=pb,
                         )
 

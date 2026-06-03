@@ -15,7 +15,13 @@ from contextlib import contextmanager
 
 import torch
 from batch_spec import parse_batch_spec, reorder_for_flashinfer
-from common import BenchmarkConfig, BenchmarkResult, MockLayer, get_attention_scale
+from common import (
+    BenchmarkConfig,
+    BenchmarkResult,
+    MockLayer,
+    get_attention_scale,
+    run_do_bench,
+)
 
 from vllm.config import (
     CacheConfig,
@@ -28,7 +34,6 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_kv_cache_layout,
@@ -436,16 +441,7 @@ def _run_single_benchmark(
             "max": 0.0,
         }
     else:
-        if config.use_cuda_graphs:
-            all_ms = triton.testing.do_bench_cudagraph(
-                benchmark_fn,
-                return_mode="all",
-            )
-        else:
-            all_ms = triton.testing.do_bench(
-                benchmark_fn,
-                return_mode="all",
-            )
+        all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
 
         # Convert ms to seconds per layer
         times = [t / 1000.0 / config.num_layers for t in all_ms]

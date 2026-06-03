@@ -15,6 +15,8 @@ from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
 
+from vllm.triton_utils import triton
+
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     """
@@ -32,6 +34,21 @@ def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     except Exception:
         # Fallback for unparsable specs
         return (0, 0, 0)
+
+
+def run_do_bench(
+    benchmark_fn,
+    use_cuda_graphs: bool,
+    warmup_ms: int | None = None,
+) -> list[float]:
+    kwargs: dict[str, Any] = {"return_mode": "all"}
+    if use_cuda_graphs:
+        result = triton.testing.do_bench_cudagraph(benchmark_fn, **kwargs)
+    else:
+        if warmup_ms is not None:
+            kwargs["warmup"] = warmup_ms
+        result = triton.testing.do_bench(benchmark_fn, **kwargs)
+    return result
 
 
 # Mock classes for vLLM attention infrastructure
@@ -226,6 +243,7 @@ class BenchmarkConfig:
     profile_memory: bool = False
     use_cuda_graphs: bool = False
     ncu_profile: bool = False
+    warmup_ms: int | None = None
 
     # "auto" or "fp8"
     kv_cache_dtype: str = "auto"
