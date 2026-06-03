@@ -1423,7 +1423,7 @@ def use_cascade_attention(
 
     if fa_version == 3 and pack_gqa:
         # By using PackGQA
-        # [Q_0, Q_1,...., Q_15] are packed together and is processed by one CTA
+        # [Q_0, Q_1,...., Q_n] are packed together and is processed by one CTA
         cascade_ctas = num_kv_heads * cdiv(num_tokens * num_queries_per_kv, q_tile_size)
         cascade_waves = cdiv(cascade_ctas, num_sms)
         cascade_time = cascade_waves * num_prefix_tiles
