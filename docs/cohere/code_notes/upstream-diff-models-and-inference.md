@@ -54,7 +54,7 @@ Notable contract:
 
 ## 5) Spec Decode and Multimodal Benchmarking Utilities
 
-`examples/offline_inference/spec_decode.py` now supports:
+`examples/features/speculative_decoding/spec_decode_offline.py` (Cohere CI spec-decode entrypoint) now supports:
 
 - `ngram-eagle` method,
 - custom multimodal prompts,

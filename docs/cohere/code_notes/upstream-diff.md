@@ -4,6 +4,8 @@ This is the top-level tracker for fork-vs-upstream understanding, with deep tech
 
 Many notes were originally derived from analyzing the branch delta against upstream `v0.14.1`, then expanded into behavior-focused documentation.
 
+For **ownership tagging and reduction planning** on the v0.21 upgrade, see [`../upstream-upgrade-customization-inventory.md`](../upstream-upgrade-customization-inventory.md).
+
 ## Read This First
 
 - `ci-and-automation.md`: CI graph, dispatcher matrix logic, result upload semantics, rerere rebase automation.

@@ -24,7 +24,7 @@ Critical contract:
 This applies to **all** platform Dockerfiles:
 
 - `docker/Dockerfile` (NVIDIA/CUDA) — wheel retained via multi-stage `COPY --from`.
-- `docker/Dockerfile.rocm` (AMD/ROCm) — same pattern.
+- `docker/Dockerfile.rocm` (AMD/ROCm) — same pattern in the `final` stage (and `test`).
 - `docker/Dockerfile.cpu` — `COPY --from=vllm-build /vllm-workspace/dist /app/cohere/dist` persists the wheel so the CI wheel-upload pipeline (`build-and-push.yaml`) can extract it with crane.
 
 Why this matters:

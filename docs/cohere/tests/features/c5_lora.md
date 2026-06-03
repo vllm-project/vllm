@@ -69,7 +69,7 @@ Features from [Feature Matrix](../feature_matrix.md)
    - [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py) -- `C5_SANITY_PROMPTS` mixes English (capitals, NBA, Python `add`) with Chinese (`中国的首都是哪里?`)
 2. **Cohere Feature**:
 3. **Model Architecture**: C5 Arch (compatible)
-   - [`vllm/model_executor/models/commandr.py`](../../../../vllm/model_executor/models/commandr.py) -- `Cohere2MoeForCausalLM` declares `SupportsLoRA` and `packed_modules_mapping` for `qkv_proj` / `gate_up_proj`
+   - [`vllm/model_executor/models/cohere2_moe.py`](../../../../vllm/model_executor/models/cohere2_moe.py) -- `Cohere2MoeForCausalLM` declares `SupportsLoRA` and `packed_modules_mapping` for `qkv_proj` / `gate_up_proj`
 4. **Quantization**: BF16 (compatible)
    - [`tests/cohere/scripts/download_checkpoints.sh`](../../../../tests/cohere/scripts/download_checkpoints.sh) -- `download_model_arch_c5_lora_assets` pulls `c5_3a30t_petfatt-141_hf_export_bf16` into `c5-3a30t-petfatt-bf16`
 5. **Hardware**: H100, B200, GB200 (compatible); A100, MI300x (not compatible)
@@ -88,7 +88,7 @@ Dummy LoRA generator:
 CI entry:
 [`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh) -- `run_model_arch_c5_lora_checks`
 Runtime paths:
-[`vllm/model_executor/models/commandr.py`](../../../../vllm/model_executor/models/commandr.py),
+[`vllm/model_executor/models/cohere2_moe.py`](../../../../vllm/model_executor/models/cohere2_moe.py),
 [`vllm/lora/worker_manager.py`](../../../../vllm/lora/worker_manager.py)
 
 ### Setup

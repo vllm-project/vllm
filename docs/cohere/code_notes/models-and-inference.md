@@ -54,7 +54,7 @@ Notable contract:
 
 ## 5) Spec Decode and Multimodal Benchmarking Utilities
 
-`examples/offline_inference/spec_decode.py` now supports:
+`examples/features/speculative_decoding/spec_decode_offline.py` now supports:
 
 - `ngram-eagle` method,
 - custom multimodal prompts,
@@ -206,15 +206,15 @@ Validation checklist:
 
 ## 9) LoRA Serving for `cohere2moe` (Cohere MoE Models)
 
-`commandr.py` and related files include several fixes to enable LoRA adapter serving for `Cohere2MoE` models:
+LoRA adapter serving for `Cohere2MoE` is implemented in `cohere2_moe.py` (registry loads that module for `Cohere2MoeForCausalLM`). `commandr.py` still contains an unused duplicate `Cohere2Moe*` stack from pre-v0.21. Shared layer/config fixes:
 
 - **`_CONFIG_REGISTRY` entry** (`vllm/transformers_utils/config.py`): `cohere2moe` maps to the string `"Cohere2Config"` for lazy resolution via `LazyConfigDict` (see `vllm/transformers_utils/configs/__init__.py` `_CLASS_TO_MODULE`), avoiding `NameError` when `VLLM_USE_MODELSCOPE` is enabled.
 
-- **`hf_to_vllm_mapper`** (`Cohere2MoeForCausalLM`): strips the `backend.model.` prefix that the Faraday training framework adds when saving LoRA checkpoints, so vLLM can find weights at `layers.X...` paths.
+- **`hf_to_vllm_mapper`** (`cohere2_moe.Cohere2MoeForCausalLM`): strips the `backend.model.` prefix that the Faraday training framework adds when saving LoRA checkpoints, so vLLM can find weights at `layers.X...` paths.
 
-- **`get_expert_mapping()`** (`Cohere2MoeModel` and `Cohere2MoeForCausalLM`): exposes `FusedMoE.make_expert_params_mapping(self, ...)` so vLLM can build the correct expert-weight → param-name mapping for MoE LoRA. The `self` positional argument is required by the v0.17.1 signature.
+- **`get_expert_mapping()`** (`cohere2_moe.Cohere2MoeModel` and `Cohere2MoeForCausalLM`): exposes `FusedMoE.make_expert_params_mapping(self, ...)` so vLLM can build the correct expert-weight → param-name mapping for MoE LoRA. The `self` positional argument is required by the v0.17.1 signature.
 
-- **LoRA base-layer unwrap** (`Cohere2MoeDecoderLayer`): `getattr(self.mlp.experts, "base_layer", self.mlp.experts)` is used before calling `must_reduce_shared_expert_outputs()` so the check works even when the experts layer is wrapped by LoRA.
+- **LoRA base-layer unwrap** (`commandr.Cohere2MoeDecoderLayer` only; upstream `cohere2_moe` decoder uses a simpler residual path): `getattr(self.mlp.experts, "base_layer", self.mlp.experts)` before `must_reduce_shared_expert_outputs()` when TP MoE all-reduce is enabled.
 
 - **`lora_extra_vocab_size` on `LoRAConfig`** (`vllm/config/lora.py`): the fork adds this field (default `0`) so `Cohere2MoeModel` / `Cohere2MoeForCausalLM` can size embedding tables consistently with other LoRA-enabled models without silent `getattr` fallbacks.
 
