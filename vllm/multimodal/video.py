@@ -28,6 +28,60 @@ except ImportError:
 logger = init_logger(__name__)
 
 
+class VideoLoaderRegistry(ExtensionManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processor2backend: dict[str, str] = {}
+
+    @staticmethod
+    def _normalize_registered_video_processors(
+        video_processor: str | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        if video_processor is None:
+            return ()
+
+        if isinstance(video_processor, str):
+            return (video_processor,)
+
+        if all(isinstance(processor, str) for processor in video_processor):
+            return video_processor
+
+        raise TypeError(
+            "video_processor must be a class name or a tuple of class names"
+        )
+
+    def register(
+        self,
+        name: str,
+        *,
+        video_processor: str | tuple[str, ...] | None = None,
+    ):
+        processors = self._normalize_registered_video_processors(video_processor)
+
+        def wrap(cls_to_register):
+            self.name2class[name] = cls_to_register
+            for processor_name in processors:
+                self.processor2backend[processor_name] = name
+            return cls_to_register
+
+        return wrap
+
+    def get_backend_for_video_processor(
+        self,
+        video_processor: str | None,
+    ) -> str | None:
+        if video_processor is None:
+            return None
+
+        return self.processor2backend.get(video_processor)
+
+
+def get_video_loader_backend_for_processor(
+    video_processor: str | None,
+) -> str | None:
+    return VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(video_processor)
+
+
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
@@ -113,7 +167,7 @@ class VideoLoader:
         }
 
 
-VIDEO_LOADER_REGISTRY = ExtensionManager()
+VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
 
 class OpenCVVideoBackendMixin:
@@ -550,7 +604,10 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         )
 
 
-@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+@VIDEO_LOADER_REGISTRY.register(
+    "opencv_dynamic",
+    video_processor="Glm4vVideoProcessor",
+)
 class DynamicVideoBackend(VideoBackend):
     """Duration-aware dynamic-sampling video backend.
 
@@ -639,8 +696,11 @@ class DynamicVideoBackend(VideoBackend):
         )
 
 
-@VIDEO_LOADER_REGISTRY.register("glm4_6v")
-class GLM4_6VVideoBackend(VideoBackend):
+@VIDEO_LOADER_REGISTRY.register(
+    "glmga",
+    video_processor="GlmgaVideoProcessor",
+)
+class GLMGAVideoBackend(VideoBackend):
     @classmethod
     def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
         # Estimate duration from frame count and fps when the container
@@ -740,7 +800,10 @@ class GLM4_6VVideoBackend(VideoBackend):
         return frames, metadata
 
 
-@VIDEO_LOADER_REGISTRY.register("molmo2")
+@VIDEO_LOADER_REGISTRY.register(
+    "molmo2",
+    video_processor="Molmo2VideoProcessor",
+)
 class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod
     def get_candidate_target_fps(
