@@ -169,6 +169,8 @@ class ModelConfig:
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
+    kv_cache_planner_cls: str | None = field(default=None, init=False)
+    """Fully-qualified KV cache planner class declared by the resolved model."""
     allowed_local_media_path: str = ""
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
@@ -607,6 +609,7 @@ class ModelConfig:
         model_info, arch = registry.inspect_model_cls(architectures, self)
         self._model_info = model_info
         self._architecture = arch
+        self.kv_cache_planner_cls = model_info.kv_cache_planner_cls
         logger.info("Resolved architecture: %s", arch)
 
         # Set default tokenizer modes based on model architecture

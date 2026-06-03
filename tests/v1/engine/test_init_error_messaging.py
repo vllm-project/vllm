@@ -37,7 +37,7 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
     config.parallel_config.decode_context_parallel_size = 1
 
     monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_utils.max_memory_usage_bytes",
+        "vllm.models.deepseek_v4.nvidia.kv_cache_planner_utils.max_memory_usage_bytes",
         lambda c, s: 100 * 1024**3,  # 100 GiB
     )
 
