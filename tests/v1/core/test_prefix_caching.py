@@ -21,7 +21,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -3058,3 +3058,43 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
 
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
+
+
+def test_cache_hit_local_and_external():
+    # Regression test for #33775: when a request hits the local prefix cache
+    # in one KV cache group and needs external (connector) blocks in another,
+    # the external allocation of an earlier group must not evict the local
+    # cache-hit blocks of a later group. Otherwise the same physical block can
+    # be handed out twice, producing duplicate block IDs / ref_cnt corruption.
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[2:]
+    req_id = "test"
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    top_blocks = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for _ in range(10):
+        top_blocks.append(head.next_free_block)
+        head = head.next_free_block
+    cache_hit = KVCacheBlocks((top_blocks[:5], top_blocks[5:]))
+
+    manager.allocate_slots(
+        make_request(req_id, [0] * (8 * block_size), block_size, sha256),
+        16,
+        5 * block_size,
+        cache_hit,
+        0,
+        2 * block_size,
+    )
+
+    req_blocks = manager.get_blocks(req_id)
+    req_block_ids = req_blocks.get_block_ids()
+    all_block_ids = req_block_ids[0] + req_block_ids[1]
+    assert len(set(all_block_ids)) == len(all_block_ids), "Block IDs are not unique"
