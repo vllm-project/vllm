@@ -122,10 +122,14 @@ class RejectionSampler:
             input_batch.expanded_idx_mapping,
             input_batch.expanded_local_pos,
             self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.min_p.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
+            # Temperature and min-p were already applied in apply_sampling_params.
+            False,  # apply_temperature
+            False,  # apply_min_p
             self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
+            use_fp64_gumbel=self.sampler.use_fp64_gumbel,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
@@ -139,6 +143,49 @@ class RejectionSampler:
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
+            num_nans=num_nans,
+            num_sampled=num_sampled,
+        )
+
+    def forward_distributed(
+        self,
+        local_logits: torch.Tensor,
+        shard_vocab_start: int,
+        input_batch: InputBatch,
+        draft_logits: torch.Tensor | None = None,
+    ) -> SamplerOutput:
+        # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
+        # that num_nans is computed before applying penalties and temperature.
+        num_nans = get_num_nans(local_logits) if self.sampler.compute_nans else None
+
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        draft_positions = input_batch.positions[input_batch.logits_indices]
+
+        # Rejection sample.
+        sampled, num_sampled = rejection_sample(
+            local_logits,
+            draft_logits,
+            draft_sampled,
+            input_batch.cu_num_logits,
+            draft_positions,
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.min_p.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            self.num_speculative_steps,
+            True,  # apply_temperature
+            True,  # apply_min_p
+            self.synthetic_conditional_rates,
+            use_fp64_gumbel=self.sampler.use_fp64_gumbel,
+            shard_vocab_start=shard_vocab_start,
+        )
+
+        return SamplerOutput(
+            sampled_token_ids=sampled,
+            # Output logprobs are not supported for distributed rejection sampling.
+            logprobs_tensors=None,
             num_nans=num_nans,
             num_sampled=num_sampled,
         )
