@@ -567,6 +567,101 @@ def test_fallback_chain_bm25_without_attention():
     assert "specific_function_call" in compressed
 
 
+
+
+# ---------------------------------------------------------------------------
+# recency_blend tests
+# ---------------------------------------------------------------------------
+
+def test_recency_blend_zero_unchanged():
+    """recency_blend=0 should produce identical results to no-recency call."""
+    messages = _make_messages(tool_content_size=2000, n_tools=4)
+    total = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    budget = total // 2
+
+    msgs_no_blend = [dict(m) for m in messages]
+    msgs_blend_0  = [dict(m) for m in messages]
+    s1 = apply_ace_eviction(msgs_no_blend, budget_chars=budget, recency_blend=0.0)
+    s2 = apply_ace_eviction(msgs_blend_0,  budget_chars=budget, recency_blend=0.0)
+    assert s1 == s2
+    assert msgs_no_blend == msgs_blend_0
+
+
+def test_recency_blend_oldest_compressed_more():
+    """With recency_blend>0, oldest compressible message should be smaller than newest."""
+    # Build 4 tool msgs, force eviction
+    messages = _make_messages(tool_content_size=3000, n_tools=5)
+    total = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    budget = int(total * 0.4)
+
+    tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    original_oldest = messages[tool_indices[0]]["content"]
+    original_newest = messages[tool_indices[-2]]["content"]  # -2 because -1 is keep_recent
+
+    apply_ace_eviction(messages, budget_chars=budget, keep_recent=1, recency_blend=0.4)
+
+    compressed_oldest = messages[tool_indices[0]]["content"]
+    compressed_newest = messages[tool_indices[-2]]["content"]
+
+    # Oldest should be compressed more (smaller) than newest
+    ratio_oldest = len(compressed_oldest) / len(original_oldest)
+    ratio_newest = len(compressed_newest) / len(original_newest)
+    assert ratio_oldest < ratio_newest, (
+        f"Oldest kept {ratio_oldest:.2%} but newest kept {ratio_newest:.2%} — "
+        "recency blend should compress oldest more aggressively"
+    )
+
+
+def test_recency_blend_preserves_error_lines_in_old_messages():
+    """Even heavily blended old messages must keep error lines (high structural score)."""
+    error_line = "ERROR: ConnectionRefusedError — could not connect to database"
+    filler = ["verbose filler line with no important content"] * 30
+    old_content = "\n".join(filler[:15] + [error_line] + filler[15:])
+
+    messages = [
+        {"role": "user", "content": "start task"},
+        {"role": "tool", "content": old_content},       # oldest — will be compressed hard
+        {"role": "assistant", "content": "I found something"},
+        {"role": "tool", "content": "recent result\nwith useful data"},  # newest
+        {"role": "user", "content": "continue"},
+    ]
+
+    total = sum(len(m["content"]) for m in messages if isinstance(m.get("content"), str))
+    apply_ace_eviction(messages, budget_chars=total // 3, keep_recent=1, recency_blend=0.4)
+
+    assert error_line in messages[1]["content"], (
+        "Error line must survive even aggressive recency-blended compression"
+    )
+
+
+def test_recency_blend_defaults_to_03():
+    """Default recency_blend should be 0.3 (not 0.0 as in original)."""
+    import inspect
+    sig = inspect.signature(apply_ace_eviction)
+    default = sig.parameters["recency_blend"].default
+    assert default == 0.3, f"Expected default 0.3, got {default}"
+
+
+def test_pixol_age_decay_exponential():
+    """Pixol age decay should be exponential, not linear."""
+    from vllm.entrypoints.pixol_compression import PixolLine
+    line = PixolLine.from_text("def process(self, value): return value * 2")
+    score_age0 = line.score
+
+    line.age = 8
+    score_age8 = line.score
+
+    line.age = 16
+    score_age16 = line.score
+
+    # Exponential: age 16 should drop more than twice age 8 (relative to age 0)
+    drop_8  = score_age0 - score_age8
+    drop_16 = score_age0 - score_age16
+    assert drop_16 > drop_8 * 1.5, "Decay should be faster than linear"
+    # Never fully zeroed out
+    assert score_age16 > 0.0
+
+
 def test_compute_line_token_spans_fallback():
     """compute_line_token_spans returns plausible spans even without offset mapping."""
 

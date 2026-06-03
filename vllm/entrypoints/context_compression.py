@@ -539,24 +539,33 @@ def apply_ace_eviction(
         if recency_blend > 0:
             msg_recency = rank / n_comp          # 0.0 (oldest) → 1.0 (newest)
             # Blend content scores with recency floor
-            content_scores = attn_scores  # may be None → ace_compress handles it
-            n_lines = len(original.split("\n"))
-            if content_scores is None:
-                # Generate content scores first so we can blend them
-                lines = original.split("\n")
-                if query:
-                    content_scores = _bm25.score_lines(query, lines)
-                else:
-                    content_scores = [_heuristic_score(l) for l in lines]
-                    mx = max(content_scores) or 1.0
-                    content_scores = [s / mx for s in content_scores]
-            # Blend: older messages → recency is low → content dominates → more eviction
+            # Generate content scores for blending
+            lines = original.split("\n")
+            if attn_scores is not None and len(attn_scores) == len(lines):
+                content_scores = attn_scores
+            elif query:
+                content_scores = _bm25.score_lines(query, lines)
+            else:
+                raw = [_heuristic_score(l) for l in lines]
+                mx = max(raw) if raw else 0.0
+                content_scores = [s / mx for s in raw] if mx > 0 else [0.5] * len(raw)
+
+            # Recency acts as a multiplicative boost to the keep-ratio,
+            # not as an additive floor. This preserves high-content-score lines
+            # in old messages (e.g. error traces) while still compressing more
+            # aggressively than newer messages.
+            # age_factor: 0.15 (oldest) → 1.0 (newest), exponential in recency
+            age_factor = 0.15 + 0.85 * (msg_recency ** 0.7)
             blended = [
-                (1 - recency_blend) * cs + recency_blend * msg_recency
+                cs * ((1 - recency_blend) + recency_blend * age_factor)
                 for cs in content_scores
             ]
+            # Normalize blended scores to [0, 1]
+            mx_b = max(blended) if blended else 0.0
+            if mx_b > 0:
+                blended = [s / mx_b for s in blended]
             # More aggressive ratio for older messages
-            effective_ratio = target_ratio * (0.5 + 0.5 * msg_recency)
+            effective_ratio = target_ratio * age_factor
             compressed = ace_compress(
                 original, effective_ratio, attention_scores=blended
             )

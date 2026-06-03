@@ -276,6 +276,9 @@ class OpenAIServingRender:
                 ),
                 use_query_relevance=True,
                 tracker=tracker,
+                recency_blend=getattr(
+                    request, "context_compression_recency_blend", 0.3
+                ),
             )
 
             # Register an attention capture for this generation turn so that

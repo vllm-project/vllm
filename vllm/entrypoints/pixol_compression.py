@@ -109,8 +109,11 @@ class PixolLine:
         """Composite importance score in [0, 1]."""
         if self.line_type == 'blank':
             return 0.0
-        ref_boost   = 1.0 + 0.25 * min(self.references, 4)
-        age_decay   = max(0.4, 1.0 - 0.08 * self.age)
+        ref_boost = 1.0 + 0.25 * min(self.references, 4)
+        # Exponential decay: 0.92^age — smooth and never fully zeroes out.
+        # At age 8: 0.513; age 16: 0.263; age 32: 0.069.
+        # Much better than linear for 50+ turn organic sessions.
+        age_decay = max(0.1, 0.92 ** self.age)
         return min(1.0, self.structural * ref_boost * age_decay)
 
 

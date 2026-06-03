@@ -426,6 +426,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Only used when context_compression='ace'."
         ),
     )
+    context_compression_recency_blend: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "How much message recency influences eviction. 0.0 = pure content "
+            "scoring; 0.3 (default) = 30% recency weight so older messages are "
+            "compressed more aggressively than newer ones. Prevents ACE from "
+            "destroying context the agent is actively using. "
+            "Only used when context_compression='ace'."
+        ),
+    )
 
     # --8<-- [end:chat-completion-extra-params]
 
