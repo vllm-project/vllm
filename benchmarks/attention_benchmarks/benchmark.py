@@ -530,12 +530,6 @@ def main():
         help="FlashAttention split-K factor (0=auto heuristic, 1=disabled, >1=force N)",
     )
     parser.add_argument(
-        "--swap-ab",
-        action="store_true",
-        default=False,
-        help="Enable FA4 swap_AB (Q on B operand, KV on A operand)",
-    )
-    parser.add_argument(
         "--ncu-profile",
         action="store_true",
         default=False,
@@ -969,7 +963,6 @@ def main():
             "ncu_profile": args.ncu_profile,
             "warmup_ms": args.warmup_ms,
             "num_splits": getattr(args, "num_splits", None),
-            "swap_ab": getattr(args, "swap_ab", False),
             "kv_lora_rank": getattr(args, "kv_lora_rank", None),
             "qk_nope_head_dim": getattr(args, "qk_nope_head_dim", None),
             "qk_rope_head_dim": getattr(args, "qk_rope_head_dim", None),
@@ -999,7 +992,6 @@ def main():
             "ncu_profile": args.ncu_profile,
             "warmup_ms": args.warmup_ms,
             "num_splits": getattr(args, "num_splits", None),
-            "swap_ab": getattr(args, "swap_ab", False),
         }
         all_results = run_parameter_sweep(
             backends, args.batch_specs, base_config_args, args.parameter_sweep, console
@@ -1034,7 +1026,6 @@ def main():
                             ncu_profile=args.ncu_profile,
                             warmup_ms=args.warmup_ms,
                             num_splits=getattr(args, "num_splits", None),
-                            swap_ab=getattr(args, "swap_ab", False),
                         )
 
                         result = run_benchmark(config)

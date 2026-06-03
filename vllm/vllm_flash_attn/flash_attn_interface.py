@@ -200,7 +200,6 @@ def flash_attn_varlen_func(
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
-    swap_ab: bool = False,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
@@ -386,7 +385,6 @@ def flash_attn_varlen_func(
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
             num_splits=num_splits,
-            swap_AB=swap_ab,
             return_lse=return_softmax_lse,
             out=out,
             learnable_sink=s_aux,

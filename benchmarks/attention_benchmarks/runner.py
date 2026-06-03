@@ -530,10 +530,6 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             ):
                 attn_metadata.max_num_splits = config.num_splits
 
-            # Override swap_ab for FA4 testing
-            if config.swap_ab and hasattr(attn_metadata, "swap_ab"):
-                attn_metadata.swap_ab = True
-
             # Only quantize queries when the impl supports it
             quantize_query = config.kv_cache_dtype.startswith("fp8") and getattr(
                 impl, "supports_quant_query_input", False

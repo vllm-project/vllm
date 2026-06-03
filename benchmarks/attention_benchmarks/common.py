@@ -268,7 +268,6 @@ class BenchmarkConfig:
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
-    swap_ab: bool = False  # FA4 swap_AB (Q on B, KV on A)
 
 
 @dataclass
