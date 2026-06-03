@@ -25,8 +25,8 @@ pub struct AppState {
     pub enable_log_requests: bool,
     /// Whether to set X-Request-Id on every HTTP response.
     pub enable_request_id_headers: bool,
-    /// Runtime server information returned by `/server_info`.
-    server_info: ServerInfoSnapshot,
+    /// Runtime server information returned by `/server_info`, when available.
+    server_info: Option<ServerInfoSnapshot>,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -47,13 +47,12 @@ impl AppState {
             !served_model_names.is_empty(),
             "served_model_names must not be empty"
         );
-        let server_info = ServerInfoSnapshot::from_served_model_names(&served_model_names);
         Self {
             served_model_names,
             chat,
             enable_log_requests: false,
             enable_request_id_headers: false,
-            server_info,
+            server_info: None,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -73,13 +72,16 @@ impl AppState {
 
     /// Attach the runtime server information snapshot used by `/server_info`.
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
-        self.server_info = server_info;
+        self.server_info = Some(server_info);
         self
     }
 
     /// Build a `/server_info` response payload.
-    pub(crate) fn server_info_response(&self, config_format: ServerInfoConfigFormat) -> Value {
-        self.server_info.response(config_format)
+    pub(crate) fn server_info_response(
+        &self,
+        config_format: ServerInfoConfigFormat,
+    ) -> Option<Value> {
+        self.server_info.as_ref().map(|server_info| server_info.response(config_format))
     }
 
     /// The primary model name echoed back in API responses (the first served

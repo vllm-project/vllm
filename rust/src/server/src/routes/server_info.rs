@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::server_info::ServerInfoConfigFormat;
 use crate::state::AppState;
@@ -38,6 +39,9 @@ pub(crate) struct ServerInfoParams {
 pub async fn server_info(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ServerInfoParams>,
-) -> Json<Value> {
-    Json(state.server_info_response(params.config_format.into()))
+) -> Response {
+    match state.server_info_response(params.config_format.into()) {
+        Some(response) => Json(response).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
