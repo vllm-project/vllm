@@ -236,6 +236,12 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    from vllm.entrypoints.openai.batch.api_router import (
+        attach_router as register_batch_api_router,
+    )
+
+    register_batch_api_router(app)
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,
@@ -410,6 +416,11 @@ async def init_app_state(
         from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+
+    # Batch API serving classes
+    from vllm.entrypoints.openai.batch.api_router import init_batch_state
+
+    init_batch_state(state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
