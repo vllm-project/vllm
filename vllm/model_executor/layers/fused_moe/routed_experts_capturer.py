@@ -14,6 +14,9 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
+from vllm.v1.core.kv_cache_utils import (
+    get_token_proportional_kv_cache_capacity_tokens,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 
 logger = logging.getLogger(__name__)
@@ -240,9 +243,9 @@ class RoutedExpertsManager:
          calls :meth:`get` with the request's block IDs to recover
          the full per-token routing.
 
-    Memory: ``routed_experts_by_slot`` is sized for the whole block
-    pool (``num_blocks * block_size`` slots). For large block pools
-    this can reach multiple GB; see the init log for the exact size.
+    Memory: ``routed_experts_by_slot`` is sized for the token-proportional
+    attention KV-cache capacity. For large block pools this can reach
+    multiple GB; see the init log for the exact size.
     """
 
     def __init__(
@@ -264,14 +267,13 @@ class RoutedExpertsManager:
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
 
-        # All kv_cache_groups share the same physical block pool, so
-        # block IDs span [0, num_blocks) regardless of how many groups
-        # exist. Sizing to the full pool avoids index-out-of-range
-        # when different groups happen to land on the same block.
+        # Slot mappings are derived from the attention KV-cache group. Hybrid
+        # models may split request-constant Mamba state into a separate compact
+        # pool, so size this buffer from TOKEN_PROPORTIONAL capacity only.
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        max_num_slots = kv_cache_config.num_blocks * self.block_size
+        max_num_slots = get_token_proportional_kv_cache_capacity_tokens(kv_cache_config)
         # Expert IDs are 0..num_experts-1; uint8 fits 256 distinct
         # values so the boundary is ``<= 256`` (NOT ``< 256``). Keeping
         # this narrow matters because the slot buffer is sized for the

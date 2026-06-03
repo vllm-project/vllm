@@ -477,6 +477,9 @@ def make_kv_cache_config(
                     block_size=block_size,
                     shapes=((16,), (16,)),
                     dtypes=(torch.float16,),
+                    # These connector tests exercise the legacy shared-pool
+                    # prefix-cache path, not request-constant Mamba allocation.
+                    mamba_cache_mode="all",
                 ),
             )
         )

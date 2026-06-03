@@ -4,9 +4,14 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import cast
 
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import (
+    BlockPool,
+    BlockPoolProtocol,
+    CacheableBlockPoolProtocol,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashWithGroupId,
@@ -19,6 +24,7 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheSpec,
     MambaSpec,
+    MemoryModel,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
@@ -37,7 +43,7 @@ class SingleTypeKVCacheManager(ABC):
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
-        block_pool: BlockPool,
+        block_pool: BlockPoolProtocol,
         enable_caching: bool,
         kv_cache_group_id: int,
         scheduler_block_size: int,
@@ -91,6 +97,27 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+
+    def _should_record_new_block_ids_for_zeroing(self) -> bool:
+        """Return whether newly allocated blocks should be zeroed.
+
+        This preserves the legacy behavior exactly: only full-attention style
+        KV blocks are zeroed by the GPU worker. Sink attention uses a custom
+        manager and is excluded from this generic full-attention path.
+        """
+        return isinstance(self.kv_cache_spec, FullAttentionSpec) and not isinstance(
+            self.kv_cache_spec, SinkFullAttentionSpec
+        )
+
+    def _cacheable_block_pool(self) -> CacheableBlockPoolProtocol:
+        """Return the block pool as a prefix-cache-capable pool.
+
+        Compact/request-constant pools only implement the allocation protocol.
+        Prefix-cache paths are guarded by ``enable_caching`` and must only run
+        with a cacheable pool.
+        """
+        assert self.enable_caching
+        return cast(CacheableBlockPoolProtocol, self.block_pool)
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -226,7 +253,7 @@ class SingleTypeKVCacheManager(ABC):
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
+            self._cacheable_block_pool().touch(new_computed_blocks)
         else:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -247,11 +274,7 @@ class SingleTypeKVCacheManager(ABC):
                 cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
             )
             req_blocks.extend(allocated_blocks)
-            if type(self.kv_cache_spec) in (
-                FullAttentionSpec,
-                TQFullAttentionSpec,
-                MLAAttentionSpec,
-            ):
+            if self._should_record_new_block_ids_for_zeroing():
                 self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
@@ -279,11 +302,7 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
-            if type(self.kv_cache_spec) in (
-                FullAttentionSpec,
-                TQFullAttentionSpec,
-                MLAAttentionSpec,
-            ):
+            if self._should_record_new_block_ids_for_zeroing():
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
 
@@ -330,7 +349,7 @@ class SingleTypeKVCacheManager(ABC):
                 self.kv_cache_spec,
                 self.use_eagle,
             )
-        self.block_pool.cache_full_blocks(
+        self._cacheable_block_pool().cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
             num_cached_blocks=num_cached_blocks,
@@ -400,7 +419,7 @@ class SingleTypeKVCacheManager(ABC):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -513,7 +532,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -591,7 +610,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -750,7 +769,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -891,12 +910,17 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 class MambaManager(SingleTypeKVCacheManager):
     def __init__(
-        self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
+        self, kv_cache_spec: MambaSpec, block_pool: BlockPoolProtocol, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
+        self.is_request_constant = (
+            kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT
+        )
+        if self.is_request_constant:
+            assert not self.enable_caching
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -910,7 +934,7 @@ class MambaManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -962,6 +986,13 @@ class MambaManager(SingleTypeKVCacheManager):
         # that we might actually need.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
+        if self.is_request_constant and self.mamba_cache_mode != "align":
+            # Non-align compact Mamba keeps exactly one current state block
+            # plus optional speculative state blocks per request. Token-window
+            # based skipped-block eviction would incorrectly free that compact
+            # state because its block table is not token-proportional.
+            return
+
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
@@ -988,6 +1019,13 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return 0
 
+    def _get_request_constant_num_blocks_to_allocate(self, request_id: str) -> int:
+        assert isinstance(self.kv_cache_spec, MambaSpec)
+        held_blocks = sum(
+            not block.is_null for block in self.req_to_blocks.get(request_id, ())
+        )
+        return max(self.kv_cache_spec.blocks_per_request - held_blocks, 0)
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -1007,6 +1045,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # that kv_cache_manager will think there is no enough blocks to allocate now
             # and don't schedule it in the current step.
             return self.block_pool.num_gpu_blocks + 1
+        if self.is_request_constant and self.mamba_cache_mode != "align":
+            assert len(new_computed_blocks) == 0
+            return self._get_request_constant_num_blocks_to_allocate(request_id)
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1059,6 +1100,16 @@ class MambaManager(SingleTypeKVCacheManager):
         self, request_id: str, num_tokens: int, num_tokens_main_model: int
     ) -> list[KVCacheBlock]:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+        if self.is_request_constant and self.mamba_cache_mode != "align":
+            compact_req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            num_new_blocks = self._get_request_constant_num_blocks_to_allocate(
+                request_id
+            )
+            if num_new_blocks <= 0:
+                return []
+            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            compact_req_blocks.extend(new_blocks)
+            return new_blocks
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1137,6 +1188,16 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
+        if self.is_request_constant:
+            # CompactBlockPool rejects freeing the null sentinel. Align-mode
+            # request block tables can contain null padding, so filter them
+            # before returning real compact blocks to the pool.
+            req_blocks = self.req_to_blocks.pop(request_id, [])
+            self.block_pool.free_blocks(
+                block for block in reversed(req_blocks) if not block.is_null
+            )
+            self.num_cached_block.pop(request_id, None)
+            return
         super().free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1204,7 +1265,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheableBlockPoolProtocol,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1244,7 +1305,7 @@ class SinkFullAttentionManager(FullAttentionManager):
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
         num_sink_block = sink_len // self.block_size
-        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
+        self.sink_blocks = block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {

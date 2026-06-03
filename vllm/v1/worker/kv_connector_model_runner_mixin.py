@@ -17,11 +17,12 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MemoryModel
 from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.gpu.attn_utils import get_block_layout_page_size_bytes
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -212,6 +213,15 @@ class KVConnectorModelRunnerMixin:
         attn_group = attn_groups[0][0]
         kv_cache_spec = attn_group.kv_cache_spec
         assert isinstance(kv_cache_spec, AttentionSpec)
+        if any(
+            group.kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT
+            for groups in attn_groups
+            for group in groups
+        ):
+            raise NotImplementedError(
+                "Cross-layer KV connector does not support REQUEST_CONSTANT "
+                "specs. Multi-pool connector support is out of scope."
+            )
 
         tensor_sizes = set(
             kv_cache_tensor.size for kv_cache_tensor in kv_cache_config.kv_cache_tensors
@@ -219,7 +229,7 @@ class KVConnectorModelRunnerMixin:
         assert len(tensor_sizes) == 1
         tensor_size = tensor_sizes.pop()
 
-        page_size = kv_cache_spec.page_size_bytes
+        page_size = get_block_layout_page_size_bytes(kv_cache_spec)
         assert tensor_size % page_size == 0
         num_blocks = tensor_size // page_size
         num_layers = len(kv_cache_config.kv_cache_tensors)

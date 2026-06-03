@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -10,6 +11,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
@@ -20,6 +22,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -31,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
+    get_token_proportional_kv_cache_capacity_tokens,
     hash_block_tokens,
     init_none_hash,
     is_kv_cache_spec_uniform,
@@ -42,10 +46,12 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
     KVCacheSpec,
     KVCacheSpecKind,
     KVCacheTensor,
     MambaSpec,
+    MemoryModel,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
@@ -179,6 +185,151 @@ def new_mamba_spec(
         page_size_padded=page_size_padded,
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+@dataclass(frozen=True)
+class _DummyRequestConstantSpec(MambaSpec):
+    """Test-only spec for generated request-constant config paths."""
+
+    @property
+    def memory_model(self) -> MemoryModel:
+        return MemoryModel.REQUEST_CONSTANT
+
+    @property
+    def blocks_per_request(self) -> int:
+        return 1 + self.num_speculative_blocks
+
+
+def new_request_constant_spec(
+    block_size=16,
+    shapes=((2,),),
+    dtypes=(torch.float32,),
+    num_speculative_blocks=0,
+    page_size_padded=None,
+):
+    return _DummyRequestConstantSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        num_speculative_blocks=num_speculative_blocks,
+        page_size_padded=page_size_padded,
+    )
+
+
+def assert_legacy_single_pool_metadata(config: KVCacheConfig) -> None:
+    if len(config.kv_cache_groups) == 0:
+        assert config.pool_configs == ()
+        assert config.group_to_pool_id == ()
+        assert config.num_blocks == 1
+        return
+
+    assert len(config.pool_configs) == 1
+    pool_config = config.pool_configs[0]
+    assert pool_config.pool_id == 0
+    assert pool_config.memory_model == MemoryModel.TOKEN_PROPORTIONAL
+    assert pool_config.group_ids == tuple(range(len(config.kv_cache_groups)))
+    assert config.group_to_pool_id == tuple(0 for _ in config.kv_cache_groups)
+    assert pool_config.num_blocks == config.num_blocks
+    assert config.num_blocks == sum(pool.num_blocks for pool in config.pool_configs)
+
+    accounting_page_sizes = {
+        group.kv_cache_spec.accounting_page_size_bytes
+        for group in config.kv_cache_groups
+    }
+    physical_page_sizes = {
+        group.kv_cache_spec.physical_page_size_bytes for group in config.kv_cache_groups
+    }
+    assert len(accounting_page_sizes) == 1
+    accounting_page_size = accounting_page_sizes.pop()
+    assert pool_config.accounting_page_size_bytes == accounting_page_size
+    if len(physical_page_sizes) == 1:
+        assert pool_config.physical_page_size_bytes == physical_page_sizes.pop()
+    else:
+        assert pool_config.physical_page_size_bytes == accounting_page_size
+
+
+def test_legacy_pool_metadata_keeps_mixed_memory_models_shared():
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=4,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+
+    config = KVCacheConfig(
+        num_blocks=7,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attn"], attention_spec),
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+    )
+
+    assert config.group_to_pool_id == (0, 0)
+    assert config.pool_configs == (
+        KVCachePoolConfig(
+            pool_id=0,
+            memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+            group_ids=(0, 1),
+            num_blocks=7,
+            accounting_page_size_bytes=max(
+                attention_spec.accounting_page_size_bytes,
+                mamba_spec.accounting_page_size_bytes,
+            ),
+            physical_page_size_bytes=max(
+                attention_spec.accounting_page_size_bytes,
+                mamba_spec.accounting_page_size_bytes,
+            ),
+        ),
+    )
+
+
+def test_legacy_pool_metadata_keeps_different_page_sizes_shared():
+    small_spec = FullAttentionSpec(
+        block_size=12,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    large_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+
+    config = KVCacheConfig(
+        num_blocks=11,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["small"], small_spec),
+            KVCacheGroupSpec(["large"], large_spec),
+        ],
+    )
+
+    assert config.group_to_pool_id == (0, 0)
+    assert config.pool_configs == (
+        KVCachePoolConfig(
+            pool_id=0,
+            memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+            group_ids=(0, 1),
+            num_blocks=11,
+            accounting_page_size_bytes=max(
+                small_spec.accounting_page_size_bytes,
+                large_spec.accounting_page_size_bytes,
+            ),
+            physical_page_size_bytes=max(
+                small_spec.accounting_page_size_bytes,
+                large_spec.accounting_page_size_bytes,
+            ),
+        ),
     )
 
 
@@ -1793,6 +1944,579 @@ def test_get_kv_cache_configs_attention_free():
             kv_cache_groups=[],
         )
     ]
+    assert_legacy_single_pool_metadata(kv_cache_configs[0])
+
+
+def test_kv_cache_config_legacy_pool_metadata_single_group():
+    spec = new_kv_cache_spec()
+    config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[
+            KVCacheTensor(size=spec.page_size_bytes * 10, shared_by=["layer_1"]),
+            KVCacheTensor(size=spec.page_size_bytes * 10, shared_by=["layer_2"]),
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], spec)],
+    )
+
+    assert_legacy_single_pool_metadata(config)
+
+
+def test_kv_cache_config_legacy_pool_metadata_multi_group():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_sliding_window_spec(),
+    }
+
+    config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+
+    assert len(config.kv_cache_groups) == 2
+    assert_legacy_single_pool_metadata(config)
+
+
+def test_kv_cache_config_legacy_pool_metadata_mixed_physical_page_sizes():
+    unpadded_mamba_spec = new_mamba_spec(mamba_cache_mode="all")
+    unified_page_size = unpadded_mamba_spec.physical_page_size_bytes + 1024
+    attention_spec = new_kv_cache_spec(page_size_padded=unified_page_size)
+    mamba_spec = new_mamba_spec(
+        page_size_padded=unified_page_size,
+        mamba_cache_mode="all",
+    )
+    assert (
+        attention_spec.physical_page_size_bytes != mamba_spec.physical_page_size_bytes
+    )
+
+    config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], attention_spec),
+            KVCacheGroupSpec(["layer_2"], mamba_spec),
+        ],
+    )
+
+    assert_legacy_single_pool_metadata(config)
+
+
+def test_kv_cache_config_pool_metadata_tracks_worker_min_blocks():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+    spec = new_kv_cache_spec()
+    kv_cache_specs = [
+        {
+            "layer1": new_kv_cache_spec(),
+            "layer2": new_kv_cache_spec(),
+        },
+        {
+            "layer1": new_kv_cache_spec(),
+            "layer2": new_kv_cache_spec(),
+        },
+    ]
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        [
+            spec.page_size_bytes * 2 * 10,
+            spec.page_size_bytes * 2 * 20,
+        ],
+    )
+
+    for config in kv_cache_configs:
+        assert config.num_blocks == 10
+        assert_legacy_single_pool_metadata(config)
+
+
+def make_request_constant_vllm_config(
+    max_model_len: int = 16,
+    max_num_seqs: int = 4,
+) -> VllmConfig:
+    model_config = ModelConfig(max_model_len=max_model_len)
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=max_num_seqs,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+    vllm_config.cache_config.enable_prefix_caching = False
+    return vllm_config
+
+
+def test_real_mamba_spec_none_mode_is_request_constant():
+    spec = new_mamba_spec(
+        mamba_cache_mode="none",
+        num_speculative_blocks=2,
+    )
+
+    assert spec.memory_model == MemoryModel.REQUEST_CONSTANT
+    assert spec.blocks_per_request == 3
+    assert spec.physical_page_size_bytes == spec.page_size_bytes
+
+
+def test_real_mamba_spec_align_mode_blocks_per_request():
+    spec = new_mamba_spec(
+        mamba_cache_mode="align",
+        num_speculative_blocks=2,
+    )
+
+    assert spec.memory_model == MemoryModel.REQUEST_CONSTANT
+    assert spec.blocks_per_request == 4
+
+
+def test_real_mamba_spec_all_mode_is_token_proportional():
+    spec = new_mamba_spec(
+        mamba_cache_mode="all",
+        num_speculative_blocks=2,
+    )
+
+    assert spec.memory_model == MemoryModel.TOKEN_PROPORTIONAL
+    assert spec.blocks_per_request == 3
+
+
+def test_hybrid_qwen_like_config_generates_multi_pool():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=4,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        num_speculative_blocks=0,
+        mamba_cache_mode="none",
+        page_size_padded=attention_spec.page_size_bytes,
+    )
+    mamba_num_blocks = 4 * mamba_spec.blocks_per_request + 1
+    mamba_reserved_bytes = mamba_num_blocks * mamba_spec.physical_page_size_bytes
+    available_memory = mamba_reserved_bytes + attention_spec.page_size_bytes * 20
+
+    config = get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "mamba": mamba_spec}],
+        [available_memory],
+    )[0]
+
+    assert config.kv_cache_groups == [
+        KVCacheGroupSpec(["attn"], attention_spec),
+        KVCacheGroupSpec(["mamba"], mamba_spec),
+    ]
+    assert config.group_to_pool_id == (0, 1)
+    assert config.pool_configs[0].memory_model == MemoryModel.TOKEN_PROPORTIONAL
+    assert config.pool_configs[0].num_blocks == 20
+    assert config.pool_configs[1].memory_model == MemoryModel.REQUEST_CONSTANT
+    assert config.pool_configs[1].num_blocks == mamba_num_blocks
+    assert config.kv_cache_tensors == [
+        KVCacheTensor(size=attention_spec.page_size_bytes * 20, shared_by=["attn"]),
+        KVCacheTensor(size=mamba_reserved_bytes, shared_by=["mamba"]),
+    ]
+
+
+@pytest.mark.parametrize("enable_prefix_caching", [True, False])
+def test_real_mamba_spec_all_mode_keeps_shared_pool(enable_prefix_caching):
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    vllm_config.cache_config.enable_prefix_caching = enable_prefix_caching
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        page_size_padded=64,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=4,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+        page_size_padded=64,
+    )
+
+    config = get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "mamba": mamba_spec}],
+        [64 * 10],
+    )[0]
+
+    assert config.group_to_pool_id == (0, 0)
+    assert len(config.pool_configs) == 1
+    assert config.pool_configs[0].memory_model == MemoryModel.TOKEN_PROPORTIONAL
+
+
+def test_token_proportional_capacity_ignores_request_constant_pool():
+    vllm_config = make_request_constant_vllm_config(
+        max_model_len=16,
+        max_num_seqs=4,
+    )
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=4,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        page_size_padded=attention_spec.page_size_bytes,
+    )
+    mamba_num_blocks = 4 * mamba_spec.blocks_per_request + 1
+    mamba_reserved_bytes = mamba_num_blocks * mamba_spec.physical_page_size_bytes
+
+    config = get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "mamba": mamba_spec}],
+        [mamba_reserved_bytes + attention_spec.page_size_bytes * 16],
+    )[0]
+
+    assert get_token_proportional_kv_cache_capacity_tokens(config) == 64
+    assert get_max_concurrency_for_kv_cache_config(vllm_config, config) == 4
+
+
+def _make_request_constant_mamba_cudagraph_config(
+    max_num_seqs: int = 4,
+    mamba_cache_mode: str = "none",
+    num_speculative_blocks: int = 2,
+) -> KVCacheConfig:
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=max_num_seqs)
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=4,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+        page_size_padded=attention_spec.page_size_bytes,
+    )
+    mamba_num_blocks = max_num_seqs * mamba_spec.blocks_per_request + 1
+    mamba_reserved_bytes = mamba_num_blocks * mamba_spec.physical_page_size_bytes
+    return get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "mamba": mamba_spec}],
+        [mamba_reserved_bytes + attention_spec.page_size_bytes * 16],
+    )[0]
+
+
+def test_request_constant_mamba_full_cudagraph_uses_pool_capacity():
+    kv_cache_config = _make_request_constant_mamba_cudagraph_config()
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.ALWAYS,
+        min_cg_attn_backend="test",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=4,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL
+
+
+def test_request_constant_mamba_full_cudagraph_rejects_small_pool():
+    kv_cache_config = _make_request_constant_mamba_cudagraph_config()
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+
+    with pytest.raises(
+        ValueError,
+        match="REQUEST_CONSTANT KV cache blocks",
+    ):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            min_cg_support=AttentionCGSupport.ALWAYS,
+            min_cg_attn_backend="test",
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=5,
+        )
+
+
+def test_request_constant_mamba_full_cudagraph_align_uses_blocks_per_request():
+    kv_cache_config = _make_request_constant_mamba_cudagraph_config(
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+    )
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.ALWAYS,
+        min_cg_attn_backend="test",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=4,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL
+
+
+def test_request_constant_mamba_full_cudagraph_skips_profiling_capacity():
+    kv_cache_config = _make_request_constant_mamba_cudagraph_config()
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        min_cg_support=AttentionCGSupport.ALWAYS,
+        min_cg_attn_backend="test",
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=5,
+        is_profiling=True,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL
+
+
+def test_request_constant_mamba_full_cudagraph_requires_max_num_reqs():
+    kv_cache_config = _make_request_constant_mamba_cudagraph_config()
+    compilation_config = CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL)
+
+    with pytest.raises(
+        ValueError,
+        match="requires max_num_seqs for capacity validation",
+    ):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            min_cg_support=AttentionCGSupport.ALWAYS,
+            min_cg_attn_backend="test",
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=None,
+        )
+
+
+def test_mixed_memory_model_config_reserves_request_constant_pool():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    request_constant_spec = new_request_constant_spec(
+        num_speculative_blocks=1,
+        page_size_padded=16,
+    )
+    request_constant_num_blocks = 4 * request_constant_spec.blocks_per_request + 1
+    reserved_bytes = (
+        request_constant_num_blocks * request_constant_spec.physical_page_size_bytes
+    )
+    available_memory = reserved_bytes + attention_spec.page_size_bytes * 10
+
+    config = get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "state": request_constant_spec}],
+        [available_memory],
+    )[0]
+
+    assert config.num_blocks == 10
+    assert config.kv_cache_groups == [
+        KVCacheGroupSpec(["attn"], attention_spec),
+        KVCacheGroupSpec(["state"], request_constant_spec),
+    ]
+    assert config.kv_cache_tensors == [
+        KVCacheTensor(size=attention_spec.page_size_bytes * 10, shared_by=["attn"]),
+        KVCacheTensor(size=reserved_bytes, shared_by=["state"]),
+    ]
+    assert config.group_to_pool_id == (0, 1)
+    assert config.pool_configs == (
+        KVCachePoolConfig(
+            pool_id=0,
+            memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+            group_ids=(0,),
+            num_blocks=10,
+            accounting_page_size_bytes=attention_spec.accounting_page_size_bytes,
+            physical_page_size_bytes=attention_spec.physical_page_size_bytes,
+        ),
+        KVCachePoolConfig(
+            pool_id=1,
+            memory_model=MemoryModel.REQUEST_CONSTANT,
+            group_ids=(1,),
+            num_blocks=request_constant_num_blocks,
+            accounting_page_size_bytes=(
+                request_constant_spec.accounting_page_size_bytes
+            ),
+            physical_page_size_bytes=request_constant_spec.physical_page_size_bytes,
+        ),
+    )
+
+
+def test_multi_pool_config_deterministic_across_workers():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    request_constant_spec = new_request_constant_spec(
+        num_speculative_blocks=1,
+        page_size_padded=16,
+    )
+    request_constant_num_blocks = 4 * request_constant_spec.blocks_per_request + 1
+    reserved_bytes = (
+        request_constant_num_blocks * request_constant_spec.physical_page_size_bytes
+    )
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        [
+            {"attn": attention_spec, "state": request_constant_spec},
+            {"attn": attention_spec, "state": request_constant_spec},
+        ],
+        [
+            reserved_bytes + attention_spec.page_size_bytes * 10,
+            reserved_bytes + attention_spec.page_size_bytes * 20,
+        ],
+    )
+
+    for config in kv_cache_configs:
+        assert config.num_blocks == 10
+        assert config.pool_configs[0].num_blocks == 10
+        assert config.pool_configs[1].num_blocks == request_constant_num_blocks
+        assert config.kv_cache_tensors == [
+            KVCacheTensor(size=attention_spec.page_size_bytes * 10, shared_by=["attn"]),
+            KVCacheTensor(size=reserved_bytes, shared_by=["state"]),
+        ]
+
+    scheduler_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    assert scheduler_config.pool_configs == kv_cache_configs[0].pool_configs
+    assert scheduler_config.group_to_pool_id == (0, 1)
+
+
+def test_request_constant_prefix_caching_fails_early():
+    vllm_config = make_request_constant_vllm_config()
+    vllm_config.cache_config.enable_prefix_caching = True
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    request_constant_spec = new_request_constant_spec()
+    reserved_bytes = (
+        vllm_config.scheduler_config.max_num_seqs
+        * request_constant_spec.blocks_per_request
+        + 1
+    ) * request_constant_spec.physical_page_size_bytes
+
+    with pytest.raises(
+        NotImplementedError,
+        match="Prefix caching with REQUEST_CONSTANT groups",
+    ):
+        get_kv_cache_configs(
+            vllm_config,
+            [{"attn": attention_spec, "state": request_constant_spec}],
+            [reserved_bytes + attention_spec.page_size_bytes * 10],
+        )
+
+
+def test_request_constant_reservation_fails_closed_when_memory_exhausted():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    request_constant_spec = new_request_constant_spec(
+        num_speculative_blocks=1,
+        page_size_padded=16,
+    )
+    request_constant_num_blocks = 4 * request_constant_spec.blocks_per_request + 1
+    reserved_bytes = (
+        request_constant_num_blocks * request_constant_spec.physical_page_size_bytes
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="REQUEST_CONSTANT KV cache reservation",
+    ):
+        kv_cache_utils.get_kv_cache_config_from_groups(
+            vllm_config,
+            [
+                KVCacheGroupSpec(["attn"], attention_spec),
+                KVCacheGroupSpec(["state"], request_constant_spec),
+            ],
+            available_memory=reserved_bytes,
+        )
+
+
+def test_request_constant_num_blocks_override_allows_minimal_config():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    vllm_config.cache_config.num_gpu_blocks_override = 1
+    attention_spec = new_kv_cache_spec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    request_constant_spec = new_request_constant_spec(
+        num_speculative_blocks=1,
+        page_size_padded=16,
+    )
+    request_constant_num_blocks = 4 * request_constant_spec.blocks_per_request + 1
+    reserved_bytes = (
+        request_constant_num_blocks * request_constant_spec.physical_page_size_bytes
+    )
+
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config,
+        [
+            KVCacheGroupSpec(["attn"], attention_spec),
+            KVCacheGroupSpec(["state"], request_constant_spec),
+        ],
+        available_memory=0,
+    )
+
+    assert config.num_blocks == 1
+    assert config.pool_configs[0].num_blocks == 1
+    assert config.pool_configs[1].num_blocks == request_constant_num_blocks
+    assert config.kv_cache_tensors == [
+        KVCacheTensor(size=attention_spec.page_size_bytes, shared_by=["attn"]),
+        KVCacheTensor(size=reserved_bytes, shared_by=["state"]),
+    ]
+
+
+def test_request_constant_only_num_blocks_override_allows_minimal_config():
+    vllm_config = make_request_constant_vllm_config(max_num_seqs=4)
+    vllm_config.cache_config.num_gpu_blocks_override = 1
+    request_constant_spec = new_request_constant_spec(
+        num_speculative_blocks=1,
+        page_size_padded=16,
+    )
+    request_constant_num_blocks = 4 * request_constant_spec.blocks_per_request + 1
+    reserved_bytes = (
+        request_constant_num_blocks * request_constant_spec.physical_page_size_bytes
+    )
+
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config,
+        [KVCacheGroupSpec(["state"], request_constant_spec)],
+        available_memory=0,
+    )
+
+    assert config.num_blocks == request_constant_num_blocks
+    assert config.group_to_pool_id == (0,)
+    assert config.pool_configs == (
+        KVCachePoolConfig(
+            pool_id=0,
+            memory_model=MemoryModel.REQUEST_CONSTANT,
+            group_ids=(0,),
+            num_blocks=request_constant_num_blocks,
+            accounting_page_size_bytes=(
+                request_constant_spec.accounting_page_size_bytes
+            ),
+            physical_page_size_bytes=request_constant_spec.physical_page_size_bytes,
+        ),
+    )
+    assert config.kv_cache_tensors == [
+        KVCacheTensor(size=reserved_bytes, shared_by=["state"]),
+    ]
 
 
 def test_generate_uniform_type_kv_cache_specs():
@@ -1866,6 +2590,36 @@ def test_generate_scheduler_kv_cache_config():
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
     )
+
+
+def test_generate_scheduler_kv_cache_config_rejects_mismatched_pool_schema():
+    spec = new_kv_cache_spec()
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_1"], spec)],
+    )
+    mismatched_kv_cache_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer_1"], spec)],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=(0,),
+                num_blocks=10,
+                accounting_page_size_bytes=spec.accounting_page_size_bytes + 1,
+                physical_page_size_bytes=spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0,),
+    )
+
+    with pytest.raises(AssertionError):
+        generate_scheduler_kv_cache_config(
+            [kv_cache_config, mismatched_kv_cache_config]
+        )
 
 
 def new_mla_spec(cache_dtype_str=None):
@@ -2196,7 +2950,16 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config = ModelConfig(max_model_len=8192)
     # Simulate the user passing -1 by setting original_max_model_len
     model_config.original_max_model_len = -1
-    vllm_config = VllmConfig(model_config=model_config)
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=1,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+    vllm_config.cache_config.enable_prefix_caching = False
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -2205,7 +2968,9 @@ def test_auto_fit_max_model_len_with_hybrid():
         "layer_2": new_kv_cache_spec(),
     }
 
-    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    # 64 attention blocks for 1024 tokens plus 3 compact Mamba blocks for the
+    # single request and 1 compact-pool null block.
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma + 1)
     _kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
 import torch
 
 from vllm import SamplingParams
@@ -34,7 +35,10 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
     KVCacheTensor,
+    MambaSpec,
+    MemoryModel,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -91,6 +95,59 @@ def _make_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=tensors,
         kv_cache_groups=groups,
+    )
+
+
+def _make_request_constant_kv_cache_config(num_blocks: int = 8) -> KVCacheConfig:
+    attention_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    mamba_spec = MambaSpec(
+        block_size=BLOCK_SIZE,
+        shapes=((1,),),
+        dtypes=(DTYPE,),
+        mamba_cache_mode="none",
+        page_size_padded=attention_spec.page_size_bytes,
+    )
+    mamba_num_blocks = 3
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=attention_spec.page_size_bytes * num_blocks,
+                shared_by=["attn"],
+            ),
+            KVCacheTensor(
+                size=mamba_spec.physical_page_size_bytes * mamba_num_blocks,
+                shared_by=["mamba"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attn"], attention_spec),
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=(0,),
+                num_blocks=num_blocks,
+                accounting_page_size_bytes=attention_spec.accounting_page_size_bytes,
+                physical_page_size_bytes=attention_spec.physical_page_size_bytes,
+            ),
+            KVCachePoolConfig(
+                pool_id=1,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=(1,),
+                num_blocks=mamba_num_blocks,
+                accounting_page_size_bytes=mamba_spec.accounting_page_size_bytes,
+                physical_page_size_bytes=mamba_spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0, 1),
     )
 
 
@@ -173,6 +230,19 @@ def make_scheduler(
         kv_cache_config=kv_cache_config,
         num_groups=num_groups,
     )
+
+
+def test_cpu_offload_rejects_request_constant_kv_cache():
+    kv_cache_config = _make_request_constant_kv_cache_config()
+
+    with pytest.raises(
+        NotImplementedError,
+        match="CPU KV cache offload with REQUEST_CONSTANT specs",
+    ):
+        SimpleCPUOffloadScheduler._derive_cpu_config(
+            kv_cache_config,
+            cpu_capacity_bytes=_BYTES_PER_BLOCK,
+        )
 
 
 _req_counter = 0

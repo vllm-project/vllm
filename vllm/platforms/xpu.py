@@ -278,14 +278,23 @@ class XPUPlatform(Platform):
                 new_block_size * attn_page_size_1_token
             )
         cache_config.block_size = new_block_size
-        logger.info(
-            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
-            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
-            new_block_size,
-            kernel_block_size,
-            cache_config.mamba_page_size_padded,
-            original_mamba_page_size_padded,
-        )
+        if original_mamba_page_size_padded is None:
+            logger.info(
+                "[XPU]Setting attention block size to %d tokens to ensure "
+                "multiple of %d; mamba_page_size_padded remains unset.",
+                new_block_size,
+                kernel_block_size,
+            )
+        else:
+            logger.info(
+                "[XPU]Setting attention block size to %d tokens to ensure "
+                "multiple of %d, set mamba_page_size_padded to %d bytes "
+                "accordingly, before was %d bytes.",
+                new_block_size,
+                kernel_block_size,
+                cache_config.mamba_page_size_padded,
+                original_mamba_page_size_padded,
+            )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

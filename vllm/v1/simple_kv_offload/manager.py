@@ -5,7 +5,7 @@
 import contextlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -21,6 +21,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
+    MemoryModel,
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -130,7 +131,7 @@ class SimpleCPUOffloadScheduler:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
-        self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
+        self.cpu_block_pool = cast(BlockPool, self.cpu_coordinator.block_pool)
 
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
@@ -184,6 +185,15 @@ class SimpleCPUOffloadScheduler:
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
+        if any(
+            pool.memory_model == MemoryModel.REQUEST_CONSTANT
+            for pool in gpu_config.pool_configs
+        ):
+            raise NotImplementedError(
+                "CPU KV cache offload with REQUEST_CONSTANT specs "
+                "(Mamba in 'none' or 'align' mode) is not supported. Set "
+                "mamba_cache_mode='all' or disable offload."
+            )
 
         gpu_total_bytes = sum(t.size for t in gpu_config.kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks

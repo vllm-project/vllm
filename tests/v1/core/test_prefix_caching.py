@@ -37,8 +37,10 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
     KVCacheSpecKind,
     MambaSpec,
+    MemoryModel,
     SlidingWindowSpec,
 )
 
@@ -140,8 +142,9 @@ def make_kv_cache_config_hybrid_model(
     elif second_spec_type == "mamba":
         second_spec = MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
+            page_size_padded=8 * block_size,
         )
 
     return KVCacheConfig(
@@ -175,8 +178,12 @@ def make_kv_cache_config_three_types(
     if third_spec_type == "mamba":
         third_spec = MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
+            page_size_padded=8 * block_size,
+            # This helper is used by prefix-caching event tests. Request-constant
+            # Mamba modes intentionally reject prefix caching.
+            mamba_cache_mode="all",
         )
     elif third_spec_type == "sliding_window":
         third_spec = SlidingWindowSpec(
@@ -755,13 +762,19 @@ def _make_hybrid_kv_cache_config(
         ),
         "mamba": lambda: MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
+            page_size_padded=8 * block_size,
+            # Prefix-caching tests exercise the legacy shared-pool Mamba path.
+            # Non-"all" Mamba modes are REQUEST_CONSTANT and intentionally
+            # fail-closed with prefix caching.
+            mamba_cache_mode="all",
         ),
         "mamba_align": lambda: MambaSpec(
             block_size=block_size,
-            shapes=(1, 1),
+            shapes=((1, 1),),
             dtypes=(torch.float32,),
+            page_size_padded=8 * block_size,
             mamba_cache_mode="align",
         ),
     }
@@ -982,44 +995,62 @@ def test_prefill_hybrid_model_combinations_eagle(
     manager.free(req1)
 
 
-def test_prefill_hybrid_model_mamba_align():
-    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
-
-    Regression test for https://github.com/vllm-project/vllm/issues/34361.
-    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
-    null blocks. cache_full_blocks() correctly skips them, but
-    MambaManager.cache_blocks() must also skip null blocks when tracking
-    cached_blocks_this_step.
-    """
+def test_prefill_hybrid_model_mamba_align_prefix_caching_rejected():
+    """mamba_cache_mode="align" is REQUEST_CONSTANT and not prefix-cacheable."""
     block_size = 16
     num_blocks = 30
-
-    kv_cache_config = _make_hybrid_kv_cache_config(
-        block_size, num_blocks, ["full", "mamba_align"]
+    full_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
     )
-    manager = make_kv_cache_manager(
-        kv_cache_config,
-        max_model_len=8192,
-        enable_caching=True,
-        hash_block_size=block_size,
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        page_size_padded=8 * block_size,
+        mamba_cache_mode="align",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer0"], full_spec),
+            KVCacheGroupSpec(["layer1"], mamba_spec),
+        ],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=(0,),
+                num_blocks=num_blocks,
+                accounting_page_size_bytes=full_spec.accounting_page_size_bytes,
+                physical_page_size_bytes=full_spec.physical_page_size_bytes,
+            ),
+            KVCachePoolConfig(
+                pool_id=1,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=(1,),
+                num_blocks=3,
+                accounting_page_size_bytes=mamba_spec.accounting_page_size_bytes,
+                physical_page_size_bytes=mamba_spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0, 1),
     )
 
-    hash_fn = sha256
-
-    # 3 full blocks (48 tokens) + 7 partial tokens = 55 tokens total
-    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
-
-    # First request: allocate_slots should not crash with the assertion error
-    # in MambaManager.cache_blocks() when null blocks are present.
-    req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert num_computed_tokens == 0
-
-    blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
-    assert blocks is not None
-    assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
-
-    manager.free(req0)
+    with pytest.raises(
+        NotImplementedError,
+        match="multi-pool configs only when prefix caching is disabled",
+    ):
+        KVCacheManager(
+            kv_cache_config,
+            max_model_len=8192,
+            enable_caching=True,
+            scheduler_block_size=block_size,
+            hash_block_size=block_size,
+        )
 
 
 def test_prefill_plp():
@@ -1980,6 +2011,43 @@ def test_kv_cache_events(blocks_to_cache: int):
 
     assert isinstance(events[-1], AllBlocksCleared)
     assert len(manager.block_pool.cached_block_hash_to_block) == 0
+
+
+def test_request_constant_only_kv_cache_events_noop():
+    block_size = 4
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mamba"], mamba_spec)],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=(0,),
+                num_blocks=3,
+                accounting_page_size_bytes=mamba_spec.accounting_page_size_bytes,
+                physical_page_size_bytes=mamba_spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0,),
+    )
+
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=False,
+        enable_kv_cache_events=True,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
+    )
+
+    assert manager.take_events() == []
 
 
 def test_null_parent_block_hash():

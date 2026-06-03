@@ -149,6 +149,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MemoryModel,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -199,6 +200,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import get_block_layout_page_size_bytes
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -7048,9 +7050,15 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                block_layout_page_size = get_block_layout_page_size_bytes(kv_cache_spec)
+                assert raw_tensor.numel() % block_layout_page_size == 0
+                num_blocks = raw_tensor.numel() // block_layout_page_size
                 if isinstance(kv_cache_spec, AttentionSpec):
+                    if kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT:
+                        raise NotImplementedError(
+                            "REQUEST_CONSTANT AttentionSpec is not supported. "
+                            "Attention KV cache is token-proportional."
+                        )
                     has_attn = True
                     num_blocks_per_kv_block = (
                         kv_cache_spec.block_size // kernel_block_size
@@ -7101,7 +7109,7 @@ class GPUModelRunner(
                         # standard attention backends whose shape starts with
                         # a K/V dimension of size 2.
                         dtype_size = get_dtype_size(dtype)
-                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                        page_stride = block_layout_page_size // dtype_size
                         strides = list(torch.empty(kv_cache_shape).stride())
                         strides[inv_order[0]] = page_stride
                         kv_cache = torch.as_strided(
@@ -7121,9 +7129,7 @@ class GPUModelRunner(
                     storage_offset_bytes = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
+                        num_element_per_page = block_layout_page_size // dtype_size
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])

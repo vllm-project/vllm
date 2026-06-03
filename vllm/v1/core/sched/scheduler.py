@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -244,7 +245,14 @@ class Scheduler(SchedulerInterface):
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
-            self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+            block_pool = self.kv_cache_manager.block_pool
+            if not isinstance(block_pool, BlockPool):
+                raise NotImplementedError(
+                    "KV connector requires the token-proportional BlockPool. "
+                    "REQUEST_CONSTANT KV cache pools are not supported with "
+                    "KV connector yet."
+                )
+            self.connector.bind_gpu_block_pool(block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner

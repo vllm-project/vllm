@@ -31,6 +31,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
+    MambaSpec,
+    MemoryModel,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -72,6 +75,162 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def test_routed_experts_capacity_uses_token_proportional_pool():
+    block_size = 16
+    num_attention_blocks = 8
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    model_config.enable_return_routed_experts = True
+    model_config.hf_text_config.num_experts = 4
+    model_config.hf_text_config.num_experts_per_tok = 2
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        max_model_len=128,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+    )
+    attention_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_attention_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["attn"], attention_spec),
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=(0,),
+                num_blocks=num_attention_blocks,
+                accounting_page_size_bytes=attention_spec.page_size_bytes,
+                physical_page_size_bytes=attention_spec.physical_page_size_bytes,
+            ),
+            KVCachePoolConfig(
+                pool_id=1,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=(1,),
+                num_blocks=2,
+                accounting_page_size_bytes=mamba_spec.page_size_bytes,
+                physical_page_size_bytes=mamba_spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0, 1),
+    )
+    cache_config.num_gpu_blocks = num_attention_blocks
+
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=kv_cache_config,
+        block_size=block_size,
+        structured_output_manager=StructuredOutputManager(vllm_config),
+    )
+
+    expected_max_num_kv_tokens = num_attention_blocks * block_size
+    assert scheduler.routed_experts_mgr.attn_gid == 0
+    assert (
+        scheduler.routed_experts_mgr.routed_experts_by_slot.shape[0]
+        == expected_max_num_kv_tokens
+    )
+
+
+def test_kv_connector_rejects_request_constant_block_pool():
+    block_size = 16
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        max_model_len=128,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    cache_config = CacheConfig(
+        block_size=block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=False,
+    )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MockKVConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "matched_tokens": 0,
+            "is_async": False,
+        },
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+    )
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((4,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+        pool_configs=(
+            KVCachePoolConfig(
+                pool_id=0,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=(0,),
+                num_blocks=2,
+                accounting_page_size_bytes=mamba_spec.page_size_bytes,
+                physical_page_size_bytes=mamba_spec.physical_page_size_bytes,
+            ),
+        ),
+        group_to_pool_id=(0,),
+    )
+    cache_config.num_gpu_blocks = 2
+
+    with pytest.raises(NotImplementedError, match="KV connector requires"):
+        Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            block_size=block_size,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
 
 
 @pytest.mark.parametrize(
