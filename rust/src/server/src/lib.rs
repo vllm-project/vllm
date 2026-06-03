@@ -7,6 +7,7 @@ mod listener;
 mod lora;
 mod middleware;
 mod routes;
+mod server_info;
 mod state;
 mod utils;
 
@@ -30,6 +31,7 @@ use vllm_text::TextLlm;
 
 use crate::listener::Listener;
 use crate::routes::build_router;
+use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine
@@ -88,7 +90,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
             .with_log_requests(config.enable_log_requests)
-            .with_request_id_headers(config.enable_request_id_headers),
+            .with_request_id_headers(config.enable_request_id_headers)
+            .with_server_info(ServerInfoSnapshot::from_config(config)),
     ))
 }
 
