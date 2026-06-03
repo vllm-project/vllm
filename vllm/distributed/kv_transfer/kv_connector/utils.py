@@ -530,20 +530,8 @@ class TransferTopology:
         also accounting for hybrid SSM models specificities.
         """
         if isinstance(layer_spec, MambaSpec):
-            # Register the whole kv cache shared tensor, including
-            # SSM/Conv.
-            conv, ssm = cache
-            return [conv]
-
-        # Check may be hacky but it's matching
-        # `_update_hybrid_attention_mamba_layout`.
-        if self.is_mamba and cache.shape[0] == 2:
-            # When MAMBA is present, all backends are blocks first, so
-            # that blocks can be shared between attention layers and mamba
-            # layers.  Runner already adjusted strides for FlashAttn-like
-            # backends so its num_blocks first.
-            # Swap [2<>num_blocks] dims for hybrid SSM layout.
-            cache = cache.transpose(0, 1)
+            # Standardized layout: Mamba cache is a single 4D tensor.
+            return [cache]
 
         return [cache]
 

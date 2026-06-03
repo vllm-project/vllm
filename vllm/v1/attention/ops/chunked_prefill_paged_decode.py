@@ -48,7 +48,7 @@ def kernel_paged_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
     key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
-    value_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
     sink_ptr,  # [num_query_heads]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
@@ -171,9 +171,7 @@ def kernel_paged_attention_2d(
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
-        # 4D addressing logic of V
-        # stride_v_cache_2 = head_size dim stride
-        # stride_v_cache_3 = block-position (N) dim stride
+        # 4D addressing logic of V (Slot is innermost)
         v_offset = (
             p_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_1
@@ -323,7 +321,7 @@ def chunked_prefill_paged_decode(
             causal=causal,
         )
 
-    block_size = value_cache.shape[2]
+    block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     # key may be None in cross-attention decode (already cached from encoder)
