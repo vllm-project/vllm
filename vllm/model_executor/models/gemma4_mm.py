@@ -1014,13 +1014,19 @@ class Gemma4ForConditionalGeneration(
         self.model_dtype = vllm_config.model_config.dtype
 
         # Only quantize towers when the quant method supports their
-        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
-        # (Marlin, FP8, …) require dimensions divisible by 64, which
-        # the vision tower (intermediate_size=4304) does not satisfy.
+        # dimensions.  BNB/torchao/compressed-tensors resolve quantization
+        # per-layer and handle arbitrary sizes; other methods (Marlin, FP8, …)
+        # require dimensions divisible by 64, which the vision tower
+        # (intermediate_size=4304) does not satisfy.
         if quant_config and quant_config.get_name() in [
             "bitsandbytes",
             "torchao",
+            "compressed-tensors",
         ]:
+            # compressed-tensors falls back to an unquantized linear for tower
+            # layers that match no scheme (e.g. the dequantized audio
+            # ffw_layer_1 / linear_start / post), and its WNA8O8Int humming/torch
+            # path handles the non-64-aligned tower dimensions.
             tower_quant = quant_config
         else:
             vision_cfg = config.vision_config
