@@ -1021,7 +1021,7 @@ class DeepseekV2MLAAttention(nn.Module):
             )
 
             if is_mtp:
-                _skip_topk = True
+                _skip_topk = getattr(config, "index_share_for_mtp_iteration", False)
             else:
                 # IndexCache config
                 # Refer: https://arxiv.org/abs/2603.12201 for more details.
