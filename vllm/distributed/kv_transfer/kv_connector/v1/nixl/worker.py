@@ -774,15 +774,18 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
+    def register_cross_layers_kv_caches(
+        self,
+        kv_cache: torch.Tensor,
+        block_stride: int | None = None,
+    ) -> None:
         """Register a cross-layers KV cache tensor with NIXL.
 
-        `use_uniform_kv_cache()` guarantees a single KV cache group whose
-        layers all share the same `AttentionSpec`, so any layer name from
-        `_layer_specs` yields the correct per-layer spec for `page_size_bytes`.
+        When block_stride is provided (packed heterogeneous layout),
+        it overrides the per-layer page_size calculation.
         """
+        self._packed_block_stride = block_stride
         first_layer = next(iter(self._layer_specs))
-        # Forwarding a real layer name rather than a synthetic key
         self.register_kv_caches({first_layer: kv_cache})
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -859,19 +862,23 @@ class NixlConnectorWorker:
             )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
-            physical_page_size = (
-                layer_spec.page_size_bytes
-                if isinstance(layer_spec, MambaSpec)
-                else layer_spec.page_size_bytes
-                // self._physical_blocks_per_logical_kv_block
-            )
-            # For when registering multiple tensors eg K/V in separate regions.
-            physical_page_size = physical_page_size // len(cache_list)
-            if self.transfer_topo._cross_layers_blocks:
-                # When cross-layers blocks are used, multiply by number of layers
-                physical_page_size = physical_page_size * len(
-                    self.kv_cache_config.kv_cache_tensors
+            packed_stride = getattr(self, "_packed_block_stride", None)
+            if packed_stride is not None:
+                physical_page_size = packed_stride
+            else:
+                physical_page_size = (
+                    layer_spec.page_size_bytes
+                    if isinstance(layer_spec, MambaSpec)
+                    else layer_spec.page_size_bytes
+                    // self._physical_blocks_per_logical_kv_block
                 )
+                # For when registering multiple tensors eg K/V in separate regions.
+                physical_page_size = physical_page_size // len(cache_list)
+                if self.transfer_topo._cross_layers_blocks:
+                    # When cross-layers blocks are used, multiply by number of layers
+                    physical_page_size = physical_page_size * len(
+                        self.kv_cache_config.kv_cache_tensors
+                    )
             num_blocks = (
                 self._logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
@@ -906,7 +913,7 @@ class NixlConnectorWorker:
                 else:
                     self.block_len_per_layer.append(physical_page_size)
 
-                if cache.shape[0] != num_blocks:
+                if packed_stride is None and cache.shape[0] != num_blocks:
                     raise AssertionError(
                         "All kv cache tensors must have the same number of "
                         f"blocks; layer={layer_name}, "

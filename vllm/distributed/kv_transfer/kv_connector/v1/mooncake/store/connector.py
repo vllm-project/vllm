@@ -248,7 +248,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type | None,
+        block_stride: int | None = None,
     ):
         assert self.connector_worker is not None
         assert (

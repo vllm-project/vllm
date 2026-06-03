@@ -259,7 +259,10 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type["AttentionBackend"] | None,
+        block_stride: int | None = None,
     ):
         """
         Initialize with a single KV cache tensor used by all layers.

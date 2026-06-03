@@ -183,8 +183,12 @@ class OffloadingConnectorWorker:
         self._register_handlers(canonical_kv_caches)
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type[AttentionBackend] | None,
+        block_stride: int | None = None,
     ):
+        assert attn_backend is not None
         # verify that num_blocks is at physical position 0 in the cross-layers
         # tensor layout.
         test_shape = attn_backend.get_kv_cache_shape(

@@ -1240,17 +1240,43 @@ def _get_kv_cache_config_deepseek_v4(
     num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
+    full_block_bytes = layer_tuple_page_bytes * num_layer_tuples
+    total_size = full_block_bytes * num_blocks
+
     kv_cache_tensors: list[KVCacheTensor] = []
+
     for tuple_idx in range(num_layer_tuples):
+        ps_offset = 0
         for ps in page_sizes:
-            shared_by: list[str] = []
-            for b in bucketed:
+            mla_shared: list[str] = []
+            swa_shared: list[str] = []
+            for g_idx, b in enumerate(bucketed):
                 bucket = b.get(ps)
                 if bucket is not None and tuple_idx < len(bucket):
-                    shared_by.append(bucket[tuple_idx])
-            kv_cache_tensors.append(
-                KVCacheTensor(size=ps * num_blocks, shared_by=shared_by)
-            )
+                    if g_idx == 0:
+                        mla_shared.append(bucket[tuple_idx])
+                    else:
+                        swa_shared.append(bucket[tuple_idx])
+            offset = tuple_idx * layer_tuple_page_bytes + ps_offset
+            if mla_shared:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=total_size,
+                        shared_by=mla_shared,
+                        offset=offset,
+                        block_stride=full_block_bytes,
+                    )
+                )
+            if swa_shared:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=total_size,
+                        shared_by=swa_shared,
+                        offset=offset,
+                        block_stride=full_block_bytes,
+                    )
+                )
+            ps_offset += ps
 
     return num_blocks, kv_cache_tensors
 

@@ -6995,7 +6995,7 @@ class GPUModelRunner(
 
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
-    ) -> dict[str, torch.Tensor]:
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
         to be reshaped to the desired shape before being used by the models.
@@ -7007,12 +7007,20 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
+            if kv_cache_tensor.block_stride > 0:
+                if packed_backing is None:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                    )
+                backing = packed_backing
+            else:
+                backing = torch.zeros(
+                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                )
             for layer_name in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name] = tensor
+                kv_cache_raw_tensors[layer_name] = backing
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -7023,7 +7031,7 @@ class GPUModelRunner(
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
             "Some layers are not correctly initialized"
         )
-        return kv_cache_raw_tensors
+        return kv_cache_raw_tensors, packed_backing
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
@@ -7052,6 +7060,12 @@ class GPUModelRunner(
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
+
+        layer_packing: dict[str, tuple[int, int]] = {}
+        for kv_tensor in self.kv_cache_config.kv_cache_tensors:
+            if kv_tensor.block_stride > 0:
+                for ln in kv_tensor.shared_by:
+                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -7063,8 +7077,13 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                packing = layer_packing.get(layer_name)
+                if packing is not None:
+                    _, blk_stride = packing
+                    num_blocks = raw_tensor.numel() // blk_stride
+                else:
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -7106,15 +7125,19 @@ class GPUModelRunner(
                     ]
 
                     raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
-                    if kv_cache_spec.page_size_padded is not None:
-                        # Use strided view to handle page_size_bytes that
-                        # include padding. This follows
-                        # the same pattern as MambaSpec handling below.
-                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                        # (i.e. the first physical dimension is the block
-                        # index), which holds for MLA backends but NOT for
-                        # standard attention backends whose shape starts with
-                        # a K/V dimension of size 2.
+                    if packing is not None:
+                        layer_offset, blk_stride = packing
+                        dtype_size = get_dtype_size(dtype)
+                        page_stride = blk_stride // dtype_size
+                        strides = list(torch.empty(kv_cache_shape).stride())
+                        strides[inv_order[0]] = page_stride
+                        kv_cache = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=tuple(strides),
+                            storage_offset=layer_offset // dtype_size,
+                        )
+                    elif kv_cache_spec.page_size_padded is not None:
                         dtype_size = get_dtype_size(dtype)
                         page_stride = kv_cache_spec.page_size_bytes // dtype_size
                         strides = list(torch.empty(kv_cache_shape).stride())
@@ -7125,7 +7148,6 @@ class GPUModelRunner(
                             stride=tuple(strides),
                         )
                     else:
-                        # No padding — safe to use a contiguous view.
                         kv_cache = raw_tensor.view(kv_cache_shape)
                     kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
@@ -7227,12 +7249,23 @@ class GPUModelRunner(
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            kv_cache_raw_tensors, packed_backing = self._allocate_kv_cache_tensors(
+                kv_cache_config
+            )
 
             # Change the memory buffer to the desired shape
             kv_caches = self._reshape_kv_cache_tensors(
                 kv_cache_raw_tensors, kernel_block_sizes
             )
+
+            if packed_backing is not None:
+                block_stride = next(
+                    t.block_stride
+                    for t in kv_cache_config.kv_cache_tensors
+                    if t.block_stride > 0
+                )
+                self.cross_layers_kv_cache = packed_backing
+                self._packed_block_stride = block_stride
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -7329,9 +7362,11 @@ class GPUModelRunner(
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
             if self.cross_layers_kv_cache is not None:
-                assert self.cross_layers_attn_backend is not None
+                block_stride = getattr(self, "_packed_block_stride", None)
                 kv_transfer_group.register_cross_layers_kv_cache(
-                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
+                    self.cross_layers_kv_cache,
+                    self.cross_layers_attn_backend,
+                    block_stride=block_stride,
                 )
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
