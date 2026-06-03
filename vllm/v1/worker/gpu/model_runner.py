@@ -1452,10 +1452,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
 
-        # Post-step KV connector related operations.
-        kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-        model_runner_output.kv_connector_output = kv_connector_output
-
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
