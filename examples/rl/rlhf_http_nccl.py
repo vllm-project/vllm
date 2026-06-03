@@ -38,10 +38,12 @@ import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.config import NCCLWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
 BASE_URL = "http://localhost:8000"
@@ -60,62 +62,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         )
         results.append(response.choices[0].text)
     return results
-
-
-def init_weight_transfer_engine(
-    base_url: str,
-    master_address: str,
-    master_port: int,
-    rank_offset: int,
-    world_size: int,
-) -> None:
-    """Initialize weight transfer via HTTP endpoint."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload = {
-        "init_info": dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=rank_offset,
-            world_size=world_size,
-        )
-    }
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str) -> None:
-    """Start a weight update via HTTP endpoint."""
-    url = f"{base_url}/start_weight_update"
-    response = requests.post(url, json={}, timeout=60)
-    response.raise_for_status()
-
-
-def update_weights(
-    base_url: str,
-    names: list[str],
-    dtype_names: list[str],
-    shapes: list[list[int]],
-    packed: bool = False,
-) -> None:
-    """Update weights via HTTP endpoint."""
-    url = f"{base_url}/update_weights"
-    payload = {
-        "update_info": dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=packed,
-        )
-    }
-    response = requests.post(url, json=payload, timeout=300)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish a weight update via HTTP endpoint."""
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, json={}, timeout=60)
-    response.raise_for_status()
 
 
 def pause_generation(base_url: str) -> None:
@@ -177,75 +123,35 @@ def main():
         print("-" * 50)
 
     # Set up the communication channel between the training process and the
-    # vLLM server. The trainer is rank 0, vLLM worker(s) start at rank_offset.
+    # vLLM server. The trainer is rank 0, vLLM worker(s) start after it.
     master_address = get_ip()
     master_port = get_open_port()
-    rank_offset = 1
 
     print(f"Initializing weight transfer: master={master_address}:{master_port}")
 
-    # Initialize weight transfer on vLLM server (this is async, server will
-    # wait for NCCL connection)
-    import threading
-
-    init_thread = threading.Thread(
-        target=init_weight_transfer_engine,
-        args=(BASE_URL, master_address, master_port, rank_offset, world_size),
-    )
-    init_thread.start()
-
-    # Initialize NCCL process group on trainer side
-    model_update_group = NCCLWeightTransferEngine.trainer_init(
-        dict(
+    # The trainer engine owns the full handshake. `trainer_init` kicks off the
+    # server's init_weight_transfer_engine (via the HTTP client) on a worker
+    # thread while opening the trainer's NCCL endpoint, so both ends rendezvous
+    # together — no manual threading needed here.
+    engine = WeightTransferTrainerFactory.trainer_init(
+        backend="nccl",
+        config=NCCLWeightTransferConfig(packed=True),
+        init_info=NCCLTrainerInitInfo(
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
         ),
+        client=HTTPVLLMWeightSyncClient(BASE_URL),
+        weight_iterator=train_model.named_parameters,
     )
-
-    # Wait for init_weight_transfer_engine to complete
-    init_thread.join()
 
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
-    # Collect weight metadata for the update request
-    names = []
-    dtype_names = []
-    shapes = []
-    for name, p in train_model.named_parameters():
-        names.append(name)
-        dtype_names.append(str(p.dtype).split(".")[-1])
-        shapes.append(list(p.shape))
-
-    # Start weight update
-    start_weight_update(BASE_URL)
-
-    # Start the update_weights call in a separate thread since it will block
-    # waiting for NCCL broadcasts
-    # packed=True enables efficient batched tensor broadcasting
-    update_thread = threading.Thread(
-        target=update_weights,
-        args=(BASE_URL, names, dtype_names, shapes, True),  # packed=True
-    )
-    update_thread.start()
-
-    # Broadcast all weights from trainer to vLLM workers
+    # One call drives start_weight_update / update_weights / finish_weight_update
+    # over HTTP, concurrent with the NCCL broadcast.
     print("Broadcasting weights via NCCL...")
-    trainer_args = NCCLTrainerSendWeightsArgs(
-        group=model_update_group,
-        packed=True,
-    )
-    NCCLWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
-    )
-
-    # Wait for update_weights to complete
-    update_thread.join()
-
-    # Finish weight update
-    finish_weight_update(BASE_URL)
+    engine.send_weights()
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)

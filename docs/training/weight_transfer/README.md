@@ -27,13 +27,16 @@ Specify the weight transfer backend through `WeightTransferConfig`. The backend 
 
 ```python
 from vllm import LLM
-from vllm.config import WeightTransferConfig
+from vllm.config import NCCLWeightTransferConfig  # or IPCWeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc"
+    weight_transfer_config=NCCLWeightTransferConfig(packed=True),
 )
 ```
+
+When passing the config as a dict (e.g. via the CLI), the right backend subclass is selected
+automatically from the `backend` field.
 
 ### CLI (Online Serving)
 
@@ -63,26 +66,41 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 
 ## Trainer-Side API
 
-Both backends provide static methods that the trainer calls to send weights. The general pattern is:
+The trainer side mirrors the worker side: a stateful `TrainerWeightTransferEngine`
+constructed via the `WeightTransferTrainerFactory.trainer_init` factory, then driven by a
+parameter-free `send_weights()`. The engine owns the full handshake and the four-phase
+protocol — it talks to the inference side through a `VLLMWeightSyncClient` (built-in HTTP and
+Ray implementations are provided; any object with the four control-plane methods works, since
+the protocol is structural).
 
 ```python
-# 1. Initialize the transfer engine (backend-specific)
-EngineClass.trainer_init(init_info)
+from vllm.config import NCCLWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    RayVLLMWeightSyncClient,        # or HTTPVLLMWeightSyncClient(base_url)
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 
-# 2. Start weight update on inference side
-llm.start_weight_update()
-
-# 3. Send weights to inference workers
-EngineClass.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=backend_specific_args,
+# 1. Build the engine and rendezvous with the inference side. `trainer_init`
+#    drives init_weight_transfer_engine internally (concurrent with the
+#    trainer-side rendezvous when the backend needs it).
+engine = WeightTransferTrainerFactory.trainer_init(
+    backend="nccl",
+    config=NCCLWeightTransferConfig(packed=True),
+    init_info=NCCLTrainerInitInfo(master_address=addr, master_port=port, world_size=ws),
+    client=RayVLLMWeightSyncClient(llm_handle),
+    weight_iterator=model.named_parameters,  # a factory: returns a fresh iterator
 )
 
-# 4. Finish weight update on inference side
-llm.finish_weight_update()
+# 2. Push weights. One call drives start_weight_update / update_weights /
+#    finish_weight_update on the inference side (and the data-plane transfer).
+engine.send_weights()
 ```
 
-See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific trainer APIs and full examples.
+`packed` and the buffer sizes are static "must-agree" wire params and live on the
+backend-specific `WeightTransferConfig` subclass, so the trainer and inference sides cannot
+drift. See the [NCCL](nccl.md) and [IPC](ipc.md) pages for backend-specific details and full
+examples.
 
 ## Extending the System
 

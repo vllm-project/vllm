@@ -17,100 +17,77 @@ The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) h
 
 ## Packed (Chunked) Transfer
 
-By default, all weights are sent in a single API call. For large models, this requires the full model to reside in GPU memory on both sides simultaneously. Setting `packed=True` enables **chunked transfer** with bounded GPU memory:
+By default, all weights are sent in a single API call. For large models, this requires the full model to reside in GPU memory on both sides simultaneously. Setting `packed=True` on `IPCWeightTransferConfig` enables **chunked transfer** with bounded GPU memory:
 
 - Weights are concatenated into fixed-size packed buffers (controlled by `packed_buffer_size_bytes`).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
 - After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
 
 ```python
-trainer_args = IPCTrainerSendWeightsArgs(
-    send_mode="ray",
-    llm_handle=llm_actor_handle,
+from vllm.config import IPCWeightTransferConfig
+
+config = IPCWeightTransferConfig(
     packed=True,
     packed_buffer_size_bytes=256 * 1024 * 1024,  # 256 MB chunks
 )
 ```
 
+`packed` and `packed_buffer_size_bytes` are static wire params on the config, constructed
+identically at the trainer and inference sides.
+
 ## Initialization
 
-The IPC backend requires no initialization on either side. The `init_transfer_engine` call is a no-op for IPC.
+The IPC backend requires no data-plane rendezvous. `trainer_init` still calls the inference
+side's (no-op) `init_weight_transfer_engine` via the client.
 
 ## Sending Weights
 
-IPC supports two transport modes for delivering the handles:
-
-### Ray Mode
-
-Used when vLLM is running as a Ray actor:
+The transport is chosen by the `VLLMWeightSyncClient` passed at `trainer_init`; the trainer
+code is identical across transports.
 
 ```python
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerSendWeightsArgs,
-    IPCWeightTransferEngine,
+from vllm.config import IPCWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
+
+# Ray (vLLM running as a Ray actor):
+client = RayVLLMWeightSyncClient(llm_actor_handle)
+# ...or HTTP (vLLM running as a server):
+client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+
+engine = WeightTransferTrainerFactory.trainer_init(
+    backend="ipc",
+    config=IPCWeightTransferConfig(packed=False),
+    init_info=IPCTrainerInitInfo(),
+    client=client,
+    weight_iterator=model.named_parameters,
 )
 
-trainer_args = IPCTrainerSendWeightsArgs(
-    send_mode="ray",
-    llm_handle=llm_actor_handle,
-)
-# start
-ray.get(llm_actor_handle.start_weight_update.remote())
-# send weights
-IPCWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
-# finish
-ray.get(llm_actor_handle.finish_weight_update.remote())
+# Drives start_weight_update / update_weights / finish_weight_update.
+engine.send_weights()
 ```
 
-In Ray mode, the engine calls `llm_handle.update_weights.remote(...)` directly, passing the IPC handles via Ray's serialization.
+In **Ray** mode the IPC handles pass through Ray's serialization natively. In **HTTP** mode
+the `HTTPVLLMWeightSyncClient` pickles and base64-encodes the handles into JSON, so the vLLM
+server must be started with `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.
 
-### HTTP Mode
+### Custom transports
 
-Used when vLLM is running as an HTTP server:
+The control plane is a structural `VLLMWeightSyncClient` protocol — any object with
+`init_weight_transfer_engine`, `start_weight_update`, `update_weights`, and
+`finish_weight_update` (all taking/returning the documented dicts) works as a `client`, with
+no import or subclassing required.
 
-```python
-trainer_args = IPCTrainerSendWeightsArgs(
-    send_mode="http",
-    url="http://localhost:8000",
-)
+### Multi-rank (FSDP) trainers
 
-# start
-base_url = "http://localhost:8000"
-url = f"{base_url}/start_weight_update"
-response = requests.post(url, json={}, timeout=60)
-response.raise_for_status()
-# send weights
-IPCWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
-# finish
-url = f"{base_url}/finish_weight_update"
-response = requests.post(url, json={}, timeout=60)
-response.raise_for_status()
-```
-
-In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. Because the worker deserializes the payload via `pickle.loads`, the vLLM server must be started with `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.
-
-```python
-def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):
-    # Custom logic to deliver update_info to vLLM
-    ...
-
-trainer_args = IPCTrainerSendWeightsArgs(
-    send_mode=my_custom_sender,
-)
-
-IPCWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
-```
-
-See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
+Only rank 0 holds the engine and drives the inference side. All ranks must still participate
+in the IPC handle all-gather, so non-rank-0 ranks call
+`IPCTrainerWeightTransferEngine.participate(weight_iterator, config)` concurrently with rank
+0's `send_weights()`. See the FSDP example below.
 
 ## Examples
 

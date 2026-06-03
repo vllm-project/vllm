@@ -42,6 +42,7 @@ from vllm.config import (
     DiffusionConfig,
     ECTransferConfig,
     EPLBConfig,
+    IPCWeightTransferConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -50,6 +51,7 @@ from vllm.config import (
     MambaConfig,
     ModelConfig,
     MultiModalConfig,
+    NCCLWeightTransferConfig,
     ObservabilityConfig,
     OffloadConfig,
     ParallelConfig,
@@ -138,6 +140,14 @@ logger = init_logger(__name__)
 T = TypeVar("T")
 TypeHint: TypeAlias = type[Any] | object
 TypeHintT: TypeAlias = type[T] | object
+
+# Maps a weight-transfer backend name to its config subclass, used when the
+# user passes `weight_transfer_config` as a dict. Backends without extra wire
+# params (e.g. "sparse_nccl") fall back to the base `WeightTransferConfig`.
+_WEIGHT_TRANSFER_CONFIG_CLASSES: dict[str, type[WeightTransferConfig]] = {
+    "nccl": NCCLWeightTransferConfig,
+    "ipc": IPCWeightTransferConfig,
+}
 
 
 def parse_type(return_type: Callable[[str], T]) -> Callable[[str], T]:
@@ -741,9 +751,12 @@ class EngineArgs:
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
-            self.weight_transfer_config = WeightTransferConfig(
-                **self.weight_transfer_config
-            )
+            # Dispatch to the backend-specific config subclass so that
+            # backend wire params (packed, buffer sizes) are typed and shared
+            # by both the trainer and inference sides.
+            backend = self.weight_transfer_config.get("backend", "nccl")
+            cls = _WEIGHT_TRANSFER_CONFIG_CLASSES.get(backend, WeightTransferConfig)
+            self.weight_transfer_config = cls(**self.weight_transfer_config)
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 

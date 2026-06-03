@@ -14,7 +14,7 @@ MVP limitations:
 * not composable with checkpoint-format or packed updates
 """
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -24,7 +24,11 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.config.weight_transfer import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+    WeightTransferConfig,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferUpdateInfo,
@@ -34,13 +38,39 @@ from vllm.distributed.weight_transfer.nccl_common import (
     trainer_init,
     worker_init_process_group,
 )
-from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerSendWeightsArgs
 
 __all__ = [
     "SparseWeightPatch",
+    "NCCLTrainerSendWeightsArgs",
     "SparseNCCLWeightTransferUpdateInfo",
     "SparseNCCLWeightTransferEngine",
 ]
+
+
+@dataclass
+class NCCLTrainerSendWeightsArgs:
+    """Arguments for the sparse NCCL ``trainer_send_weights`` static method.
+
+    Relocated here from `nccl_engine` (the dense engine dropped its static
+    trainer path in favor of `NCCLTrainerWeightTransferEngine`); the sparse
+    engine is now the only consumer.
+    """
+
+    group: Any
+    """Process group (PyNcclCommunicator) for NCCL communication."""
+    src: int = 0
+    """Source rank (default 0, trainer is typically rank 0)."""
+    post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor] | None = None
+    """Optional function to apply to each (name, tensor) pair before broadcasting.
+    If None, extracts just the tensor."""
+    packed: bool = False
+    """Whether to use packed tensor broadcasting. Unsupported for sparse."""
+    stream: torch.cuda.Stream | None = None
+    """CUDA stream to use for broadcasting. Defaults to the current stream."""
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    """Size in bytes for each packed tensor buffer."""
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    """Number of buffers for double/triple buffering during packed transfer."""
 
 
 @dataclass

@@ -43,12 +43,13 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm import LLM, SamplingParams
-from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.config import NCCLWeightTransferConfig, WeightTransferConfig
+from vllm.distributed.weight_transfer.nccl_common import (
+    NCCLTrainerInitInfo,
+    trainer_init,
 )
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    NCCLTrainerSendWeightsArgs,
     SparseNCCLWeightTransferEngine,
     SparseWeightPatch,
 )
@@ -113,15 +114,15 @@ class TrainModel:
         return self.master_address, self.port
 
     def init_weight_transfer_group(self, world_size: int) -> None:
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+        self.model_update_group = trainer_init(
+            NCCLTrainerInitInfo(
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
             )
         )
 
-    def get_dense_update_info(self, packed: bool = False) -> tuple[dict, int]:
+    def get_dense_update_info(self) -> tuple[dict, int]:
         names = []
         dtype_names = []
         shapes = []
@@ -137,7 +138,6 @@ class TrainModel:
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,
-                packed=packed,
             ),
             payload_bytes,
         )
@@ -250,19 +250,16 @@ class TrainModel:
         )
         return update_info, selected_token_ids, patch_digest, sparse_payload_bytes
 
-    def broadcast_weights(self, packed: bool = False) -> float:
+    def broadcast_weights(self) -> float:
         if self.model_update_group is None:
             raise RuntimeError("Weight transfer group is not initialized")
 
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
+        # Dense baseline: simple unpacked per-tensor broadcast (the inference
+        # side is configured with packed=False).
         start = time.perf_counter()
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+        stream = torch.cuda.current_stream()
+        for _, tensor in self.model.named_parameters():
+            self.model_update_group.broadcast(tensor, src=0, stream=stream)
         torch.accelerator.synchronize()
         return (time.perf_counter() - start) * 1000.0
 
@@ -286,6 +283,12 @@ def launch_llm(
     scheduling_inference: PlacementGroupSchedulingStrategy,
     backend: str = "nccl",
 ):
+    # Dense NCCL reads `packed` from its config (unpacked here to match the
+    # trainer's simple per-tensor broadcast); sparse carries no wire params.
+    if backend == "nccl":
+        wt_config: WeightTransferConfig = NCCLWeightTransferConfig(packed=False)
+    else:
+        wt_config = WeightTransferConfig(backend=backend)
     return ray.remote(
         num_cpus=0,
         num_gpus=0,
@@ -296,7 +299,7 @@ def launch_llm(
         tensor_parallel_size=1,
         distributed_executor_backend="ray",
         gpu_memory_utilization=0.7,
-        weight_transfer_config=WeightTransferConfig(backend=backend),
+        weight_transfer_config=wt_config,
     )
 
 
@@ -368,7 +371,7 @@ def run_dense_phase(
         )
         dense_send_ms, _ = ray.get(
             [
-                train_model.broadcast_weights.remote(packed=False),
+                train_model.broadcast_weights.remote(),
                 inference_update,
             ]
         )
