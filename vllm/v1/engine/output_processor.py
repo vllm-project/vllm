@@ -739,10 +739,14 @@ class OutputProcessor:
             ),
             SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
+            # Emit both legacy and current OTel GenAI semconv names so existing
+            # dashboards keep working while new consumers can use the spec names.
             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
+            SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS: prompt_length,
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
             ),
+            SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS: (metrics.num_generation_tokens),
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL: prefill_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE: decode_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE: inference_time,
