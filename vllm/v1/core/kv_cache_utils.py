@@ -1243,7 +1243,16 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Generate KVCacheConfig: one KVCacheTensor per unique page size."""
+    """Generate the KV cache configuration from the KV cache groups and spec
+    of each layer.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_groups: The KV cache groups
+        available_memory: Memory available for KV cache in bytes
+    Returns:
+        The generated KVCacheConfig
+    """
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.

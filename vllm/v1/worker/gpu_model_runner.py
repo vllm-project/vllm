@@ -7023,8 +7023,8 @@ class GPUModelRunner(
                 kernel_block_size = kernel_block_sizes[g.kv_cache_group_id]
 
                 num_blocks = bytes_per_slot // spec.page_size_bytes
-                num_blocks_per_kv_block = spec.block_size // kernel_block_size
-                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+                num_kernel_blocks_per_block = spec.block_size // kernel_block_size
+                kernel_num_blocks = num_blocks * num_kernel_blocks_per_block
 
                 multi_slot_kv_cache = reshape_kv_cache(
                     buf,
