@@ -47,6 +47,8 @@ from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
 from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -196,6 +198,11 @@ def build_app(
 
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
+    if envs.VLLM_SERVER_DEV_MODE:
+        from vllm.entrypoints.serve import register_vllm_dev_api_routers
+
+        register_vllm_dev_api_routers(app)
+
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import (
             register_generate_api_routers,
@@ -208,12 +215,6 @@ def build_app(
         )
 
         attach_disagg_router(app)
-
-        from vllm.entrypoints.serve.rlhf.api_router import (
-            attach_router as attach_rlhf_router,
-        )
-
-        attach_rlhf_router(app)
 
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
