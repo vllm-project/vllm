@@ -102,6 +102,23 @@ def _pad_paddleocr_cu_seqlens_buffer(
     dst: torch.Tensor,
     src: torch.Tensor,
 ) -> None:
+    """Copy a replay ``cu_seqlens`` into a captured ``cu_seqlens`` buffer.
+
+    Registered as the ``cu_seqlens`` padding logic in
+    :meth:`PaddleOCRVLForConditionalGeneration.get_encoder_cudagraph_config`.
+    The CUDA graph was captured for a fixed ``pixel_values`` buffer of
+    ``capture_total`` patches, so the attention kernel's total token count must
+    stay ``capture_total`` at replay. We therefore copy the real (shorter)
+    segment offsets into the front of ``dst`` and fill the unused tail with
+    ``capture_total`` (``dst[-1]``, the capture-time total) rather than the
+    replay total. This turns the zero-padded patches into a single trailing
+    attention segment whose output is later discarded by the scatter step, while
+    keeping ``cu_seqlens[-1]`` invariant across capture and replay.
+
+    Args:
+        dst: The captured buffer to write into (length fixed at capture time).
+        src: The real batch ``cu_seqlens`` for this replay.
+    """
     capture_total = dst[-1].clone()
     n = src.shape[0]
     dst.zero_()
@@ -409,6 +426,23 @@ class Projector(nn.Module):
         image_features: torch.Tensor,
         merge_index: torch.Tensor,
     ) -> torch.Tensor:
+        """Fixed-shape spatial merge used inside the encoder CUDA graph.
+
+        Numerically equivalent to the list branch of :meth:`forward`, but the
+        per-image ``rearrange`` (whose layout depends on each image's ``h, w``)
+        is replaced by a static gather with the precomputed ``merge_index``,
+        followed by a fixed reshape. This keeps the projector capturable.
+
+        Args:
+            image_features: Encoder output, ``[1, ΣT·H·W, vision_hidden]`` or
+                ``[ΣT·H·W, vision_hidden]``.
+            merge_index: Gather order from
+                :meth:`SiglipVisionModel.prepare_encoder_metadata` that groups
+                each ``spatial_merge_size**2`` block of patches contiguously.
+
+        Returns:
+            ``[Σ output_tokens, text_hidden_size]`` projected embeddings.
+        """
         x = image_features.reshape(-1, image_features.shape[-1])
         x = self.pre_norm(x)
         x = x[merge_index].reshape(-1, self.hidden_size)
@@ -524,6 +558,23 @@ class SiglipVisionEmbeddings(nn.Module):
         interpolate_pos_encoding=False,
         position_embeddings: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Patchify pixels and add learned (interpolated) position embeddings.
+
+        Two paths share this method:
+
+        - **Eager** (``position_embeddings is None``): the original behavior —
+          interpolate the position embedding per image (a data-dependent
+          ``F.interpolate`` whose output shape depends on ``h, w``) inside the
+          forward.
+        - **CUDA graph** (``position_embeddings`` provided): the interpolation
+          was done ahead of time in
+          :meth:`SiglipVisionModel.prepare_encoder_metadata`, so here we only
+          run the fixed-shape patch ``Conv2d`` and add the precomputed
+          embeddings. This removes the dynamic-shape op from the captured graph.
+
+        Returns:
+            ``[1, ΣT·H·W, embed_dim]`` patch embeddings.
+        """
         if position_embeddings is not None:
             if pixel_values.dim() == 5:
                 pixel_values = rearrange(pixel_values, "b l c h w -> (b l) c h w")
@@ -831,6 +882,21 @@ class SiglipEncoder(nn.Module):
         rotary_pos_emb: torch.Tensor | None = None,
         max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """Run the SigLIP transformer layers with block-diagonal attention.
+
+        Each image is one attention segment defined by ``cu_seqlens``.
+
+        - **Eager** (``rotary_pos_emb is None``): build the 2D rotary
+          embeddings from ``image_grid_thw`` (a per-image Python loop plus a
+          host-side ``pids.max()`` sync) and derive ``max_seqlen`` from the
+          attention backend.
+        - **CUDA graph** (``rotary_pos_emb`` / ``max_seqlen`` provided): consume
+          the precomputed buffers and skip all host-dependent work, so the layer
+          stack is capturable.
+
+        Returns:
+            ``[1, ΣT·H·W, embed_dim]`` hidden states (pre ``post_layernorm``).
+        """
         device = inputs_embeds.device
         hidden_states = inputs_embeds
 
@@ -914,6 +980,17 @@ class SiglipVisionTransformer(nn.Module):
         image_grid_thw: torch.Tensor | None = None,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
+        """Embeddings -> encoder -> ``post_layernorm`` for the vision tower.
+
+        When ``encoder_metadata`` is provided (CUDA graph path), the precomputed
+        ``position_embeddings`` / ``rotary_pos_emb`` / ``cu_seqlens`` /
+        ``max_seqlen`` buffers are unpacked and forwarded to the embeddings and
+        encoder so neither recomputes data-dependent values. When it is ``None``,
+        the eager path runs unchanged.
+
+        Returns:
+            ``[1, ΣT·H·W, embed_dim]`` last hidden state.
+        """
         # Encoder CUDA graph path: consume precomputed, fixed-shape buffers.
         position_embeddings = None
         rotary_pos_emb = None
@@ -981,7 +1058,33 @@ class SiglipVisionModel(nn.Module):
         max_seqlen_override: int | None = None,
         device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
-        """Precompute fixed-shape buffers for encoder CUDA graph capture/replay."""
+        """Precompute fixed-shape buffers for encoder CUDA graph capture/replay.
+
+        All data-dependent work that cannot live inside a CUDA graph is done
+        here, eagerly, so the captured forward only sees fixed-shape tensors:
+
+        - ``position_embeddings``: per-image bilinear interpolation of the
+          learned position embedding, concatenated (``[ΣT·H·W, embed_dim]``).
+        - ``rotary_pos_emb``: 2D rotary embeddings gathered per patch
+          (``[ΣT·H·W, head_dim/2]``); replaces the host-side ``pids.max()`` sync.
+        - ``cu_seqlens``: one segment per image (``t·h·w`` patches), padded to
+          ``max_batch_size + 1`` so the buffer shape is stable.
+        - ``max_seqlen``: scalar for FA-style backends (else omitted);
+          ``max_seqlen_override`` pins it at capture time.
+        - ``merge_index``: gather order that turns the projector's per-image
+          ``rearrange`` into a static reshape (see
+          :meth:`Projector.forward_packed`).
+
+        Args:
+            grid_thw: ``[t, h, w]`` patch grid per image in the batch.
+            max_batch_size: Pad ``cu_seqlens`` to this many segments (capture).
+            max_seqlen_override: Force ``max_seqlen`` to this value (capture).
+            device: Target device for the returned buffers.
+
+        Returns:
+            Dict of buffers keyed for ``SiglipVisionModel.forward``'s
+            ``encoder_metadata`` (``max_seqlen`` present only when non-zero).
+        """
         if device is None:
             device = self.device
 
@@ -1083,6 +1186,11 @@ class SiglipVisionModel(nn.Module):
         cu_seqlens: torch.Tensor | None = None,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> BaseModelOutputWithPooling:
+        """Thin wrapper that forwards to the inner ``SiglipVisionTransformer``.
+
+        Passing ``encoder_metadata`` (from :meth:`prepare_encoder_metadata`)
+        selects the fixed-shape CUDA graph path; omitting it runs eager.
+        """
         return self.vision_model(
             pixel_values=pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
@@ -1336,6 +1444,12 @@ class PaddleOCRVLForConditionalGeneration(
     def encode_image(
         self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor
     ) -> torch.Tensor:
+        """Eager single-image vision encode (no CUDA graph).
+
+        Builds this image's ``cu_seqlens`` / position ids on the host and runs
+        the SigLIP tower, returning ``[1, t·h·w, vision_hidden]``. Used by the
+        default ``embed_multimodal`` path and by ``encoder_eager_forward``.
+        """
         pixel_values = pixel_values.type(self.visual.dtype)
         siglip_position_ids = list()
         image_grid_hws = list()
@@ -1388,6 +1502,17 @@ class PaddleOCRVLForConditionalGeneration(
     # -- SupportsEncoderCudaGraph protocol methods --
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        """Static config the manager reads once at init.
+
+        Declares the image modality, the six fixed-shape ``buffer_keys`` the
+        manager copies before each replay, the projector output dim
+        (``out_hidden_size``), and the custom ``cu_seqlens`` padding logic.
+
+        Returns empty ``modalities`` (which disables encoder graphs) unless the
+        ViT attention backend is FlashAttention/Triton/ROCm-AITER, because only
+        those expose the varlen ``cu_seqlens``/``max_seqlen`` interface this
+        capture path relies on (e.g. ``TORCH_SDPA`` on pre-SM80 GPUs is skipped).
+        """
         attn_backend = self.visual.vision_model.encoder.attn_backend
         if attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -1415,15 +1540,23 @@ class PaddleOCRVLForConditionalGeneration(
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        """PaddleOCR-VL is image-only, so the modality is always ``"image"``."""
         return "image"
 
     def get_max_frames_per_video(self) -> int:
+        """No video support; one "frame" per item."""
         return 1
 
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: VllmConfig,
     ) -> tuple[int, int]:
+        """Return ``(min, max)`` output-token budgets for auto-bucketing.
+
+        Used when the user does not pin ``encoder_cudagraph_token_budgets``.
+        The max is capped by the scheduler/model limits; the min is a small
+        floor so tiny images still hit a bucket.
+        """
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
@@ -1435,6 +1568,10 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[tuple[int, int, int]]:
+        """Normalize ``image_grid_thw`` to a list of ``(t, h, w)`` int tuples.
+
+        Accepts a stacked tensor, a list of tensors, or a list of lists.
+        """
         image_grid_thw = mm_kwargs["image_grid_thw"]
         if isinstance(image_grid_thw, torch.Tensor):
             image_grid_thw = image_grid_thw.tolist()
@@ -1449,6 +1586,13 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[torch.Tensor]:
+        """Return ``pixel_values`` as a per-image list.
+
+        ``mm_kwargs`` may carry either the native per-image list or a single
+        concatenated tensor (as produced by
+        :meth:`select_encoder_cudagraph_items`); a concatenated tensor is
+        re-split by per-image patch counts.
+        """
         pixel_values = mm_kwargs["pixel_values"]
         if isinstance(pixel_values, torch.Tensor):
             image_grid_thw = self._get_image_grid_thw(mm_kwargs)
@@ -1460,6 +1604,7 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        """Return ``pixel_values`` as a single ``[ΣT·H·W, 3, ps, ps]`` tensor."""
         pixel_values = mm_kwargs["pixel_values"]
         if isinstance(pixel_values, torch.Tensor):
             return pixel_values
@@ -1469,6 +1614,12 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[EncoderItemSpec]:
+        """Describe each image so the manager can pack items into budgets.
+
+        ``input_size`` is the patch count (``t·h·w``); ``output_tokens`` is the
+        post spatial-merge token count (``t·(h/m)·(w/m)``), which is how many
+        rows the graph output contributes for this image.
+        """
         m = self.config.vision_config.spatial_merge_size
         return [
             EncoderItemSpec(
@@ -1483,6 +1634,12 @@ class PaddleOCRVLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
+        """Return mm_kwargs for the sub-batch of images at ``indices``.
+
+        Called by the manager during greedy packing: it concatenates the
+        selected images' ``pixel_values`` and subsets ``image_grid_thw`` so the
+        sub-batch can be fed to a single graph (or to ``encoder_eager_forward``).
+        """
         pixel_values_list = self._get_pixel_values_list(mm_kwargs)
         image_grid_thw = self._get_image_grid_thw(mm_kwargs)
 
@@ -1514,6 +1671,16 @@ class PaddleOCRVLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
     ) -> EncoderCudaGraphCaptureInputs:
+        """Build dummy inputs + buffers to capture the graph for one budget.
+
+        Synthesizes a worst-case batch of ``max_batch_size`` images whose total
+        output tokens cover ``token_budget``, allocates a dummy ``pixel_values``
+        tensor, and computes the matching metadata (with ``max_seqlen`` pinned
+        via ``max_seqlen_override``). ``cu_seqlens`` is extended by one extra
+        slot so the captured buffer matches the layout
+        :func:`_pad_paddleocr_cu_seqlens_buffer` writes at replay. The returned
+        ``values`` are the exact tensors recorded into the graph.
+        """
         vision_config = self.config.vision_config
         spatial_merge_size = vision_config.spatial_merge_size
         per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
@@ -1558,6 +1725,13 @@ class PaddleOCRVLForConditionalGeneration(
         max_batch_size: int,
         max_frames_per_batch: int,
     ) -> EncoderCudaGraphReplayBuffers:
+        """Compute the real-batch buffers copied into the captured graph.
+
+        Recomputes the metadata from the actual ``mm_kwargs`` (sized to the real
+        item count; the manager pads each buffer up to the captured shape).
+        ``max_seqlen`` is left as ``None`` so the captured (override) value is
+        kept, since it is baked into the kernel launch at capture time.
+        """
         metadata = self.visual.prepare_encoder_metadata(
             [list(grid) for grid in self._get_image_grid_thw(mm_kwargs)],
             max_batch_size=max_batch_size,
@@ -1576,6 +1750,13 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
+        """The forward recorded into / replayed from the CUDA graph.
+
+        Runs the whole vision tower plus the spatial-merge projector over the
+        fixed-shape ``values`` buffers, returning ``[Σ output_tokens,
+        text_hidden_size]``. This is the batched, fixed-shape counterpart of the
+        eager ``encode_image`` + ``mlp_AR`` pipeline.
+        """
         pixel_values = values["pixel_values"].type(self.visual.dtype)
         metadata = {k: v for k, v in values.items() if k != "pixel_values"}
         vision_outputs = self.visual(
@@ -1588,6 +1769,12 @@ class PaddleOCRVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
+        """Eager fallback when an item exceeds all captured budgets.
+
+        Encodes each image with the original per-image ``encode_image`` path and
+        applies the projector, returning the same ``[Σ output_tokens,
+        text_hidden_size]`` layout as :meth:`encoder_cudagraph_forward`.
+        """
         pixel_values = self._get_pixel_values_list(mm_kwargs)
         image_grid_thw = self._get_image_grid_thw(mm_kwargs)
         vision_outputs = tuple(
