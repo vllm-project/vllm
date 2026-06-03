@@ -8,14 +8,14 @@ import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
 
 
-def make_host_fp32w(k_val: int, bs: int = 256):
-    _VPT = 8       # 8 × fp32 = 32 bytes = 256-bit B load
-    _BS = bs
-    _KPI = _VPT * _BS  # 2048 K elements per main-loop iteration
+def make_host_fp32w(k_val: int, bs: int = 128):
+    _VPT = 8
+    _BS = 128
+    _KPI = _VPT * _BS  # 1024
     _k_main = k_val // _KPI
 
-    _VPT_T = 4     # 4 × fp32 = 16 bytes = 128-bit tail load
-    _KPT = _VPT_T * _BS
+    _VPT_T = 4
+    _KPT = _VPT_T * _BS  # 512
     _k_tail = (k_val - _k_main * _KPI) // _KPT
 
     _k_done = _k_main * _KPI + _k_tail * _KPT
@@ -46,47 +46,22 @@ def make_host_fp32w(k_val: int, bs: int = 256):
         for m in cutlass.range_constexpr(M):
             acc[m] = cutlass.Float32(0.0)
 
-        # Preload first B chunk before PDL wait (weights are static)
-        if K_MAIN > 0:
-            kb0 = tid_off
-            bp0 = (b_base + kb0).align(32)
-            bt0 = cute.make_tensor(bp0, cute.make_layout((VPT,)))
-            br0 = cute.make_rmem_tensor((VPT,), elem_b)
-            cute.autovec_copy(bt0, br0)
+        #cute.arch.griddepcontrol_wait()
 
-            cute.arch.griddepcontrol_wait()
-
-            ar_all = cute.make_rmem_tensor((M, VPT), elem_a)
+        # Main K-loop: load B, then per-token load A + FMA (no ar_all staging)
+        for ki in cutlass.range_constexpr(K_MAIN):
+            kb = ki * KPI + tid_off
+            bp = (b_base + kb).align(32)
+            bt = cute.make_tensor(bp, cute.make_layout((VPT,)))
+            br = cute.make_rmem_tensor((VPT,), elem_b)
+            cute.autovec_copy(bt, br)
             for m in cutlass.range_constexpr(M):
-                ap = (gA.iterator + (m * K_dim + kb0)).align(16)
+                ap = (gA.iterator + (m * K_dim + kb)).align(16)
                 at = cute.make_tensor(ap, cute.make_layout((VPT,)))
                 ar = cute.make_rmem_tensor((VPT,), elem_a)
                 cute.autovec_copy(at, ar)
                 for v in cutlass.range_constexpr(VPT):
-                    ar_all[m, v] = ar[v]
-            for m in cutlass.range_constexpr(M):
-                for v in cutlass.range_constexpr(VPT):
-                    acc[m] = acc[m] + ar_all[m, v].to(cutlass.Float32) * br0[v]
-
-            for ki in cutlass.range_constexpr(K_MAIN - 1):
-                kb = (ki + 1) * KPI + tid_off
-                bp = (b_base + kb).align(32)
-                bt = cute.make_tensor(bp, cute.make_layout((VPT,)))
-                br = cute.make_rmem_tensor((VPT,), elem_b)
-                cute.autovec_copy(bt, br)
-                ar_all2 = cute.make_rmem_tensor((M, VPT), elem_a)
-                for m in cutlass.range_constexpr(M):
-                    ap = (gA.iterator + (m * K_dim + kb)).align(16)
-                    at = cute.make_tensor(ap, cute.make_layout((VPT,)))
-                    ar = cute.make_rmem_tensor((VPT,), elem_a)
-                    cute.autovec_copy(at, ar)
-                    for v in cutlass.range_constexpr(VPT):
-                        ar_all2[m, v] = ar[v]
-                for m in cutlass.range_constexpr(M):
-                    for v in cutlass.range_constexpr(VPT):
-                        acc[m] = acc[m] + ar_all2[m, v].to(cutlass.Float32) * br[v]
-        else:
-            cute.arch.griddepcontrol_wait()
+                    acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br[v]
 
         VPT_T: cutlass.Constexpr = _VPT_T
         KPT: cutlass.Constexpr = _KPT
@@ -155,7 +130,7 @@ def make_host_fp32w(k_val: int, bs: int = 256):
                 for w in cutlass.range_constexpr(NW):
                     t = t + sm[m, w]
                 gC[m * N_dim + n_idx] = t
-        cute.arch.griddepcontrol_launch_dependents()
+        #cute.arch.griddepcontrol_launch_dependents()
 
     @cute.jit
     def host_fp32w_lf(
@@ -164,8 +139,8 @@ def make_host_fp32w(k_val: int, bs: int = 256):
         stream: CUstream,
     ):
         dotprod_fp32w_lf(gA, gB, gC, M, K_dim, N_dim).launch(
-            grid=[N_dim, 1, 1], block=[bs, 1, 1],
-            smem=M * 4 * (bs // 32), stream=stream, use_pdl=True,
+            grid=[N_dim, 1, 1], block=[128, 1, 1],
+            smem=M * 4 * 4, stream=stream, use_pdl=False, min_blocks_per_mp=1,
         )
 
     return host_fp32w_lf

@@ -58,6 +58,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, a_dtyp
 
     # N is not in the key.
     # the kernel handles any N at runtime (one CTA per expert, grid size = N).
+    bs = 128 if (K % 2048 != 0 and K % 1024 == 0) else 256
     key = (M, K, a_dtype)
     if key in _compiled_cache:
         return _compiled_cache[key]
@@ -65,6 +66,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, a_dtyp
     # cache check before any expensive work.
     from ._ll_fp32w_dotprod import make_host_fp32w
 
+    # Use BS=128 when K doesn't divide by VPT(8)*256=2048 but does by VPT(8)*128=1024
     host_fn = make_host_fp32w(K) # creates a new kernel closure with K baked
     # into all loop bounds as Constexpr
 
