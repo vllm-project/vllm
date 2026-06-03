@@ -58,7 +58,11 @@ def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     for tid in token_ids:
         delta_text = tokenizer.decode([tid])
         result = parser.parse_delta(
-            delta_text, [tid], request, prompt_token_ids=prompt_token_ids
+            delta_text,
+            [tid],
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -146,7 +150,11 @@ def stream_chunks(parser, tokenizer, chunks, request_obj):
     for chunk in chunks:
         delta_text = tokenizer.decode(chunk)
         result = parser.parse_delta(
-            delta_text, chunk, request_obj, prompt_token_ids=prompt_token_ids
+            delta_text,
+            chunk,
+            request_obj,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
