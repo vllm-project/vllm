@@ -104,9 +104,6 @@ class DraftModelSpeculator(BaseSpeculator):
             max_num_tokens=self.max_num_tokens,
             device=device,
         )
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-        )
         self.idx_mapping = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )

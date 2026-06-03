@@ -32,6 +32,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
+        self.hidden_states = torch.zeros(
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+        )
         self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
@@ -90,9 +93,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_mode,
             decode_query_len=1,
         )
-        # Share a single pool between prefill and decode since they never
-        # execute concurrently.
-        self.decode_cudagraph_manager.pool = self.prefill_cudagraph_manager.pool
 
     def capture(
         self,
