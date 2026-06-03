@@ -3,25 +3,38 @@
 """Sharded Ray Direct Transport (RDT) weight transfer engine.
 
 Unlike the unsharded RDT engine, this backend pulls only the *slice* that
-each vLLM worker actually consumes, not the full HF-format tensor. It does
-this by handing ``model.load_weights`` ``LazyRDTTensor`` placeholders that
-defer materialization. The placeholders intercept a whitelisted set of
-view/slice ops into a single ordered op chain; the actual transfer happens
-in one batched RPC per layer via ``LayerReloadingInfo.pre_replay_hook`` —
-the trainer replays the chain on its live parameter and ships only the
-resulting slice. With ``payload_batch=True`` the per-layer processing is
-deferred so the whole ``update_weights`` payload is fetched in a single RPC
-instead of one per layer.
+each vLLM worker actually consumes, not the full HF-format tensor.
+
+It works in two phases, keyed per ``update_weights`` name set:
+
+  * **Bake** (first sync for a name set): drive ``model.load_weights`` with
+    ``LazyRDTTensor`` placeholders that defer materialization. The
+    placeholders intercept a whitelisted set of view/slice ops into a single
+    ordered op chain; the whole payload's slices are fetched in one batched
+    RPC, the trainer replays each chain on its live parameter and ships only
+    the resulting slice. While replaying the loaders, we *record* a plan: for
+    each leaf module, how each destination slice is fetched (source op-chain)
+    and where it lands (an ``as_strided`` descriptor into a real param).
+
+  * **Replay** (every later sync): no ``model.load_weights``, no lazy-tensor
+    dispatch, no per-loader discovery. One batched pull, then scatter each
+    recorded slice directly into freshly materialized params, run
+    ``process_weights_after_loading``, and copy into kernel storage.
+
+Groups whose loaders don't reduce to a pure view + ``copy_`` (or whose
+requested names aren't fully covered by recorded copies — e.g. weights that
+load via the attention/partial-layer finalize path) fail the coverage gate
+and fall back to a plain batched load every sync.
 
 Only valid with ``is_checkpoint_format=True`` (layerwise reload). See
-``sharded_weight_loader_rdt.md`` for the full design and the spike in
-``nixl_slice_spike.py`` confirming NIXL is view-aware.
+``sharded_weight_loader_rdt.md`` and ``baked_rdt_replay.md`` for the design,
+and the spike in ``nixl_slice_spike.py`` confirming NIXL is view-aware.
 """
 
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
@@ -33,9 +46,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 
 logger = init_logger(__name__)
 
@@ -76,50 +86,37 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 @dataclass
 class _FetchPlan:
-    """Per-receive_weights state shared by every LazyRDTTensor in the call.
+    """Per-bake state shared by every LazyRDTTensor in one bake load.
 
-    When ``layerwise_batch`` is True (default):
-        Pass 1 (``online_process_loader`` -> ``get_numel_loaded``) records every
-        ``(name, op_chain)`` it would copy_ onto a meta destination into
-        ``needed``. ``drain`` (bound as the layer's pre-replay hook) issues one
-        batched RPC for every chain in ``needed`` and stores the results in
-        ``results``. Pass 2 (replay inside ``_layerwise_process``) pops from
-        ``results`` on the real copy_.
-
-    When ``layerwise_batch`` is False:
-        ``needed``/``results`` stay empty and no hook is installed. Pass 2's
-        ``copy_`` materializes each lazy by issuing one single-tensor RPC
-        right then. Simpler control flow at the cost of one round-trip per
-        slice instead of one per layer.
-
-    When ``payload_batch`` is True:
-        Like ``layerwise_batch`` for the *recording* of chains into ``needed``,
-        but no per-layer hook is installed. Layerwise processing is deferred
-        until after ``load_weights`` returns, at which point the engine calls
-        ``drain`` once for the whole payload (a single RPC) and then runs the
-        deferred per-layer processing, which pops from ``results``.
+    Pass 1 (``online_process_loader`` -> ``get_numel_loaded``) records every
+    ``(name, op_chain)`` it would copy_ onto a meta destination into
+    ``needed``. ``drain`` issues one batched RPC for every chain in ``needed``
+    and stores the results in ``results``. Pass 2 (replay inside
+    ``_layerwise_process``) pops from ``results`` on the real copy_, and — when
+    ``trace_sink`` is set — records the destination descriptor for replay.
     """
 
     produce_method: Any = None
     needed: set[FetchKey] = field(default_factory=set)
     results: dict[FetchKey, torch.Tensor] = field(default_factory=dict)
-    layerwise_batch: bool = True
-    payload_batch: bool = False
+
+    # Trace mode (bake): when ``trace_sink`` is set, the Pass-2 ``copy_`` branch
+    # appends a ``_BakedCopy`` (source key + destination descriptor) for every
+    # materialized copy_ so the scatter can be replayed via ``param.as_strided``
+    # on later syncs without re-running the loader. ``trace_layer`` is the module
+    # currently being processed, used to match the copy_ destination's storage
+    # back to one of its params. A ``None`` entry marks an un-matchable copy_
+    # (the layer is then not bakeable and falls back to the slow path).
+    trace_sink: "list[_BakedCopy | None] | None" = None
+    trace_layer: Any = None
 
     # Timing instrumentation: cumulative wall-clock seconds spent in the
     # NIXL pull (the trainer RPC + transfer) and the number of pulls issued.
     pull_seconds: float = 0.0
     pull_calls: int = 0
 
-    def drain(self, info: "LayerReloadingInfo | None" = None) -> None:
-        """Single batched RPC for every chain pass 1 recorded.
-
-        Bound as ``LayerReloadingInfo.pre_replay_hook`` so the layerwise
-        replay path triggers it before materializing the layer. ``info``
-        matches the hook signature but is unused — the chains we need are
-        already in ``self.needed``.
-        """
-        del info
+    def drain(self) -> None:
+        """Single batched RPC for every chain Pass 1 recorded into ``needed``."""
         if not self.needed:
             return
         needed = list(self.needed)
@@ -139,6 +136,74 @@ class _FetchPlan:
         self.needed.clear()
 
 
+@dataclass
+class _BakedCopy:
+    """One recorded scatter: pull ``src`` from the trainer and copy it into
+    ``param_name`` at the recorded strided region.
+
+    Captured once during the bake from the Pass-2 ``copy_`` (which holds both
+    the lazy source's op-chain and the materialized destination view). On every
+    later sync the destination is reconstructed as
+    ``param.as_strided(shape, stride, offset)`` and filled by ``copy_`` — no
+    loader, no lazy tensor, no Pass-1 discovery.
+    """
+
+    src: FetchKey
+    param_name: str
+    offset: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+
+
+@dataclass
+class _BakedGroup:
+    """A baked leaf module: its destination scatters plus the post-load
+    processing flag.
+
+    ``layer`` is a strong reference to the module, held for the engine's
+    lifetime and cleared in ``shutdown``. The module persists across syncs (the
+    model is not rebuilt), and its ``LayerReloadingInfo`` — with the meta
+    ``restore_metadata`` and per-sync ``kernel_tensors`` — is re-established by
+    ``initialize_layerwise_reload`` at the start of every update.
+    """
+
+    layer: Any
+    copies: list[_BakedCopy]
+    needs_pwal: bool
+
+
+def _match_dst_descriptor(
+    dest: torch.Tensor, layer: Any
+) -> tuple[str, int, tuple[int, ...], tuple[int, ...]] | None:
+    """Match a ``copy_`` destination view back to one of ``layer``'s tensors.
+
+    Returns ``(param_name, storage_offset, shape, stride)`` such that
+    ``getattr(layer, param_name).as_strided(shape, stride, offset)`` reproduces
+    ``dest`` exactly, or ``None`` if ``dest`` does not alias any of the layer's
+    param/buffer storages — in which case the layer is not bakeable (the loader
+    built its destination by some means other than a view into a registered
+    param) and the engine falls back to the slow path for that group.
+    """
+    from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+
+    try:
+        dest_ptr = dest.untyped_storage().data_ptr()
+    except (RuntimeError, ValueError):
+        return None
+    for name, tensor in get_layer_tensors(layer).items():
+        try:
+            if tensor.untyped_storage().data_ptr() == dest_ptr:
+                return (
+                    name,
+                    dest.storage_offset(),
+                    tuple(dest.shape),
+                    tuple(dest.stride()),
+                )
+        except (RuntimeError, ValueError):
+            continue
+    return None
+
+
 class _UnsupportedLazyOp(NotImplementedError):
     """Raised when a weight loader calls an op we don't support on a LazyRDTTensor.
 
@@ -148,7 +213,7 @@ class _UnsupportedLazyOp(NotImplementedError):
 
 
 class LazyRDTTensor(torch.Tensor):
-    """Zero-storage tensor that defers slice fetching to a layer-boundary RPC.
+    """Zero-storage tensor that defers slice fetching during a bake load.
 
     Built via ``_make_wrapper_subclass`` so ``.shape``/``.dtype``/``.device``/
     ``.size()``/``.dim()`` work without allocating storage. The two layerwise
@@ -157,10 +222,9 @@ class LazyRDTTensor(torch.Tensor):
     Pass 1 (buffering): every supported op (narrow/view/reshape/transpose/
     __getitem__/...) returns a new ``LazyRDTTensor`` with the spec appended
     to its chain. ``copy_`` onto a meta destination records ``(name, chain)``
-    into the fetch plan and returns; no data moves.
-
-    Pre-replay hook: batches every chain seen this layer into one RPC,
-    populates ``plan.results``.
+    into the fetch plan and returns; no data moves. After load_weights
+    returns, the engine calls ``plan.drain()`` once to fetch every recorded
+    chain in a single batched RPC, populating ``plan.results``.
 
     Pass 2 (replay): the loader rebuilds the same chain (loader is
     deterministic over identical bound_args). ``copy_`` onto a real
@@ -243,19 +307,15 @@ class LazyRDTTensor(torch.Tensor):
         key = self._key()
         tensor = self._fetch_plan.results.pop(key, None)
         if tensor is None:
-            # No prefetched slice. Two cases:
-            #   1. layerwise_batch=True but the hook missed this key (e.g.
-            #      lazy materialized outside the layerwise replay). Warn so
-            #      the miss surfaces in tests.
-            #   2. layerwise_batch=False — the per-copy RPC IS the design.
-            #      Silent.
-            if self._fetch_plan.layerwise_batch or self._fetch_plan.payload_batch:
-                logger.warning(
-                    "LazyRDTTensor %r falling back to single-tensor RPC "
-                    "(chain=%s); pre_replay_hook missed this key.",
-                    self._name,
-                    self._ops,
-                )
+            # The batched drain should have prefetched every recorded chain;
+            # a miss means this lazy materialized outside the traced replay.
+            # Fall back to a single-tensor RPC and warn so it surfaces.
+            logger.warning(
+                "LazyRDTTensor %r falling back to single-tensor RPC "
+                "(chain=%s); batched drain missed this key.",
+                self._name,
+                self._ops,
+            )
             import ray
 
             tensor = ray.get(
@@ -282,19 +342,14 @@ class LazyRDTTensor(torch.Tensor):
             src = args[1] if len(args) > 1 else kwargs.get("src")
             if isinstance(src, cls):
                 if dest.device.type == "meta":
-                    # Pass 1 over a meta-restored param. Record the chain
-                    # into the plan when batching, then let a meta-backed
-                    # copy_ fire so layerwise's `CopyCounter` (a
-                    # TorchDispatchMode) still counts the numel -- otherwise
-                    # `info.load_numel` stays at 0 and `_layerwise_process`
-                    # is never triggered, so the slice is never fetched.
-                    # Record under both layerwise_batch (per-layer drain via
-                    # the hook) and payload_batch (one explicit drain at the
-                    # end of receive_weights). When both are disabled, skip
-                    # the record: there's no drain that would consume it.
+                    # Pass 1 over a meta-restored param. Record the chain into
+                    # the plan, then let a meta-backed copy_ fire so layerwise's
+                    # `CopyCounter` (a TorchDispatchMode) still counts the numel
+                    # -- otherwise `info.load_numel` stays at 0 and
+                    # `_layerwise_process` is never triggered, so the slice is
+                    # never fetched.
                     assert src._fetch_plan is not None
-                    if src._fetch_plan.layerwise_batch or src._fetch_plan.payload_batch:
-                        src._fetch_plan.needed.add(src._key())
+                    src._fetch_plan.needed.add(src._key())
                     meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
                     with torch._C.DisableTorchFunctionSubclass():
                         return dest.copy_(meta_src)
@@ -303,6 +358,19 @@ class LazyRDTTensor(torch.Tensor):
                 mat = src._materialize()
                 with torch._C.DisableTorchFunctionSubclass():
                     result = dest.copy_(mat)
+                # Bake: record (source key -> destination descriptor) so later
+                # syncs replay this scatter directly via param.as_strided,
+                # skipping the loader and Pass-1 discovery entirely.
+                plan = src._fetch_plan
+                if plan is not None and plan.trace_sink is not None:
+                    desc = _match_dst_descriptor(dest, plan.trace_layer)
+                    if desc is None:
+                        plan.trace_sink.append(None)
+                    else:
+                        name, offset, shape, stride = desc
+                        plan.trace_sink.append(
+                            _BakedCopy(src._key(), name, offset, shape, stride)
+                        )
                 # Release the prefetched buffer as soon as the data lives in
                 # the destination param. See "Memory contract" in the design.
                 src._materialized = None
@@ -418,27 +486,6 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     the chain in order on its live parameter before cloning and returning.
     """
 
-    layerwise_batch: bool = True
-    """Coalesce all of a layer's slice fetches into one RPC at the layer
-    boundary (default). When False, each ``copy_`` issues its own
-    single-tensor RPC — simpler control flow at the cost of one round-trip
-    per slice instead of one per layer. The trainer-side producer signature
-    is identical in both modes (a list of specs); batched mode just sends
-    larger lists less often. Ignored when ``payload_batch`` is True."""
-
-    payload_batch: bool = False
-    """Coalesce *all* slice fetches for one ``update_weights`` payload into a
-    single RPC. When True, layerwise processing is deferred until after
-    ``model.load_weights`` returns; the engine then issues one batched RPC for
-    the whole payload and runs the deferred per-layer processing. Takes
-    precedence over ``layerwise_batch``. The trainer-side producer signature is
-    unchanged (a list of specs).
-
-    Tradeoff: every slice for the payload is resident on the worker GPU at the
-    moment of the single transfer (vs. one layer's worth with
-    ``layerwise_batch``). Bound peak memory by chunking ``update_weights``
-    calls on the trainer side."""
-
     warmup_method_name: str | None = None
     """Optional trainer-side method that returns a tiny tensor over NIXL,
     used to prime the worker->trainer NIXL connection during
@@ -504,11 +551,9 @@ class ShardedRDTWeightTransferEngine(
         arithmetic on the loaded weight will raise from
         ``__torch_dispatch__`` and should fall back to backend='rdt'.
 
-    Set ``init_info.layerwise_batch=False`` to disable the layer-boundary
-    batching and issue one RPC per slice. Set ``init_info.payload_batch=True``
-    to instead coalesce the entire ``update_weights`` payload into a single RPC
-    (defers per-layer processing until after ``load_weights`` returns); this
-    trades higher peak memory for fewer round-trips.
+    The first ``update_weights`` for a given name set *bakes* a replay plan
+    (and loads correctly); every later one *replays* it. See the module
+    docstring and ``baked_rdt_replay.md``.
     """
 
     init_info_cls = ShardedRDTWeightTransferInitInfo
@@ -520,13 +565,12 @@ class ShardedRDTWeightTransferEngine(
         super().__init__(config, parallel_config)
         self._trainer_actor: Any | None = None
         self._produce_method: Any | None = None
-        self._layerwise_batch: bool = True
-        self._payload_batch: bool = False
+        # Keyed by tuple(update_info.names). Value is the baked group list for
+        # that name set, or None once the set is found unbakeable (slow path).
+        self._baked_plans: dict[tuple[str, ...], "list[_BakedGroup] | None"] = {}
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
-        self._layerwise_batch = init_info.layerwise_batch
-        self._payload_batch = init_info.payload_batch
         try:
             import ray
         except ImportError as e:
@@ -587,110 +631,268 @@ class ShardedRDTWeightTransferEngine(
         update_info: ShardedRDTWeightTransferUpdateInfo,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
-        """Drive ``model.load_weights`` with lazy placeholders, fetching the
-        slices each worker consumes.
+        """Bake on first sight of a name set, replay after.
 
-        Default (``layerwise_batch``): one RPC per layer, issued at the layer
-        boundary via the pre-replay hook. With ``payload_batch`` the per-layer
-        processing is deferred so all of the payload's slices are fetched in a
-        single RPC after ``load_weights`` returns.
+        Keyed by ``tuple(update_info.names)`` so the (driver-stable) per-layer
+        call boundary maps each call to its own plan, order-independently. A
+        name set found unbakeable stores ``None`` and takes the plain batched
+        load every sync.
         """
         if self._produce_method is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
             )
 
-        # Deferred import: pulling LAYERWISE_INFO from reload.layerwise
-        # transitively imports attention layers, which need the compiled
-        # flash-attn extensions. Keep the import inside receive_weights so
-        # the engine module itself stays importable in lightweight envs
-        # (matches the lazy-loading the factory already does).
+        key = tuple(update_info.names)
+        if key not in self._baked_plans:
+            # First sight: bake (a correct, real load plus recording). Stores
+            # None if the group turns out not to be replayable.
+            self._baked_plans[key] = self._do_bake(update_info, load_weights)
+            return
+        plan = self._baked_plans[key]
+        if plan is None:
+            self._load_unbaked(update_info, load_weights)
+        else:
+            self._replay(update_info, plan)
+
+    def _build_lazy_weights(
+        self,
+        update_info: ShardedRDTWeightTransferUpdateInfo,
+        plan: "_FetchPlan",
+        device: torch.device,
+    ) -> list[tuple[str, torch.Tensor]]:
+        # The base ``load_weights`` callable is typed as taking a ``list``,
+        # and LazyRDTTensors are zero-storage so building them upfront is
+        # just a few object allocations.
+        return [
+            (
+                name,
+                LazyRDTTensor(
+                    name=name,
+                    shape=torch.Size(shape),
+                    dtype=_dtype_from_name(dtype_name),
+                    device=device,
+                    fetch_plan=plan,
+                ),
+            )
+            for name, dtype_name, shape in zip(
+                update_info.names,
+                update_info.dtype_names,
+                update_info.shapes,
+            )
+        ]
+
+    # ---------------- Bake / replay ----------------
+
+    def _load_unbaked(
+        self,
+        update_info: ShardedRDTWeightTransferUpdateInfo,
+        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
+    ) -> None:
+        """Plain batched load for name sets that failed the bake coverage gate:
+        one batched pull for the whole call, then the deferred layer processing.
+        No recording, runs every sync."""
         from vllm.model_executor.model_loader.reload.layerwise import (
-            LAYERWISE_INFO,
             deferred_layerwise_processing,
             run_deferred_layer_processing,
         )
 
-        layerwise_infos = [info for info in LAYERWISE_INFO.values() if info.can_load()]
-        if not layerwise_infos:
+        plan = _FetchPlan(produce_method=self._produce_method)
+        device = torch.empty(0).device
+        _t_recv = time.perf_counter()
+        with deferred_layerwise_processing() as deferred:
+            load_weights(self._build_lazy_weights(update_info, plan, device))
+            plan.drain()
+            _t_proc = time.perf_counter()
+            run_deferred_layer_processing(deferred)
+            process_seconds = time.perf_counter() - _t_proc
+        self._log_timing(
+            "unbaked", plan, time.perf_counter() - _t_recv, process_seconds
+        )
+
+    def _do_bake(
+        self,
+        update_info: ShardedRDTWeightTransferUpdateInfo,
+        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
+    ) -> "list[_BakedGroup] | None":
+        """Run one real (payload-batch) load while recording a replay plan.
+
+        Produces correct weights *and* returns the per-leaf-module
+        ``_BakedGroup`` list — or ``None`` if the group is not safely
+        replayable (an un-matchable copy_ destination, or requested names not
+        fully covered by recorded copies, e.g. weights that flow through the
+        attention/partial-layer finalize path).
+        """
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizeMethodBase,
+        )
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            LAYERWISE_INFO,
+            _layerwise_process,
+            deferred_layerwise_processing,
+        )
+
+        if not any(info.can_load() for info in LAYERWISE_INFO.values()):
             raise RuntimeError(
                 "ShardedRDTWeightTransferEngine requires layerwise mode "
                 "(is_checkpoint_format=True). For the kernel-format path, "
                 "use backend='rdt' instead."
             )
 
-        plan = _FetchPlan(
-            produce_method=self._produce_method,
-            layerwise_batch=self._layerwise_batch,
-            payload_batch=self._payload_batch,
-        )
-
-        # The worker has already entered `with torch.device(self.device):`
-        # before calling receive_weights, so torch.empty's device is the
-        # correct GPU for this worker.
+        plan = _FetchPlan(produce_method=self._produce_method)
         device = torch.empty(0).device
 
-        def build_lazy_weights() -> list[tuple[str, torch.Tensor]]:
-            # The base ``load_weights`` callable is typed as taking a ``list``,
-            # and LazyRDTTensors are zero-storage so building them upfront is
-            # just a few object allocations.
-            return [
-                (
-                    name,
-                    LazyRDTTensor(
-                        name=name,
-                        shape=torch.Size(shape),
-                        dtype=_dtype_from_name(dtype_name),
-                        device=device,
-                        fetch_plan=plan,
-                    ),
+        groups: list[_BakedGroup] = []
+        bakeable = True
+        _t_recv = time.perf_counter()
+        with deferred_layerwise_processing() as deferred:
+            load_weights(self._build_lazy_weights(update_info, plan, device))
+            plan.drain()
+            _t_proc = time.perf_counter()
+            # A layer can appear in the deferred queue more than once: in
+            # deferred mode a module whose load crosses load_numel_total early
+            # (FusedMoE, some quant configs — see online_process_loader's
+            # "excessive loading" note) re-enqueues itself on every subsequent
+            # loader call. The first _layerwise_process replays *all* of its
+            # accumulated loaded_weights and resets the info, so process each
+            # layer exactly once; later duplicates would be no-ops (and would
+            # double-reset on replay).
+            seen: set[int] = set()
+            for layer, info in deferred:
+                if id(layer) in seen:
+                    continue
+                seen.add(id(layer))
+                sink: list[_BakedCopy | None] = []
+                plan.trace_sink = sink
+                plan.trace_layer = layer
+                try:
+                    # Pass 2: replays the buffered loaders onto the materialized
+                    # params; each copy_ appends its (src, dst) to ``sink``.
+                    _layerwise_process(layer, info)
+                finally:
+                    plan.trace_sink = None
+                    plan.trace_layer = None
+                if any(c is None for c in sink):
+                    # A copy_ whose destination didn't alias a registered param
+                    # — this layer can't be replayed by as_strided.
+                    bakeable = False
+                    continue
+                needs_pwal = isinstance(
+                    getattr(layer, "quant_method", None), QuantizeMethodBase
                 )
-                for name, dtype_name, shape in zip(
-                    update_info.names,
-                    update_info.dtype_names,
-                    update_info.shapes,
+                groups.append(
+                    _BakedGroup(
+                        layer=layer,
+                        copies=[c for c in sink if c is not None],
+                        needs_pwal=needs_pwal,
+                    )
                 )
-            ]
+            process_seconds = time.perf_counter() - _t_proc
+        self._log_timing("bake", plan, time.perf_counter() - _t_recv, process_seconds)
+
+        # Coverage gate: every requested name must flow into a recorded copy.
+        # Uncovered names load via the finalize path (attention scales / padded
+        # layers) which replay does not reproduce, so we fall back fail-closed.
+        covered = {c.src[0] for g in groups for c in g.copies}
+        uncovered = set(update_info.names) - covered
+        if uncovered or not bakeable:
+            logger.warning(
+                "Sharded RDT bake: group not replayable "
+                "(uncovered_names=%d, unmatched_copy=%s); using slow path. "
+                "Example uncovered: %s",
+                len(uncovered),
+                not bakeable,
+                sorted(uncovered)[:3],
+            )
+            return None
+        logger.info(
+            "Sharded RDT baked %d names -> %d leaf groups, %d copies (replay armed)",
+            len(update_info.names),
+            len(groups),
+            sum(len(g.copies) for g in groups),
+        )
+        return groups
+
+    def _replay(
+        self,
+        update_info: ShardedRDTWeightTransferUpdateInfo,
+        groups: "list[_BakedGroup]",
+    ) -> None:
+        """Fast path: one batched pull, then scatter each baked group directly
+        into freshly materialized params — no ``load_weights``, no Pass-1
+        discovery, no lazy-tensor dispatch.
+
+        Mirrors ``_layerwise_process`` minus the loader replay: materialize ->
+        scatter via ``as_strided`` -> ``process_weights_after_loading`` ->
+        copy into persistent kernel storage -> ``info.reset()`` (the reset is
+        what makes ``finalize_layerwise_reload`` skip the layer instead of
+        clobbering it with the old kernel tensors).
+        """
+        import ray
+
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizeMethodBase,
+        )
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            LAYERWISE_INFO,
+            _copy_and_restore_kernel_tensors,
+        )
+        from vllm.model_executor.model_loader.reload.meta import materialize_layer
 
         _t_recv = time.perf_counter()
-        process_seconds = 0.0
 
-        if self._payload_batch:
-            # Defer every layer's processing until load_weights has recorded
-            # all chains, then fetch the whole payload in one RPC and run the
-            # deferred processing (each layer pops its slices from plan.results
-            # and frees them as it goes). No per-layer hook is installed: the
-            # explicit drain covers every recorded chain, including attention
-            # and partial layers finalized later in finish_weight_update.
-            with deferred_layerwise_processing() as deferred:
-                load_weights(build_lazy_weights())
-                plan.drain()
-                _t_proc = time.perf_counter()
-                run_deferred_layer_processing(deferred)
-                process_seconds = time.perf_counter() - _t_proc
-            self._log_timing(
-                "payload", plan, time.perf_counter() - _t_recv, process_seconds
+        # One batched pull for every unique source slice this call needs.
+        keys = sorted({c.src for g in groups for c in g.copies})
+        _t_pull = time.perf_counter()
+        tensors = ray.get(self._produce_method.remote(keys))
+        pull_seconds = time.perf_counter() - _t_pull
+        if len(tensors) != len(keys):
+            raise RuntimeError(
+                f"Trainer returned {len(tensors)} tensors for {len(keys)} keys."
             )
-            return
+        results = dict(zip(keys, tensors))
 
-        # Per-layer (or per-copy) mode. Save/restore so we don't permanently
-        # mutate global LAYERWISE_INFO state if a caller later reuses these
-        # infos with a different engine. In non-batching mode we still walk the
-        # infos (and save empties) so the finally-clause is symmetric —
-        # installing nothing, restoring nothing.
-        saved_hooks: list[tuple[Any, Any]] = []
-        if self._layerwise_batch:
-            for info in layerwise_infos:
-                saved_hooks.append((info, info.pre_replay_hook))
-                info.pre_replay_hook = plan.drain
+        _t_proc = time.perf_counter()
+        for g in groups:
+            layer = g.layer
+            info = LAYERWISE_INFO.get(layer)
+            if info is None or not info.can_load():
+                raise RuntimeError(
+                    f"Baked replay: layer {type(layer).__name__} was not set up "
+                    "for reload this sync (start_weight_update must run before "
+                    "update_weights, and each baked layer must be processed at "
+                    "most once per replay)."
+                )
+            # Materialize HF params for this leaf module (cheap empty alloc).
+            materialize_layer(layer, info)
+            # Scatter each recorded slice into its destination region.
+            for c in g.copies:
+                param = getattr(layer, c.param_name)
+                dst = param.as_strided(c.shape, c.stride, c.offset)
+                with torch._C.DisableTorchFunctionSubclass():
+                    dst.copy_(results[c.src])
+            # Quantization / repack, matching _layerwise_process.
+            if g.needs_pwal:
+                quant_method = getattr(layer, "quant_method", None)
+                if isinstance(quant_method, QuantizeMethodBase):
+                    if hasattr(layer, "_already_called_process_weights_after_loading"):
+                        delattr(layer, "_already_called_process_weights_after_loading")
+                    quant_method.process_weights_after_loading(layer)
+            # Copy into persistent kernel storage (preserves cudagraph refs).
+            if info.kernel_tensors is not None:
+                _copy_and_restore_kernel_tensors(layer, info)
+            # Reset so finalize_layerwise_reload skips this (already-loaded) layer.
+            info.reset()
+        process_seconds = time.perf_counter() - _t_proc
 
-        try:
-            load_weights(build_lazy_weights())
-        finally:
-            for info, prior in saved_hooks:
-                info.pre_replay_hook = prior
-        mode = "layer" if self._layerwise_batch else "none"
-        self._log_timing(mode, plan, time.perf_counter() - _t_recv, process_seconds)
+        # Report timing through the same channel as the slow path. Synthesize a
+        # plan-shaped record so _log_timing can read pull stats uniformly.
+        plan = _FetchPlan(produce_method=self._produce_method)
+        plan.pull_seconds = pull_seconds
+        plan.pull_calls = 1
+        self._log_timing(
+            "replay", plan, time.perf_counter() - _t_recv, process_seconds
+        )
 
     @staticmethod
     def _log_timing(
@@ -698,10 +900,9 @@ class ShardedRDTWeightTransferEngine(
     ) -> None:
         """Log a one-line timing summary for one ``receive_weights`` call.
 
-        ``pull_seconds`` isolates the NIXL transfer from the surrounding
-        layerwise record/materialize/quantize work; in per-layer mode the pull
-        is interleaved with processing so only the total is meaningful for the
-        non-pull portion.
+        ``mode`` is one of ``bake`` / ``replay`` / ``unbaked``. ``pull_seconds``
+        isolates the NIXL transfer; ``process_seconds`` is the
+        scatter/materialize/quantize/kernel-copy work after the pull.
         """
         logger.info(
             "[RDT-TIMING] receive_weights mode=%s total=%.4fs nixl_pull=%.4fs "
@@ -730,6 +931,8 @@ class ShardedRDTWeightTransferEngine(
     def shutdown(self) -> None:
         self._trainer_actor = None
         self._produce_method = None
+        # Drop strong references to baked modules so the model can be freed.
+        self._baked_plans.clear()
 
     @staticmethod
     def trainer_send_weights(

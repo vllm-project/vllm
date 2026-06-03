@@ -226,9 +226,9 @@ ray.get(
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
 # is_checkpoint_format=True is MANDATORY for the sharded backend --
-# it requires the layerwise reload path so the pre_replay_hook can
-# fire between buffering and replay. The engine raises if it doesn't
-# find layerwise infos.
+# it requires the layerwise reload path so the engine can buffer the
+# lazy placeholders and drain their slices in one batched RPC. The
+# engine raises if it doesn't find layerwise infos.
 ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
 
 # update_weights drives model.load_weights with lazy placeholders.

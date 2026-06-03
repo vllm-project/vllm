@@ -74,15 +74,15 @@ MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 TRAINER_ACTOR_NAME = "sharded_rdt_fsdp_trainer"
 RAY_NAMESPACE = "sharded_rdt_fsdp_example"
 
-# Profiling knob: RDT_PAYLOAD_BATCH=1 -> coalesce the whole update_weights
-# payload into one RPC (defer all per-layer processing); 0 (default) -> the
-# default layerwise_batch path (one RPC per layer via the pre_replay_hook).
-PAYLOAD_BATCH = os.environ.get("RDT_PAYLOAD_BATCH", "0") == "1"
-
 # RDT_WARMUP=1 -> prime the per-worker NIXL connection during
 # init_weight_transfer_engine (via the trainer's rdt_warmup method) so the
 # first real update_weights doesn't pay the one-time connection-setup cost.
 WARMUP = os.environ.get("RDT_WARMUP", "0") == "1"
+
+# RDT_SYNC_ITERS -> how many back-to-back weight syncs to run. The sharded RDT
+# backend bakes a replay plan on the first sync for a given name set and
+# replays it on subsequent syncs, so use >=2 to observe the replay speedup.
+SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "1"))
 
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
@@ -364,6 +364,16 @@ class FSDPTrainWorker:
                 "bytes": self._produce_bytes,
             }
 
+    def reset_produce_timing(self) -> None:
+        """Zero the rank-0 produce counters so each sync iteration can be timed
+        independently (bake vs replay)."""
+        with self._timing_lock:
+            self._produce_calls = 0
+            self._produce_specs = 0
+            self._produce_wait_seconds = 0.0
+            self._produce_slice_seconds = 0.0
+            self._produce_bytes = 0
+
     def free_group(self, names: list[str]) -> None:
         """Drop a layer group's gathered full tensors from the rank-0 cache.
 
@@ -505,7 +515,6 @@ async def main():
                 ShardedRDTWeightTransferInitInfo(
                     trainer_actor_name=TRAINER_ACTOR_NAME,
                     trainer_actor_namespace=RAY_NAMESPACE,
-                    payload_batch=PAYLOAD_BATCH,
                     warmup_method_name="rdt_warmup" if WARMUP else None,
                 )
             )
@@ -520,11 +529,9 @@ async def main():
     print("[sync] Pausing generation...")
     await engine.pause_generation(mode="abort")
 
-    await engine.start_weight_update(is_checkpoint_format=True)
-
     # Group the flat name list into layer-aligned groups so we transfer
-    # one layer at a time. The driver does this once and reuses the
-    # groups for both the per-rank gather and the per-call update_info.
+    # one layer at a time. Sync-independent, so compute once and reuse for
+    # every iteration's per-rank gather and per-call update_info.
     layer_groups = _layerwise_groups(names)
     print(
         f"[sync] Partitioned {len(names)} params into {len(layer_groups)} "
@@ -533,108 +540,83 @@ async def main():
     )
     name_to_idx = {n: i for i, n in enumerate(names)}
 
-    # Per-layer transfer loop. The two interleaved operations:
-    #
-    #   * ``gather_layer`` on every FSDP rank: a collective full_tensor
-    #     for each name in the group; rank 0 caches, ranks 1-3 discard.
-    #   * ``engine.update_weights`` on the inference side: triggers the
-    #     vLLM workers' load_weights with lazy placeholders, which call
-    #     back to rank 0's ``rdt_produce_weights_batched`` for slices.
-    #
-    # We fire the previous layer's ``update_weights`` as an
-    # ``asyncio.Task`` and only await it at the *start* of the next
-    # iteration, so the gather for layer K+1 overlaps with the worker
-    # applying layer K. Backpressure is implicit — the next
-    # ``update_weights`` does not fire until the previous one has
-    # drained, so the rank-0 cache holds at most two layers worth of
-    # full tensors at any given moment.
-    print("[sync] Driving per-layer gather + update_weights...")
-    _sync_t0 = time.perf_counter()
-    prev_task: asyncio.Task | None = None
-    prev_names: list[str] | None = None
-    for group_names in layer_groups:
-        # Build this group's update_info from the captured metadata.
-        group_info = ShardedRDTWeightTransferUpdateInfo(
-            names=group_names,
-            dtype_names=[dtype_names[name_to_idx[n]] for n in group_names],
-            shapes=[shapes[name_to_idx[n]] for n in group_names],
-        )
+    # Run SYNC_ITERS back-to-back syncs. Iter 0 records the replay plan (slow)
+    # and iters 1.. replay it (fast). Each iter brackets the per-layer loop in
+    # its own start/finish_weight_update, since initialize/finalize_layerwise_reload
+    # run per sync.
+    for sync_iter in range(SYNC_ITERS):
+        phase = " [BAKE]" if sync_iter == 0 else " [REPLAY]"
+        # Zero rank-0 produce counters so each iter is timed independently.
+        ray.get(fsdp_workers[0].reset_produce_timing.remote())
 
-        # Fire the collective gather on every FSDP rank. These are Ray
-        # task submissions; they return immediately so we can overlap
-        # the awaiting of the previous update_weights below.
-        gather_futs = [w.gather_layer.remote(group_names) for w in fsdp_workers]
+        await engine.start_weight_update(is_checkpoint_format=True)
 
-        # Drain the previous layer's update_weights. While we await
-        # here, the gather_futs above are already executing on the FSDP
-        # actors -- that's the gather/transport overlap.
+        # Per-layer transfer loop. The two interleaved operations:
+        #
+        #   * ``gather_layer`` on every FSDP rank: a collective full_tensor
+        #     for each name in the group; rank 0 caches, ranks 1-3 discard.
+        #   * ``engine.update_weights`` on the inference side: triggers the
+        #     vLLM workers' load_weights with lazy placeholders (bake) or a
+        #     direct replay scatter (replay), pulling slices from rank 0.
+        #
+        # We fire the previous layer's ``update_weights`` as an
+        # ``asyncio.Task`` and only await it at the *start* of the next
+        # iteration, so the gather for layer K+1 overlaps with the worker
+        # applying layer K. Backpressure is implicit — the next
+        # ``update_weights`` does not fire until the previous one has
+        # drained, so the rank-0 cache holds at most two layers at once.
+        print(f"[sync] iter {sync_iter}{phase}: gather + update_weights...")
+        _sync_t0 = time.perf_counter()
+        prev_task: asyncio.Task | None = None
+        prev_names: list[str] | None = None
+        for group_names in layer_groups:
+            group_info = ShardedRDTWeightTransferUpdateInfo(
+                names=group_names,
+                dtype_names=[dtype_names[name_to_idx[n]] for n in group_names],
+                shapes=[shapes[name_to_idx[n]] for n in group_names],
+            )
+            gather_futs = [w.gather_layer.remote(group_names) for w in fsdp_workers]
+            if prev_task is not None:
+                await prev_task
+                ray.get(fsdp_workers[0].free_group.remote(prev_names))
+            ray.get(gather_futs)
+            prev_task = asyncio.create_task(
+                engine.update_weights(
+                    WeightTransferUpdateRequest(update_info=asdict(group_info))
+                )
+            )
+            prev_names = group_names
+
         if prev_task is not None:
             await prev_task
-            # The previous group's update_weights has fully drained, so every
-            # inference worker has pulled all of its slices for that group.
-            # Free the whole group from the rank-0 cache in one shot — no
-            # per-name refcounting needed. This keeps peak rank-0 resident
-            # memory bounded to ~two layer groups.
             ray.get(fsdp_workers[0].free_group.remote(prev_names))
 
-        # Now make sure this layer's gather has actually completed
-        # before we fire update_weights for it (the producer would
-        # block on the cache otherwise, but failing here surfaces gather
-        # errors more cleanly).
-        ray.get(gather_futs)
+        await engine.finish_weight_update()
+        _sync_seconds = time.perf_counter() - _sync_t0
 
-        # Fire this layer's update_weights as a Task; we await it on
-        # the next iteration (or after the loop, for the final layer).
-        prev_task = asyncio.create_task(
-            engine.update_weights(
-                WeightTransferUpdateRequest(update_info=asdict(group_info))
-            )
-        )
-        prev_names = group_names
-
-    if prev_task is not None:
-        await prev_task
-        # Free the final group now that its update_weights has drained.
-        ray.get(fsdp_workers[0].free_group.remote(prev_names))
-
-    await engine.finish_weight_update()
-    _sync_seconds = time.perf_counter() - _sync_t0
-
-    # ---- Profiling summary ----
-    # Trainer-side (rank 0): time spent producing slices (op-chain replay +
-    # contiguous clone, GPU-synced) vs. waiting on the gather cache. The NIXL
-    # transport itself happens AFTER rdt_produce_weights_batched returns, in
-    # Ray's tensor-transport layer during each worker's ray.get, so it does
-    # NOT show up in slice_seconds. The worker-side timing file
-    # (VLLM_RDT_TIMING_FILE) records each worker's observed nixl_pull (=
-    # trainer slice + transport + RPC overhead) and deferred_process; the gap
-    # between worker nixl_pull and trainer slice_seconds is the transport.
-    ptiming = ray.get(fsdp_workers[0].get_produce_timing.remote())
-    gib = ptiming["bytes"] / (1024**3)
-    slice_s = ptiming["slice_seconds"]
-    print("=" * 60)
-    print(
-        f"[profile] MODE = {'PAYLOAD-BATCH' if PAYLOAD_BATCH else 'LAYERWISE-BATCH'}"
-        f"  warmup={'ON' if WARMUP else 'OFF'}"
-    )
-    print(f"[profile] init_weight_transfer_engine : {_init_seconds:.3f} s")
-    print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
-    print(f"[profile] init + sync                 : {_init_seconds + _sync_seconds:.3f} s")
-    print(f"[profile] trainer produce calls       : {ptiming['calls']}")
-    print(f"[profile] trainer specs (slices) total: {ptiming['specs']}")
-    print(f"[profile] trainer gather-cache wait    : {ptiming['wait_seconds']:.3f} s")
-    print(f"[profile] trainer slice+clone (synced) : {slice_s:.3f} s")
-    print(f"[profile] bytes produced (rank0)       : {gib:.3f} GiB")
-    if slice_s > 0:
+        # ---- Per-iter profiling summary ----
+        # Trainer-side (rank 0): produce calls (RPC count) and slice+clone time.
+        # On replay the produce-call count collapses (one batched pull per
+        # update_weights) and the worker side skips Pass-1 discovery entirely;
+        # see VLLM_RDT_TIMING_FILE for the worker pull/process split.
+        ptiming = ray.get(fsdp_workers[0].get_produce_timing.remote())
+        gib = ptiming["bytes"] / (1024**3)
+        slice_s = ptiming["slice_seconds"]
+        print("=" * 60)
         print(
-            f"[profile] slice throughput (clone)     : "
-            f"{gib / slice_s:.1f} GiB/s"
+            f"[profile] iter {sync_iter}{phase}  warmup={'ON' if WARMUP else 'OFF'}"
         )
-    print(
-        "[profile] NOTE: NIXL transport time is the worker nixl_pull MINUS "
-        "this trainer slice time; see VLLM_RDT_TIMING_FILE for the worker side."
-    )
-    print("=" * 60)
+        if sync_iter == 0:
+            print(f"[profile] init_weight_transfer_engine : {_init_seconds:.3f} s")
+        print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
+        print(f"[profile] trainer produce calls       : {ptiming['calls']}")
+        print(f"[profile] trainer specs (slices) total: {ptiming['specs']}")
+        print(f"[profile] trainer gather-cache wait    : {ptiming['wait_seconds']:.3f} s")
+        print(f"[profile] trainer slice+clone (synced) : {slice_s:.3f} s")
+        print(f"[profile] bytes produced (rank0)       : {gib:.3f} GiB")
+        if slice_s > 0:
+            print(f"[profile] slice throughput (clone)     : {gib / slice_s:.1f} GiB/s")
+        print("=" * 60)
 
     print("[sync] Resuming generation...")
     await engine.resume_generation()
