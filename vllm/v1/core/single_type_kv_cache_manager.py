@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+import numpy as np
+
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -396,6 +398,29 @@ class SingleTypeKVCacheManager(ABC):
 
     @classmethod
     @abstractmethod
+    def required_range_starts(
+        cls,
+        max_num_blocks: int,
+        kv_cache_spec: KVCacheSpec,
+        drop_eagle_block: bool,
+    ) -> np.ndarray | None:
+        """
+        For each block position i, return starts[i] such that blocks
+        [starts[i], i] must ALL be cached for position i to be hittable.
+        Return None if this attention type never participates in prefix caching.
+
+        Args:
+            max_num_blocks: Number of block positions to evaluate.
+            kv_cache_spec: The kv cache spec for this attention type.
+            drop_eagle_block: Whether to drop the last matched block for
+                EAGLE/MTP (may widen required range).
+
+        Returns:
+            A numpy int32 array of length max_num_blocks, or None.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def find_longest_cache_hit(
         cls,
         block_hashes: BlockHashList,
@@ -413,38 +438,109 @@ class SingleTypeKVCacheManager(ABC):
         `max_length`. The prefix should be a common prefix hit for all the
         kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
         return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        Need to be customized for each attention type.
-
-        Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
-                Always False for non-EAGLE/MTP groups, but can be False for EAGLE/MTP
-                groups too if the last block is already dropped (e.g., in a
-                convergence loop in `find_longest_cache_hit`).
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens). By default, it should
-                be set to the block_size.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
 
         Returns:
-            A list of cached blocks with skipped blocks replaced by null block
-            for each kv cache group in `kv_cache_group_ids`.
-            Return a list of length `len(kv_cache_group_ids)`, where the i-th
-            element is a list of cached blocks for the i-th kv cache group
-            in `kv_cache_group_ids`.
-            For example, sliding window manager should return a list like
+            A tuple of lists of KVCacheBlock, one per kv cache group.
+            For example, sliding window manager returns a list like
             ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
             and sliding window 8 and len(kv_cache_group_ids) = 1.
         """
+        if isinstance(kv_cache_spec, SlidingWindowSpec):
+            assert dcp_world_size == 1, "DCP not support sliding window attn now."
+            assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        elif isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+            assert dcp_world_size == 1, "DCP not support chunked local attn now."
+            assert pcp_world_size == 1, "PCP not support chunked local attn now."
+            assert kv_cache_spec.block_size == alignment_tokens, (
+                "KV cache groups with different block sizes are not compatible "
+                "with chunked local attention now"
+            )
+        elif isinstance(kv_cache_spec, MambaSpec):
+            assert dcp_world_size == 1, "DCP not support mamba now."
+            assert pcp_world_size == 1, "PCP not support mamba now."
+        block_size = kv_cache_spec.block_size
+        if dcp_world_size * pcp_world_size > 1:
+            block_size *= dcp_world_size * pcp_world_size
+        max_num_blocks = max_length // block_size
 
-        raise NotImplementedError
+        empty: tuple[list[KVCacheBlock], ...] = tuple([] for _ in kv_cache_group_ids)
+        starts = cls.required_range_starts(
+            max_num_blocks, kv_cache_spec, drop_eagle_block
+        )
+        if max_num_blocks == 0 or starts is None:
+            return empty
+
+        # Match: check cache for each block position.
+        match: list[list[KVCacheBlock] | None] = [
+            block_pool.get_cached_block(h, kv_cache_group_ids)
+            for h in itertools.islice(block_hashes, max_num_blocks)
+        ]
+
+        # Hittable: position i is hittable when no miss lies in [starts[i], i].
+        # last_miss tracks the most recent miss — O(1) check per position.
+        max_start = max(int(s) for s in starts)
+        n_hit = 0
+        last_miss = -1
+        for i in range(max_num_blocks):
+            if i >= len(match) or match[i] is None:
+                last_miss = i
+            if last_miss < int(starts[i]):
+                n_hit = i + 1
+            if last_miss >= max_start:
+                break
+
+        # Eagle: drop the last matched block.
+        if drop_eagle_block and n_hit > 0:
+            n_hit -= 1
+
+        # Alignment: shrink to a multiple of alignment_tokens.
+        while (
+            block_size != alignment_tokens  # Faster for common case.
+            and n_hit > 0
+            and n_hit * block_size % alignment_tokens != 0
+        ):
+            n_hit -= 1
+
+        if n_hit == 0:
+            return empty
+
+        # Collect: null-pad before window start, real blocks after.
+        collect_starts = cls.required_range_starts(
+            max_num_blocks, kv_cache_spec, drop_eagle_block=False
+        )
+        if collect_starts is None:
+            return empty
+        return cls._collect_hit_blocks(
+            match, n_hit, collect_starts, kv_cache_group_ids, block_pool
+        )
+
+    @classmethod
+    def _collect_hit_blocks(
+        cls,
+        match: list[list[KVCacheBlock] | None],
+        n_hit: int,
+        starts: np.ndarray,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        """
+        Build result blocks: null blocks before window start, cached blocks
+        within the window.
+
+        For example, sliding window manager returns:
+        [null] [null] ... [null] [hit block 1 (1st block containing
+        last window)] [hit block 2] ... [hit block x]
+        """
+        window_start = int(starts[n_hit - 1])
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * n_hit for _ in kv_cache_group_ids
+        )
+        for i in range(window_start, n_hit):
+            cached_block = match[i] if i < len(match) else None
+            if cached_block is not None:
+                for computed, cached in zip(computed_blocks, cached_block):
+                    computed[i] = cached
+        return computed_blocks
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
@@ -509,53 +605,20 @@ class SingleTypeKVCacheManager(ABC):
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    def required_range_starts(
+        cls, max_num_blocks: int, kv_cache_spec: KVCacheSpec, drop_eagle_block: bool
+    ) -> np.ndarray | None:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
         )
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [] for _ in range(len(kv_cache_group_ids))
-        )
-        block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            block_size *= dcp_world_size * pcp_world_size
-        max_num_blocks = max_length // block_size
-        for block_hash in itertools.islice(block_hashes, max_num_blocks):
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
-            ):
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed.append(cached)
-            else:
-                break
-        if drop_eagle_block and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
-            for computed in computed_blocks:
-                computed.pop()
-        while (
-            block_size != alignment_tokens  # Faster for common case.
-            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-        ):
-            for computed in computed_blocks:
-                computed.pop()
-        return computed_blocks
+        # block_hashes is a chain of block hashes. If a block hash is not
+        # in the cached_block_hash_to_id, the following block hashes are
+        # not computed yet for sure.
+        # So position i requires ALL blocks [0..i] to be cached (full prefix).
+        return np.zeros(max_num_blocks, dtype=np.int32)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -587,91 +650,25 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         return blocks
 
     @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    def required_range_starts(
+        cls, max_num_blocks: int, kv_cache_spec: KVCacheSpec, drop_eagle_block: bool
+    ) -> np.ndarray | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
-
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
+            kv_cache_spec.sliding_window,
+            kv_cache_spec.block_size,
+            drop_eagle_block,
         )
-
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // kv_cache_spec.block_size
-        computed_blocks = tuple(
-            [block_pool.null_block] * max_num_blocks
-            for _ in range(len(kv_cache_group_ids))
-        )
-        block_size = kv_cache_spec.block_size
-        num_contiguous_blocks = 0
-        match_found = False
-        # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
-            ):
-                # Skip prefix matching check if the block is not aligned with
-                # `alignment_tokens`.
-                if num_contiguous_blocks == 0 and block_size != alignment_tokens:
-                    post_pop_blocks = i if drop_eagle_block else i + 1
-                    if (post_pop_blocks * block_size) % alignment_tokens != 0:
-                        continue
-                # Add the cached block to the computed blocks.
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed[i] = cached
-                num_contiguous_blocks += 1
-                if num_contiguous_blocks >= sliding_window_contiguous_blocks:
-                    # Trim the trailing blocks.
-                    # E.g., [NULL, NULL, 8, 3, NULL, 9] -> [NULL, NULL, 8, 3]
-                    # when sliding_window_contiguous_blocks=2.
-                    for computed in computed_blocks:
-                        del computed[i + num_contiguous_blocks :]
-                    match_found = True
-                    break
-            else:
-                num_contiguous_blocks = 0
-        if not match_found:
-            # The first `num_contiguous_blocks` is a cache hit even if
-            # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
-            for computed in computed_blocks:
-                del computed[num_contiguous_blocks:]
-            while (
-                block_size != alignment_tokens  # Faster for common case.
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
-        if drop_eagle_block and computed_blocks[0]:
-            for computed in computed_blocks:
-                computed.pop()
-            # Re-align after eagle pop: the pop may break the alignment
-            # when block_size != alignment_tokens (hybrid models with
-            # different page sizes, e.g. Gemma4).
-            while (
-                block_size != alignment_tokens
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
-        return computed_blocks
+        # Position i is hittable when blocks
+        # [max(0, i+1-sliding_window_contiguous_blocks), i] are all cached.
+        # The first sliding_window_contiguous_blocks positions are a cache hit
+        # even if fewer contiguous blocks exist (the window extends past pos 0).
+        return np.maximum(
+            0, np.arange(1, max_num_blocks + 1) - sliding_window_contiguous_blocks
+        ).astype(np.int32)
 
     @classmethod
     def reachable_block_mask(
@@ -746,18 +743,9 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
 
     @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    def required_range_starts(
+        cls, max_num_blocks: int, kv_cache_spec: KVCacheSpec, drop_eagle_block: bool
+    ) -> np.ndarray | None:
         """
         For chunked local attention, we need to find the longest cache hit
         prefix of the blocks that is not longer than `max_length`. The prefix
@@ -777,65 +765,29 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         for next token at 16th (zero-indexed), 0th - 15th tokens are not
         in the window, so they are already marked as computed.
         we return 4 blocks[null, null, null, null]
-
-        Args:
-            block_hashes: The block hashes of the request.
-            max_length: The maximum length of the cache hit prefix.
-            kv_cache_group_ids: The ids of the kv cache groups.
-            block_pool: The block pool.
-            kv_cache_spec: The kv cache spec.
-            drop_eagle_block: Whether to drop the last matched block for EAGLE/MTP.
-            dcp_world_size: The world size of decode context parallelism.
-            pcp_world_size: The world size of prefill context parallelism.
-            alignment_tokens: The returned cache hit length (in tokens) should
-                be a multiple of this value (in tokens).
-
-        Returns:
-            A list of cached blocks
         """
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
         )
         assert drop_eagle_block is False, (
-            "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
+            "Hybrid KV cache is not supported for eagle + chunked local attention."
         )
-        assert dcp_world_size == 1, "DCP not support chunked local attn now."
-        assert pcp_world_size == 1, "PCP not support chunked local attn now."
-        assert kv_cache_spec.block_size == alignment_tokens, (
-            "KV cache groups with different block sizes are not compatible with "
-            "chunked local attention now"
+        block_size = kv_cache_spec.block_size
+        chunk_size = kv_cache_spec.attention_chunk_size
+        # For each position i, the chunk boundary that i's token range falls in:
+        token_ends = (np.arange(max_num_blocks) + 1) * block_size
+        chunk_start_blocks = (
+            token_ends // chunk_size * chunk_size // block_size
+        ).astype(np.int32)
+        # Blocks before the chunk boundary are always hittable (outside window).
+        # We use starts[i] = i + 1 as sentinel: range_sum = 0 == required = 0.
+        # Blocks inside the chunk must be prefix-matched from chunk_start.
+        positions = np.arange(max_num_blocks, dtype=np.int32)
+        starts = np.where(
+            positions < chunk_start_blocks, positions + 1, chunk_start_blocks
         )
-        max_num_blocks = max_length // kv_cache_spec.block_size
-        if max_length > 0:
-            local_attention_start_idx = (
-                max_length
-                // kv_cache_spec.attention_chunk_size
-                * kv_cache_spec.attention_chunk_size
-            )
-        else:
-            local_attention_start_idx = 0
-        # we marked blocks out of window as computed
-        # with null blocks, and blocks inside window based on cache lookup
-        # result [null] [null] ... [null] [hit block 1 (1st block contain
-        # last window)] [hit block 2] ... [hit block x]
-        local_attention_start_block_idx = (
-            local_attention_start_idx // kv_cache_spec.block_size
-        )
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [block_pool.null_block] * local_attention_start_block_idx
-            for _ in range(len(kv_cache_group_ids))
-        )
-        for i in range(local_attention_start_block_idx, max_num_blocks):
-            block_hash = block_hashes[i]
-            if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
-            ):
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed.append(cached)
-            else:
-                break
-        return computed_blocks
+        return starts.astype(np.int32)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -906,52 +858,41 @@ class MambaManager(SingleTypeKVCacheManager):
             self._allocated_block_reqs: set[str] = set()
 
     @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    def required_range_starts(
+        cls, max_num_blocks: int, kv_cache_spec: KVCacheSpec, drop_eagle_block: bool
+    ) -> np.ndarray | None:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
-        assert dcp_world_size == 1, "DCP not support mamba now."
-        assert pcp_world_size == 1, "PCP not support mamba now."
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [] for _ in range(len(kv_cache_group_ids))
-        )
+        # When enable Mamba prefix caching, `block_size` will be aligned
+        # across full attention layers and Mamba layers to ensure the
+        # prefix hit length aligned at block boundaries.
+        # Mamba only needs a single block at position i (point check).
+        return np.arange(max_num_blocks, dtype=np.int32)
 
-        block_size = kv_cache_spec.block_size
-        max_num_blocks = max_length // block_size
+    @classmethod
+    def _collect_hit_blocks(
+        cls,
+        match: list[list[KVCacheBlock] | None],
+        n_hit: int,
+        starts: np.ndarray,
+        kv_cache_group_ids: list[int],
+        block_pool: BlockPool,
+    ) -> tuple[list[KVCacheBlock], ...]:
         # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
-            ):
-                # When enable Mamba prefix caching, `block_size` will be aligned
-                # across full attention layers and Mamba layers to ensure the
-                # prefix hit length aligned at block
-                if (
-                    block_size != alignment_tokens  # Faster for common case.
-                    and (i + 1) * block_size % alignment_tokens != 0
-                ):
-                    continue
+        # We insert dummy blocks at the beginning so that:
+        #   hit_length = len(hit_blocks[0]) * block_size
+        for i in range(min(n_hit, len(match)) - 1, -1, -1):
+            cached_block = match[i]
+            if cached_block is not None:
+                computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+                    [] for _ in kv_cache_group_ids
+                )
                 for computed, cached in zip(computed_blocks, cached_block):
-                    # the hit length logic later assumes:
-                    #  hit_length = len(hit_blocks_other_attn[0])
-                    #               * self.other_block_size
-                    # so we insert dummy blocks at the beginning:
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
-                break  # we just need the last match - early stopping
-
-        return computed_blocks
+                return computed_blocks
+        return tuple([] for _ in kv_cache_group_ids)
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
@@ -1200,18 +1141,9 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         return 0
 
     @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    def required_range_starts(
+        cls, max_num_blocks: int, kv_cache_spec: KVCacheSpec, drop_eagle_block: bool
+    ) -> np.ndarray | None:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
         )
@@ -1220,8 +1152,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         #    inputs)
         # 2. Encoder states are computed once per request, not incrementally
         # 3. No reusable prefix exists between different multimodal inputs
-        # Return empty blocks to indicate no cache hits
-        raise NotImplementedError("CrossAttentionManager does not support caching")
+        return None
 
 
 class SinkFullAttentionManager(FullAttentionManager):

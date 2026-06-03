@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
+
+import numpy as np
 
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -535,12 +538,12 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
-        Find the longest cache hit using an iterative fixed-point algorithm.
+        Find the longest cache hit using a hittable-array pipeline.
 
-        Each attention type either accepts the current candidate length or
-        reduces it. If any type reduces the length, restart checks over all
-        types. This converges because length monotonically decreases and is
-        bounded below by 0.
+        1. Match: check cache for each block position per group.
+        2. Hittable: compute per-group hittable arrays via required_range_starts.
+        3. Combine: AND hittable arrays across groups (resampled to hash_block_size).
+        4. Collect: build result blocks for the decided hit_length.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -560,75 +563,96 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
+
+        # Step 1 & 2: Match + Hittable per group.
+        matches: list[list[list[KVCacheBlock] | None]] = []
+        hittables: list[np.ndarray] = []
+        for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
+            adapted_hashes = _get_block_hashes(spec)
+            max_num_blocks = max_cache_hit_length // spec.block_size
+
+            starts = manager_cls.required_range_starts(max_num_blocks, spec, use_eagle)
+            if starts is None:
+                matches.append([])
+                hittables.append(np.zeros(max_num_blocks, dtype=bool))
+                continue
+
+            # Match: check cache for each block position.
+            match: list[list[KVCacheBlock] | None] = []
+            for block_hash in itertools.islice(adapted_hashes, max_num_blocks):
+                match.append(self.block_pool.get_cached_block(block_hash, group_ids))
+
+            # Hittable: vectorized range-sum check via cumsum.
+            matched = np.zeros(max_num_blocks, dtype=np.int32)
+            matched[: len(match)] = [m is not None for m in match]
+            cumsum = np.concatenate(([0], np.cumsum(matched)))
+            ends = np.arange(max_num_blocks)
+            clamped_starts = np.minimum(starts, ends + 1)
+            range_sums = cumsum[ends + 1] - cumsum[clamped_starts]
+            required = ends - clamped_starts + 1
+            hittable = range_sums == required
+
+            # Eagle: shift hittable left by 1 to drop the last block.
+            if use_eagle:
+                hittable = np.roll(hittable, -1)
+                hittable[-1] = False
+
+            matches.append(match)
+            hittables.append(hittable)
+
+        # Step 3: Combine — AND hittable arrays (resampled to hash_block_size).
+        max_hash_blocks = max_cache_hit_length // self.hash_block_size
+        combined = np.ones(max_hash_blocks, dtype=bool)
+        for idx, group in enumerate(self.attention_groups):
+            ratio = group.spec.block_size // self.hash_block_size
+            arr = hittables[idx]
+            upsampled = np.repeat(arr, ratio)[:max_hash_blocks]
+            combined[: len(upsampled)] &= upsampled
+            if len(upsampled) < max_hash_blocks:
+                combined[len(upsampled) :] = False
+
+        # Find rightmost hittable position, align to scheduler_block_size.
+        hit_indices = np.flatnonzero(combined)
+        hit_hash_blocks = int(hit_indices[-1]) + 1 if len(hit_indices) > 0 else 0
+        hit_length = hit_hash_blocks * self.hash_block_size
+        hit_length = hit_length // self.scheduler_block_size * self.scheduler_block_size
+
+        # Step 4: Collect blocks per group.
+        # Eagle is already handled by the hittable shift; for collection,
+        # use the actual window without eagle expansion.
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        for idx, (spec, group_ids, manager_cls, _) in enumerate(self.attention_groups):
+            n_hit = hit_length // spec.block_size
+            if n_hit == 0 or not matches[idx]:
+                for group_id in group_ids:
+                    hit_blocks_by_group[group_id] = []
+                continue
+            starts = manager_cls.required_range_starts(
+                n_hit, spec, drop_eagle_block=False
+            )
+            if starts is None:
+                for group_id in group_ids:
+                    hit_blocks_by_group[group_id] = []
+                continue
+            hit_blocks = manager_cls._collect_hit_blocks(
+                matches[idx], n_hit, starts, group_ids, self.block_pool
+            )
+            for group_id, blocks in zip(group_ids, hit_blocks):
+                hit_blocks_by_group[group_id] = blocks
 
-        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists.
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0].spec, FullAttentionSpec
-        )
+        # Mamba may return fewer blocks; recompute hit_length as minimum.
+        for group in self.attention_groups:
+            blks = hit_blocks_by_group[group.group_ids[0]]
+            if blks is not None:
+                group_hit = len(blks) * group.spec.block_size
+                hit_length = min(hit_length, group_hit)
 
-        # Attention-group indices whose EAGLE drop is verified at the current
-        # ``curr_hit_length``. Each eagle group applies the drop at most once
-        # per candidate length (see issue #32802).
-        eagle_verified: set[int] = set()
-
-        while True:
-            curr_hit_length = hit_length
-
-            for idx, (spec, group_ids, manager_cls, use_eagle) in enumerate(
-                self.attention_groups
-            ):
-                cached_blocks = hit_blocks_by_group[group_ids[0]]
-                if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
-                    # Full attention is downward-closed: we only need to look
-                    # up cached blocks once; on subsequent iterations just trim
-                    # to the (reduced) current hit length.
-                    curr_hit_length = (
-                        curr_hit_length // spec.block_size * spec.block_size
-                    )
-                    continue
-
-                drop_eagle_block = use_eagle and idx not in eagle_verified
-
-                _max_length = curr_hit_length
-                if drop_eagle_block:
-                    # Eagle needs to match one more block and then pop the last.
-                    _max_length = min(
-                        curr_hit_length + spec.block_size, max_cache_hit_length
-                    )
-                hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec),
-                    max_length=_max_length,
-                    kv_cache_group_ids=group_ids,
-                    block_pool=self.block_pool,
-                    kv_cache_spec=spec,
-                    drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self.scheduler_block_size,
-                )
-                _new_hit_length = len(hit_blocks[0]) * spec.block_size
-                if drop_eagle_block:
-                    eagle_verified.add(idx)
-                elif _new_hit_length < curr_hit_length:
-                    # length shrunk; invalidate previous eagle verifications
-                    eagle_verified.clear()
-                curr_hit_length = _new_hit_length
-                for group_id, blocks in zip(group_ids, hit_blocks):
-                    hit_blocks_by_group[group_id] = blocks
-
-            if curr_hit_length >= hit_length:
-                break
-            hit_length = curr_hit_length
-            if is_simple_hybrid:
-                break
-
-        # Truncate full attention blocks to final hit_length (if present)
-        first_group = self.attention_groups[0]
-        if isinstance(first_group.spec, FullAttentionSpec):
-            num_blocks = hit_length // first_group.spec.block_size
-            for group_id in first_group.group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
+        # Truncate all groups to final hit_length.
+        for group in self.attention_groups:
+            num_blocks = hit_length // group.spec.block_size
+            for group_id in group.group_ids:
+                blks = hit_blocks_by_group[group_id]
+                if blks is not None and len(blks) > num_blocks:
                     del blks[num_blocks:]
 
         return tuple(
