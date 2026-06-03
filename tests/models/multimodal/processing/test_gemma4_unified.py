@@ -7,7 +7,7 @@ import pytest
 import torch
 from PIL import Image as PILImage
 
-from vllm.model_executor.models.gemma4_unified import Gemma4ImagePixelInputs
+from vllm.model_executor.models.gemma4_mm import Gemma4ImagePixelInputs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig
 
