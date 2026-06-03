@@ -80,16 +80,6 @@ else:
 
 logger = init_logger(__name__)
 
-
-def is_cumem_allocator_available() -> bool:
-    try:
-        from vllm.device_allocator.cumem import cumem_available
-    except ImportError:
-        return False
-
-    return cumem_available
-
-
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
@@ -542,7 +532,10 @@ class ModelConfig:
                     "Enabling cumem allocator because sleep mode requires it."
                 )
                 self.enable_cumem_allocator = True
-        if self.enable_cumem_allocator and not is_cumem_allocator_available():
+        if (
+            self.enable_cumem_allocator
+            and not current_platform.is_cumem_allocator_available()
+        ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
@@ -791,7 +784,7 @@ class ModelConfig:
                 f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
                 "Please provide a valid tokenizer path or HuggingFace model ID."
             )
-        if not isinstance(self.max_model_len, int):
+        if not isinstance(self.max_model_len, int) or self.max_model_len < 1:
             raise ValueError(
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
@@ -1028,7 +1021,6 @@ class ModelConfig:
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "deepseek_v4_fp8",
-                "cpu_awq",
                 "humming",
                 "gguf",
             ]
