@@ -939,13 +939,10 @@ class InternVLChatModel(
 
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
-            input_key_by_modality={
-                "image": "pixel_values_flat",
-                "video": "pixel_values_flat_video",
-            },
             # InternVision uses standard ViT attention (no rotary embeddings,
-            # no variable-length sequence metadata), so no extra buffers needed.
-            buffer_keys=[],
+            # no variable-length sequence metadata), so the only graph-recorded
+            # buffer is pixel_values_flat itself.
+            buffer_keys=["pixel_values_flat"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -1046,14 +1043,10 @@ class InternVLChatModel(
         dummy_pixel_values = torch.randn(
             total_tiles, 3, image_size, image_size, device=device, dtype=dtype
         )
-        mm_kwargs = {
-            "pixel_values_flat": dummy_pixel_values,
-            # Single dummy item consuming all tiles; not used inside
-            # extract_feature, only needed for structural consistency.
-            "image_num_patches": [total_tiles],
-        }
 
-        return EncoderCudaGraphCaptureInputs(mm_kwargs=mm_kwargs, buffers={})
+        return EncoderCudaGraphCaptureInputs(
+            values={"pixel_values_flat": dummy_pixel_values},
+        )
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -1065,19 +1058,23 @@ class InternVLChatModel(
             EncoderCudaGraphReplayBuffers,
         )
 
-        # No metadata buffers required for InternVision.
-        return EncoderCudaGraphReplayBuffers(buffers={})
+        modality = self.get_input_modality(mm_kwargs)
+        pv_key = (
+            "pixel_values_flat" if modality == "image" else "pixel_values_flat_video"
+        )
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values_flat": mm_kwargs[pv_key]},
+        )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         # The graph is always captured with pixel_values_flat as the input
         # buffer. During video replay the manager copies video tiles into
         # this same buffer before calling graph.replay(), so we always read
         # from pixel_values_flat here.
-        pixel_values = mm_kwargs["pixel_values_flat"]
+        pixel_values = values["pixel_values_flat"]
         out = self.extract_feature(pixel_values)  # [N, num_image_token, H]
         return out.view(-1, self.config.text_config.hidden_size)
 
