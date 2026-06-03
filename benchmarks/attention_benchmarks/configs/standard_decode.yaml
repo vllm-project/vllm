@@ -5,8 +5,8 @@
 
 model:
   num_layers: 32
-  num_q_heads: 32   # Base value, overridden by sweep
-  num_kv_heads: 8   # Base value, overridden by sweep
+  num_q_heads: 32 # Base value, overridden by sweep
+  num_kv_heads: 8 # Base value, overridden by sweep
   head_dim: 128
   block_size: 16
 
@@ -26,25 +26,25 @@ model:
 model_parameter_sweep:
   values:
     # --- head_dim=128 (Llama 3 family) ---
-    - {num_q_heads: 32, num_kv_heads: 32, head_dim: 128}  # MHA 1:1
-    - {num_q_heads: 32, num_kv_heads: 1, head_dim: 128}   # MQA 32:1
-    - {num_q_heads: 4, num_kv_heads: 1, head_dim: 128}    # Llama 3 8B TP8
-    - {num_q_heads: 8, num_kv_heads: 2, head_dim: 128}    # Llama 3 8B TP4
-    - {num_q_heads: 16, num_kv_heads: 4, head_dim: 128}   # Llama 3 8B TP2
-    - {num_q_heads: 32, num_kv_heads: 8, head_dim: 128}   # Llama 3 8B TP1 / GQA 4:1
-    - {num_q_heads: 8, num_kv_heads: 1, head_dim: 128}    # Llama 3 70B TP8
-    - {num_q_heads: 16, num_kv_heads: 2, head_dim: 128}   # Llama 3 70B TP4
-    - {num_q_heads: 32, num_kv_heads: 4, head_dim: 128}   # Llama 3 70B TP2 / GQA 8:1
-    - {num_q_heads: 64, num_kv_heads: 8, head_dim: 128}   # Llama 3 70B TP1
-    - {num_q_heads: 16, num_kv_heads: 1, head_dim: 128}   # Llama 3 405B TP8
-    - {num_q_heads: 32, num_kv_heads: 2, head_dim: 128}   # Llama 3 405B TP4
-    - {num_q_heads: 64, num_kv_heads: 4, head_dim: 128}   # Llama 3 405B TP2
-    - {num_q_heads: 128, num_kv_heads: 8, head_dim: 128}  # Llama 3 405B TP1
+    - { num_q_heads: 32, num_kv_heads: 32, head_dim: 128 } # MHA 1:1
+    - { num_q_heads: 32, num_kv_heads: 1, head_dim: 128 } # MQA 32:1
+    - { num_q_heads: 4, num_kv_heads: 1, head_dim: 128 } # Llama 3 8B TP8
+    - { num_q_heads: 8, num_kv_heads: 2, head_dim: 128 } # Llama 3 8B TP4
+    - { num_q_heads: 16, num_kv_heads: 4, head_dim: 128 } # Llama 3 8B TP2
+    - { num_q_heads: 32, num_kv_heads: 8, head_dim: 128 } # Llama 3 8B TP1 / GQA 4:1
+    - { num_q_heads: 8, num_kv_heads: 1, head_dim: 128 } # Llama 3 70B TP8
+    - { num_q_heads: 16, num_kv_heads: 2, head_dim: 128 } # Llama 3 70B TP4
+    - { num_q_heads: 32, num_kv_heads: 4, head_dim: 128 } # Llama 3 70B TP2 / GQA 8:1
+    - { num_q_heads: 64, num_kv_heads: 8, head_dim: 128 } # Llama 3 70B TP1
+    - { num_q_heads: 16, num_kv_heads: 1, head_dim: 128 } # Llama 3 405B TP8
+    - { num_q_heads: 32, num_kv_heads: 2, head_dim: 128 } # Llama 3 405B TP4
+    - { num_q_heads: 64, num_kv_heads: 4, head_dim: 128 } # Llama 3 405B TP2
+    - { num_q_heads: 128, num_kv_heads: 8, head_dim: 128 } # Llama 3 405B TP1
     # --- head_dim=64 (GPT-OSS 120B) ---
-    - {num_q_heads: 8, num_kv_heads: 1, head_dim: 64}     # GPT-OSS 120B TP8
-    - {num_q_heads: 16, num_kv_heads: 2, head_dim: 64}    # GPT-OSS 120B TP4
-    - {num_q_heads: 32, num_kv_heads: 4, head_dim: 64}    # GPT-OSS 120B TP2
-    - {num_q_heads: 64, num_kv_heads: 8, head_dim: 64}    # GPT-OSS 120B TP1
+    - { num_q_heads: 8, num_kv_heads: 1, head_dim: 64 } # GPT-OSS 120B TP8
+    - { num_q_heads: 16, num_kv_heads: 2, head_dim: 64 } # GPT-OSS 120B TP4
+    - { num_q_heads: 32, num_kv_heads: 4, head_dim: 64 } # GPT-OSS 120B TP2
+    - { num_q_heads: 64, num_kv_heads: 8, head_dim: 64 } # GPT-OSS 120B TP1
   label_format: "{backend}_q{num_q_heads}kv{num_kv_heads}d{head_dim}"
 
 batch_specs:
@@ -135,7 +135,7 @@ batch_specs:
 # Available backends: FLASH_ATTN, TRITON_ATTN, FLASHINFER
 backends:
   - FLASH_ATTN
-  # - TRITON_ATTN
+  - TRITON_ATTN
   - FLASHINFER
 
 device: "cuda:0"
