@@ -2466,6 +2466,8 @@ class GPUModelRunner(
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
                 for mm_feature in req_state.mm_features:
+                    if mm_feature.modality == "audio":
+                        continue
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
