@@ -320,6 +320,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size,
                 dtype,
                 kv_cache_dtype,
+                head_size_v=self.head_size_v,
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,
