@@ -3,12 +3,12 @@
 """Inference-only MOSS-Audio model compatible with HuggingFace weights."""
 
 import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -23,15 +23,17 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.inputs import ModalityData, MultiModalDataDict
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY, SiluAndMul
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
@@ -59,6 +61,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsPP,
     _require_is_multimodal,
 )
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
@@ -714,33 +717,59 @@ class GatedMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_proj = ReplicatedLinear(
+        self.gate_up_proj = MergedColumnParallelLinear(
             input_size,
-            hidden_size,
+            [hidden_size, hidden_size],
             bias=False,
             quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.gate_proj",
+            prefix=f"{prefix}.gate_up_proj",
         )
-        self.up_proj = ReplicatedLinear(
-            input_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.up_proj",
-        )
-        self.down_proj = ReplicatedLinear(
+        self.down_proj = RowParallelLinear(
             hidden_size,
             output_size,
             bias=False,
+            input_is_parallel=True,
             quant_config=quant_config,
-            return_bias=False,
             prefix=f"{prefix}.down_proj",
         )
+        self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            target_name = name
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                components = target_name.split(".")
+                if weight_name not in components:
+                    continue
+
+                target_name = ".".join(
+                    param_name if component == weight_name else component
+                    for component in components
+                )
+                param = params_dict[target_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[target_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(target_name)
+        return loaded_params
 
 
 @support_torch_compile(
@@ -753,6 +782,10 @@ class GatedMLP(nn.Module):
     }
 )
 class MossQwen3Model(Qwen3Model):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.deepstack_inject_layer_indices: Iterable[int] = range(0)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -778,13 +811,12 @@ class MossQwen3Model(Qwen3Model):
             start=self.start_layer,
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
-            if deepstack_input_embeds is not None and layer_idx < len(
-                deepstack_input_embeds
+            deepstack_key = f"deepstack_input_embeds_{layer_idx}"
+            if (
+                deepstack_input_embeds is not None
+                and deepstack_key in deepstack_input_embeds.tensors
             ):
-                hidden_states = (
-                    hidden_states
-                    + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
-                )
+                hidden_states = hidden_states + deepstack_input_embeds[deepstack_key]
             self._maybe_add_hidden_state(
                 aux_hidden_states,
                 layer_idx - self.start_layer + 1,
@@ -793,9 +825,25 @@ class MossQwen3Model(Qwen3Model):
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
-            )
+            tensors = {"hidden_states": hidden_states, "residual": residual}
+            # Keep the DeepStack PP schema config-driven, but only carry
+            # payloads needed by downstream injection points across this rank.
+            # Missing downstream payloads are zero-filled below to clear
+            # receive buffers instead of leaving stale tensors.
+            for layer_idx in self.deepstack_inject_layer_indices:
+                if layer_idx < self.end_layer:
+                    continue
+                deepstack_key = f"deepstack_input_embeds_{layer_idx}"
+                if (
+                    deepstack_input_embeds is not None
+                    and deepstack_key in deepstack_input_embeds.tensors
+                ):
+                    tensors[deepstack_key] = deepstack_input_embeds[deepstack_key]
+                else:
+                    tensors[deepstack_key] = hidden_states.new_zeros(
+                        hidden_states.shape
+                    )
+            return IntermediateTensors(tensors)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
@@ -832,9 +880,24 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
+        self.deepstack_inject_layer_indices: Iterable[int] = range(0)
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        intermediate_tensors = self.model.make_empty_intermediate_tensors(
+            batch_size, dtype, device
         )
+        for layer_idx in self.deepstack_inject_layer_indices:
+            intermediate_tensors[f"deepstack_input_embeds_{layer_idx}"] = torch.zeros(
+                (batch_size, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            )
+        return intermediate_tensors
 
     def forward(
         self,
@@ -1158,7 +1221,8 @@ class MossAudioProcessingInfo(BaseProcessingInfo):
     @staticmethod
     def _get_processor_cache_key(kwargs: Mapping[str, object]) -> tuple[object, ...]:
         mel_config = _normalize_moss_audio_mel_config(
-            kwargs.get("mel_config") if isinstance(kwargs.get("mel_config"), Mapping)
+            kwargs.get("mel_config")
+            if isinstance(kwargs.get("mel_config"), Mapping)
             else None
         )
         return (
@@ -1277,7 +1341,8 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
         mm_kwargs = dict(mm_kwargs)
         processor_kwargs = _filter_moss_audio_processor_config(mm_kwargs)
         tok_kwargs = {
-            key: value for key, value in tok_kwargs.items()
+            key: value
+            for key, value in tok_kwargs.items()
             if key not in MOSS_AUDIO_PROCESSOR_CONFIG_KEYS
         }
         return self.info.ctx.call_hf_processor(
@@ -1387,7 +1452,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
     info=MossAudioProcessingInfo,
     dummy_inputs=MossAudioDummyInputsBuilder,
 )
-class MossAudioModel(nn.Module, SupportsMultiModal):
+class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1439,20 +1504,23 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         self.multimodal_config = vllm_config.model_config.multimodal_config
 
         parallel_config = vllm_config.parallel_config
-        if parallel_config.tensor_parallel_size != 1:
-            # TODO:tp
+        tp_size = parallel_config.tensor_parallel_size
+        if self.config.adapter_hidden_size % tp_size != 0:
             raise ValueError(
-                "MossAudioModel currently supports only tensor_parallel_size=1; "
-                f"got {parallel_config.tensor_parallel_size}."
-            )
-        if parallel_config.pipeline_parallel_size != 1:
-            # TODO:PP
-            raise ValueError(
-                "MossAudioModel currently supports only pipeline_parallel_size=1; "
-                f"got {parallel_config.pipeline_parallel_size}."
+                "MOSS-Audio adapter_hidden_size must be divisible by tensor "
+                f"parallel size. Got adapter_hidden_size="
+                f"{self.config.adapter_hidden_size} and tensor_parallel_size="
+                f"{tp_size}."
             )
 
         audio_config = MossAudioEncoderConfig.from_config(self.config.audio_config)
+        if audio_config.encoder_attention_heads % tp_size != 0:
+            raise ValueError(
+                "MOSS-Audio encoder_attention_heads must be divisible by "
+                "tensor parallel size. Got encoder_attention_heads="
+                f"{audio_config.encoder_attention_heads} and "
+                f"tensor_parallel_size={tp_size}."
+            )
         language_config = self.config.language_config
         self.audio_token_id = MOSS_AUDIO_TOKEN_ID
         self.deepstack_input_embeds: IntermediateTensors | None = None
@@ -1500,6 +1568,10 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
                 ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+            self.language_model.deepstack_inject_layer_indices = range(deepstack_k)
+            self.language_model.model.deepstack_inject_layer_indices = range(
+                deepstack_k
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1522,9 +1594,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
     ) -> torch.Tensor:
         if len(audio_data) == 0:
             raise ValueError("audio_data list must not be empty.")
-        MossAudioModel._validate_audio_batch_size(
-            len(audio_data), audio_data_seqlens
-        )
+        MossAudioModel._validate_audio_batch_size(len(audio_data), audio_data_seqlens)
 
         # pad_sequence needs every item to share the same trailing feature
         # layout, so validate the mel-major audio tensors before transposing.
@@ -1532,9 +1602,7 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         if not isinstance(first, torch.Tensor):
             raise TypeError("audio_data list items must be torch.Tensor.")
         if first.ndim != 2:
-            raise ValueError(
-                "audio_data list items must have shape [mel_dim, time]."
-            )
+            raise ValueError("audio_data list items must have shape [mel_dim, time].")
 
         mel_dim = first.shape[0]
         dtype = first.dtype
@@ -1547,17 +1615,11 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
                     "audio_data list items must have shape [mel_dim, time]."
                 )
             if item.shape[0] != mel_dim:
-                raise ValueError(
-                    "audio_data list items must have the same mel_dim."
-                )
+                raise ValueError("audio_data list items must have the same mel_dim.")
             if item.dtype != dtype:
-                raise TypeError(
-                    "audio_data list items must have the same dtype."
-                )
+                raise TypeError("audio_data list items must have the same dtype.")
             if item.device != device:
-                raise ValueError(
-                    "audio_data list items must be on the same device."
-                )
+                raise ValueError("audio_data list items must be on the same device.")
 
         # Each item arrives as [mel_dim, time]. pad_sequence pads along dim 1
         # after converting to [time, mel_dim], then we restore [batch, mel, time].
@@ -1592,13 +1654,9 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
             audio_data = self._pad_audio_data_list(audio_data, audio_data_seqlens)
         elif isinstance(audio_data, torch.Tensor):
             if audio_data.ndim == 3:
-                self._validate_audio_batch_size(
-                    audio_data.shape[0], audio_data_seqlens
-                )
+                self._validate_audio_batch_size(audio_data.shape[0], audio_data_seqlens)
         else:
-            raise TypeError(
-                "audio_data must be a torch.Tensor or list[torch.Tensor]."
-            )
+            raise TypeError("audio_data must be a torch.Tensor or list[torch.Tensor].")
 
         audio_token_lens = MossAudioEncoder._compute_downsampled_length(
             audio_data_seqlens
@@ -1796,16 +1854,18 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        if intermediate_tensors is not None:
-            raise ValueError(
-                "MossAudioModel does not support pipeline parallelism yet."
-            )
+        assert intermediate_tensors is None or inputs_embeds is None, (
+            "non-first PP rank must not receive inputs_embeds"
+        )
 
-        deepstack_input_embeds = self.deepstack_input_embeds
+        if intermediate_tensors is None:
+            deepstack_input_embeds = self.deepstack_input_embeds
+        else:
+            deepstack_input_embeds = intermediate_tensors
         hidden_states = self.language_model(
             input_ids,
             positions,
-            intermediate_tensors=None,
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             deepstack_input_embeds=deepstack_input_embeds,
         )
