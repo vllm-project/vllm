@@ -133,8 +133,8 @@ class FlexAttentionBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            return (1, 0, 3, 2, 4, 5)
-        return (0, 2, 1, 3, 4)
+            return (1, 0, 3, 2, 4)
+        return (0, 2, 1, 3)
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
