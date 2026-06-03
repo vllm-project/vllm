@@ -54,8 +54,7 @@ from vllm.model_executor.layers.pooler import (
 )
 from vllm.model_executor.layers.pooler.tokwise import (
     AllPool,
-    TokenClassifierPoolerHead,
-    TokenPooler,
+    pooler_for_token_classify,
 )
 
 # cohere end
@@ -597,18 +596,15 @@ class Cohere2ForRewardModel(CohereForCausalLM):
         assert pooler_config is not None
 
         # cohere start
-        pooler = TokenPooler(
-            pooling=AllPool(),
-            head=TokenClassifierPoolerHead(
-                classifier=None,
-                logit_bias=None,
-                head_dtype=vllm_config.model_config.head_dtype,
-                activation=None,
-            ),
-        )
-
         self.pooler = DispatchPooler(
-            {"token_classify": pooler},
+            {
+                "token_classify": pooler_for_token_classify(
+                    pooler_config,
+                    pooling=AllPool(),
+                    classifier=None,
+                    act_fn=None,
+                ),
+            },
         )
         # cohere end
 

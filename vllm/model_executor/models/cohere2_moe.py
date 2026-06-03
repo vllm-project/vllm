@@ -37,9 +37,9 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .commandr import LayerNorm
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
-    AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -391,10 +391,18 @@ class Cohere2MoeModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
-        self.vocab_size = config.vocab_size
+        # cohere start
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
+        self.vocab_size = config.vocab_size + lora_vocab
+        # cohere end
         self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
@@ -441,6 +449,18 @@ class Cohere2MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    # cohere start
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
+
+    # cohere end
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             ("qkv_proj", "q_proj", "q"),
@@ -479,6 +499,10 @@ class Cohere2MoeModel(nn.Module):
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
+                # cohere start
+                if param_name in name:
+                    continue
+                # cohere end
                 if "mlp.experts" in name:
                     continue
                 name = name.replace(shard_name, param_name)
@@ -532,7 +556,7 @@ class Cohere2MoeModel(nn.Module):
         return loaded_params
 
 
-class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+class Cohere2MoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     is_text_generation_model = True
 
     packed_modules_mapping = {
@@ -547,13 +571,28 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         ],
     }
 
+    # cohere start
+    embedding_modules = {"embed_tokens": "input_embeddings"}
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "backend.model.": "",
+        }
+    )
+
+    # cohere end
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
+        # cohere start
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        # cohere end
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale
         self.logits_processor = LogitsProcessor(
@@ -572,6 +611,12 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
+    # cohere start
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
+
+    # cohere end
+
     @torch.no_grad()
     def forward(
         self,
@@ -586,8 +631,112 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        return self.logits_processor(self.model.embed_tokens, hidden_states)
+        # cohere start
+        # VocabParallelEmbeddingWithLoRA exposes .weight via base_layer but
+        # quant_method lives on the underlying embedding only.
+        embed_tokens = self.model.embed_tokens
+        lm_head = (
+            embed_tokens.base_layer
+            if hasattr(embed_tokens, "base_layer")
+            else embed_tokens
+        )
+        return self.logits_processor(lm_head, hidden_states)
+        # cohere end
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
-        return loader.load_weights(weights)
+        stacked_params_mapping = [
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        # cohere start
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.num_experts,
+        )
+        # cohere end
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+
+            for param_name, shard_name, shard_id in stacked_params_mapping:
+                if shard_name not in name:
+                    continue
+                # cohere start
+                if param_name in name:
+                    continue
+                # cohere end
+                if "mlp.experts" in name:
+                    continue
+                name = name.replace(shard_name, param_name)
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
+                    break
+                else:
+                    if "lm_head.weight" in name:
+                        continue
+                    if (
+                        name.endswith(".bias") or name.endswith("_bias")
+                    ) and name not in params_dict:
+                        continue
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        return loaded_params
