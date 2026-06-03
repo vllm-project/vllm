@@ -344,7 +344,11 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
-        quant_config = getattr(self.module, "quant_config", None)
+        # Many models store quant_config in the base model instead of the causal model.
+        # We look at the causal model's direct children for this reason.
+        modules = (self.module, *self.module.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        quant_config = next(iterator, None)
         cache_scale_mapper = (
             quant_config.get_cache_scale_mapper() if quant_config is not None else None
         )
