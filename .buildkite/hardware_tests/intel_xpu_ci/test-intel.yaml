@@ -24,7 +24,7 @@ steps:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
       REPO: "vllm-ci-test-repo"
     source_file_dependencies:
-      - .buildkite/intel_jobs/test-intel.yaml 
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml 
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -51,7 +51,7 @@ steps:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
       REPO: "vllm-ci-test-repo"
     source_file_dependencies:
-      - .buildkite/intel_jobs/test-intel.yaml 
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml 
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -74,7 +74,7 @@ steps:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
       REPO: "vllm-ci-test-repo"
     source_file_dependencies:
-      - .buildkite/intel_jobs/test-intel.yaml q
+      - .buildkite/hardware_tests/intel_xpu_ci/test-intel.yaml 
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
