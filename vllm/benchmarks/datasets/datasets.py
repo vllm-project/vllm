@@ -2780,14 +2780,15 @@ class CustomImageDataset(CustomDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
-        ensure_client_side_data: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         lora_path: str | None = None,
         max_loras: int | None = None,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        chat_template_kwargs: dict | None = None,
+        ensure_client_side_data: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         # load all data if needed
@@ -2884,6 +2885,7 @@ class CustomAudioDataset(CustomDataset):
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        chat_template_kwargs: dict | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         self.num_available_samples = len(self.data)
@@ -3013,10 +3015,21 @@ class SpecBench(CustomDataset):
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        chat_template_kwargs: dict | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # leverage CustomDataset sample
         return super().sample(
+            tokenizer=tokenizer,
+            num_requests=num_requests,
+            request_id_prefix=request_id_prefix,
+            no_oversample=no_oversample,
+            lora_path=lora_path,
+            max_loras=max_loras,
+            output_len=output_len,
+            enable_multimodal_chat=enable_multimodal_chat,
+            skip_chat_template=skip_chat_template,
+            chat_template_kwargs=chat_template_kwargs,
             **kwargs,
         )
 
