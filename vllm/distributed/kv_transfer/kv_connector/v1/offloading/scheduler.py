@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     _TransferMetricName,
 )
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -77,6 +77,9 @@ class GroupOffloadConfig(NamedTuple):
     # than the MLA full-attention group).
     # None for full-attention groups or when the optimization doesn't apply.
     alignment_block_count: int | None = None
+    # If there is a KV cache group with MamabaSpec in "align" cache mode,
+    # here we record the mamba alignment requirement for offloading.
+    mamba_align_size: int | None = None
 
 
 def get_sliding_window_size_in_blocks(
@@ -137,6 +140,12 @@ class SchedulerOffloadConfig(NamedTuple):
                 return None
             return per_segment
 
+        def _mamba_alignment_size(kv_spec, offload_block_size) -> int | None:
+            if isinstance(kv_spec, MambaSpec) and kv_spec.mamba_cache_mode == "align":
+                return offload_block_size
+            else:
+                return None
+
         return cls(
             num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
@@ -156,6 +165,10 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     alignment_block_count=_alignment_block_count(
                         gpu_block_size * spec.block_size_factor, sw
+                    ),
+                    mamba_align_size=_mamba_alignment_size(
+                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec,
+                        gpu_block_size * spec.block_size_factor,
                     ),
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
@@ -290,6 +303,14 @@ class OffloadingConnectorScheduler:
         # used by _lookup
         self._sliding_window_groups: tuple[int, ...] = tuple(sliding_window_groups)
         self._lookup_groups = tuple(full_attention_groups) + self._sliding_window_groups
+        self._mamba_align_size: int | None = None
+        for gc in self.config.kv_group_configs:
+            if gc.mamba_align_size is not None:
+                assert (
+                    self._mamba_align_size is None
+                    or self._mamba_align_size == gc.mamba_align_size
+                )
+                self._mamba_align_size = gc.mamba_align_size
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
@@ -408,6 +429,16 @@ class OffloadingConnectorScheduler:
             # for sliding window attention, we must reduce by 1 to make sure
             # we still have a hit after reduction
             max_hit_size_tokens -= 1
+            if self._mamba_align_size is not None:
+                # Constrain hit-window to the mamba block size.
+                max_hit_size_tokens = round_down(
+                    max_hit_size_tokens, self._mamba_align_size
+                )
+
+            if max_hit_size_tokens == 0:
+                # could drop to zero with mamba round_down
+                return 0
+
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
