@@ -212,7 +212,7 @@ class TestGetActFn:
             problem_type="",
             sentence_transformers={"activation_fn": "os.system"},
         )
-        with pytest.raises(AssertionError, match="restricted"):
+        with pytest.raises(ValueError, match="restricted"):
             get_act_fn(cfg)
 
 

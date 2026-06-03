@@ -19,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorWorkerMetadata,
     SupportsHMA,
-    supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -151,6 +150,22 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 return True
         return False
 
+    @classmethod
+    def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Return True only if every configured child connector supports HMA."""
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            if not KVConnectorFactory.supports_hma_config(child_config):
+                return False
+        return True
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -169,7 +184,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
-        self._all_support_hma = all(supports_hma(c) for c in self._connectors)
+        assert vllm_config.kv_transfer_config is not None
+        self._all_support_hma = MultiConnector.all_children_support_hma(
+            vllm_config.kv_transfer_config
+        )
         assert (
             vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             or self._all_support_hma
