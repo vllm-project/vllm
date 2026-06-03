@@ -6,7 +6,6 @@ import copy
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
@@ -42,9 +41,8 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
 from vllm.outputs import RequestOutput
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -273,12 +271,13 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser] | None,
+        parser_cls: type[Parser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
-        tool_parser_cls: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -287,17 +286,17 @@ class ParsableContext(ConversationContext):
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
-        if reasoning_parser_cls is None:
-            raise ValueError("reasoning_parser_cls must be provided.")
-
         self.parser = get_responses_parser_for_simple_context(
             tokenizer=tokenizer,
-            reasoning_parser_cls=reasoning_parser_cls,
+            parser_cls=parser_cls,
             response_messages=response_messages,
             request=request,
-            tool_parser_cls=tool_parser_cls,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+            enable_auto_tools=enable_auto_tools,
+            tool_call_id_type=tool_call_id_type,
         )
-        self.tool_parser_cls = tool_parser_cls
+        self.parser_cls = parser_cls
         self.request = request
 
         self.available_tools = available_tools or []
@@ -523,10 +522,12 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        function_tool_names: frozenset[str] | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 

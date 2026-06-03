@@ -9,6 +9,11 @@ from vllm.model_executor.kernels.linear import (  # noqa: E501
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 
@@ -23,6 +28,11 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
+            return (
+                False,
+                "XPUFP8ScaledMM only support per-channel and per-tensor quantization",
+            )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
             return False, "XPUFP8ScaledMM only support FP8 weight dtype"
         return True, None
@@ -34,6 +44,23 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         assert self.is_supported()[0]
         self.config = c
         self.layer_param_names = layer_param_names
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # fp8_gemm_w8a16 expects weight in [in, out] layout.
+        # Transpose if weight is still in [out, in] layout.
+        # For square matrices, use contiguity as tie-breaker:
+        # checkpoint weights are contiguous, .t() views are not.
+        weight = layer.weight
+        out_features, in_features = self.config.weight_shape
+
+        if weight.shape == (out_features, in_features) and (
+            in_features != out_features or weight.is_contiguous()
+        ):
+            replace_parameter(layer, "weight", weight.data.t())
+        # else: already in [in, out] layout — no-op
+
+        weight_scale = layer.weight_scale.t().contiguous()
+        replace_parameter(layer, "weight_scale", weight_scale.data)
 
     def apply_weights(
         self,

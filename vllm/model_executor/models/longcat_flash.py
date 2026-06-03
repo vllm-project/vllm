@@ -46,7 +46,10 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE, ZeroExpertFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -66,6 +69,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -292,17 +296,14 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        assert config.zero_expert_num is not None
         assert config.zero_expert_type is not None
-        self.experts = ZeroExpertFusedMoE(
-            zero_expert_num=config.zero_expert_num,
+        self.experts = FusedMoE(
             zero_expert_type=config.zero_expert_type,
-            router=self.router,
+            e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=True,
             params_dtype=params_dtype,
             renormalize=False,
             quant_config=quant_config,
@@ -332,7 +333,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.router_params_dtype)
         )
 
-        # ZeroExpertFusedMoE handles routing memoization and zero expert computation
+        # FusedMoE handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
@@ -485,6 +486,7 @@ class FlashModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.quant_config = quant_config
 
         self.vocab_size = config.vocab_size
 
@@ -551,81 +553,10 @@ class FlashModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-
-class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
-    """Flash model for causal language modeling."""
-
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        quant_config = vllm_config.quant_config
-
-        self.config = config
-        config.intermediate_size = (
-            config.ffn_hidden_size
-            if hasattr(config, "ffn_hidden_size")
-            else config.intermediate_size
-        )
-
-        self.quant_config = quant_config
-
-        self.model = FlashModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -730,9 +661,9 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             loaded_params.add(name)
         for layer_id in range(self.config.num_hidden_layers):
             for i in range(2):
-                if isinstance(self.model.layers[layer_id], PPMissingLayer):
+                if isinstance(self.layers[layer_id], PPMissingLayer):
                     continue
-                self_attn = self.model.layers[layer_id].self_attn[i]
+                self_attn = self.layers[layer_id].self_attn[i]
                 if hasattr(
                     self.quant_config, "weight_block_size"
                 ) and self_attn.kv_b_proj.weight.dtype in (
@@ -765,3 +696,81 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         self.config.hidden_size / self.config.kv_lora_rank
                     ) ** 0.5
         return loaded_params
+
+
+class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+    """Flash model for causal language modeling."""
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+        config.intermediate_size = (
+            config.ffn_hidden_size
+            if hasattr(config, "ffn_hidden_size")
+            else config.intermediate_size
+        )
+
+        self.quant_config = quant_config
+
+        self.model = FlashModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)

@@ -15,8 +15,8 @@ from __future__ import annotations
 import json as _json
 from typing import Any
 
-from vllm.beam_search import BeamSearchSequence
 from vllm.config import VllmConfig
+from vllm.entrypoints.generate.beam_search.utils import BeamSearchSequence
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.bitmask import bitmask_to_token_ids

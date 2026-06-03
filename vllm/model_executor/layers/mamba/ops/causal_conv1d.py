@@ -33,11 +33,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
-    seqlen: tl.int32,  # cu_seqlen
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_x_token: tl.int64,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
     stride_w_width: tl.constexpr,  # stride to get to next width-axis value
     stride_istate_seq: tl.constexpr,
@@ -45,7 +44,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_token: tl.constexpr,
     stride_cache_indices: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     stride_block_m: tl.constexpr,  # Stride block to align divided by BLOCK_M
     # others
     pad_slot_id: tl.constexpr,
@@ -592,7 +591,6 @@ def causal_conv1d_fn(
         stride_istate_seq = conv_states.stride(0)
         stride_istate_dim = conv_states.stride(1)
         stride_istate_token = conv_states.stride(2)
-        assert stride_istate_dim == 1
     if out.dim() == 2:
         stride_o_dim = out.stride(0)
         stride_o_token = out.stride(1)
@@ -716,7 +714,6 @@ def causal_conv1d_fn(
         out,
         # Matrix dimensions
         dim,
-        cu_seqlen,
         num_cache_lines,
         # stride
         stride_x_dim,
@@ -770,7 +767,7 @@ def _causal_conv1d_update_kernel(
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
-    stride_x_token: tl.constexpr,
+    stride_x_token: tl.int64,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
     stride_conv_state_seq: tl.constexpr,
@@ -779,7 +776,7 @@ def _causal_conv1d_update_kernel(
     stride_state_indices: tl.constexpr,
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     # others
     null_block_id: tl.constexpr,
     # Meta-parameters
@@ -1149,9 +1146,6 @@ def causal_conv1d_update(
 
     if validate_data:
         assert dim == weight.size(0)
-        assert conv_state.stride(-2) == 1, (
-            f"ERROR: expect contiguous along feat-dim of conv_state (currently stride={conv_state.stride()})"
-        )
         assert state_len >= width - 1
         # when above happens, we don't shift-left to keep any records in conv_state
         assert dim == conv_state.size(1)

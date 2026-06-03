@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from transformers import PretrainedConfig
+
+    from vllm.config import CacheConfig, ModelConfig, VllmConfig
+
 
 logger = init_logger(__name__)
 
@@ -52,7 +54,101 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class Gemma4Config(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Force unified attention backend for models with heterogeneous
+        head dimensions.
+
+        Some Gemma4 variants use different head dimensions for
+        sliding window (head_dim) vs full attention (global_head_dim) layers.
+        When global_head_dim > 256, FlashAttention rejects those layers
+        (head_size <= 256 kernel limit), causing vLLM to select a different
+        backend for each layer type. This mixed-backend execution produces
+        numerical divergence and output corruption.
+
+        The fix detects heterogeneous head dimensions from the model config
+        and forces TRITON_ATTN (which has no head_size ceiling) for all
+        layers when the user hasn't explicitly chosen a backend.
+
+        TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
+        require NixlConnector changes to support per-layer KV transfer
+        with different head dimensions for prefill-decode disaggregation.
+        """
+        hf_text_config = vllm_config.model_config.hf_text_config
+        head_dim = getattr(hf_text_config, "head_dim", None)
+        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+
+        # Only force Triton when head dimensions actually differ AND the
+        # larger one exceeds FlashAttention's kernel limit (head_size <= 256).
+        # This avoids unnecessary backend forcing on smaller models where
+        # the config carries global_head_dim but all layers can still use
+        # the same FA backend.
+        max_head_dim = max(head_dim or 0, global_head_dim or 0)
+        if (
+            head_dim is not None
+            and global_head_dim is not None
+            and head_dim != global_head_dim
+            and max_head_dim > 256
+            and vllm_config.attention_config.backend is None
+        ):
+            from vllm.v1.attention.backends.registry import (
+                AttentionBackendEnum,
+            )
+
+            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions "
+                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
+                "backend to prevent mixed-backend numerical divergence.",
+                head_dim,
+                global_head_dim,
+            )
+
+
+class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "fp8":
+            model_type = getattr(model_config.hf_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "fp8"
+        ):
+            model_type = getattr(model_config.hf_text_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_text_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "mxfp4":
+            model_config.hf_config.quantization_config["quant_method"] = "gpt_oss_mxfp4"
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "mxfp4"
+        ):
+            model_config.hf_text_config.quantization_config["quant_method"] = (
+                "gpt_oss_mxfp4"
+            )
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
@@ -137,6 +233,12 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaForRankingConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.embedding_size = 512
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -171,8 +273,8 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
-        if pooler_config.logit_bias is None:
-            pooler_config.logit_bias = 2.65
+        if pooler_config.logit_mean is None:
+            pooler_config.logit_mean = 2.65
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
@@ -293,17 +395,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+    DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
+    """Only `float32` is known to have no accuracy issues by default."""
+
+    @classmethod
+    def update_mamba_ssm_cache_dtype(
+        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+    ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
-        float16 if not specified.
+        `float32` if not specified.
         """
-        cache_config = vllm_config.cache_config
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            hf_config = vllm_config.model_config.hf_config
             mamba_ssm_cache_dtype = getattr(
-                hf_config, "mamba_ssm_cache_dtype", "float16"
+                hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE
             )
             logger.info(
                 "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
@@ -311,8 +416,22 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             )
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        cls.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config,
+        )
+
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         mm_config = model_config.multimodal_config
@@ -353,79 +472,21 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         )
 
         head_dim = config.hidden_size // config.num_attention_heads
-        max_trained_positions = getattr(config, "max_trained_positions", 2048)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
+        max_trained_positions = getattr(
+            config, "max_trained_positions", max_position_embeddings
+        )
+
+        rope_parameters = {
+            "max_trained_positions": max_trained_positions,
+            **(config.rope_parameters or {}),
+        }
 
         config.rotary_kwargs = {
             "head_size": head_dim,
-            "max_position": max_trained_positions,
-            "rope_parameters": config.rope_parameters,
+            "max_position": model_config.max_model_len,
+            "rope_parameters": rope_parameters,
         }
-
-        # we ignore config.rotary_scaling_factor so that for datasets shorter
-        # than max_trained_positions 2048, the results are consistent
-        # with SentenceTransformer.
-        # The context extension uses vllm style rope_theta and rope_parameters.
-        # See #17785 #18755
-        if (
-            not model_config.hf_overrides
-            and model_config.original_max_model_len is None
-        ):
-            # Default
-            # Reset max_model_len to max_trained_positions.
-            # nomic-embed-text-v2-moe the length is set to 512
-            # by sentence_bert_config.json.
-            max_model_len_before = model_config.max_model_len
-            max_model_len = min(model_config.max_model_len, max_trained_positions)
-
-            model_config.max_model_len = model_config.get_and_verify_max_len(
-                max_model_len
-            )
-
-            if model_config.max_model_len != max_model_len_before:
-                logger.warning(
-                    "Nomic context extension is disabled. "
-                    "Changing max_model_len from %s to %s. "
-                    "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.py",
-                    max_model_len_before,
-                    model_config.max_model_len,
-                )
-        else:
-            # We need to re-verify max_model_len to avoid lengths
-            # greater than position_embedding.
-            hf_text_config = model_config.hf_text_config
-
-            if isinstance(model_config.hf_overrides, dict):
-                # hf_overrides_kw
-                max_model_len = model_config.hf_overrides.get(
-                    "max_model_len", model_config.max_model_len
-                )
-            else:
-                # hf_overrides_fn
-                # This might be overridden by sentence_bert_config.json.
-                max_model_len = model_config.max_model_len
-
-            # reset hf_text_config for recalculate_max_model_len.
-            if hasattr(hf_text_config, "max_model_len"):
-                delattr(hf_text_config, "max_model_len")
-            hf_text_config.max_position_embeddings = max_trained_positions
-            hf_text_config.rope_parameters = config.rotary_kwargs["rope_parameters"]
-
-            # Update the cached derived_max_model_len to enforce the limit
-            model_config.model_arch_config.derived_max_model_len_and_key = (
-                float(max_trained_positions),
-                "max_position_embeddings",
-            )
-
-            # The priority of sentence_bert_config.json is higher
-            # than max_position_embeddings
-            encoder_config = deepcopy(model_config.encoder_config)
-            encoder_config.pop("max_seq_length", None)
-            model_config.encoder_config = encoder_config
-
-            model_config.max_model_len = model_config.get_and_verify_max_len(
-                max_model_len
-            )
 
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
@@ -529,15 +590,19 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
+    "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
+    "Gemma4ForCausalLM": Gemma4Config,
+    "Gemma4ForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,

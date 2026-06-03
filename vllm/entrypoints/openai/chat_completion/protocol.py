@@ -11,7 +11,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -30,6 +30,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -41,6 +43,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -92,6 +95,16 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -107,6 +120,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request).
+    prompt_text: str | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
@@ -129,13 +145,33 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Rendered prompt text from chat templating (only set when
+    # ``return_prompt_text=True`` on the request); only sent on the first chunk.
+    prompt_text: str | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
+    defer_loading: bool | None = None
+
+    @model_validator(mode="after")
+    def _propagate_defer_loading(self) -> "ChatCompletionToolsParam":
+        if self.defer_loading is not None and self.function.defer_loading is None:
+            self.function.defer_loading = self.defer_loading
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
 
 
 class ChatCompletionNamedFunction(OpenAIBaseModel):
@@ -179,8 +215,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
-    thinking_token_budget: int | None = None
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Constrains effort on reasoning for reasoning models. "
+            "Currently supported values are none, minimal, low, medium, "
+            "high, xhigh, and max. Reducing reasoning effort can result in "
+            "faster responses and fewer tokens used on reasoning in a response. "
+            "Note that 'max' is specific to the DeepSeek V4 series and is not "
+            "part of the standard OpenAI API specification."
+        ),
+    )
+    thinking_token_budget: ThinkingTokenBudget = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -200,6 +248,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
+    truncation_side: Literal["left", "right"] | None = Field(
+        default=None,
+        description=(
+            "Which side to truncate from when truncate_prompt_tokens is active. "
+            "'right' keeps the first N tokens. "
+            "'left' keeps the last N tokens."
+        ),
+    )
     prompt_logprobs: int | None = None
     allowed_token_ids: list[int] | None = None
     bad_words: list[str] = Field(default_factory=list)
@@ -319,6 +375,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_prompt_text: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response will include ``prompt_text`` containing the "
+            "prompt string produced by chat templating. In streaming mode it "
+            "is sent only on the first chunk. This is useful for inspecting "
+            "exactly what was fed into the model."
+        ),
+    )
 
     cache_salt: str | None = Field(
         default=None,
@@ -357,22 +422,80 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:chat-completion-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_messages_before(cls, data: Any) -> Any:
+        """Pre-process message dicts before Pydantic field validation.
+
+        Performs two normalizations in a single pass:
+        - Converts tool_calls generators/iterators to lists so one-shot
+          generators are not consumed during union type matching.
+        - Renames the deprecated ``reasoning_content`` field to
+          ``reasoning`` so downstream code only needs to check one field.
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+            reasoning_content = msg.pop("reasoning_content", None)
+            if reasoning_content is not None and msg.get("reasoning") is None:
+                msg["reasoning"] = reasoning_content
+        return data
+
+    @model_validator(mode="after")
+    def _materialize_tool_calls_after(self) -> "ChatCompletionRequest":
+        """Convert Pydantic ValidatorIterator wrappers back to lists.
+
+        Even after the "before" validator converts iterables to lists,
+        Pydantic re-wraps them in a ValidatorIterator when validating
+        against ChatCompletionAssistantMessageParam's Iterable[...] type.
+        This "after" pass materialises those wrappers so downstream code
+        (tokenizers, model_dump_json) always sees plain lists.
+        """
+        for msg in self.messages:
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls")
+            if tool_calls is not None and not isinstance(tool_calls, list):
+                msg["tool_calls"] = list(tool_calls)
+        return self
+
+    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
+
     def build_chat_params(
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
     ) -> ChatParams:
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=self.add_generation_prompt,
+            continue_final_message=self.continue_final_message,
+            documents=self.documents,
+            reasoning_effort=self.reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if self.reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         return ChatParams(
             chat_template=self.chat_template or default_template,
             chat_template_content_format=default_template_content_format,
             chat_template_kwargs=merge_kwargs(
                 self.chat_template_kwargs,
-                dict(
-                    add_generation_prompt=self.add_generation_prompt,
-                    continue_final_message=self.continue_final_message,
-                    documents=self.documents,
-                    reasoning_effort=self.reasoning_effort,
-                ),
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
@@ -389,6 +512,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_output_tokens or 0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            truncation_side=self.truncation_side,
             add_special_tokens=self.add_special_tokens,
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
@@ -550,6 +674,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter="response_format",
                 )
 
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+
         return data
 
     @model_validator(mode="before")
@@ -619,25 +746,38 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
         # you can only use one kind of constraints for structured outputs
         if count > 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only use one kind of constraints for structured "
-                "outputs ('json', 'regex' or 'choice')."
+                "outputs ('json', 'regex' or 'choice').",
             )
         # you can only either use structured outputs or tools, not both
-        if count > 1 and data.get("tool_choice", "none") not in (
+        if count > 0 and data.get("tool_choice", "none") not in (
             "none",
             "auto",
             "required",
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only either use constraints for structured outputs "
-                "or tools, not both."
+                "or tools, not both.",
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+        if not isinstance(data, dict):
+            return data
+
+        # Reject empty tools array, matching OpenAI API behavior
+        if data.get("tools") == []:
+            raise ValueError(
+                "`tools` must not be an empty array. "
+                "Either provide at least one tool or omit the field entirely."
+            )
+
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
@@ -651,30 +791,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" in data and data["tool_choice"] is not None:
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise ValueError("When using `tool_choice`, `tools` must be set.")
+                raise VLLMValidationError(
+                    "When using `tool_choice`, `tools` must be set.",
+                    parameter="tool_choice",
+                )
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
                 data["tool_choice"], dict
             ):
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
                     'Only named tools, "none", "auto" or "required" '
-                    "are supported."
+                    "are supported.",
+                    parameter="tool_choice",
                 )
-
-            # if tool_choice is "required" but the "tools" list is empty,
-            # override the data to behave like "none" to align with
-            # OpenAI’s behavior.
-            if (
-                data["tool_choice"] == "required"
-                and isinstance(data["tools"], list)
-                and len(data["tools"]) == 0
-            ):
-                data["tool_choice"] = "none"
-                del data["tools"]
-                return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
@@ -686,29 +818,33 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 valid_tool = False
                 function = data["tool_choice"].get("function")
                 if not isinstance(function, dict):
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                        f"`tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function",
                     )
                 if "name" not in function:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                        f"`tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function.name",
                     )
                 function_name = function["name"]
                 if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}"
+                        f" in `tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function.name",
                     )
                 for tool in data["tools"]:
                     if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`"
+                        " of the specified `tools`",
+                        parameter="tool_choice",
                     )
         return data
 
@@ -716,9 +852,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
 
@@ -728,8 +864,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
@@ -782,13 +919,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         return data
 
-    @model_validator(mode="before")
-    @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
-        return data
-
 
 class BatchChatCompletionRequest(OpenAIBaseModel):
     """Request model for the /v1/chat/completions/batch endpoint.
@@ -806,7 +936,9 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     - The ``n`` parameter must be 1 (or omitted).
     """
 
-    messages: list[list[ChatCompletionMessageParam]] = Field(..., min_length=1)
+    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
+        Field(..., min_length=1)
+    )
     model: str | None = None
 
     # Shared sampling / generation fields — mirror ChatCompletionRequest.
@@ -854,6 +986,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Batch chat completions do not support beam search. "
                 "Please set `use_beam_search` to False."
             )
+        response_format = data.get("response_format")
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+        if (structured_outputs := data.get("structured_outputs")) is not None:
+            validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)
         if n is not None and n != 1:
             raise ValueError(

@@ -35,7 +35,6 @@ def _chunk_cumsum_fwd_kernel(
     dA_cumsum_ptr,
     cu_chunk_seqlens_ptr,
     # Matrix dimension
-    seqlen,
     nheads: tl.constexpr,
     chunk_size: tl.constexpr,
     dt_min: tl.constexpr,
@@ -206,7 +205,6 @@ def _chunk_state_fwd_kernel(
     hdim: tl.constexpr,
     dstate: tl.constexpr,
     chunk_size: tl.constexpr,
-    seqlen,
     nheads_ngroups_ratio: tl.constexpr,
     # Strides
     stride_x_seqlen: tl.int64,
@@ -280,7 +278,7 @@ def _chunk_state_fwd_kernel(
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(
             tl.float32
         )
-        scale = fast_exp(dA_cs_last - dA_cs_k) * dt_k
+        scale = fast_exp(tl.minimum(dA_cs_last - dA_cs_k, 0.0)) * dt_k
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -331,7 +329,6 @@ def _chunk_cumsum_fwd(
             dt_out_ptr=dt_out,
             dA_cumsum_ptr=dA_cumsum,
             cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            seqlen=seqlen,
             nheads=nheads,
             chunk_size=chunk_size,
             dt_min=dt_limit[0],
@@ -389,7 +386,6 @@ def _chunk_state_fwd(
             hdim=headdim,
             dstate=dstate,
             chunk_size=chunk_size,
-            seqlen=seqlen,
             nheads_ngroups_ratio=nheads // ngroups,
             stride_x_seqlen=x.stride(0),
             stride_x_head=x.stride(1),

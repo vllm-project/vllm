@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import huggingface_hub
-from huggingface_hub import hf_hub_download, try_to_load_from_cache
-from huggingface_hub import list_repo_files as hf_list_repo_files
+from huggingface_hub import HfApi, try_to_load_from_cache
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -24,8 +23,30 @@ from huggingface_hub.utils import (
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+_hf_api: HfApi | None = None
+
+
+def hf_api() -> HfApi:
+    """Return a shared HfApi instance tagged with vLLM's library info."""
+    global _hf_api
+    if _hf_api is None:
+        _hf_api = HfApi(
+            library_name="vllm",
+            library_version=VLLM_VERSION,
+        )
+    return _hf_api
+
+
+def hf_fs() -> "huggingface_hub.HfFileSystem":
+    """Return a fresh HfFileSystem tagged with vLLM's library info."""
+    return huggingface_hub.HfFileSystem(
+        library_name="vllm",
+        library_version=VLLM_VERSION,
+    )
 
 
 _R = TypeVar("_R")
@@ -80,7 +101,7 @@ def list_repo_files(
                     revision=revision,
                     token=os.getenv("MODELSCOPE_API_TOKEN", None),
                 )
-            return hf_list_repo_files(
+            return hf_api().list_repo_files(
                 repo_id, revision=revision, repo_type=repo_type, token=token
             )
         except huggingface_hub.errors.OfflineModeIsEnabled:
@@ -215,9 +236,10 @@ def get_model_path(model: str | Path, revision: str | None = None):
 
         return snapshot_download(model_id=model, **common_kwargs)
 
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(repo_id=model, **common_kwargs)
+    return hf_api().snapshot_download(
+        repo_id=model,
+        **common_kwargs,
+    )
 
 
 def _try_download_from_hf_hub(
@@ -231,7 +253,13 @@ def _try_download_from_hf_hub(
     if Path(model).is_dir():
         return None
     try:
-        return Path(hf_hub_download(model, file_name, revision=revision))
+        return Path(
+            hf_api().hf_hub_download(
+                model,
+                file_name,
+                revision=revision,
+            )
+        )
     except huggingface_hub.errors.OfflineModeIsEnabled:
         return None
     except (

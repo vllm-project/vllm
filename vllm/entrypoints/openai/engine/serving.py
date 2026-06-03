@@ -1,22 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
-from openai.types.responses import ToolChoiceFunction
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
+from vllm import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.beam_search_utils import (
@@ -24,10 +22,14 @@ from vllm.entrypoints.beam_search_utils import (
     init_beam_search_so_backend,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
+from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
+from vllm.entrypoints.generate.beam_search.utils import (
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -37,23 +39,10 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
     GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-)
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorRequest,
-    PoolingChatRequest,
-    PoolingCompletionRequest,
-    PoolingResponse,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -61,12 +50,16 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs.preprocess import (
@@ -79,7 +72,6 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
@@ -110,17 +102,11 @@ class RendererChatRequest(RendererRequest, Protocol):
 
 
 CompletionLikeRequest: TypeAlias = (
-    CompletionRequest
-    | TokenizeCompletionRequest
-    | DetokenizeRequest
-    | PoolingCompletionRequest
+    CompletionRequest | TokenizeCompletionRequest | DetokenizeRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest
-    | BatchChatCompletionRequest
-    | TokenizeChatRequest
-    | PoolingChatRequest
+    ChatCompletionRequest | BatchChatCompletionRequest | TokenizeChatRequest
 )
 
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
@@ -130,7 +116,6 @@ AnyRequest: TypeAlias = (
     | ChatLikeRequest
     | SpeechToTextRequest
     | ResponsesRequest
-    | IOProcessorRequest
     | GenerateRequest
 )
 
@@ -139,11 +124,11 @@ AnyResponse: TypeAlias = (
     | ChatCompletionResponse
     | TranscriptionResponse
     | TokenizeResponse
-    | PoolingResponse
     | GenerateResponse
 )
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
+_T = TypeVar("_T")
 
 
 @dataclass(kw_only=True)
@@ -155,16 +140,10 @@ class ServeContext(Generic[RequestT]):
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
     engine_inputs: list[EngineInput] | None = None
-
-    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
-        None
-    )
-    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
-
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing:
+class OpenAIServing(BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -180,7 +159,6 @@ class OpenAIServing:
         super().__init__()
 
         self.engine_client = engine_client
-
         self.models = models
 
         self.request_logger = request_logger
@@ -188,8 +166,23 @@ class OpenAIServing:
 
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
-        self.io_processor = engine_client.io_processor
         self.input_processor = engine_client.input_processor
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.has_kv_connector = kv_transfer_config is not None
+
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
 
     def _init_beam_search_so_backend(
         self,
@@ -244,13 +237,11 @@ class OpenAIServing:
         if prompt["type"] == "embeds":
             raise NotImplementedError("Embedding prompt not supported for beam search")
 
-        # Extract prompt tokens and text based on model type
         decoder_prompt = (
             prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
         )
         prompt_text = decoder_prompt.get("prompt")
         prompt_token_ids = decoder_prompt["prompt_token_ids"]
-
         tokenized_length = len(prompt_token_ids)
 
         logprobs_num = 2 * beam_width
@@ -876,7 +867,7 @@ class OpenAIServing:
         self,
         request_id: str,
         inputs: PromptType | EngineInput,
-        params: SamplingParams | PoolingParams | BeamSearchParams | None,
+        params: SamplingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
         if self.request_logger is None:
@@ -934,84 +925,39 @@ class OpenAIServing:
         except ValueError:
             return None
 
-    @staticmethod
-    def _parse_tool_calls_from_content(
-        request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike | None,
-        enable_auto_tools: bool,
-        tool_parser_cls: type[ToolParser] | None,
-        content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        function_calls = list[FunctionCall]()
-        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ChatCompletionNamedToolChoiceParam
-        ):
-            assert content is not None
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
-            tool_calls = []
-            with contextlib.suppress(ValidationError):
-                content = content or ""
-                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
-                    content
-                )
-            for tool_call in tool_calls:
-                function_calls.append(
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                )
-            content = None  # Clear content since tool is called.
-        elif (
-            tool_parser_cls
-            and enable_auto_tools
-            and (request.tool_choice == "auto" or request.tool_choice is None)
-        ):
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
+    async def _with_kv_transfer_rejection_cleanup(
+        self,
+        awaitable: Awaitable[_T],
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> _T:
+        """Wrap a `create_*` coroutine so that, if it raises or returns an
+        ErrorResponse (i.e. the request never reached the engine), the KV
+        connector is notified to free any pinned remote-prefill blocks."""
+        kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
+        if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+            return await awaitable
 
-            # Automatic Tool Call Parsing
-            try:
-                tool_parser = tool_parser_cls(tokenizer, request.tools)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
+        notify = True
+        try:
+            result = await awaitable
+            if not isinstance(result, ErrorResponse):
+                notify = False
+            return result
+        finally:
+            if notify:
+                try:
+                    await self.engine_client.notify_kv_transfer_request_rejected(
+                        request.request_id,
+                        kv_transfer_params,
+                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
                     )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-                if content and content.strip() == "":
-                    content = None
-            else:
-                # No tool calls.
-                return None, content
-
-        return function_calls, content
+                except Exception:
+                    logger.warning(
+                        "Failed to notify KV connector about rejected request %s",
+                        request.request_id,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _get_decoded_token(
@@ -1035,6 +981,8 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
+            return True
+        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
             return True
         return self.models.is_base_model(model_name)
 
