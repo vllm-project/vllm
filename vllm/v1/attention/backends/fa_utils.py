@@ -332,3 +332,28 @@ def is_flash_attn_varlen_func_available() -> bool:
         return _ROCM_FLASH_ATTN_AVAILABLE
 
     return False
+
+def should_pack_gqa(seqlen_q: int, qhead_per_khead: int, blockM: int) -> bool:
+    """
+    Decide whether to pack GQA heads for decoding (fixed-length queries).
+
+    Args:
+        seqlen_q: length of the query sequence (fixed)
+        qhead_per_khead: number of Q heads per KV head
+        blockM: FlashAttention tile size
+
+    Returns:
+        True if PackGQA is beneficial
+    """
+    # Helper to round up to nearest multiple of blockM
+    def round_up(a: int, b: int) -> int:
+        return ((a + b - 1) // b) * b
+
+    # Efficiency if we do NOT pack
+    nopack_eff = seqlen_q / round_up(seqlen_q, blockM)
+
+    # Efficiency if we pack multiple Q heads together
+    pack_eff = (seqlen_q * qhead_per_khead) / round_up(seqlen_q * qhead_per_khead, blockM)
+
+    # Heuristic: pack if it improves tile utilization by ~10%
+    return nopack_eff < 0.9 * pack_eff
