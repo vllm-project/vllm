@@ -21,12 +21,15 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from typing_extensions import override
+
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
+    RequestOffloadingContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -47,7 +50,7 @@ class FileSystemTierManager(SecondaryTierManager):
     queue, so neither starves.
 
     submit_store / submit_load are non-blocking: they enqueue tasks and return.
-    get_finished() polls job completion and returns completed JobResults.
+    get_finished_jobs() polls job completion and returns completed JobResults.
 
     """
 
@@ -100,11 +103,17 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
+    @override
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    @override
     def lookup(
         self, key: OffloadKey, req_context: ReqContext | None = None
     ) -> bool | None:
         return os.path.exists(self.file_mapper.get_file_name(key))
 
+    @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         tasks = (
             functools.partial(
@@ -118,6 +127,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
 
+    @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
         tasks = (
             functools.partial(
@@ -131,7 +141,8 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
 
-    def get_finished(self) -> Iterable[JobResult]:
+    @override
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
@@ -140,6 +151,7 @@ class FileSystemTierManager(SecondaryTierManager):
             for job_id, success in self._pool.get_finished()
         )
 
+    @override
     def shutdown(self) -> None:
         """
         Release resources held by this tier.

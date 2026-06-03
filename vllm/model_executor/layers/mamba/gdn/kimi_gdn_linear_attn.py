@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from ...fla.ops.kda import (
     FusedRMSNormGated,
-    chunk_kda,
+    chunk_kda_with_fused_gate,
     fused_kda_gate,
     fused_recurrent_kda,
 )
@@ -243,9 +243,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         beta = self.b_proj(hidden_states)[0].float().sigmoid()
         g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
-        g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
         beta = beta.unsqueeze(0)
-        g1 = g1.unsqueeze(0)
+        g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
 
         g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
@@ -298,8 +297,8 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         q_proj_states = q_proj_states[:num_actual_tokens]
         k_proj_states = k_proj_states[:num_actual_tokens]
         v_proj_states = v_proj_states[:num_actual_tokens]
-        g1 = g1[:num_actual_tokens]
-        beta = beta[:num_actual_tokens]
+        g1 = g1[:, :num_actual_tokens]
+        beta = beta[:, :num_actual_tokens]
 
         (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
         # conv_state must be (..., dim, width-1) for the conv kernels.
@@ -401,12 +400,14 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
-            ) = chunk_kda(
+            ) = chunk_kda_with_fused_gate(
                 q=q,
                 k=k,
                 v=v,
-                g=g1,
+                raw_g=g1,
                 beta=beta,
+                A_log=self.A_log,
+                g_bias=self.dt_bias,
                 initial_state=initial_state,
                 output_final_state=True,
                 use_qk_l2norm_in_kernel=True,
@@ -416,6 +417,12 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             recurrent_state[non_spec_state_indices_tensor] = last_recurrent_state
         else:
             assert non_spec_query_start_loc is not None
+            g1 = fused_kda_gate(
+                rearrange(g1, "1 n h d -> n (h d)"),
+                self.A_log,
+                self.head_dim,
+                g_bias=self.dt_bias,
+            ).unsqueeze(0)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
