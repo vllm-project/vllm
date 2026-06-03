@@ -85,7 +85,7 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         if vllm_config is None:
             raise ValueError("vllm_config must be provided to create a LoRA manager.")
@@ -246,7 +246,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
         if vllm_config is None:
             raise ValueError("vllm_config must be provided to create a LoRA manager.")

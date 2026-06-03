@@ -222,6 +222,7 @@ def test_dedup_shared_module_across_paths(default_vllm_config, dist_init, dummy_
             max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
         ),
         torch.device(DEVICES[0]),
+        default_vllm_config,
     )
 
     canonical = manager.model.get_submodule("moe.gate")
@@ -266,6 +267,7 @@ def test_lm_head_exempt_from_dedup(default_vllm_config, dist_init, dummy_model):
             max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
         ),
         torch.device(DEVICES[0]),
+        default_vllm_config,
     )
 
     # lm_head's special handling still ran: logits_processor got wrapped
@@ -650,9 +652,7 @@ def test_lru_lora_model_manager(default_vllm_config, dist_init, dummy_model, dev
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_lru_cache_worker_adapter_manager(
-    default_vllm_config, dist_init, dummy_model, device, tmp_path
-):
+def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_path):
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
     )
@@ -678,7 +678,7 @@ def test_lru_cache_worker_adapter_manager(
     worker_adapter_manager.max_num_seqs = 4
     worker_adapter_manager.max_num_batched_tokens = 2
 
-    worker_adapter_manager.create_lora_manager(dummy_model)
+    worker_adapter_manager.create_lora_manager(dummy_model, vllm_config)
 
     mapping = LoRAMapping([], [])
     worker_adapter_manager.set_active_adapters(
@@ -766,9 +766,7 @@ def test_lru_cache_worker_adapter_manager(
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_worker_adapter_manager(
-    default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
-):
+def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path):
     # Should remove every LoRA not specified in the request.
     lora_config = LoRAConfig(
         max_lora_rank=8, max_cpu_loras=4, max_loras=4, lora_dtype=DEFAULT_DTYPE
@@ -782,7 +780,7 @@ def test_worker_adapter_manager(
 
     worker_adapter_manager = WorkerLoRAManager(vllm_config, device, EMBEDDING_MODULES)
     worker_adapter_manager.vocab_size = dummy_model_gate_up.unpadded_vocab_size
-    worker_adapter_manager.create_lora_manager(dummy_model_gate_up)
+    worker_adapter_manager.create_lora_manager(dummy_model_gate_up, vllm_config)
 
     dummy_lora_files = f"{tmp_path}/lora_adapter"
     os.makedirs(dummy_lora_files, exist_ok=True)

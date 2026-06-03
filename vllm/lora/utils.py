@@ -192,7 +192,11 @@ def parse_fine_tuned_lora_name(
     start_index = 2 if name.startswith("base_model.model.") else 0
 
     parts = name.split(".")
-    if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
+    if (
+        parts[-1] == "weight"
+        and len(parts) >= 2
+        and (parts[-2] == "lora_A" or parts[-2] == "lora_B")
+    ):
         new_name = ".".join(parts[start_index:-2])
         return new_name, parts[-2] == "lora_A"
 
