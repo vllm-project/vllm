@@ -420,7 +420,7 @@ class TransferTopology:
                 head_size=1,
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+        # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         # Hybrid SSM models assume a single blocks_first layout
         self._is_kv_layout_blocks_first = self.is_mamba or (
@@ -483,6 +483,15 @@ class TransferTopology:
     @property
     def cross_layers_blocks(self) -> bool:
         return self._cross_layers_blocks
+
+    @property
+    def virtually_split_kv_in_blocks(self) -> bool:
+        # Whether to logically split each block into K and V halves.
+        # Applies when K/V are interleaved within each block (blocks-first),
+        # but NOT when cross-layer blocks are used — cross-layer blocks have
+        # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
+        # simple half-split does not separate K from V.
+        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
 
     @property
     def split_k_and_v(self) -> bool:
@@ -593,7 +602,7 @@ class TransferTopology:
         return (
             f"TransferTopology("
             f"tp_ratio={self.tp_ratio(info.remote_tp_size)}, "
-            f"K={self.total_num_kv_heads}, "
+            f"num_kv_heads={self.total_num_kv_heads if not self.is_mla else 1}, "
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"local_rank={self.tp_rank}, "

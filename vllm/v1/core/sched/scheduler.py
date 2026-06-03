@@ -7,7 +7,6 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -25,8 +24,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsManager,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -216,6 +219,11 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.use_dflash():
+                # DFlash requires an extra lookahead slot since it uses in-fill-style
+                # decoding instead of standard next-token sampling, so it has a query
+                # for the last sampled token plus queries for each draft token.
+                self.num_lookahead_tokens = self.num_spec_tokens + 1
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -230,18 +238,20 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
+            scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
-        if self.connector is not None and hasattr(
-            self.connector, "bind_gpu_block_pool"
-        ):
+        if self.connector is not None:
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
+        # cadence (`next_decode_eligible_step`).
+        self.current_step = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -254,6 +264,25 @@ class Scheduler(SchedulerInterface):
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        self.enable_return_routed_experts = (
+            vllm_config.model_config.enable_return_routed_experts
+        )
+
+        if self.enable_return_routed_experts:
+            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
+                "enable_return_routed_experts does not support context parallelism "
+                "(dcp_world_size > 1 or pcp_world_size > 1)"
+            )
+
+            self.routed_experts_mgr = RoutedExpertsManager(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+            )
+            # Block-ID snapshot taken at schedule time (before forward),
+            # so update_from_output can read slot data even if a later
+            # schedule() frees the blocks (async scheduling race).
+            self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -308,6 +337,7 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
+        self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -360,6 +390,12 @@ class Scheduler(SchedulerInterface):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
+                req_index += 1
+                continue
+
+            if self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # to match worker-side sampled-tokens broadcast slot ring cadence.
                 req_index += 1
                 continue
 
@@ -604,6 +640,18 @@ class Scheduler(SchedulerInterface):
                     )
                     assert num_computed_tokens <= request.num_tokens
 
+                    # Skip request with pending mm encoding prefetches
+                    if (
+                        self.ec_connector is not None
+                        and request.mm_features
+                        and not self.ec_connector.ensure_cache_available(
+                            request, num_computed_tokens
+                        )
+                    ):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+
                     # Track first scheduled prefill, not post-preemption repeat prefills
                     if request.prefill_stats is not None:
                         assert num_computed_tokens <= request.num_prompt_tokens
@@ -683,8 +731,9 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
+                limit_lookahead_tokens = load_kv_async and self.use_eagle
                 effective_lookahead_tokens = (
-                    0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
+                    0 if limit_lookahead_tokens else self.num_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -950,6 +999,22 @@ class Scheduler(SchedulerInterface):
                 request.use_structured_output and not request.is_prefill_chunk
             )
 
+        # Snapshot block IDs for routed experts before forward starts.
+        # A concurrent schedule() may preempt requests and free blocks
+        # before update_from_output runs; the snapshot survives that.
+        # Use update() to preserve entries from the previous step that
+        # have not yet been consumed by update_from_output (async
+        # scheduling may call _update_after_schedule again before the
+        # prior update_from_output runs).
+        if self.enable_return_routed_experts:
+            gid = self.routed_experts_mgr.attn_gid
+            self._re_block_ids.update(
+                {
+                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
+                    for rid in num_scheduled_tokens
+                }
+            )
+
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
@@ -1099,21 +1164,22 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
-        for i, mm_feature in enumerate(mm_features):
+
+        lo, hi = get_mm_features_in_window(
+            mm_features,
+            start=num_computed_tokens,
+            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
+        )
+        # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
+        if self.is_encoder_decoder:
+            lo = 0
+
+        for i in range(lo, hi):
+            mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
-
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
-            if (
-                start_pos
-                >= num_computed_tokens + num_new_tokens + shift_computed_tokens
-            ):
-                # The encoder input is not needed in this step.
-                break
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
                 assert start_pos == 0, (
@@ -1129,10 +1195,6 @@ class Scheduler(SchedulerInterface):
                 # inputs before running the decoder.  Once we've calculated some
                 # decoder tokens (num_computed_tokens > 0), then we know we
                 # already calculated encoder inputs and can skip here.
-                continue
-            elif start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
                 continue
 
             if not self.is_encoder_decoder:
@@ -1283,6 +1345,27 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
+        # Persist per-step routed experts into the scheduler-side slot
+        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
+        # MUST precede the per-request routing reads below: stopped
+        # requests may terminate on tokens generated in this very step,
+        # whose routing was just D2H'd into model_runner_output.
+        routing_data = None
+        routing_offsets: dict[str, int] = {}
+        if model_runner_output.routed_experts is not None:
+            re = model_runner_output.routed_experts
+            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
+            routing_data = re.routing_data.astype(
+                self.routed_experts_mgr.routed_experts_by_slot.dtype,
+                copy=False,
+            )
+            # Build offset map using model runner's request order
+            # (input_batch ordering), NOT scheduler dict order.
+            offset = 0
+            for rid in model_runner_output.req_ids:
+                routing_offsets[rid] = offset
+                offset += num_scheduled_tokens[rid]
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1345,6 +1428,7 @@ class Scheduler(SchedulerInterface):
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
+            num_output_tokens_before = len(request._output_token_ids)
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -1373,13 +1457,46 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
-            # Get routing data from ModelRunnerOutput (via worker D2H pipeline)
             routed_experts = None
             if (
-                model_runner_output.routed_experts_dict is not None
-                and req_id in model_runner_output.routed_experts_dict
+                self.enable_return_routed_experts
+                and routing_data is not None
+                and new_token_ids
             ):
-                routed_experts = model_runner_output.routed_experts_dict[req_id]
+                req_offset = routing_offsets[req_id]
+                end = req_offset + num_tokens_scheduled
+                block_ids = self._re_block_ids.pop(req_id, [])
+                if num_output_tokens_before == 0:
+                    # Prefill completed: read full prompt routing from
+                    # slot buffer using the block-ID snapshot taken at
+                    # schedule time (immune to async preemption).
+                    if (
+                        request.sampling_params is not None
+                        and request.sampling_params.routed_experts_prompt_start
+                        is not None
+                    ):
+                        prompt_start = (
+                            request.sampling_params.routed_experts_prompt_start
+                        )
+                        assert prompt_start < request.num_prompt_tokens
+                    else:
+                        prompt_start = 0
+                    routed_experts = self.routed_experts_mgr.get(
+                        block_ids,
+                        request.num_prompt_tokens,
+                        token_start=prompt_start,
+                    )
+                else:
+                    if scheduled_spec_token_ids:
+                        # Spec decode: accepted tokens at the START of
+                        # the scheduled range, rejected at the end.
+                        routed_experts = routing_data[
+                            req_offset : req_offset + len(new_token_ids)
+                        ]
+                    else:
+                        # Normal decode / re-prefill: token(s) at the END.
+                        routed_experts = routing_data[end - len(new_token_ids) : end]
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1681,6 +1798,8 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.connector is not None:
+                self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -1790,7 +1909,16 @@ class Scheduler(SchedulerInterface):
         return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
-        return len(self.finished_req_ids) > 0
+        if self.finished_req_ids:
+            return True
+        if self.connector is None:
+            return False
+        # Finished requests waiting on delayed connector cleanup remain in
+        # self.requests after they have been removed from scheduling queues.
+        num_in_queues = (
+            len(self.waiting) + len(self.skipped_waiting) + len(self.running)
+        )
+        return len(self.requests) > num_in_queues
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
@@ -1813,10 +1941,14 @@ class Scheduler(SchedulerInterface):
             while self.running:
                 request = self.running.pop()
                 self._preempt_request(request, timestamp)
-                # NOTE(zhuohan): For async scheduling, we need to discard the latest
-                # output token on the fly to avoid a redundant repetitive output token.
+                # For async scheduling, any output frames already in flight at
+                # preemption time are now stale and must be discarded when they
+                # return. num_output_placeholders is exactly that count: 0 if
+                # the engine has drained (e.g. pause_generation(keep) waited
+                # for idle), 1 for vanilla async mid-step, or 1 + spec/PP frames
+                # otherwise.
+                request.async_tokens_to_discard = request.num_output_placeholders
                 request.num_output_placeholders = 0
-                request.discard_latest_async_tokens = True
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
@@ -1840,8 +1972,16 @@ class Scheduler(SchedulerInterface):
 
     def reset_connector_cache(self) -> bool:
         if self.connector is None:
-            logger.warning("reset_connector called but no KV connector is configured.")
-            return False
+            # No connector attached -> nothing to reset, treat as success so
+            # callers that unconditionally request a connector reset (e.g. as
+            # part of a cache-clearing cascade after a weight update) don't
+            # see reset_prefix_cache() flip to False purely because they
+            # didn't configure a connector.
+            logger.debug(
+                "reset_connector requested but no KV connector is configured; "
+                "treating as no-op success."
+            )
+            return True
 
         if self.connector.reset_cache() is False:
             return False
@@ -1922,6 +2062,8 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+        if self.ec_connector is not None:
+            self.ec_connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods

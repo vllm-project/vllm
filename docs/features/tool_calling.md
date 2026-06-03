@@ -464,6 +464,17 @@ Supported models:
 
 Flags: `--tool-call-parser gigachat3`
 
+### Apertus Models (`apertus`)
+
+Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
+
+Supported models:
+
+* `swiss-ai/Apertus-8B-Instruct-2509`
+* `swiss-ai/Apertus-70B-Instruct-2509`
+
+Flags: `--tool-call-parser apertus`
+
 ### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
