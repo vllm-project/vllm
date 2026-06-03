@@ -464,7 +464,7 @@ def view_paged_kv_as_blocks(kv_paged, *, blk_kv):
             f"page_size ({page_size}) must be divisible by blk_kv ({blk_kv})"
         )
     blocks_per_page = page_size // blk_kv
-    return kv_paged.view(num_pages, blocks_per_page, blk_kv, head_kv, dim).reshape(
+    return kv_paged.view(num_pages, blocks_per_page, blk_kv, head_kv, dim).view(
         num_pages * blocks_per_page, blk_kv, head_kv, dim
     )
 

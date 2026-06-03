@@ -42,7 +42,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    get_kv_cache_layout,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
@@ -93,11 +96,25 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        # Main GQA cache: paged K and V (FlashAttention layout). NOTE: cannot
-        # key off num_kv_heads==1 to detect the index cache, since GQA itself
-        # has num_kv_heads==1 at TP>=num_kv_heads. The index cache uses a
-        # dedicated backend (MiniMaxM3IndexerBackend) instead.
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        # `stride_order` indicates the permutation that gets us from
+        # `get_kv_cache_shape` to the actual memory layout we want.
+        if include_num_layers_dimension:
+            # M3 does not use cross-layer (per-layer-stacked) KV blocks for now.
+            raise NotImplementedError
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD":
+            stride_order = (0, 1, 2, 3, 4)
+        elif cache_layout == "HND":
+            stride_order = (0, 1, 3, 2, 4)
+        else:
+            raise ValueError(f"Unknown cache layout format {cache_layout}.")
+        return stride_order
 
 
 class MiniMaxM3IndexerBackend(MiniMaxM3SparseBackend):
@@ -120,6 +137,15 @@ class MiniMaxM3IndexerBackend(MiniMaxM3SparseBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            # M3 does not use cross-layer (per-layer-stacked) KV blocks.
+            raise NotImplementedError
+        return (0, 1, 2)
 
 
 class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):

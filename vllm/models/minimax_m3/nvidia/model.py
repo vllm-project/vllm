@@ -539,7 +539,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         assert isinstance(main_meta, MiniMaxM3SparseMetadata)
         assert isinstance(index_meta, MiniMaxM3SparseMetadata)
 
-        # Main cache layout: [num_blocks, 2, block, num_kv_heads, head_dim].
         # Identity scale: unused for the bf16 cache, required arg of the op.
         key_cache, value_cache = self.kv_cache.unbind(1)
         scale = torch.ones((), device=key.device)
