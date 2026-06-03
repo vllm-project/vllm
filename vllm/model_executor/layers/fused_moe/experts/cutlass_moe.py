@@ -322,6 +322,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
         ]
 
@@ -719,10 +720,12 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
         ]
 
