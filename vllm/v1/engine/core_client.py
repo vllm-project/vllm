@@ -713,6 +713,10 @@ class MPClient(EngineCoreClient):
         num_gpu_blocks += response.num_gpu_blocks
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
 
+        # Sync block_size: may be enlarged by _align_hybrid_block_size in the
+        # worker for hybrid Mamba models.
+        vllm_config.cache_config.block_size = response.block_size
+
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
         # initial handshake with the rank 0 front-end.

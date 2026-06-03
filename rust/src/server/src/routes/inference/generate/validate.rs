@@ -13,8 +13,11 @@ pub(super) fn validate_request_compat(
         return Err(ApiError::model_not_found(model.clone()));
     }
 
-    if request.stream {
-        bail_invalid_request!(param = "stream", "stream=true is not supported.");
+    if request.stream_options.is_some() && !request.stream {
+        bail_invalid_request!(
+            param = "stream_options",
+            "stream_options are only supported when stream=true."
+        );
     }
 
     if request.token_ids.is_empty() {
@@ -65,11 +68,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_streaming() {
+    fn validate_request_compat_accepts_streaming() {
         let request = GenerateRequest {
             stream: true,
             ..base_request()
         };
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_stream_options_without_streaming() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "stream": false,
+            "stream_options": {"include_usage": true},
+            "sampling_params": {}
+        }))
+        .expect("parse request");
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
