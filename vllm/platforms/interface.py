@@ -199,6 +199,14 @@ class Platform:
         # all ROCm platforms for now.
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
+    def is_cumem_allocator_available(self) -> bool:
+        try:
+            from vllm.device_allocator.cumem import cumem_available
+        except ImportError:
+            return False
+
+        return cumem_available
+
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """
