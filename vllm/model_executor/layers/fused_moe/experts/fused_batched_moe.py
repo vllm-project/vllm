@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
+    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -554,9 +555,6 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
             "This method should not be called."
         )
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -798,12 +796,19 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
+
+    def activation(
+        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+    ) -> None:
+        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
+        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
+            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
+            return
+
+        super().activation(activation, output, input)
 
     def workspace_shapes(
         self,

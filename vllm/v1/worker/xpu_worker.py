@@ -104,6 +104,9 @@ class XPUWorker(Worker):
         if torch.distributed.is_xccl_available():
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
