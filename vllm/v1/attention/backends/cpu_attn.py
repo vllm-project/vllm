@@ -292,7 +292,8 @@ class CPUAttentionBackendImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape = [num_blocks, 2*num_kv_heads, block_size, head_size]
+            kv_cache: shape =
+                [num_blocks, 2*num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
