@@ -51,6 +51,14 @@ _ENABLE_TORCH_WRAP: bool = True
 """Global override flag to control torch op layer wrapping."""
 
 
+def set_default_torch_wrap(enable: bool = True) -> None:
+    """
+    Permanently set the torch wrap flag.
+    """
+    global _ENABLE_TORCH_WRAP
+    _ENABLE_TORCH_WRAP = enable
+
+
 @contextlib.contextmanager
 def enable_torch_wrap(enable: bool = True):
     """
@@ -372,42 +380,53 @@ class IrOp:
         """Get the current dispatch priority for implementations for this op."""
         return [p.provider for p in self._priority_impls]
 
+    def _filter_priority_impls(self, priority: list[str]) -> list["IrOpImpl"]:
+        assert all(p in self.impls for p in priority), (
+            "All providers in priority must be registered implementations."
+        )
+        filtered_impls: list[IrOpImpl] = []
+        for p in priority:
+            impl = self.impls[p]
+            if not impl.supported:
+                # Skip unsupported implementations
+                continue
+
+            filtered_impls.append(impl)
+
+            # If all args are supported, skip other implementations
+            if impl.supports_all_args:
+                return filtered_impls
+
+        logger.warning_once(
+            "Op %s: No implementation in priority list supports all args, "
+            "execution fallback to native is possible. To silence this warning, "
+            "explicitly add 'native' to the end of the priority list",
+            self.name,
+        )
+        filtered_impls.append(self.impls["native"])
+        return filtered_impls
+
+    def set_default(self, priority: list[str]) -> None:
+        """
+        Permanently set the dispatch priority for this op. Use this for
+        process-lifetime setup (e.g., worker startup). For scoped overrides,
+        use ``set_priority`` instead.
+        """
+        self._priority_impls = self._filter_priority_impls(priority)
+        logger.debug(
+            "Priority for vllm.ir.%s set to %s",
+            self.name,
+            lazy(lambda: [p.provider for p in self._priority_impls]),
+        )
+
     @contextlib.contextmanager
     def set_priority(self, priority: list[str]):
         """
         Context manager to set the dispatch priority for implementations for this op.
         """
-        assert all(p in self.impls for p in priority), (
-            "All providers in priority must be registered implementations."
-        )
-
-        def filter_priority_impls(p_list: list[str]) -> list[IrOpImpl]:
-            filtered_impls = []
-            for p in p_list:
-                impl = self.impls[p]
-                if not impl.supported:
-                    # Skip unsupported implementations
-                    continue
-
-                filtered_impls.append(impl)
-
-                # If all args are supported, skip other implementations
-                if impl.supports_all_args:
-                    return filtered_impls
-
-            logger.warning_once(
-                "Op %s: No implementation in priority list supports all args, "
-                "execution fallback to native is possible. To silence this warning, "
-                "explicitly add 'native' to the end of the priority list",
-                self.name,
-            )
-            filtered_impls.append(self.impls["native"])
-            return filtered_impls
-
-        # Temporarily set priority
         old_priority_impls = self._priority_impls
         try:
-            self._priority_impls = filter_priority_impls(priority)
+            self._priority_impls = self._filter_priority_impls(priority)
             logger.debug(
                 "Priority for vllm.ir.%s set to %s",
                 self.name,

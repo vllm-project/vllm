@@ -11,12 +11,12 @@ Sq      as Q sequence length
 Skv     as KV sequence length
 
 MLA has two possible ways of computing, a data-movement friendly approach and a
-compute friendly approach, we generally want to use the compute friendly
-approach for "prefill" (i.e. the ratio Sq / Skv is "small", is near 1)
-and the data-movement friendly approach for "decode" (i.e. the ratio
-Sq / Skv is "large").
+compute friendly approach. We generally want to use the compute friendly
+approach for "prefill" (i.e. the ratio Sq / Skv is relatively large, often near
+1) and the data-movement friendly approach for "decode" (i.e. the ratio
+Sq / Skv is small).
 
-NOTE what we deem small and large is currently determined by if its labelled
+NOTE what we deem small and large is currently determined by if it is labelled
 prefill or decode by the scheduler, but this is something we should probably
 tune.
 
@@ -96,7 +96,7 @@ NOTE: in the actual code,
 Runtime
 q_c      = h_t @ W_DQ
 q_nope   = (q_c @ W_UQ).view(-1, N, P)
-ql_nope  = einsum("snh,lnh->snl", q, W_UK)
+ql_nope  = einsum("snh,lnh->snl", q_nope, W_UK)
 q_pe     = RoPE(q_c @ W_QR).view(Sq, N, R)
 new_kv_c = h_t @ W_DKV
 new_k_pe = RoPE(h_t @ W_KR)
@@ -115,7 +115,7 @@ spda_o = scaled_dot_product_attention(
 )
 
 o = einsum("snl,lnv->snv", spda_o.reshape(-1, N, Lkv), W_UV)
-return o.view(-1, N * V) @ self.num_heads @ W_O
+return o.view(-1, N * V) @ W_O
 
 
 ## Chunked Prefill
@@ -200,6 +200,7 @@ from tqdm import tqdm
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
     ModelConfig,
@@ -989,19 +990,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            # Convert from (B, N * V) to (N, B, V)
-            out = out.transpose(0, 1)
-
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
-
-            # Convert from (N, B, V) to (B, N * V)
-            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-
-            # Adjust output buffer shape back to the original (B, N * V)
-            N, B, V = out.shape
-            out.resize_((B, N * V))
-            out.copy_(out_new)  # Copy result
+            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
+            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
 
 
 def unified_mla_kv_cache_update(
@@ -1047,6 +1037,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,

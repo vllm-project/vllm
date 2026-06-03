@@ -103,6 +103,19 @@ def test_is_envs_cache_enabled() -> None:
     assert not envs._is_envs_cache_enabled()
 
 
+def test_precompiled_install_flags_are_orthogonal() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "VLLM_PRECOMPILED_WHEEL_LOCATION": "/tmp/vllm.whl",
+            "VLLM_USE_PRECOMPILED_RUST": "1",
+        },
+        clear=False,
+    ):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is False
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 
