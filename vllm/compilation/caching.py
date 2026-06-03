@@ -12,7 +12,6 @@ from unittest.mock import patch
 
 import torch
 from torch._subclasses import FakeTensorMode
-from torch.fx._graph_pickler import GraphPickler, Options
 from torch.utils import _pytree as pytree
 
 import vllm.envs as envs
@@ -23,6 +22,25 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
+
+try:
+    from torch.fx._graph_pickler import GraphPickler, Options
+except ModuleNotFoundError:
+
+    class Options:
+        def __init__(self, **_: Any) -> None:
+            pass
+
+    class GraphPickler:
+        reducer_override = None
+
+        @staticmethod
+        def dumps(obj: Any, _: Options | None = None) -> bytes:
+            return pickle.dumps(obj)
+
+        @staticmethod
+        def loads(data: bytes, _: FakeTensorMode | None = None) -> Any:
+            return pickle.loads(data)
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable

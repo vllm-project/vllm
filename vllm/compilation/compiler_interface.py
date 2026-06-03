@@ -227,9 +227,9 @@ def _patch_standalone_compile_atomic_save() -> None:
     ) -> None:
         if format != "binary":
             return original_save(self, path=path, format=format)
-        from torch._dynamo.utils import dynamo_timed
         from torch._inductor.codecache import torch_key
         from torch.utils._appending_byte_serializer import BytesWriter
+        from vllm.compilation.dynamo_utils import dynamo_timed
 
         with dynamo_timed("CompiledArtifact.save"):
             assert self._artifacts is not None

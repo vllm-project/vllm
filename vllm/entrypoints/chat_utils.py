@@ -30,7 +30,6 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai.types.responses import ResponseInputImageParam
-from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
@@ -66,9 +65,11 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     import torch
     import transformers
+    from openai_harmony import Message as OpenAIHarmonyMessage
 else:
     transformers = LazyLoader("transformers", globals(), "transformers")
     torch = LazyLoader("torch", globals(), "torch")
+    OpenAIHarmonyMessage = Any
 
 logger = init_logger(__name__)
 

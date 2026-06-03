@@ -138,8 +138,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
     # for jump-forward decoding
 
     vocab_size: int
-    matcher: xgr.GrammarMatcher = field(hash=False)
-    ctx: xgr.CompiledGrammar = field(hash=False)
+    matcher: "xgr.GrammarMatcher" = field(hash=False)
+    ctx: "xgr.CompiledGrammar" = field(hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )

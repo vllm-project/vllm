@@ -1,13 +1,20 @@
 #pragma once
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <variant>
 
 // For STD_TORCH_CHECK
-#include <torch/headeronly/util/Exception.h>
+#if __has_include(<torch/headeronly/util/Exception.h>)
+  #include <torch/headeronly/util/Exception.h>
+#elif !defined(STD_TORCH_CHECK)
+  #define STD_TORCH_CHECK(cond, ...)                                      \
+    ((cond) ? static_cast<void>(0)                                        \
+            : throw std::runtime_error("STD_TORCH_CHECK failed"))
+#endif
 
 namespace vllm {
 

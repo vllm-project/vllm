@@ -11,11 +11,11 @@ from typing import Any
 
 import torch._functorch.config
 import torch.fx as fx
-from torch._dynamo.utils import dynamo_timed
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
 from vllm.compilation.backends import VllmBackend
+from vllm.compilation.dynamo_utils import dynamo_timed
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.logger import init_logger

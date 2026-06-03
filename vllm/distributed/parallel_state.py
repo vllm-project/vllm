@@ -39,7 +39,10 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
-import torch.distributed._symmetric_memory
+try:
+    import torch.distributed._symmetric_memory  # noqa: F401
+except ImportError:
+    pass
 from torch.distributed import Backend, ProcessGroup, Store
 
 import vllm.envs as envs

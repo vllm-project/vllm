@@ -22,6 +22,10 @@ vLLM is a Python library that supports the following CPU variants. Select your C
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:installation"
 
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:installation"
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-cpu` channel of [vLLM Slack](https://slack.vllm.ai/).
@@ -47,6 +51,10 @@ When open a Github issue about the CPU backend, please add `[CPU Backend]` in th
 === "IBM Z (S390X)"
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:requirements"
+
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:requirements"
 
 ## Set up using Python
 
@@ -74,6 +82,10 @@ For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
 === "IBM Z (S390X)"
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-wheels"
+
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:pre-built-wheels"
 
 ### Build wheel from source
 
@@ -105,6 +117,10 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-wheel-from-source"
 
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:build-wheel-from-source"
+
 ## Set up using Docker
 
 ### Pre-built images
@@ -125,6 +141,10 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:pre-built-images"
 
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:pre-built-images"
+
 ### Build image from source
 
 === "Intel/AMD x86"
@@ -141,6 +161,10 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
+
+=== "SiFive P550 (RISC-V)"
+
+    --8<-- "docs/getting_started/installation/cpu.p550.inc.md:build-image-from-source"
 
 ## Related runtime environment variables
 

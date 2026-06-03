@@ -13,9 +13,10 @@ from functools import partial
 from typing import Any
 
 import torch.fx
-from torch._dynamo.utils import dynamo_timed
 from torch._logging import trace_structured
 from torch.fx.node import _get_qualified_name
+
+from vllm.compilation.dynamo_utils import dynamo_timed
 
 
 def generate_execution_code_with_name(
