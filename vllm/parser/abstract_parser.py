@@ -35,6 +35,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
@@ -515,10 +516,19 @@ class DelegatingParser(Parser):
             and (request.tool_choice == "auto" or request.tool_choice is None)
         ):
             # Automatic Tool Call Parsing
-            tool_call_info = self._tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
+            tool_call_info = None
+            try:
+                tool_call_info = self._tool_parser.extract_tool_calls(
+                    content if content is not None else "",
+                    request=request,  # type: ignore
+                )
+            finally:
+                record_tool_parser_invocation(
+                    mode="non_streaming",
+                    tools_called=tool_call_info is not None
+                    and tool_call_info.tools_called,
+                    request=request,
+                )
             if tool_call_info is not None and tool_call_info.tools_called:
                 function_calls.extend(
                     FunctionCall(
@@ -607,10 +617,19 @@ class DelegatingParser(Parser):
         elif is_auto_tool_choice or use_mistral_tool_parser:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
+            tool_call_info = None
+            try:
+                tool_call_info = tool_parser.extract_tool_calls(
+                    content if content is not None else "",
+                    request=request,  # type: ignore
+                )
+            finally:
+                record_tool_parser_invocation(
+                    mode="non_streaming",
+                    tools_called=tool_call_info is not None
+                    and tool_call_info.tools_called,
+                    request=request,
+                )
             if tool_call_info is not None and tool_call_info.tools_called:
                 tool_calls.extend(
                     FunctionCall(
@@ -667,7 +686,16 @@ class DelegatingParser(Parser):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
-        return self._tool_parser.extract_tool_calls(model_output, request)
+        result = None
+        try:
+            result = self._tool_parser.extract_tool_calls(model_output, request)
+        finally:
+            record_tool_parser_invocation(
+                mode="non_streaming",
+                tools_called=result is not None and result.tools_called,
+                request=request,
+            )
+        return result
 
     def extract_tool_calls_streaming(
         self,
@@ -681,15 +709,24 @@ class DelegatingParser(Parser):
     ) -> DeltaMessage | None:
         if self._tool_parser is None:
             return None
-        return self._tool_parser.extract_tool_calls_streaming(
-            previous_text,
-            current_text,
-            delta_text,
-            previous_token_ids,
-            current_token_ids,
-            delta_token_ids,
-            request,
-        )
+        result = None
+        try:
+            result = self._tool_parser.extract_tool_calls_streaming(
+                previous_text,
+                current_text,
+                delta_text,
+                previous_token_ids,
+                current_token_ids,
+                delta_token_ids,
+                request,
+            )
+        finally:
+            record_tool_parser_invocation(
+                mode="streaming",
+                tools_called=bool(result and result.tool_calls),
+                request=request,
+            )
+        return result
 
     def _extract_tool_calls_streaming(
         self,
