@@ -172,7 +172,6 @@ def sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
