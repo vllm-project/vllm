@@ -454,7 +454,16 @@ def apply_ace_eviction(
     tracker: AttentionImportanceTracker | None = None,
     tokenizer: Any | None = None,
     token_offsets: list[int] | None = None,
+    recency_blend: float = 0.3,
 ) -> int:
+    """
+    recency_blend: fraction of the per-line score contributed by message recency.
+      0.0 = pure content scoring (BM25 / heuristics).
+      0.3 = 30% recency + 70% content (default). Oldest compressible messages
+            are evicted more aggressively; newest compressible messages keep
+            more of their lines. This prevents ACE from destroying context the
+            agent is actively using in recent turns.
+    """
     """
     Compress old tool-result messages until total size <= budget_chars.
 
@@ -504,16 +513,17 @@ def apply_ace_eviction(
         and len(m["content"]) >= min_chars
     ]
     compressable = tool_indices[: max(0, len(tool_indices) - keep_recent)]
+    n_comp = max(len(compressable) - 1, 1)
     saved = 0
 
-    for idx in compressable:
+    for rank, idx in enumerate(compressable):
         if _total(messages) <= budget_chars:
             break
         original = messages[idx]["content"]
         if "omitted by ACE" in original:
             continue
 
-        # Compute per-line attention scores if tracker is available
+        # Compute per-line content scores (attention / BM25 / heuristic)
         attn_scores: list[float] | None = None
         if use_attention and idx < len(token_offsets):
             try:
@@ -522,14 +532,40 @@ def apply_ace_eviction(
                 )
                 attn_scores = tracker.score_lines(spans)
             except Exception:
-                pass  # fall through to BM25 or heuristics
+                pass
 
-        compressed = ace_compress(
-            original,
-            target_ratio,
-            query=query,
-            attention_scores=attn_scores,
-        )
+        # Recency blend: rank 0 = oldest (recency=0.0), rank n-1 = newest (recency=1.0)
+        # Older messages get a lower keep-ratio → compressed more aggressively.
+        if recency_blend > 0:
+            msg_recency = rank / n_comp          # 0.0 (oldest) → 1.0 (newest)
+            # Blend content scores with recency floor
+            content_scores = attn_scores  # may be None → ace_compress handles it
+            n_lines = len(original.split("\n"))
+            if content_scores is None:
+                # Generate content scores first so we can blend them
+                lines = original.split("\n")
+                if query:
+                    content_scores = _bm25.score_lines(query, lines)
+                else:
+                    content_scores = [_heuristic_score(l) for l in lines]
+                    mx = max(content_scores) or 1.0
+                    content_scores = [s / mx for s in content_scores]
+            # Blend: older messages → recency is low → content dominates → more eviction
+            blended = [
+                (1 - recency_blend) * cs + recency_blend * msg_recency
+                for cs in content_scores
+            ]
+            # More aggressive ratio for older messages
+            effective_ratio = target_ratio * (0.5 + 0.5 * msg_recency)
+            compressed = ace_compress(
+                original, effective_ratio, attention_scores=blended
+            )
+        else:
+            effective_ratio = target_ratio
+            compressed = ace_compress(
+                original, effective_ratio, query=query, attention_scores=attn_scores
+            )
+
         delta = len(original) - len(compressed)
         if delta <= 0:
             continue
