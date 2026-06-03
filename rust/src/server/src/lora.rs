@@ -142,14 +142,14 @@ impl LoraManager {
             }
         })?;
 
-        if let Some(actual) = requested_lora_int_id {
-            if actual != lora_request.lora_int_id {
-                return Err(UnloadLoraError::IntIdMismatch {
-                    lora_name: lora_name.to_string(),
-                    expected: lora_request.lora_int_id,
-                    actual,
-                });
-            }
+        if let Some(actual) = requested_lora_int_id
+            && actual != lora_request.lora_int_id
+        {
+            return Err(UnloadLoraError::IntIdMismatch {
+                lora_name: lora_name.to_string(),
+                expected: lora_request.lora_int_id,
+                actual,
+            });
         }
 
         let removed = engine_core_client
