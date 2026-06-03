@@ -23,6 +23,7 @@ git clone --depth 1 --branch "$BASELINE_BRANCH" "$(git remote get-url origin)" "
 
 baseline_file="$OUTPUT_DIR/branch/baselines/$COMMIT/run_leaderboard.json"
 baseline_commit="$COMMIT"
+baseline_source="exact"
 if [[ ! -f "$baseline_file" ]]; then
   if [[ "$ALLOW_BASELINE_FALLBACK" != "1" ]]; then
     echo "No exact perfgate baseline found for $COMMIT" >&2
@@ -30,6 +31,7 @@ if [[ ! -f "$baseline_file" ]]; then
   fi
   baseline_file="$OUTPUT_DIR/branch/latest-main.json"
   baseline_commit="latest-main"
+  baseline_source="latest-main-fallback"
 fi
 
 if [[ ! -f "$baseline_file" ]]; then
@@ -42,6 +44,7 @@ cp "$baseline_file" "$resolved_file"
 {
   echo "PERFGATE_BASELINE_FILE=$resolved_file"
   echo "PERFGATE_BASELINE_COMMIT=$baseline_commit"
+  echo "PERFGATE_BASELINE_SOURCE=$baseline_source"
 } >> "$GITHUB_ENV"
 
-echo "Fetched perfgate baseline: $baseline_commit -> $resolved_file"
+echo "Fetched perfgate baseline: $baseline_commit ($baseline_source) -> $resolved_file"

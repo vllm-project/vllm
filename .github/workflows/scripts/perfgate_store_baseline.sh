@@ -4,7 +4,6 @@ set -euo pipefail
 RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_SHA:-local}}
 RESULT_ROOT=${RESULT_ROOT:-${GITHUB_WORKSPACE:-$PWD}/.benchmarks/ci/$RUN_ID}
 GITHUB_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
-RUN_ID=${RUN_ID:-manual}
 BASELINE_BRANCH=${PERFGATE_BASELINE_BRANCH:-benchmark-baselines}
 BASELINE_FILE=${PERFGATE_BASELINE_SOURCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 WORKTREE_DIR=${PERFGATE_BASELINE_WORKTREE:-${RUNNER_TEMP:-/tmp}/perfgate-baselines-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
@@ -13,6 +12,40 @@ if [[ ! -f "$BASELINE_FILE" ]]; then
   echo "Perfgate baseline source not found: $BASELINE_FILE" >&2
   exit 2
 fi
+
+"${PYTHON_BIN:-python}" - "$BASELINE_FILE" <<'PY'
+import json
+import math
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+except Exception as exc:
+    print(f"Invalid perfgate baseline JSON: {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+metrics = payload.get("metrics")
+if not isinstance(metrics, dict):
+    print(f"Invalid perfgate baseline JSON: {path}: missing object key metrics", file=sys.stderr)
+    sys.exit(2)
+missing = []
+for name in ("throughput_tps", "ttft_ms", "tbt_ms"):
+    value = metrics.get(name)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        missing.append(name)
+        continue
+    if value is None or not math.isfinite(number):
+        missing.append(name)
+if missing:
+    print(
+        f"Invalid perfgate baseline JSON: {path}: missing/non-null finite metrics: {', '.join(missing)}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+PY
 
 rm -rf "$WORKTREE_DIR"
 if git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then

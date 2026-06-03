@@ -23,7 +23,9 @@ cleanup() {
   git checkout --force "$ORIGINAL_REF" >/dev/null 2>&1 || true
   git branch -D "$TEMP_BRANCH" >/dev/null 2>&1 || true
   if [[ -n "${PYTHON_BIN:-}" ]]; then
-    "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps >/dev/null 2>&1 || true
+    if ! "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps >/dev/null 2>&1; then
+      echo "Warning: failed to reinstall original checkout after Stage 2 cleanup" >&2
+    fi
   fi
 }
 trap cleanup EXIT
@@ -95,14 +97,15 @@ if [[ ! -f "$b1prime_file" ]]; then
 fi
 
 PERFGATE_BASELINE_OUTPUT_DIR="${RUNNER_TEMP:-/tmp}/perfgate-stage2-baseline" \
-  PERFGATE_ALLOW_BASELINE_FALLBACK=0 \
+  PERFGATE_ALLOW_BASELINE_FALLBACK="${PERFGATE_ALLOW_STAGE2_BASELINE_FALLBACK:-0}" \
   GITHUB_ENV="$GITHUB_ENV.stage2" \
   bash .github/workflows/scripts/perfgate_fetch_baseline.sh "$M2_COMMIT"
 # shellcheck disable=SC1090
 source "$GITHUB_ENV.stage2"
-cat "$GITHUB_ENV.stage2" >> "$GITHUB_ENV"
 write_env PERFGATE_STAGE2_B1PRIME_FILE "$b1prime_file"
 write_env PERFGATE_STAGE2_M2_BASELINE_FILE "$PERFGATE_BASELINE_FILE"
+write_env PERFGATE_STAGE2_M2_BASELINE_COMMIT "$PERFGATE_BASELINE_COMMIT"
+write_env PERFGATE_STAGE2_M2_BASELINE_SOURCE "$PERFGATE_BASELINE_SOURCE"
 write_env PERFGATE_STAGE2_REBASE_CONFLICT 0
 write_env PERFGATE_STAGE2_SKIPPED 0
 
