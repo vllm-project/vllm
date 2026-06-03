@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -187,6 +189,27 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        # EXPERIMENTAL: route the rowwise (per-token act / per-channel weight)
+        # FP8 GEMM to the Helion ``vllm_helion::scaled_mm`` kernel when
+        # VLLM_USE_HELION_SCALED_MM=1. Only the bf16-out, bias-free,
+        # per-token+per-channel, small-M (decode) case is routed; everything else
+        # falls through to cutlass (Helion only wins at M<=16). See
+        # vllm/kernels/helion/ops/scaled_mm.py.
+        M = A.shape[0]
+        if (
+            os.environ.get("VLLM_USE_HELION_SCALED_MM") == "1"
+            and bias is None
+            and out_dtype is torch.bfloat16
+            and As.numel() == M  # per-token activation scale
+            and Bs.numel() == B.shape[1]  # per-channel weight scale
+            and M <= 16
+        ):
+            import vllm.kernels.helion  # noqa: F401, registers vllm_helion ops
+
+            return torch.ops.vllm_helion.scaled_mm(
+                A, B, As.reshape(M, 1), Bs.reshape(1, B.shape[1])
+            ).view(*output_shape)
+
         # Per-tensor/Per-channel padding to use Cutlass instead of Triton.
         K, N = B.shape
         pad_k = (16 - K % 16) % 16
