@@ -817,10 +817,12 @@ class TestIntegrationScenarios:
         # Take events (should only get common events)
         taken_events = list(mock_connector.take_events())
 
-        # With aggregation, only events reported by both workers should be present
-        # In this case, hash_common was reported by both
+        # Only events reported by both workers should be present.
+        # hash_common was reported by both; worker-specific events should be filtered.
         event_hashes = [e.block_hashes[0] for e in taken_events]
         assert "hash_common" in event_hashes
+        assert "hash_worker1" not in event_hashes
+        assert "hash_worker2" not in event_hashes
 
     def test_empty_workflow(self, mock_connector):
         """Test workflow when there are no events at any stage."""
