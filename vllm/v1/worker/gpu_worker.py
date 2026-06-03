@@ -1147,7 +1147,10 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance()
-    override_envs_for_eplb(parallel_config)
+    override_envs_for_eplb(
+        parallel_config,
+        moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
+    )
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
