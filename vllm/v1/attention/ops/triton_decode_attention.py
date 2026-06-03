@@ -65,6 +65,8 @@ def _fwd_kernel_stage1(
     Req_to_tokens,
     B_Seqlen,
     Att_Out,
+    Router_Table,
+    Q_Router,
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -84,6 +86,7 @@ def _fwd_kernel_stage1(
     NUM_KV_SPLITS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     logit_cap: tl.constexpr,
+    req_depth: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
 ):
@@ -141,6 +144,14 @@ def _fwd_kernel_stage1(
 
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
+
+            if req_depth > 0:
+                # Topologically route blocks based on Medoid-Value similarity
+                q_routing = tl.load(Q_Router + cur_batch_req_idx * req_depth + tl.arange(0, req_depth), mask=tl.arange(0, req_depth) < req_depth, other=0)
+                kv_routing = tl.load(Router_Table + kv_page_number[:, None] * req_depth + tl.arange(0, req_depth)[None, :], mask=(offs_n[:, None] < split_kv_end) & (tl.arange(0, req_depth)[None, :] < req_depth), other=0)
+                # Compute tree depth mismatch
+                mismatch = tl.sum((q_routing[None, :] != kv_routing).to(tl.int32), 1) > 0
+                qk = tl.where(mismatch, float("-inf"), qk)
 
             qk = tl.where(offs_n < split_kv_end, qk, float("-inf"))
 
@@ -267,6 +278,8 @@ def _fwd_grouped_kernel_stage1(
     Req_to_tokens,
     B_Seqlen,
     Att_Out,
+    Router_Table,
+    Q_Router,
     stride_req_to_tokens_b,
     stride_qbs,
     stride_qh,
@@ -289,6 +302,7 @@ def _fwd_grouped_kernel_stage1(
     NUM_KV_SPLITS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     logit_cap: tl.constexpr,
+    req_depth: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     IS_MLA: tl.constexpr = False,
@@ -386,6 +400,13 @@ def _fwd_grouped_kernel_stage1(
 
             if logit_cap > 0:
                 qk = logit_cap * tanh(qk / logit_cap)
+
+            if req_depth > 0:
+                # Topologically route blocks based on Medoid-Value similarity
+                q_routing = tl.load(Q_Router + cur_batch_req_idx * req_depth + tl.arange(0, req_depth), mask=tl.arange(0, req_depth) < req_depth, other=0)
+                kv_routing = tl.load(Router_Table + kv_page_number[:, None] * req_depth + tl.arange(0, req_depth)[None, :], mask=(offs_n[:, None] < split_kv_end) & (tl.arange(0, req_depth)[None, :] < req_depth), other=0)
+                mismatch = tl.sum((q_routing[None, :] != kv_routing).to(tl.int32), 1) > 0
+                qk = tl.where(mismatch[None, :], float("-inf"), qk)
 
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")

@@ -132,6 +132,9 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # The topological routing path (p-adic tree path) associated with this block
+    router_indices: list[int] | None = None
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
