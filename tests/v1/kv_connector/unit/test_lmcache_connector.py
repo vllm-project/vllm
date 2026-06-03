@@ -196,6 +196,15 @@ class TestGetKVConnectorKVCacheEvents:
         events = result.get_all_events()
         assert events[0].parent_block_hash is None
 
+    def test_raises_when_engine_fails(self, mock_connector):
+        """Test that exception from engine propagates through connector."""
+        mock_connector._lmcache_engine.get_kv_events.side_effect = RuntimeError(
+            "LMCache engine failed"
+        )
+
+        with pytest.raises(RuntimeError, match="LMCache engine failed"):
+            mock_connector.get_kv_connector_kv_cache_events()
+
 
 class TestUpdateConnectorOutput:
     """Test update_connector_output method."""
@@ -558,6 +567,184 @@ class TestTakeEvents:
         assert events == []
         assert mock_connector._kv_cache_events is None
 
+    def test_worker_produces_no_events(self, mock_connector):
+        """Test when a worker produces no events (e.g., storage failure).
+
+        Simulates TP=4 where Worker 1 produces no events at all.
+        Only 3 workers report, so num_workers will be 3 (not 4).
+        Events reported by all 3 active workers will be retained -
+        potentially incorrect behavior if the missing worker should
+        have contributed.
+        """
+        # Simulate 3 workers reporting (Worker 1 silent)
+        # Start with num_workers=1, increment for each additional worker
+        kv_events = LMCacheKVEvents(num_workers=1)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        # Worker 0 reports (initial worker, count=1, workers=1)
+        kv_events.add_events([event_a])
+        # Worker 2 reports (Worker 1 silent, increment workers)
+        kv_events.add_events([event_a])
+        kv_events.increment_workers(1)
+        # Worker 3 reports (increment workers)
+        kv_events.add_events([event_a])
+        kv_events.increment_workers(1)
+
+        mock_connector._kv_cache_events = kv_events
+
+        events = list(mock_connector.take_events())
+
+        # num_workers=3, count=3 → event_a retained
+        assert len(events) == 1
+        assert events[0] == event_a
+
+    def test_workers_produce_completely_different_events(self, mock_connector):
+        """Test when all workers report completely different events.
+
+        No common events should be yielded.
+        """
+        kv_events = LMCacheKVEvents(num_workers=3)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        event_b = BlockStored(
+            block_hashes=["hash_b"],
+            parent_block_hash=None,
+            token_ids=[2],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        event_c = BlockStored(
+            block_hashes=["hash_c"],
+            parent_block_hash=None,
+            token_ids=[3],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+
+        # Each worker reports a unique event
+        kv_events.add_events([event_a])  # Worker 0
+        kv_events.add_events([event_b])  # Worker 1
+        kv_events.add_events([event_c])  # Worker 2
+
+        mock_connector._kv_cache_events = kv_events
+
+        events = list(mock_connector.take_events())
+
+        # No event was reported by all 3 workers
+        assert events == []
+        assert mock_connector._kv_cache_events is None
+
+    def test_partial_storage_failure_cascade(self, mock_connector):
+        """Test cascading storage failure where each worker misses more events.
+
+        Worker 0: [A, B, C]
+        Worker 1: [A, B]      ← C failed
+        Worker 2: [A]         ← B, C failed
+
+        Only A should survive (reported by all 3).
+        """
+        kv_events = LMCacheKVEvents(num_workers=3)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        event_b = BlockStored(
+            block_hashes=["hash_b"],
+            parent_block_hash=None,
+            token_ids=[2],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        event_c = BlockStored(
+            block_hashes=["hash_c"],
+            parent_block_hash=None,
+            token_ids=[3],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+
+        # Worker 0 reports all
+        kv_events.add_events([event_a, event_b, event_c])
+        # Worker 1 misses C
+        kv_events.add_events([event_a, event_b])
+        # Worker 2 misses B and C
+        kv_events.add_events([event_a])
+
+        mock_connector._kv_cache_events = kv_events
+
+        events = list(mock_connector.take_events())
+
+        # Only event_a was reported by all 3 workers
+        assert len(events) == 1
+        assert events[0] == event_a
+        assert mock_connector._kv_cache_events is None
+
+    def test_mla_passive_rank_scenario(self, mock_connector):
+        """Test MLA mode where only the leader rank produces events.
+
+        In MLA mode with save_only_first_rank, only rank 0 stores KV.
+        Other ranks are passive and produce no events.
+        num_workers should be 1, and events should be retained.
+        """
+        # Only leader rank produces events
+        kv_events = LMCacheKVEvents(num_workers=1)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        event_b = BlockStored(
+            block_hashes=["hash_b"],
+            parent_block_hash=None,
+            token_ids=[2],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        kv_events.add_events([event_a, event_b])
+
+        mock_connector._kv_cache_events = kv_events
+
+        events = list(mock_connector.take_events())
+
+        # num_workers=1, count=1 for both events → both retained
+        assert len(events) == 2
+        assert event_a in events
+        assert event_b in events
+        assert mock_connector._kv_cache_events is None
+
 
 class TestIntegrationScenarios:
     """Test integration scenarios."""
@@ -784,3 +971,81 @@ class TestIntegrationScenarios:
         assert aggregated_events[0].block_hashes == ["hash_common"]
         assert aggregated_events[0].parent_block_hash == "parent_common"
         assert aggregated_events[0].token_ids == [1, 2, 3]
+
+    def test_aggregation_with_empty_events_object(self, mock_connector):
+        """Test aggregation when a worker contributes an empty events object.
+
+        Worker 0: LMCacheKVEvents with [] (empty)
+        Worker 1: LMCacheKVEvents with [A]
+
+        After aggregation, num_workers=2 but A has count=1, so it's filtered.
+        """
+        # Worker 0: empty events
+        empty_events = LMCacheKVEvents(num_workers=1)
+        # No events added
+
+        connector_output_empty = KVConnectorOutput(kv_cache_events=empty_events)
+        mock_connector.update_connector_output(connector_output_empty)
+
+        # Worker 1: has events
+        events_with_data = LMCacheKVEvents(num_workers=1)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        events_with_data.add_events([event_a])
+
+        connector_output_data = KVConnectorOutput(kv_cache_events=events_with_data)
+        mock_connector.update_connector_output(connector_output_data)
+
+        events = list(mock_connector.take_events())
+
+        # num_workers=2, event_a count=1 → filtered out
+        assert events == []
+        assert mock_connector._kv_cache_events is None
+
+    def test_get_kv_events_exception_handling(self, mock_connector):
+        """Test that connector state is clean after engine raises exception.
+
+        If get_kv_connector_kv_cache_events raises, the connector's
+        _kv_cache_events should not be affected.
+        """
+        # First, set up a valid event
+        kv_events = LMCacheKVEvents(num_workers=1)
+        event_a = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        kv_events.add_events([event_a])
+
+        output = KVConnectorOutput(kv_cache_events=kv_events)
+        mock_connector.update_connector_output(output)
+
+        assert mock_connector._kv_cache_events is not None
+
+        # Now engine raises exception on next call
+        mock_connector._lmcache_engine.get_kv_events.side_effect = RuntimeError(
+            "Engine error"
+        )
+
+        with pytest.raises(RuntimeError):
+            mock_connector.get_kv_connector_kv_cache_events()
+
+        # Previous _kv_cache_events should still be there
+        assert mock_connector._kv_cache_events is not None
+        assert len(mock_connector._kv_cache_events.get_all_events()) == 1
+
+        # Take events should still work
+        events = list(mock_connector.take_events())
+        assert len(events) == 1
+        assert events[0] == event_a
