@@ -40,7 +40,6 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -884,6 +883,24 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 # ---------------------------------------------------------------------------
 
 
+class Gemma4RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.with_scale = with_scale
+        if with_scale:
+            self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.float()
+        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True) + self.eps
+        hidden_states = hidden_states * torch.pow(variance, -0.5)
+        if self.with_scale:
+            hidden_states = hidden_states * self.weight.float()
+        return hidden_states.to(input_dtype)
+
+
 class Gemma4ClippableReplicatedLinear(ReplicatedLinear):
     """Gemma4 vision linear with optional activation clipping."""
 
@@ -1076,15 +1093,16 @@ class Gemma4VisionRotaryEmbedding(nn.Module):
 
     def __init__(self, config: Gemma4VisionConfig):
         super().__init__()
-        base = config.rope_parameters["rope_theta"]
+        self.base = config.rope_parameters["rope_theta"]
         dim = getattr(config, "head_dim", None) or (
             config.hidden_size // config.num_attention_heads
         )
-        spatial_dim = dim // 2
+        self.spatial_dim = dim // 2
         inv_freq = 1.0 / (
-            base
+            self.base
             ** (
-                torch.arange(0, spatial_dim, 2, dtype=torch.int64).float() / spatial_dim
+                torch.arange(0, self.spatial_dim, 2, dtype=torch.int64).float()
+                / self.spatial_dim
             )
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -1094,11 +1112,23 @@ class Gemma4VisionRotaryEmbedding(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Keep RoPE frequencies in fp32 even if module buffers are cast to the
+        # model dtype. Gemma4 vision is sensitive to bf16-rounded inv_freq.
+        inv_freq = 1.0 / (
+            self.base
+            ** (
+                torch.arange(
+                    0,
+                    self.spatial_dim,
+                    2,
+                    dtype=torch.int64,
+                    device=hidden_states.device,
+                ).float()
+                / self.spatial_dim
+            )
+        )
         inv_freq_expanded = (
-            self.inv_freq[None, :, None]
-            .float()
-            .expand(position_ids.shape[0], -1, 1)
-            .to(hidden_states.device)
+            inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
         )
 
         all_cos, all_sin = [], []
@@ -1185,13 +1215,14 @@ def _gemma4_vision_attention_forward(
 ) -> torch.Tensor:
     key_states = _repeat_kv(key, module.num_key_value_groups)
     value_states = _repeat_kv(value, module.num_key_value_groups)
-
-    attn_weights = torch.matmul(query, key_states.transpose(2, 3)) * module.scaling
-    if attention_mask is not None:
-        attn_weights = attn_weights + attention_mask
-
-    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
-    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = F.scaled_dot_product_attention(
+        query,
+        key_states,
+        value_states,
+        attn_mask=attention_mask,
+        dropout_p=0.0,
+        scale=module.scaling,
+    )
     return attn_output.transpose(1, 2).contiguous()
 
 
@@ -1242,9 +1273,13 @@ class Gemma4VisionAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+        self.q_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.v_norm = Gemma4RMSNorm(
+            self.head_dim,
+            eps=config.rms_norm_eps,
+            with_scale=False,
+        )
 
     def forward(
         self,
@@ -1300,14 +1335,16 @@ class Gemma4VisionEncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
+        self.input_layernorm = Gemma4RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.pre_feedforward_layernorm = RMSNorm(
+        self.post_attention_layernorm = Gemma4RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_feedforward_layernorm = RMSNorm(
+        self.pre_feedforward_layernorm = Gemma4RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = Gemma4RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -1363,16 +1400,10 @@ class Gemma4VisionEncoder(nn.Module):
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> torch.Tensor:
-        min_dtype = torch.finfo(inputs_embeds.dtype).min
-        mask = torch.zeros(
-            attention_mask.shape[0],
-            1,
-            1,
-            attention_mask.shape[1],
-            dtype=inputs_embeds.dtype,
+        return attention_mask[:, None, None, :].to(
             device=inputs_embeds.device,
+            dtype=torch.bool,
         )
-        return mask.masked_fill(~attention_mask[:, None, None, :], min_dtype)
 
     def forward(
         self,
@@ -1468,7 +1499,7 @@ class Gemma4MultimodalEmbedder(nn.Module):
     """Projects vision/audio soft tokens into LM embedding space.
 
     Architecture:
-        inputs_embeds → embedding_projection → embedding_post_projection_norm
+        inputs_embeds → embedding_pre_projection_norm → embedding_projection
 
     Unlike Gemma3n which has separate hard/soft embedding paths with
     per-path normalization and a learned embedding table, Gemma4 uses a
@@ -1498,10 +1529,10 @@ class Gemma4MultimodalEmbedder(nn.Module):
             or multimodal_config.hidden_size
         )
 
-        self.embedding_pre_projection_norm = RMSNorm(
+        self.embedding_pre_projection_norm = Gemma4RMSNorm(
             embedding_dim,
             eps=self.eps,
-            has_weight=False,
+            with_scale=False,
         )
 
         self.embedding_projection = ReplicatedLinear(
@@ -1537,6 +1568,8 @@ class Gemma4ForConditionalGeneration(
     SupportsLoRA,
     SupportsEagle3,
 ):
+    requires_mm_lora_sequential_encoding = ("image", "video")
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -2079,12 +2112,15 @@ class Gemma4ForConditionalGeneration(
         # so the pre-allocated zeros are used instead.
         if self.per_layer_embeddings is not None:
             # Mask multimodal tokens (image/audio) to 0 for PLE
-            # computation (using token_type_ids == 0 as text_mask).
-            # Replicate this: map image token positions to token 0.
+            # computation. HF maps multimodal placeholder positions to the
+            # text pad token before looking up the token-identity PLE.
             if is_multimodal is not None:
+                pad_token_id = self.config.text_config.pad_token_id
+                if pad_token_id is None:
+                    pad_token_id = 0
                 ple_input_ids = torch.where(
                     is_multimodal.to(input_ids.device, non_blocking=True),
-                    torch.zeros_like(input_ids),
+                    torch.full_like(input_ids, pad_token_id),
                     input_ids,
                 )
             else:
@@ -2209,7 +2245,7 @@ class Gemma4ForConditionalGeneration(
         # Some checkpoints have vestigial embed_vision.embedding and
         # embed_audio.embedding weights from the Gemma3n architecture
         # that are not used by Gemma4's MultimodalEmbedder (which only
-        # has embedding_projection + embedding_post_projection_norm).
+        # has embedding_pre_projection_norm + embedding_projection).
         ignore_prefixes = [
             "embed_vision.embedding.",
             "embed_audio.embedding.",

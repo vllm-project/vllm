@@ -2918,18 +2918,26 @@ class GPUModelRunner(
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
-        if self.lora_config and self.lora_manager.supports_tower_connector_lora():
+        def set_mm_lora_mapping(current_item_idx: int, num_items: int) -> None:
+            if not (
+                self.lora_config and self.lora_manager.supports_tower_connector_lora()
+            ):
+                return
+
             # Build LoRA mappings independently for encoder inputs
             # (encoder batch structure is different from main batch)
             prompt_lora_mapping = []
             token_lora_mapping = []
             lora_requests = set()
-            encoder_token_counts = []
             connector_token_counts = []
+            group_lora_refs = mm_lora_refs[
+                current_item_idx : current_item_idx + num_items
+            ]
+            group_mm_kwargs = mm_kwargs[current_item_idx : current_item_idx + num_items]
 
             for (req_id, pos_info), (modality, mm_item) in zip(
-                mm_lora_refs,
-                mm_kwargs,
+                group_lora_refs,
+                group_mm_kwargs,
                 strict=True,
             ):
                 req_idx = self.input_batch.req_id_to_index[req_id]
@@ -2943,7 +2951,6 @@ class GPUModelRunner(
                 num_tokens = lora_token_counts.tower
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
-                encoder_token_counts.append(num_tokens)
                 connector_token_counts.append(lora_token_counts.connector)
 
                 if lora_id > 0:
@@ -2990,6 +2997,11 @@ class GPUModelRunner(
                     connector_mapping,
                 )
 
+        sequential_lora_modalities = getattr(
+            self.model,
+            "requires_mm_lora_sequential_encoding",
+            (),
+        )
         encoder_outputs: list[torch.Tensor] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
@@ -2999,6 +3011,11 @@ class GPUModelRunner(
             pin_memory=self.pin_memory,
         ):
             batch_outputs: MultiModalEmbeddings
+            requires_lora_sequential_encoding = (
+                self.lora_config
+                and self.lora_manager.supports_tower_connector_lora()
+                and modality in sequential_lora_modalities
+            )
 
             # EVS and dynamic res video related change.
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
@@ -3016,19 +3033,21 @@ class GPUModelRunner(
                 (
                     self.is_multimodal_pruning_enabled
                     or self.requires_sequential_video_encoding
+                    or requires_lora_sequential_encoding
                 )
                 and modality == "video"
                 and num_items > 1
-            ):
+            ) or (requires_lora_sequential_encoding and num_items > 1):
                 batch_outputs_lst = list[torch.Tensor]()
-                for video_idx in range(num_items):
-                    video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
+                for item_idx in range(num_items):
+                    mm_kwargs_item = mm_kwargs[current_item_idx + item_idx]
                     with self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_item_idx + video_idx, 1
+                        should_time, mm_lora_refs, current_item_idx + item_idx, 1
                     ):
+                        set_mm_lora_mapping(current_item_idx + item_idx, 1)
                         _, _, micro_batch_mm_inputs = next(
                             group_and_batch_mm_kwargs(
-                                [video_mm_kwargs_item],
+                                [mm_kwargs_item],
                                 device=self.device,
                                 pin_memory=self.pin_memory,
                             )
@@ -3053,6 +3072,7 @@ class GPUModelRunner(
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
+                    set_mm_lora_mapping(current_item_idx, num_items)
                     cudagraph_output = None
                     if (
                         self.encoder_cudagraph_manager is not None
