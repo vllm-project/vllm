@@ -42,7 +42,8 @@ def get_eagle3_aux_layers_from_config(
     if not layer_ids:
         dflash_config = getattr(hf_config, "dflash_config", None)
         if dflash_config and isinstance(dflash_config, dict):
-            layer_ids = dflash_config.get("target_layer_ids")
+            # Add 1 to convert DFlash's aux layer id semantics
+            layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
     if layer_ids and isinstance(layer_ids, (list, tuple)):
         return tuple(layer_ids)
     return None

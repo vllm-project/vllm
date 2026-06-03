@@ -5,18 +5,16 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
-    init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
@@ -25,76 +23,29 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 
 logger = init_logger(__name__)
 
 
-class DFlashSpeculator:
+class DFlashSpeculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        self.vllm_config = vllm_config
-        self.device = device
+        super().__init__(vllm_config, device)
 
-        self.speculative_config = vllm_config.speculative_config
-        assert self.speculative_config is not None
-        self.method = self.speculative_config.method
-        self.num_speculative_steps = self.speculative_config.num_speculative_tokens
-        self.draft_model_config = self.speculative_config.draft_model_config
+        self.hidden_states = torch.zeros(
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+        )
 
-        self.scheduler_config = vllm_config.scheduler_config
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = vllm_config.model_config.max_model_len
-        # We need to get the hidden size from the draft model config because
-        # the draft model's hidden size can be different from the target model's
-        # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
-        self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.dtype = vllm_config.model_config.dtype
-        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
-
-        # DP configuration
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        # Multimodal inputs not currently supported.
+        self.supports_mm_inputs = False
 
         # Each request emits exactly (bonus + N mask) query tokens per step.
         self.num_query_per_req = 1 + self.num_speculative_steps
         self.max_query_tokens = self.max_num_reqs * self.num_query_per_req
 
-        # Parallel drafting mask token id used for the speculative slots.
-        draft_hf_config = self.draft_model_config.hf_config
-        dflash_config = getattr(draft_hf_config, "dflash_config", None) or {}
-        if "mask_token_id" in dflash_config:
-            self.parallel_drafting_token_id = int(dflash_config["mask_token_id"])
-        elif hasattr(draft_hf_config, "pard_token"):
-            self.parallel_drafting_token_id = int(draft_hf_config.pard_token)
-        elif hasattr(draft_hf_config, "ptd_token_id"):
-            self.parallel_drafting_token_id = int(draft_hf_config.ptd_token_id)
-        else:
-            raise ValueError(
-                "DFlash draft model config must specify `dflash_config.mask_token_id`,"
-                " `pard_token`, or `ptd_token_id`."
-            )
-
-        self.input_buffers = InputBuffers(
-            max_num_reqs=self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
-            device=device,
-        )
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
-        )
-        self.idx_mapping = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
-        self.temperature = torch.zeros(
-            self.max_num_reqs, dtype=torch.float32, device=device
-        )
-        self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
-        self.draft_tokens = torch.zeros(
-            self.max_num_reqs,
-            self.num_speculative_steps,
-            dtype=torch.int64,
-            device=device,
+        self.parallel_drafting_token_id = get_parallel_drafting_token_id(
+            self.draft_model_config.hf_config
         )
 
         # Buffers for context K/V precomputation. Populated by prepare_dflash_inputs,
@@ -124,33 +75,11 @@ class DFlashSpeculator:
             self.num_speculative_steps, dtype=torch.int32, device=device
         ).repeat(self.max_num_reqs)
 
-        self.arange = torch.arange(
-            self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
-        )
-
-        self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=torch.float32,
-                device=device,
-            )
-
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
 
-        # Multimodal inputs not currently supported.
-        self.supports_mm_inputs = False
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
-
-        # PIECEWISE cudagraphs are not supported for dflash draft forwards.
-        # PIECEWISE pads num_tokens to the next capture size without padding
-        # num_reqs, which can cause attention backends to read past the
-        # valid per-request metadata (e.g. FlashInfer's kv_indptr buffer).
+        # PIECEWISE cudagraphs are not supported for dflash
         if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         else:
@@ -163,21 +92,30 @@ class DFlashSpeculator:
             decode_query_len=self.num_query_per_req,
         )
 
-    def load_model(self, target_model: nn.Module) -> None:
-        target_attn_layer_names = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        ).keys()
-
-        self.model = load_dflash_model(target_model, self.vllm_config)
-
-        all_attn_layers = get_layers_from_vllm_config(
-            self.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-        ).keys()
-        self.draft_attn_layer_names = set(all_attn_layers) - set(
-            target_attn_layer_names
+    def capture(self, attn_states: dict | None = None) -> None:
+        logger.info("Capturing model for DFlash speculator...")
+        # Reset sampling indices to zero to prevent stale values from prior
+        # dummy runs from being baked into the captured graph.
+        self.sample_indices.zero_()
+        self.sample_pos.zero_()
+        self.sample_idx_mapping.zero_()
+        assert self.query_cudagraph_manager is not None
+        self.query_cudagraph_manager.capture(
+            self._generate_draft,
+            self.input_buffers,
+            self.block_tables,
+            self.attn_groups,
+            self.kv_cache_config,
+            self.max_model_len,
+            progress_bar_desc="Capturing dflash CUDA graphs",
         )
+
+    def load_draft_model(
+        self,
+        target_model: nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> nn.Module:
+        return load_dflash_model(target_model, self.vllm_config)
 
     def set_attn(
         self,
@@ -185,15 +123,7 @@ class DFlashSpeculator:
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
     ) -> None:
-        self.model_state = model_state
-        self.kv_cache_config = kv_cache_config
-        self.attn_groups, _, _ = init_attn_backend(
-            kv_cache_config,
-            self.vllm_config,
-            self.device,
-            active_layer_names=self.draft_attn_layer_names,
-        )
-        self.block_tables = block_tables
+        super().set_attn(model_state, kv_cache_config, block_tables)
 
         # DFlash precomputes context K/V with a single block_size; mixing
         # kv-cache groups would silently corrupt the cache for the non-matching group.
@@ -208,7 +138,7 @@ class DFlashSpeculator:
         ]
 
     @torch.inference_mode()
-    def run_model(
+    def _run_model(
         self,
         num_tokens: int,
         attn_metadata: dict[str, Any] | None,
@@ -233,31 +163,36 @@ class DFlashSpeculator:
             )
         return last_hidden_states
 
-    def _sample_draft(self, logits: torch.Tensor, num_reqs: int) -> torch.Tensor:
-        num_sample = num_reqs * self.num_speculative_steps
-        idx_mapping = self.sample_idx_mapping[:num_sample]
-        pos = self.sample_pos[:num_sample]
-        if self.draft_logits is not None:
-            # Pass a column index for each token so we can safely sample multiple tokens
-            # per request in a single kernel call
-            col = self.sample_col[:num_sample]
+    def sample_draft(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_step: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+    ) -> torch.Tensor:
+        logits = self.model.compute_logits(hidden_states)
+        if draft_logits is not None:
             # NOTE: We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
+            # used for draft and target sampling. draft_step is a per-token
+            # column tensor so we can sample all mask tokens in one kernel call.
             return gumbel_sample(
                 logits,
                 idx_mapping,
-                self.temperature,
-                self.seeds,
-                pos + 1,
+                temperature,
+                seeds,
+                positions + 1,
                 apply_temperature=True,
-                output_processed_logits=self.draft_logits,
-                output_processed_logits_col=col,
+                output_processed_logits=draft_logits,
+                output_processed_logits_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
         else:
             return logits.argmax(dim=-1)
 
-    def generate_draft(
+    def _generate_draft(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -266,7 +201,7 @@ class DFlashSpeculator:
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        last_hidden_states = self.run_model(
+        last_hidden_states = self._run_model(
             num_tokens_padded,
             attn_metadata,
             slot_mappings,
@@ -276,8 +211,15 @@ class DFlashSpeculator:
 
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
-        logits = self.model.compute_logits(sample_hidden_states)
-        draft_tokens = self._sample_draft(logits, num_reqs)
+        draft_tokens = self.sample_draft(
+            sample_hidden_states,
+            self.sample_pos[:num_sample],
+            self.sample_idx_mapping[:num_sample],
+            self.temperature,
+            self.seeds,
+            self.sample_col[:num_sample],
+            self.draft_logits,
+        )
         self.draft_tokens[:num_reqs] = draft_tokens.view(
             num_reqs, self.num_speculative_steps
         )
@@ -312,29 +254,13 @@ class DFlashSpeculator:
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=self.num_query_per_req,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-            max_seq_len=self.max_model_len,
+            max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=False,
         )
         return attn_metadata
-
-    def capture(self, attn_states: dict | None = None) -> None:
-        # attn_states is the target's captured attention metadata, unused by
-        # DFlash because the draft uses its own non-causal attention backend.
-        del attn_states
-        logger.info("Capturing model for DFlash speculator...")
-        assert self.query_cudagraph_manager is not None
-        self.query_cudagraph_manager.capture(
-            self.generate_draft,
-            self.input_buffers,
-            self.block_tables,
-            self.attn_groups,
-            self.kv_cache_config,
-            self.max_model_len,
-            progress_bar_desc="Capturing dflash CUDA graphs",
-        )
 
     @torch.inference_mode()
     def propose(
@@ -367,13 +293,15 @@ class DFlashSpeculator:
         num_reqs = input_batch.num_reqs
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
+        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        self.draft_max_seq_len = min(
+            max_seq_len + self.num_query_per_req, self.max_model_len
+        )
 
-        # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
-        # number of rejected tokens, we maintain the size of eagle's input_ids and
+        # NOTE: To avoid CPU-GPU synchronization without CPU knowing the
+        # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
-        # request's query length to include any rejected positions. By doing so,
-        # we can also reuse the attention metadata (e.g., query_start_loc,
-        # seq_lens) of the target model.
+        # request's query length to include any rejected positions.
         if aux_hidden_states:
             hidden_states = self.model.combine_hidden_states(
                 torch.cat(aux_hidden_states, dim=-1)
@@ -382,14 +310,12 @@ class DFlashSpeculator:
             hidden_states = last_hidden_states
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
 
-        # NOTE(woosuk): For draft sampling, we only consider the temperature
-        # and ignore the other sampling parameters such as top_k and top_p,
-        # for simplicity and performance.
-        # While this may slightly degrade the acceptance rate, it does not
-        # affect the output distribution after rejection sampling.
-        self.temperature.copy_(temperature)
-        self.seeds.copy_(seeds)
-        self.idx_mapping[:num_reqs].copy_(input_batch.idx_mapping)
+        self._copy_request_inputs(
+            num_reqs,
+            input_batch.idx_mapping,
+            temperature,
+            seeds,
+        )
 
         if dummy_run and skip_attn_for_dummy_run:
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
@@ -399,7 +325,7 @@ class DFlashSpeculator:
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
-            self.generate_draft(
+            self._generate_draft(
                 num_reqs,
                 num_query_tokens,
                 attn_metadata=None,
@@ -477,7 +403,7 @@ class DFlashSpeculator:
             assert self.query_cudagraph_manager is not None
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
         else:
-            self.generate_draft(
+            self._generate_draft(
                 num_reqs_padded,
                 num_tokens_padded,
                 draft_attn_metadata,
