@@ -397,9 +397,15 @@ endif()
 #
 # _C extension
 #
+set(VLLM_CPU_FLA_SRC "csrc/cpu/sgl-kernels/fla.cpp")
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    message(STATUS "Using RISC-V CPU FLA stubs")
+    set(VLLM_CPU_FLA_SRC "csrc/cpu/sgl-kernels/fla_stub.cpp")
+endif()
+
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
-    "csrc/cpu/sgl-kernels/fla.cpp"
+    ${VLLM_CPU_FLA_SRC}
     "csrc/cpu/utils.cpp"
     "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
