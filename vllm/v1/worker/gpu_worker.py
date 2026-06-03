@@ -526,7 +526,7 @@ class Worker(WorkerBase):
         if mm_config is None or mm_config.mm_ipc_gpu_memory_gb <= 0:
             return available_kv_cache_memory_bytes
 
-        reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * (1 << 30))
+        reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
         remaining = available_kv_cache_memory_bytes - reserved_bytes
         if remaining <= 0:
             raise ValueError(

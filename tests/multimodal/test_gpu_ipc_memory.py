@@ -7,12 +7,12 @@ import time
 import pytest
 
 from vllm.multimodal.gpu_ipc_memory import (
-    GiB_bytes,
     MultiModalGPUMemoryPool,
     get_mm_gpu_ipc_pool,
     maybe_init_mm_gpu_ipc_pool,
     set_mm_gpu_ipc_pool,
 )
+from vllm.utils.mem_constants import GiB_bytes
 
 
 def test_acquire_release_accounting():
@@ -126,5 +126,15 @@ def test_global_pool_accessor():
         assert pool is not None
         assert get_mm_gpu_ipc_pool() is pool
         assert pool.total_bytes == 2 * GiB_bytes
+    finally:
+        set_mm_gpu_ipc_pool(None)
+
+
+def test_global_pool_splits_budget_across_api_processes():
+    try:
+        pool = maybe_init_mm_gpu_ipc_pool(2, api_process_count=4)
+        assert pool is not None
+        assert get_mm_gpu_ipc_pool() is pool
+        assert pool.total_bytes == GiB_bytes // 2
     finally:
         set_mm_gpu_ipc_pool(None)
