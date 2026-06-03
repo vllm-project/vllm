@@ -39,6 +39,7 @@ develop-eggs/
 dist/
 downloads/
 /.hf_downloads/
+/.p550_web_server.pid
 eggs/
 .eggs/
 lib/
