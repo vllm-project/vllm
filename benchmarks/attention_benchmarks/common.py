@@ -223,7 +223,9 @@ class ModelParameterSweep:
     def get_label(self, backend: str, value: Any) -> str:
         """Generate a label for a specific parameter value."""
         if isinstance(value, dict):
-            return self.label_format.format(backend=backend, value=value, **value)
+            return self.label_format.format(
+                backend=backend, param_name=self.param_name, value=value, **value
+            )
         return self.label_format.format(
             backend=backend, param_name=self.param_name, value=value
         )
@@ -232,8 +234,10 @@ class ModelParameterSweep:
         """Apply a sweep value to config args."""
         if isinstance(value, dict):
             config_args.update(value)
-        else:
+        elif self.param_name is not None:
             config_args[self.param_name] = value
+        else:
+            raise ValueError("param_name must be set if sweep values are not dicts")
 
 
 @dataclass

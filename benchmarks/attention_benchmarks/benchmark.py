@@ -581,31 +581,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Re-exec under ncu if --ncu-profile and not already inside ncu.
-    if args.ncu_profile and "_NCU_INNER" not in os.environ:
-        ncu = shutil.which("ncu")
-        if ncu is None:
-            print("Error: 'ncu' not found in PATH", file=sys.stderr)
-            sys.exit(1)
-        cmd = [
-            ncu,
-            "--profile-from-start",
-            "off",
-            "--set",
-            "full",
-            "--import-source",
-            "yes",
-            "-o",
-            args.ncu_output,
-            sys.executable,
-            *sys.argv,
-        ]
-        env = os.environ.copy()
-        env["CUTE_DSL_LINEINFO"] = "1"
-        env["_NCU_INNER"] = "1"
-        print(f"Launching: {' '.join(cmd)}")
-        sys.exit(subprocess.call(cmd, env=env))
-
     console = Console()
     console.print("[bold cyan]vLLM Attention Benchmark[/]")
 
@@ -727,6 +702,32 @@ def main():
                 args.output_json = output["json"]
 
         console.print()
+
+    # Re-exec under ncu if --ncu-profile and not already inside ncu. This runs
+    # after YAML processing so ncu_profile set via config file is honored.
+    if args.ncu_profile and "_NCU_INNER" not in os.environ:
+        ncu = shutil.which("ncu")
+        if ncu is None:
+            print("Error: 'ncu' not found in PATH", file=sys.stderr)
+            sys.exit(1)
+        cmd = [
+            ncu,
+            "--profile-from-start",
+            "off",
+            "--set",
+            "full",
+            "--import-source",
+            "yes",
+            "-o",
+            args.ncu_output,
+            sys.executable,
+            *sys.argv,
+        ]
+        env = os.environ.copy()
+        env["CUTE_DSL_LINEINFO"] = "1"
+        env["_NCU_INNER"] = "1"
+        print(f"Launching: {' '.join(cmd)}")
+        sys.exit(subprocess.call(cmd, env=env))
 
     # Handle CLI-based parameter sweep (if not from YAML)
     if (

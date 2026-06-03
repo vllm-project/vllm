@@ -215,9 +215,12 @@ def _create_backend_impl(
 
     scale = get_attention_scale(config.head_dim)
 
-    # Set v_head_dim for diff-headdim backends
-    if config.v_head_dim is not None and hasattr(backend_class, "set_head_size_v"):
-        backend_class.set_head_size_v(config.v_head_dim)
+    # Set v_head_dim for diff-headdim backends. Always reset (defaulting to
+    # head_dim) so a prior run's value doesn't leak into this one via the
+    # backend's class-level state.
+    if hasattr(backend_class, "set_head_size_v"):
+        v_dim = config.v_head_dim if config.v_head_dim is not None else config.head_dim
+        backend_class.set_head_size_v(v_dim)
 
     impl = backend_class.get_impl_cls()(
         num_heads=config.num_q_heads,
