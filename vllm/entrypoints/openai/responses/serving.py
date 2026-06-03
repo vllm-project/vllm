@@ -1415,6 +1415,7 @@ class OpenAIServingResponses(OpenAIServing):
                     delta_token_ids=delta_token_ids,
                     request=request,
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
+                    finished=output.finish_reason is not None,
                 )
             else:
                 delta_message = DeltaMessage(content=output.text)
