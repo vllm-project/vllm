@@ -1206,7 +1206,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
     "OmniAsrForConditionalGeneration": _HfExamplesInfo(
-        "facebook/omniASR-LLM-300M",
+        "ziywang50/omniASR-LLM-300M",
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",

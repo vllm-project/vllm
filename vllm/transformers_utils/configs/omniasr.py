@@ -158,7 +158,8 @@ class OmniASRConfig(PretrainedConfig):
             text_config = text_config.copy()
             text_config.setdefault("architectures", ["LlamaForCausalLM"])
             text_config = LlamaConfig(**text_config)
-        self.text_config: LlamaConfig = text_config
+        assert isinstance(text_config, LlamaConfig)
+        self.text_config = text_config
         self.projection_dim = projection_dim or self.text_config.hidden_size
         self.lang_embeddings_p = lang_embeddings_p
         self.n_special_tokens = n_special_tokens

@@ -18,6 +18,7 @@ from vllm.inputs import (
     PromptType,
     TokensPrompt,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -26,7 +27,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -60,11 +60,11 @@ from .interfaces import (
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 from .whisper import ISO639_1_SUPPORTED_LANGS
 
+logger = init_logger(__name__)
 MAX_AUDIO_CLIP_S = 40
-WARMUP_AUDIO_SAMPLES = 16000
 SAMPLING_RATE_HZ = 16000
 NORMALIZATION_EPS = 1e-7
-PLACEHOLDER_TOKEN_ID = 1
+PAD_TOKEN_ID = 1
 BOS_TOKEN_ID = 0
 
 # ISO->Omniasr code mapping for common languages.
@@ -117,6 +117,24 @@ def _resolve_lang_id(lang: str | None, model_id: str, n_special: int) -> int:
             f"Use ISO-639-1 (e.g., 'en') or OmniASR native code (e.g., 'eng_Latn')."
         )
     return table[omniasr_code] + n_special
+
+
+def _permute_q_k_for_neox(w, num_heads):
+    """Permute Q/K weights from GPT-J to NeoX RoPE convention.
+
+    Per-head: take rows at even positions first, then rows at odd positions.
+    This makes vLLM's default NeoX RoPE produce output mathematically
+    equivalent to the original GPT-J RoPE.
+    """
+    out_dim = w.shape[0]
+    head_dim = out_dim // num_heads
+    rest_shape = w.shape[1:]
+
+    return (
+        w.view(num_heads, head_dim // 2, 2, *rest_shape)
+        .transpose(1, 2)
+        .reshape(out_dim, *rest_shape)
+    )
 
 
 class OmniASRModel(nn.Module):
@@ -212,6 +230,14 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             layer_norm = nn.LayerNorm(out_ch)
             self.layers.append(nn.ModuleDict({"conv": conv, "layer_norm": layer_norm}))
             in_ch = out_ch
+        for layer in self.layers:
+            conv = layer["conv"]
+            if conv.padding[0] != 0 or conv.dilation[0] != 1:
+                raise ValueError(
+                    f"Wav2Vec2FeatureExtractor.compute_seq_len assumes "
+                    f"padding=0/dilation=1; got padding={conv.padding[0]}, "
+                    f"dilation={conv.dilation[0]}"
+                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -493,28 +519,29 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
     ) -> BatchFeature:
         data = {}
         hf_config = self.info.get_hf_config()
-        audios = []
-        if mm_data:
-            audios = mm_data.get("audios", [])
-            mm_kwargs = dict(
-                **mm_kwargs,
-                sampling_rate=hf_config.sampling_rate,
+        if not mm_data.get("audios", []):
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False
             )
-            language = mm_kwargs.get("language")
-            lang_id = _resolve_lang_id(
-                language,
-                self.info.ctx.model_config.model,
-                hf_config.n_special_tokens,
-            )
-            data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
-        if isinstance(audios, list) and len(audios) > 0:
-            features = []
-            for a in audios:
-                t = torch.tensor(a, dtype=torch.float32)
-                t = (t - t.mean()) / torch.sqrt(t.var() + NORMALIZATION_EPS)
-                features.append(t)
-        else:
-            features = [torch.zeros(WARMUP_AUDIO_SAMPLES, dtype=torch.float32)]
+            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+        audios = mm_data.get("audios", [])
+        mm_kwargs = dict(
+            **mm_kwargs,
+            sampling_rate=hf_config.sampling_rate,
+        )
+        language = mm_kwargs.get("language")
+        lang_id = _resolve_lang_id(
+            language,
+            self.info.ctx.model_config.model,
+            hf_config.n_special_tokens,
+        )
+        data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
+        features = []
+        for a in audios:
+            t = torch.tensor(a, dtype=torch.float32)
+            t = (t - t.mean()) / torch.sqrt(t.var() + NORMALIZATION_EPS)
+            features.append(t)
 
         tokenizer = self.info.get_tokenizer()
         if isinstance(prompt, str):
@@ -610,6 +637,16 @@ class OmniAsrForConditionalGeneration(
         super().__init__()
         config: OmniASRConfig = vllm_config.model_config.hf_config
         self.config = config
+        if config.pad_token_id != PAD_TOKEN_ID:
+            raise ValueError(
+                f"OmniASR requires pad_token_id={PAD_TOKEN_ID}, "
+                f"got {config.pad_token_id}"
+            )
+        if config.bos_token_id != BOS_TOKEN_ID:
+            raise ValueError(
+                f"OmniASR requires bos_token_id={BOS_TOKEN_ID}, "
+                f"got {config.bos_token_id}"
+            )
         self.model_id = vllm_config.model_config.model
         quant_config = vllm_config.quant_config
         with self._mark_tower_model(vllm_config, "audio"):
@@ -696,35 +733,6 @@ class OmniAsrForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.final_proj, hidden_states)
 
-    def _fix_rope_style(self):
-        """OmniASR's reference uses GPT-J (interleaved) RoPE; vLLM defaults to NeoX.
-        OmniASR was trained with fairseq2's RotaryEncoder, which uses
-        interleaved RoPE (rotating adjacent dim pairs: i and i+1).
-        vLLM's LlamaForCausalLM defaults to NeoX style (rotating split
-        halves: i and i+head_dim/2).
-
-        Without this fix, layer outputs diverge ~50% from reference,
-        producing garbled transcriptions despite bit-exact Q/K/V projection
-        weights.
-
-        Pattern follows vllm-omni FishSpeech precedent
-        """
-
-        for layer in self.language_model.model.layers:
-            attn = layer.self_attn
-            head_dim = attn.head_dim
-            max_position = self.config.text_config.max_position_embeddings
-            rope_params = getattr(self.config.text_config, "rope_scaling", None) or {}
-            rope_params.setdefault(
-                "rope_theta", getattr(self.config.text_config, "rope_theta", 10000.0)
-            )
-            attn.rotary_emb = get_rope(
-                head_size=head_dim,
-                max_position=max_position,
-                is_neox_style=False,
-                rope_parameters=rope_params,
-            )
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         def transform(inputs):
             name, loaded_weight = inputs
@@ -741,6 +749,14 @@ class OmniAsrForConditionalGeneration(
                 name = name.replace(".ffn.inner_proj", ".mlp.up_proj")
                 name = name.replace(".ffn.output_proj", ".mlp.down_proj")
                 name = name.replace(".ffn.gate_proj", ".mlp.gate_proj")
+
+                if ".self_attn.q_proj" in name:
+                    num_heads = self.config.text_config.num_attention_heads
+                    loaded_weight = _permute_q_k_for_neox(loaded_weight, num_heads)
+                elif ".self_attn.k_proj" in name:
+                    num_heads = self.config.text_config.num_key_value_heads
+                    loaded_weight = _permute_q_k_for_neox(loaded_weight, num_heads)
+
             elif name.startswith("text_frontend"):
                 name = name.replace(
                     "text_frontend", "language_model.model.embed_tokens"
@@ -755,7 +771,6 @@ class OmniAsrForConditionalGeneration(
 
         loader = AutoWeightsLoader(self)
         result = loader.load_weights(map(transform, weights))
-        self._fix_rope_style()
         return result
 
     @classmethod
@@ -781,7 +796,7 @@ class OmniAsrForConditionalGeneration(
         language = stt_params.language
         mm_kwargs = {"language": language} if language else {}
         return TokensPrompt(
-            prompt_token_ids=[PLACEHOLDER_TOKEN_ID, BOS_TOKEN_ID],
+            prompt_token_ids=[PAD_TOKEN_ID, BOS_TOKEN_ID],
             multi_modal_data={"audio": (audio, stt_config.sample_rate)},
             mm_processor_kwargs=mm_kwargs,
         )
