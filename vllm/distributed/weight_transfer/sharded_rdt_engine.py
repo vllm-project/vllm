@@ -9,13 +9,16 @@ defer materialization. The placeholders intercept a whitelisted set of
 view/slice ops into a single ordered op chain; the actual transfer happens
 in one batched RPC per layer via ``LayerReloadingInfo.pre_replay_hook`` —
 the trainer replays the chain on its live parameter and ships only the
-resulting slice.
+resulting slice. With ``payload_batch=True`` the per-layer processing is
+deferred so the whole ``update_weights`` payload is fetched in a single RPC
+instead of one per layer.
 
 Only valid with ``is_checkpoint_format=True`` (layerwise reload). See
 ``sharded_weight_loader_rdt.md`` for the full design and the spike in
 ``nixl_slice_spike.py`` confirming NIXL is view-aware.
 """
 
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -88,12 +91,25 @@ class _FetchPlan:
         ``copy_`` materializes each lazy by issuing one single-tensor RPC
         right then. Simpler control flow at the cost of one round-trip per
         slice instead of one per layer.
+
+    When ``payload_batch`` is True:
+        Like ``layerwise_batch`` for the *recording* of chains into ``needed``,
+        but no per-layer hook is installed. Layerwise processing is deferred
+        until after ``load_weights`` returns, at which point the engine calls
+        ``drain`` once for the whole payload (a single RPC) and then runs the
+        deferred per-layer processing, which pops from ``results``.
     """
 
     produce_method: Any = None
     needed: set[FetchKey] = field(default_factory=set)
     results: dict[FetchKey, torch.Tensor] = field(default_factory=dict)
     layerwise_batch: bool = True
+    payload_batch: bool = False
+
+    # Timing instrumentation: cumulative wall-clock seconds spent in the
+    # NIXL pull (the trainer RPC + transfer) and the number of pulls issued.
+    pull_seconds: float = 0.0
+    pull_calls: int = 0
 
     def drain(self, info: "LayerReloadingInfo | None" = None) -> None:
         """Single batched RPC for every chain pass 1 recorded.
@@ -109,7 +125,10 @@ class _FetchPlan:
         needed = list(self.needed)
         import ray
 
+        _t0 = time.perf_counter()
         tensors = ray.get(self.produce_method.remote(needed))
+        self.pull_seconds += time.perf_counter() - _t0
+        self.pull_calls += 1
         if len(tensors) != len(needed):
             raise RuntimeError(
                 f"Trainer returned {len(tensors)} tensors for {len(needed)} "
@@ -230,7 +249,7 @@ class LazyRDTTensor(torch.Tensor):
             #      the miss surfaces in tests.
             #   2. layerwise_batch=False — the per-copy RPC IS the design.
             #      Silent.
-            if self._fetch_plan.layerwise_batch:
+            if self._fetch_plan.layerwise_batch or self._fetch_plan.payload_batch:
                 logger.warning(
                     "LazyRDTTensor %r falling back to single-tensor RPC "
                     "(chain=%s); pre_replay_hook missed this key.",
@@ -268,11 +287,13 @@ class LazyRDTTensor(torch.Tensor):
                     # copy_ fire so layerwise's `CopyCounter` (a
                     # TorchDispatchMode) still counts the numel -- otherwise
                     # `info.load_numel` stays at 0 and `_layerwise_process`
-                    # is never triggered, so the hook never fires and no
-                    # weights are fetched. When batching is disabled, skip
+                    # is never triggered, so the slice is never fetched.
+                    # Record under both layerwise_batch (per-layer drain via
+                    # the hook) and payload_batch (one explicit drain at the
+                    # end of receive_weights). When both are disabled, skip
                     # the record: there's no drain that would consume it.
                     assert src._fetch_plan is not None
-                    if src._fetch_plan.layerwise_batch:
+                    if src._fetch_plan.layerwise_batch or src._fetch_plan.payload_batch:
                         src._fetch_plan.needed.add(src._key())
                     meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
                     with torch._C.DisableTorchFunctionSubclass():
@@ -403,7 +424,30 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     single-tensor RPC — simpler control flow at the cost of one round-trip
     per slice instead of one per layer. The trainer-side producer signature
     is identical in both modes (a list of specs); batched mode just sends
-    larger lists less often."""
+    larger lists less often. Ignored when ``payload_batch`` is True."""
+
+    payload_batch: bool = False
+    """Coalesce *all* slice fetches for one ``update_weights`` payload into a
+    single RPC. When True, layerwise processing is deferred until after
+    ``model.load_weights`` returns; the engine then issues one batched RPC for
+    the whole payload and runs the deferred per-layer processing. Takes
+    precedence over ``layerwise_batch``. The trainer-side producer signature is
+    unchanged (a list of specs).
+
+    Tradeoff: every slice for the payload is resident on the worker GPU at the
+    moment of the single transfer (vs. one layer's worth with
+    ``layerwise_batch``). Bound peak memory by chunking ``update_weights``
+    calls on the trainer side."""
+
+    warmup_method_name: str | None = None
+    """Optional trainer-side method that returns a tiny tensor over NIXL,
+    used to prime the worker->trainer NIXL connection during
+    ``init_transfer_engine`` so the first real ``update_weights`` doesn't pay
+    the one-time agent/connection-setup latency. Must be decorated with
+    ``@ray.method(tensor_transport="nixl")`` and take no required args; its
+    result is fetched and discarded. If None (default), no warmup is done.
+    The warmup must run on the worker (the NIXL consumer) since the connection
+    is per consumer/producer pair."""
 
 
 @dataclass
@@ -461,7 +505,10 @@ class ShardedRDTWeightTransferEngine(
         ``__torch_dispatch__`` and should fall back to backend='rdt'.
 
     Set ``init_info.layerwise_batch=False`` to disable the layer-boundary
-    batching and issue one RPC per slice.
+    batching and issue one RPC per slice. Set ``init_info.payload_batch=True``
+    to instead coalesce the entire ``update_weights`` payload into a single RPC
+    (defers per-layer processing until after ``load_weights`` returns); this
+    trades higher peak memory for fewer round-trips.
     """
 
     init_info_cls = ShardedRDTWeightTransferInitInfo
@@ -474,10 +521,12 @@ class ShardedRDTWeightTransferEngine(
         self._trainer_actor: Any | None = None
         self._produce_method: Any | None = None
         self._layerwise_batch: bool = True
+        self._payload_batch: bool = False
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
         self._layerwise_batch = init_info.layerwise_batch
+        self._payload_batch = init_info.payload_batch
         try:
             import ray
         except ImportError as e:
@@ -516,13 +565,36 @@ class ShardedRDTWeightTransferEngine(
             init_info.produce_method_name,
         )
 
+        # Optional NIXL warmup: prime the worker->trainer NIXL connection now
+        # so the first real update_weights doesn't eat the one-time
+        # agent/connection-setup latency (~seconds on the first transfer).
+        # The pull MUST be initiated here, on the worker, because the NIXL
+        # connection is established per consumer (this worker) / producer
+        # (trainer) pair -- a driver-side call would not warm up this path.
+        if init_info.warmup_method_name is not None:
+            warmup_method = getattr(self._trainer_actor, init_info.warmup_method_name)
+            t0 = time.perf_counter()
+            _ = ray.get(warmup_method.remote())
+            del _
+            logger.info(
+                "Sharded RDT engine warmed up NIXL connection via %r in %.3fs",
+                init_info.warmup_method_name,
+                time.perf_counter() - t0,
+            )
+
     def receive_weights(
         self,
         update_info: ShardedRDTWeightTransferUpdateInfo,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
-        """Drive ``model.load_weights`` with lazy placeholders, batching
-        each layer's slice fetches into one RPC via the pre-replay hook."""
+        """Drive ``model.load_weights`` with lazy placeholders, fetching the
+        slices each worker consumes.
+
+        Default (``layerwise_batch``): one RPC per layer, issued at the layer
+        boundary via the pre-replay hook. With ``payload_batch`` the per-layer
+        processing is deferred so all of the payload's slices are fetched in a
+        single RPC after ``load_weights`` returns.
+        """
         if self._produce_method is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
@@ -535,6 +607,8 @@ class ShardedRDTWeightTransferEngine(
         # (matches the lazy-loading the factory already does).
         from vllm.model_executor.model_loader.reload.layerwise import (
             LAYERWISE_INFO,
+            deferred_layerwise_processing,
+            run_deferred_layer_processing,
         )
 
         layerwise_infos = [info for info in LAYERWISE_INFO.values() if info.can_load()]
@@ -548,29 +622,19 @@ class ShardedRDTWeightTransferEngine(
         plan = _FetchPlan(
             produce_method=self._produce_method,
             layerwise_batch=self._layerwise_batch,
+            payload_batch=self._payload_batch,
         )
-
-        # Save/restore so we don't permanently mutate global LAYERWISE_INFO
-        # state if a caller later reuses these infos with a different engine.
-        # In non-batching mode we still walk the infos (and save empties) so
-        # the finally-clause is symmetric — installing nothing, restoring
-        # nothing.
-        saved_hooks: list[tuple[Any, Any]] = []
-        if self._layerwise_batch:
-            for info in layerwise_infos:
-                saved_hooks.append((info, info.pre_replay_hook))
-                info.pre_replay_hook = plan.drain
 
         # The worker has already entered `with torch.device(self.device):`
         # before calling receive_weights, so torch.empty's device is the
         # correct GPU for this worker.
         device = torch.empty(0).device
 
-        try:
-            # The base ``load_weights`` callable is typed as taking a
-            # ``list``, and LazyRDTTensors are zero-storage so the upfront
-            # materialization here is just a few object allocations.
-            lazy_weights: list[tuple[str, torch.Tensor]] = [
+        def build_lazy_weights() -> list[tuple[str, torch.Tensor]]:
+            # The base ``load_weights`` callable is typed as taking a ``list``,
+            # and LazyRDTTensors are zero-storage so building them upfront is
+            # just a few object allocations.
+            return [
                 (
                     name,
                     LazyRDTTensor(
@@ -587,10 +651,81 @@ class ShardedRDTWeightTransferEngine(
                     update_info.shapes,
                 )
             ]
-            load_weights(lazy_weights)
+
+        _t_recv = time.perf_counter()
+        process_seconds = 0.0
+
+        if self._payload_batch:
+            # Defer every layer's processing until load_weights has recorded
+            # all chains, then fetch the whole payload in one RPC and run the
+            # deferred processing (each layer pops its slices from plan.results
+            # and frees them as it goes). No per-layer hook is installed: the
+            # explicit drain covers every recorded chain, including attention
+            # and partial layers finalized later in finish_weight_update.
+            with deferred_layerwise_processing() as deferred:
+                load_weights(build_lazy_weights())
+                plan.drain()
+                _t_proc = time.perf_counter()
+                run_deferred_layer_processing(deferred)
+                process_seconds = time.perf_counter() - _t_proc
+            self._log_timing(
+                "payload", plan, time.perf_counter() - _t_recv, process_seconds
+            )
+            return
+
+        # Per-layer (or per-copy) mode. Save/restore so we don't permanently
+        # mutate global LAYERWISE_INFO state if a caller later reuses these
+        # infos with a different engine. In non-batching mode we still walk the
+        # infos (and save empties) so the finally-clause is symmetric —
+        # installing nothing, restoring nothing.
+        saved_hooks: list[tuple[Any, Any]] = []
+        if self._layerwise_batch:
+            for info in layerwise_infos:
+                saved_hooks.append((info, info.pre_replay_hook))
+                info.pre_replay_hook = plan.drain
+
+        try:
+            load_weights(build_lazy_weights())
         finally:
             for info, prior in saved_hooks:
                 info.pre_replay_hook = prior
+        mode = "layer" if self._layerwise_batch else "none"
+        self._log_timing(mode, plan, time.perf_counter() - _t_recv, process_seconds)
+
+    @staticmethod
+    def _log_timing(
+        mode: str, plan: "_FetchPlan", total_seconds: float, process_seconds: float
+    ) -> None:
+        """Log a one-line timing summary for one ``receive_weights`` call.
+
+        ``pull_seconds`` isolates the NIXL transfer from the surrounding
+        layerwise record/materialize/quantize work; in per-layer mode the pull
+        is interleaved with processing so only the total is meaningful for the
+        non-pull portion.
+        """
+        logger.info(
+            "[RDT-TIMING] receive_weights mode=%s total=%.4fs nixl_pull=%.4fs "
+            "(%d pull%s) deferred_process=%.4fs",
+            mode,
+            total_seconds,
+            plan.pull_seconds,
+            plan.pull_calls,
+            "" if plan.pull_calls == 1 else "s",
+            process_seconds,
+        )
+        # vLLM workers run in an EngineCore subprocess whose logs are not
+        # streamed to the driver; optionally append the timing to a file so
+        # benchmarks can read the pull/process split deterministically.
+        import os
+
+        timing_file = os.environ.get("VLLM_RDT_TIMING_FILE")
+        if timing_file:
+            with open(timing_file, "a") as f:
+                f.write(
+                    f"mode={mode} total={total_seconds:.4f} "
+                    f"nixl_pull={plan.pull_seconds:.4f} pull_calls={plan.pull_calls} "
+                    f"deferred_process={process_seconds:.4f}\n"
+                )
 
     def shutdown(self) -> None:
         self._trainer_actor = None

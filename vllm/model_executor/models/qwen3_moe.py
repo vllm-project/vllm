@@ -23,8 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
@@ -87,6 +86,38 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _build_expert_mapping(
+    model: nn.Module,
+    num_experts: int,
+    num_redundant_experts: int,
+) -> list[tuple[str, str, int, str]]:
+    """Return the expert weight mapping consumed by FusedMoE.load_weights.
+
+    Combines the per-expert mapping (experts.<i>.{gate_proj,up_proj,down_proj})
+    with three aliases for HF's fused-MoE checkpoint layout (transformers
+    >= v5, and any v4 checkpoint re-saved with save_original_format=False):
+    experts.gate_up_proj of shape (E, 2*I, H) and experts.down_proj of
+    shape (E, H, I). For the fused aliases expert_id is repurposed as
+    shard_idx (0=gate, 1=up) by FusedMoE.load_weights' dim()==3 branch.
+    See vllm/model_executor/models/transformers/moe.py for the same
+    pattern.
+    """
+    per_expert_mapping = fused_moe_make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name="gate_proj",
+        ckpt_down_proj_name="down_proj",
+        ckpt_up_proj_name="up_proj",
+        num_experts=num_experts,
+        num_redundant_experts=num_redundant_experts,
+    )
+    fused_mapping = [
+        ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+        ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+        ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+    ]
+    return per_expert_mapping + fused_mapping
 
 
 class Qwen3MoeMLP(nn.Module):
@@ -221,6 +252,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            expert_mapping=_build_expert_mapping(
+                self, self.n_routed_experts, self.n_redundant_experts
+            ),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -517,15 +551,9 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
+        return _build_expert_mapping(
+            self, self.config.num_experts, self.num_redundant_experts
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -551,6 +579,7 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        expert_weight_substrings = {w for _, w, _, _ in expert_params_mapping}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -606,68 +635,38 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
+                if any(w in name for w in expert_weight_substrings):
+                    # Expert weight — delegate to the layer's FusedMoE, which
+                    # knows how to dispatch both per-expert (2-D) and HF-fused
+                    # (3-D) checkpoint layouts via its dim()==3 chunk-and-unbind
+                    # branch. FusedMoE.load_weights expects expert_name s.t.
+                    # f"{layer_name}.{expert_name}" contains a mapping's
+                    # weight_name substring; the part after ".experts." in the
+                    # iterator name is what we want (AutoWeightsLoader has
+                    # already stripped the outer "model." prefix here).
+                    # Parse the layer index by structure rather than
+                    # extract_layer_index() — per-expert names contain two
+                    # integers (layer id + expert id) which trips that helper.
+                    layer_idx = int(name.split(".", 2)[1])
+                    fused_moe = self.layers[layer_idx].mlp.experts
+                    _, _, expert_name = name.partition(".experts.")
+                    for inner in fused_moe.load_weights([(expert_name, loaded_weight)]):
+                        loaded_params.add(f"{fused_moe.layer_name}.{inner}")
+                    # If FusedMoE yielded nothing the expert isn't on this rank
+                    # (silent skip, matching the previous behavior).
+                    continue
 
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
-                    is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
-                    name_mapped = name.replace(weight_name, param_name)
-
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if (
-                        name_mapped.endswith(ignore_suffixes)
-                        and name_mapped not in params_dict
-                    ):
-                        continue
-
-                    param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        # We've checked that this is an expert weight
-                        # However it's not mapped locally to this rank
-                        # So we simply skip it
-                        continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                # Skip loading extra parameters for GPTQ/modelopt models.
+                if name.endswith(ignore_suffixes) and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

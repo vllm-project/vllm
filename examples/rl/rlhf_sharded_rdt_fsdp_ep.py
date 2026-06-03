@@ -45,6 +45,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 import uuid
 from dataclasses import asdict
 
@@ -73,12 +74,22 @@ MODEL_NAME = "Qwen/Qwen3-30B-A3B"
 TRAINER_ACTOR_NAME = "sharded_rdt_fsdp_trainer"
 RAY_NAMESPACE = "sharded_rdt_fsdp_example"
 
+# Profiling knob: RDT_PAYLOAD_BATCH=1 -> coalesce the whole update_weights
+# payload into one RPC (defer all per-layer processing); 0 (default) -> the
+# default layerwise_batch path (one RPC per layer via the pre_replay_hook).
+PAYLOAD_BATCH = os.environ.get("RDT_PAYLOAD_BATCH", "0") == "1"
+
+# RDT_WARMUP=1 -> prime the per-worker NIXL connection during
+# init_weight_transfer_engine (via the trainer's rdt_warmup method) so the
+# first real update_weights doesn't pay the one-time connection-setup cost.
+WARMUP = os.environ.get("RDT_WARMUP", "0") == "1"
+
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
 INFERENCE_DP_SIZE = 4
-# vLLM workers in the inference EP group; each one will call
-# produce_method once per layer. Used by the rank-0 cache refcount so
-# a non-expert param is popped only after every worker has consumed it.
+# vLLM workers in the inference EP group; each one calls
+# rdt_produce_weights_batched once per layer. Used only to size the actor
+# threadpool (one concurrent produce call per worker, plus gather).
 NUM_INFERENCE_CONSUMERS = INFERENCE_TP_SIZE * INFERENCE_DP_SIZE
 
 
@@ -143,9 +154,9 @@ def _layerwise_groups(names: list[str]) -> list[list[str]]:
 # AND -- on rank 0 -- the concurrent ``rdt_produce_weights_batched`` calls
 # from the 4 vLLM workers on separate threads in the actor's threadpool.
 # (We'd need 1 + NUM_INFERENCE_CONSUMERS = 5 slots; 8 gives headroom.)
-# Concurrent produce_method calls are safe because the cache uses per-name
-# reference counting — a non-expert param stays resident until every
-# consumer has popped it.
+# Concurrent produce calls are read-only against the cache, so they need no
+# locking beyond the gather/free synchronization: the driver frees a layer
+# group only after its update_weights has fully drained.
 @ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
 class FSDPTrainWorker:
     """One FSDP2 training worker per GPU.
@@ -163,15 +174,9 @@ class FSDPTrainWorker:
         fsdp_world_size: int,
         fsdp_master_addr: str,
         fsdp_master_port: int,
-        num_consumers: int = 1,
     ):
         self.rank = rank
         self.world_size = fsdp_world_size
-        # Number of vLLM workers that will call rdt_produce_weights_batched.
-        # Determines the initial refcount for non-expert params (they're
-        # pulled by every consumer); expert params start at refcount 1
-        # because only the EP-owning rank pulls them.
-        self._num_consumers = num_consumers
 
         os.environ["MASTER_ADDR"] = fsdp_master_addr
         os.environ["MASTER_PORT"] = str(fsdp_master_port)
@@ -202,36 +207,35 @@ class FSDPTrainWorker:
         self._param_lookup = dict(model.named_parameters())
 
         # Cache of gathered full tensors. Only meaningful on rank 0.
-        # Filled one layer at a time by ``gather_layer``; produce reads
-        # from here. Guarded by _cache_cond so the produce thread can
-        # block on "key not yet gathered."
+        # Filled one layer group at a time by ``gather_layer``; read by
+        # ``rdt_produce_weights_batched``; dropped a whole group at a time by
+        # ``free_group``. Guarded by _cache_cond so a produce thread can block
+        # on "key not yet gathered." No per-name refcounting: the driver frees
+        # a group only after its ``update_weights`` has fully drained, which
+        # guarantees every inference worker has already pulled every slice it
+        # needs from that group (including its EP-local slice of each fused
+        # expert tensor, which all ranks pull from the same name).
         self._cache: dict[str, torch.Tensor] = {}
-        # Per-name reference count. Initialized at gather time to the
-        # number of consumers that will pull this name (NUM_CONSUMERS for
-        # non-expert params, 1 for expert params). Decremented on each
-        # produce_method call; the cache entry is popped when it hits 0.
-        # Necessary because non-expert params are pulled by EVERY DP/EP
-        # worker — popping after the first consumer would starve the
-        # others and deadlock.
-        self._refcount: dict[str, int] = {}
         self._cache_cond = threading.Condition()
         # Set if any gather_layer call errors; produce_method consults
         # this so workers don't hang waiting on a layer that will never
         # arrive.
         self._gather_error: BaseException | None = None
 
-    @staticmethod
-    def _expected_consumers_for_name(name: str, num_consumers: int) -> int:
-        """How many produce_method calls will reference this name.
-
-        MoE expert params are sharded across EP ranks — only one inference
-        worker pulls each expert's full tensor. Everything else
-        (embeddings, attention, layer norms, lm_head) is pulled by every
-        inference worker.
-        """
-        if ".mlp.experts." in name:
-            return 1
-        return num_consumers
+        # ---- Trainer-side profiling counters (rank 0 only) ----
+        # Guarded by its own lock because rdt_produce_weights_batched runs
+        # concurrently on the actor threadpool (up to NUM_INFERENCE_CONSUMERS
+        # threads). Each produce call records: time waiting on the gather
+        # cache (should be ~0 since the driver gathers before firing
+        # update_weights), time replaying op chains + cloning slices (the
+        # "slicing" cost we want to isolate from transport), the byte volume
+        # of the produced slices, and call/spec counts.
+        self._timing_lock = threading.Lock()
+        self._produce_calls = 0
+        self._produce_specs = 0
+        self._produce_wait_seconds = 0.0
+        self._produce_slice_seconds = 0.0
+        self._produce_bytes = 0
 
     def get_rank(self):
         return self.rank
@@ -247,25 +251,21 @@ class FSDPTrainWorker:
         Every FSDP rank must call this with the SAME ``names`` in the SAME
         ORDER — ``full_tensor()`` is a collective and per-rank divergence
         deadlocks the group. Rank 0 stores each gathered tensor in
-        ``self._cache`` with an appropriate refcount; ranks 1-3 release
-        the gathered tensor immediately (they participated only so the
-        collective could complete).
+        ``self._cache``; ranks 1-3 release the gathered tensor immediately
+        (they participated only so the collective could complete).
 
         Backpressure between layers is implicit in the driver loop: the
-        driver awaits the previous ``update_weights`` future before
-        firing the next layer's ``gather_layer`` and ``update_weights``,
-        so at most two layers are ever resident in ``self._cache`` at
-        once.
+        driver awaits (and frees) the previous ``update_weights`` future
+        before firing the next layer's ``update_weights``, so at most two
+        layer groups are ever resident in ``self._cache`` at once.
         """
         try:
             for name in names:
                 param = self._param_lookup[name]
                 full = param.full_tensor()
                 if self.rank == 0:
-                    rc = self._expected_consumers_for_name(name, self._num_consumers)
                     with self._cache_cond:
                         self._cache[name] = full
-                        self._refcount[name] = rc
                         self._cache_cond.notify_all()
                 else:
                     del full
@@ -278,6 +278,18 @@ class FSDPTrainWorker:
     # ---------- RDT serve (rank 0 only) ----------
 
     @ray.method(tensor_transport="nixl")
+    def rdt_warmup(self):
+        """Return a tiny tensor over NIXL to prime the connection.
+
+        Called once per inference worker during init_weight_transfer_engine.
+        Independent of the gather cache (which is empty at init time), so it
+        only exercises the NIXL agent/connection setup between this trainer
+        and the calling worker -- absorbing the one-time first-transfer
+        latency before the timed weight sync. A 1-element tensor is enough to
+        force the connection handshake."""
+        return torch.zeros(1, device="cuda:0")
+
+    @ray.method(tensor_transport="nixl")
     def rdt_produce_weights_batched(self, specs):
         """Serve a batched slice request from vLLM.
 
@@ -285,13 +297,17 @@ class FSDPTrainWorker:
         driver will have called ``gather_layer`` on the owning group
         before firing the ``update_weights`` that triggers this RPC).
         Applies each chain to the cached full tensor, clones to a slice-
-        sized contiguous buffer for NIXL, returns the list. Once the
-        response is built, the named entries are refcount-decremented
-        and popped from the cache when their count hits zero.
+        sized contiguous buffer for NIXL, and returns the list.
+
+        This is a pure read of the cache — entries are freed separately by
+        ``free_group`` once the whole group's ``update_weights`` has drained,
+        so concurrent produce calls from different EP workers never race each
+        other (each clones a different slice out of the same cached tensor).
         """
         assert self.rank == 0
         needed = sorted({name for name, _ in specs})
 
+        _t_wait0 = time.perf_counter()
         with self._cache_cond:
             while not all(n in self._cache for n in needed):
                 if self._gather_error is not None:
@@ -300,8 +316,18 @@ class FSDPTrainWorker:
                         f"{self._gather_error!r}"
                     )
                 self._cache_cond.wait()
+        wait_seconds = time.perf_counter() - _t_wait0
 
+        # Time the slice production: replaying each op chain (pure views,
+        # cheap) plus the contiguous clone (the real GPU work — a fresh
+        # allocation + copy that NIXL then ships). cuda.synchronize() before
+        # stopping the clock so the clones' async GPU time is actually
+        # captured rather than just the enqueue cost; this is the "slicing"
+        # the trainer does, isolated from the NIXL transport that happens
+        # after this method returns (during the worker's ray.get).
+        _t_slice0 = time.perf_counter()
         out: list[torch.Tensor] = []
+        nbytes = 0
         for name, chain in specs:
             tensor = self._cache[name]
             for op_name, args, kwargs_items in chain:
@@ -312,22 +338,48 @@ class FSDPTrainWorker:
                     )
                 kwargs = dict(kwargs_items)
                 tensor = getattr(tensor, op_name)(*args, **kwargs)
-            out.append(tensor.clone(memory_format=torch.contiguous_format))
+            sl = tensor.clone(memory_format=torch.contiguous_format)
+            out.append(sl)
+            nbytes += sl.element_size() * sl.nelement()
+        torch.cuda.synchronize()
+        slice_seconds = time.perf_counter() - _t_slice0
 
-        # Decrement refcount for each consumed name; pop from cache only
-        # when refcount hits 0 (i.e. every consumer has pulled this name).
-        # Concurrent produce_method calls from other consumers are safe
-        # because the cache_cond is held during refcount mutation, and
-        # each call only decrements names it actually consumed.
-        with self._cache_cond:
-            for name in needed:
-                self._refcount[name] -= 1
-                if self._refcount[name] <= 0:
-                    self._cache.pop(name, None)
-                    self._refcount.pop(name, None)
-            self._cache_cond.notify_all()
+        with self._timing_lock:
+            self._produce_calls += 1
+            self._produce_specs += len(specs)
+            self._produce_wait_seconds += wait_seconds
+            self._produce_slice_seconds += slice_seconds
+            self._produce_bytes += nbytes
 
         return out
+
+    def get_produce_timing(self) -> dict:
+        """Return accumulated rank-0 produce-side timing for profiling."""
+        with self._timing_lock:
+            return {
+                "calls": self._produce_calls,
+                "specs": self._produce_specs,
+                "wait_seconds": self._produce_wait_seconds,
+                "slice_seconds": self._produce_slice_seconds,
+                "bytes": self._produce_bytes,
+            }
+
+    def free_group(self, names: list[str]) -> None:
+        """Drop a layer group's gathered full tensors from the rank-0 cache.
+
+        Called by the driver only AFTER ``engine.update_weights`` for this
+        group has completed. That await is the synchronization point: it
+        guarantees every inference worker has finished pulling all of its
+        slices for the group (``update_weights`` does not return until each
+        worker's ``load_weights`` — and thus every ``copy_`` that issues an
+        RDT pull — has run), so the full tensors are safe to release. This
+        replaces per-name refcounting with a single per-layer free.
+        """
+        if self.rank != 0:
+            return
+        with self._cache_cond:
+            for name in names:
+                self._cache.pop(name, None)
 
 
 def create_async_engine(**kwargs):
@@ -370,7 +422,17 @@ async def main():
     }
     if forwarded:
         runtime_env["env_vars"] = forwarded
-    ray.init(runtime_env=runtime_env, namespace=RAY_NAMESPACE)
+    # On an Anyscale workspace a Ray head node is already running, and
+    # ``RAY_OVERRIDE_RESOURCES`` pins object_store_memory to the full /dev/shm
+    # size. Attach to that managed cluster rather than starting a fresh node
+    # (a fresh start trips Ray's "object store exceeds /dev/shm" guard, and
+    # object_store_memory must not be passed when connecting to an existing
+    # cluster).
+    ray.init(
+        address="auto",
+        runtime_env=runtime_env,
+        namespace=RAY_NAMESPACE,
+    )
 
     local_model_path = snapshot_download(MODEL_NAME)
     print(f"[init] Model downloaded to {local_model_path}")
@@ -379,9 +441,6 @@ async def main():
     fsdp_master_port = get_open_port()
 
     # Rank 0 is the named RDT trainer actor; vLLM workers resolve it by name.
-    # All ranks need num_consumers so they apply identical refcount math
-    # (only rank 0 actually uses it, but passing it uniformly keeps the
-    # constructor signature consistent).
     fsdp_workers = []
     for rank in range(FSDP_WORLD_SIZE):
         common_args = (
@@ -390,7 +449,6 @@ async def main():
             FSDP_WORLD_SIZE,
             fsdp_master_addr,
             fsdp_master_port,
-            NUM_INFERENCE_CONSUMERS,
         )
         if rank == 0:
             handle = FSDPTrainWorker.options(name=TRAINER_ACTOR_NAME).remote(
@@ -436,17 +494,25 @@ async def main():
         print("-" * 60)
 
     # ---- Weight transfer ----
-    print("[sync] Initializing sharded RDT engine on vLLM workers...")
+    print(
+        f"[sync] Initializing sharded RDT engine on vLLM workers "
+        f"(warmup={'on' if WARMUP else 'off'})..."
+    )
+    _init_t0 = time.perf_counter()
     await engine.init_weight_transfer_engine(
         WeightTransferInitRequest(
             init_info=asdict(
                 ShardedRDTWeightTransferInitInfo(
                     trainer_actor_name=TRAINER_ACTOR_NAME,
                     trainer_actor_namespace=RAY_NAMESPACE,
+                    payload_batch=PAYLOAD_BATCH,
+                    warmup_method_name="rdt_warmup" if WARMUP else None,
                 )
             )
         )
     )
+    _init_seconds = time.perf_counter() - _init_t0
+    print(f"[sync] init_weight_transfer_engine took {_init_seconds:.3f} s")
 
     names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
     print(f"[sync] {len(names)} parameters to transfer.")
@@ -483,7 +549,9 @@ async def main():
     # drained, so the rank-0 cache holds at most two layers worth of
     # full tensors at any given moment.
     print("[sync] Driving per-layer gather + update_weights...")
+    _sync_t0 = time.perf_counter()
     prev_task: asyncio.Task | None = None
+    prev_names: list[str] | None = None
     for group_names in layer_groups:
         # Build this group's update_info from the captured metadata.
         group_info = ShardedRDTWeightTransferUpdateInfo(
@@ -502,6 +570,12 @@ async def main():
         # actors -- that's the gather/transport overlap.
         if prev_task is not None:
             await prev_task
+            # The previous group's update_weights has fully drained, so every
+            # inference worker has pulled all of its slices for that group.
+            # Free the whole group from the rank-0 cache in one shot — no
+            # per-name refcounting needed. This keeps peak rank-0 resident
+            # memory bounded to ~two layer groups.
+            ray.get(fsdp_workers[0].free_group.remote(prev_names))
 
         # Now make sure this layer's gather has actually completed
         # before we fire update_weights for it (the producer would
@@ -516,11 +590,52 @@ async def main():
                 WeightTransferUpdateRequest(update_info=asdict(group_info))
             )
         )
+        prev_names = group_names
 
     if prev_task is not None:
         await prev_task
+        # Free the final group now that its update_weights has drained.
+        ray.get(fsdp_workers[0].free_group.remote(prev_names))
 
     await engine.finish_weight_update()
+    _sync_seconds = time.perf_counter() - _sync_t0
+
+    # ---- Profiling summary ----
+    # Trainer-side (rank 0): time spent producing slices (op-chain replay +
+    # contiguous clone, GPU-synced) vs. waiting on the gather cache. The NIXL
+    # transport itself happens AFTER rdt_produce_weights_batched returns, in
+    # Ray's tensor-transport layer during each worker's ray.get, so it does
+    # NOT show up in slice_seconds. The worker-side timing file
+    # (VLLM_RDT_TIMING_FILE) records each worker's observed nixl_pull (=
+    # trainer slice + transport + RPC overhead) and deferred_process; the gap
+    # between worker nixl_pull and trainer slice_seconds is the transport.
+    ptiming = ray.get(fsdp_workers[0].get_produce_timing.remote())
+    gib = ptiming["bytes"] / (1024**3)
+    slice_s = ptiming["slice_seconds"]
+    print("=" * 60)
+    print(
+        f"[profile] MODE = {'PAYLOAD-BATCH' if PAYLOAD_BATCH else 'LAYERWISE-BATCH'}"
+        f"  warmup={'ON' if WARMUP else 'OFF'}"
+    )
+    print(f"[profile] init_weight_transfer_engine : {_init_seconds:.3f} s")
+    print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
+    print(f"[profile] init + sync                 : {_init_seconds + _sync_seconds:.3f} s")
+    print(f"[profile] trainer produce calls       : {ptiming['calls']}")
+    print(f"[profile] trainer specs (slices) total: {ptiming['specs']}")
+    print(f"[profile] trainer gather-cache wait    : {ptiming['wait_seconds']:.3f} s")
+    print(f"[profile] trainer slice+clone (synced) : {slice_s:.3f} s")
+    print(f"[profile] bytes produced (rank0)       : {gib:.3f} GiB")
+    if slice_s > 0:
+        print(
+            f"[profile] slice throughput (clone)     : "
+            f"{gib / slice_s:.1f} GiB/s"
+        )
+    print(
+        "[profile] NOTE: NIXL transport time is the worker nixl_pull MINUS "
+        "this trainer slice time; see VLLM_RDT_TIMING_FILE for the worker side."
+    )
+    print("=" * 60)
+
     print("[sync] Resuming generation...")
     await engine.resume_generation()
 
