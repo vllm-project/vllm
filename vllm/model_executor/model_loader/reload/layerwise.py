@@ -388,10 +388,16 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     kernel tensor references on the layer. Preserves cudagraph references."""
     assert info.kernel_tensors is not None
     parameters, buffers = info.kernel_tensors
+    loaded_tensor_names = {name for name, _ in info.loaded_weights}
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
         if name not in layer._buffers:
+            continue
+        if (
+            name in layer._non_persistent_buffers_set
+            and name not in loaded_tensor_names
+        ):
             continue
         buffer.data.copy_(getattr(layer, name))
 
@@ -399,6 +405,7 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
 
 
 def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
+    non_persistent_buffers = set(layer._non_persistent_buffers_set)
     for name in get_layer_tensors(layer):
         delattr(layer, name)
 
@@ -407,4 +414,8 @@ def _place_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     for name, param in parameters.items():
         layer.register_parameter(name, param)
     for name, buffer in buffers.items():
-        layer.register_buffer(name, buffer)
+        layer.register_buffer(
+            name,
+            buffer,
+            persistent=name not in non_persistent_buffers,
+        )
