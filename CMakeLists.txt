@@ -144,14 +144,14 @@ endif()
 # Set up GPU language and check the torch version and warn if it isn't
 # what is expected.
 #
-if (NOT HIP_FOUND AND CUDA_FOUND)
+if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
   if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
-elseif(HIP_FOUND)
+elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   set(VLLM_GPU_LANG "HIP")
 
   # Importing torch recognizes and sets up some HIP/ROCm configuration but does
@@ -633,6 +633,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
+    "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+    "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
     "csrc/libtorch_stable/quantization/gguf/gguf_kernel.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
@@ -657,8 +659,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
       "csrc/libtorch_stable/permute_cols.cu"
-      "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
 
     set_gencode_flags_for_srcs(
