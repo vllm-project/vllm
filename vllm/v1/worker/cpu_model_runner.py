@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheLayout
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -123,6 +123,40 @@ class CPUModelRunner(GPUModelRunner):
         with _set_global_compilation_settings(self.vllm_config):
             self.profile_run()
         logger.info("Warming up done.")
+
+    def _allocate_and_reshape_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
+        layout: KVCacheLayout = KVCacheLayout.LBHNC,
+    ) -> dict[str, torch.Tensor]:
+        # Re-view the interleaved K|V content dim as separate head groups so
+        # the backend can slice contiguous per-head K/V:
+        # [num_blocks, num_kv_heads, block_size, 2*head_size] ->
+        # [num_blocks, 2*num_kv_heads, block_size, head_size]. Assumes
+        # content == 2*head_size (true for all CPU attention specs; MLA, which
+        # differs, isn't supported).
+        kv_caches = super()._allocate_and_reshape_kv_cache(
+            kv_cache_config,
+            kernel_block_sizes,
+            layout=KVCacheLayout.LBHNC,
+        )
+        attn_layers = {
+            name
+            for group in self._kv_cache_spec_attn_group_iterator()
+            if isinstance(group.kv_cache_spec, AttentionSpec)
+            for name in group.layer_names
+        }
+        for name in attn_layers:
+            cache = kv_caches.get(name)
+            if cache is None:
+                continue
+            num_blocks, num_kv_heads, block_size, content = cache.shape
+            assert cache.is_contiguous() and content % 2 == 0
+            kv_caches[name] = cache.view(
+                num_blocks, 2 * num_kv_heads, block_size, content // 2
+            )
+        return kv_caches
 
     def initialize_kv_cache(
         self,

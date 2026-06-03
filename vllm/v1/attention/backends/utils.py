@@ -8,7 +8,6 @@ from typing import (
     Any,
     Literal,
     Protocol,
-    get_args,
 )
 
 import numpy as np
@@ -17,7 +16,11 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
-from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheLayout,
+    KVCacheSpec,
+    MambaSpec,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -38,51 +41,87 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
-KVCacheLayoutType = Literal["NHD", "HND"]
+
+# Deprecated: use resolve_kv_cache_layout() instead (RFC #42082).
+KVCacheLayoutType = Literal["LBNHC", "LBHNC", "BLHNC", "BHLNC"]
 _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
 
 
+_LAYOUT_COMPAT_ALIASES = {
+    "NHD": "LBNHC",
+    "HND": "LBHNC",
+    "NHC": "LBNHC",
+    "HNC": "LBHNC",
+}
+_FLASHINFER_LAYOUT_NAMES = {"LBNHC": "NHD", "LBHNC": "HND"}
+
+
 def is_valid_kv_cache_layout(value: str) -> bool:
-    return value in get_args(KVCacheLayoutType)
+    return value in KVCacheLayout.__members__ or value in _LAYOUT_COMPAT_ALIASES
+
+
+def get_flashinfer_layout_string() -> str:
+    """Return the layout name in FlashInfer's convention (NHD/HND)."""
+    name = resolve_kv_cache_layout().name
+    return _FLASHINFER_LAYOUT_NAMES.get(name, name)
+
+
+def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
+    """Override the KV cache layout (for tests and platform constraints)."""
+    global _KV_CACHE_LAYOUT_OVERRIDE
+    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
+    resolve_kv_cache_layout.cache_clear()
 
 
 @functools.lru_cache
-def get_kv_cache_layout():
-    # Format specified by the code.
-    global _KV_CACHE_LAYOUT_OVERRIDE
+def resolve_kv_cache_layout(
+    attn_backends: tuple[type[AttentionBackend], ...] | None = None,
+) -> KVCacheLayout:
+    """Resolve the physical KV cache layout from the config priority chain.
 
-    cache_layout: Literal["NHD", "HND"] | None = None
+    Priority:
+      1. Runtime override (set_kv_cache_layout, used by tests)
+      2. VLLM_KV_CACHE_LAYOUT env var (user override)
+      3. Connector's get_required_kvcache_layout() preference
+      4. "LBHNC" fallback
+    """
+    global _KV_CACHE_LAYOUT_OVERRIDE
+    layout_name: str | None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.info_once(
-            "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
-            "Setting KV cache layout to %s.",
-            cache_layout,
-        )
-        return cache_layout
-
-    # Format specified by the user.
-    cache_layout = envs.VLLM_KV_CACHE_LAYOUT
-    # When neither the user nor the override specified a layout, get default
-    if cache_layout is None:
-        cache_layout = get_kv_connector_cache_layout()
+        layout_name = _KV_CACHE_LAYOUT_OVERRIDE
     else:
-        assert is_valid_kv_cache_layout(cache_layout)
-        logger.info_once(
-            "`VLLM_KV_CACHE_LAYOUT` environment variable "
-            "detected. Setting KV cache layout to %s.",
-            cache_layout,
-        )
-    return cache_layout
+        layout_name = envs.VLLM_KV_CACHE_LAYOUT
 
+        if layout_name is None and attn_backends is not None:
+            required_layouts = set(
+                backend.get_required_kv_cache_layout() for backend in attn_backends
+            )
+            required_layouts.discard(None)
+            if len(required_layouts) > 1:
+                raise ValueError(
+                    f"Multiple required KV cache layouts: {required_layouts}. "
+                    f"All backends must use the same layout."
+                )
+            if len(required_layouts) == 1:
+                layout_name = required_layouts.pop()
 
-def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
-    global _KV_CACHE_LAYOUT_OVERRIDE
-    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    get_kv_cache_layout.cache_clear()
+        if layout_name is None:
+            layout_name = get_kv_connector_cache_layout()
+
+        layout_name = layout_name or "LBHNC"
+    layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
+    try:
+        layout = KVCacheLayout[layout_name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown KV cache layout {layout_name!r}. "
+            f"Valid layouts: {[m.name for m in KVCacheLayout]}"
+        ) from None
+    logger.info_once("Resolved KV cache layout: %s", layout)
+    return layout
 
 
 @dataclass

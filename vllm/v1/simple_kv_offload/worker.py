@@ -80,15 +80,8 @@ class SimpleCPUOffloadWorker:
             logger.warning("No KV caches to offload.")
             return
 
-        # Resolve each entry to a representative tensor for storage
-        # deduplication. For attention layers the value is already a tensor;
-        # for Mamba layers it is a list of tensors that all share the same
-        # underlying raw storage, so we take the first one.
-        def _repr_tensor(v: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
-            assert isinstance(v, torch.Tensor | list)
-            return v if isinstance(v, torch.Tensor) else v[0]
-
-        any_tensor = _repr_tensor(next(iter(kv_caches.values())))
+        any_tensor = next(iter(kv_caches.values()))
+        assert isinstance(any_tensor, torch.Tensor)
         self.device = any_tensor.device
 
         assert self.kv_cache_config is not None
@@ -97,7 +90,8 @@ class SimpleCPUOffloadWorker:
         # Deduplicate: multiple layers may share the same backing storage.
         seen_ptrs: dict[int, tuple[str, torch.Tensor]] = {}
         for name, value in kv_caches.items():
-            tensor = _repr_tensor(value)
+            assert isinstance(value, torch.Tensor)
+            tensor = value
             ptr = tensor.untyped_storage().data_ptr()
             if ptr not in seen_ptrs:
                 seen_ptrs[ptr] = (name, tensor)
@@ -105,13 +99,11 @@ class SimpleCPUOffloadWorker:
         # Build [num_blocks, block_bytes] int8 views from each unique
         # storage so that stride(0) gives block_bytes for the copy op.
         #
-        # The physical layout varies across attention backends:
-        #   FlashAttn/ROCm:  (2, num_blocks, ...) -> K/V outermost, 2 segments
-        #   FlashInfer/MLA:  (num_blocks, ...)    -> blocks outermost, 1 segment
-        # We derive page_size_bytes = storage.nbytes() // num_blocks, then
-        # classify dims: any dim whose byte-stride exceeds page_size_bytes
-        # must be an outer segment dim (e.g. the K/V dim of size 2). A less
-        # hacky way is to update the interface with the layout.
+        # With standardized layouts (RFC #42082) num_blocks is always the
+        # leading logical dim, but cross-layer physical layouts
+        # (e.g. BLHNC) interleave layers between blocks, inflating the
+        # block stride.  Detect any such outer segment dims by comparing
+        # byte-strides against page_size_bytes.
         unique_gpu_caches: dict[str, torch.Tensor] = {}
         for name, tensor in seen_ptrs.values():
             storage = tensor.untyped_storage()

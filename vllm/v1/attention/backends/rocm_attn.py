@@ -29,7 +29,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
-    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -128,6 +127,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
         use_cascade = common_prefix_len > 0
 
+        prefix_scheduler_metadata = None
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -238,18 +238,6 @@ class RocmAttentionBackend(AttentionBackend):
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
         )
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -376,7 +364,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -467,43 +455,18 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+        kv_cache_transposed = kv_cache.transpose(1, 2)
+        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        triton_reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
         )
-
-        # Reshape the input keys and values and store them in the cache.
-        # Get the actual block_size from value_cache
-        # value_cache shape: [num_blocks, num_heads, head_size, block_size]
-        block_size = value_cache.shape[3]
-        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-
-        if block_size in (16, 32) and has_native_layout:
-            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-        else:
-            # Non-standard blocks and hybrid attention/Mamba layouts need the
-            # stride-aware Triton writer. The native reshape_and_cache kernel
-            # assumes contiguous block storage and writes to the wrong hybrid
-            # cache blocks.
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
@@ -522,12 +485,12 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
+        kv_cache_transposed = kv_cache.transpose(1, 2)
+        key_cache, value_cache = kv_cache_transposed.split(
+            self.head_size,
+            dim=-1,
         )
-        flash_layout = False
+        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:

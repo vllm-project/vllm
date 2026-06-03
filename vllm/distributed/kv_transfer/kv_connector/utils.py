@@ -10,18 +10,20 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -32,19 +34,18 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
-    # used for faster transfer.
-    vllm_config = get_current_vllm_config()
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout
+    # is used for faster transfer.
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
     kv_config = vllm_config.kv_transfer_config
     if kv_config is not None:
         connector_cls = KVConnectorFactory.get_connector_class(kv_config)
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(vllm_config)
         if required_kvcache_layout is not None:
             return required_kvcache_layout
-        logger.info_once(
-            "Connectors do not specify a kv cache layout, defaulting to NHD."
-        )
-    return "NHD"
+    return None
 
 
 class KVOutputAggregator:
@@ -279,11 +280,11 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """
-    Transforms the layout of received KV cache to the local block_size and HND.
-    (Only works for local blocksize > remote blocksize)
+    Transforms the layout of received KV cache to the local block_size
+    and LBHNC. (Only works for local blocksize > remote blocksize)
 
-    prefill is HND, smaller block_size
-    decode(local) is NHD, larger block_size
+    prefill is LBHNC, smaller block_size
+    decode(local) is LBNHC, larger block_size
     """
     blocks_to_update = cache.index_select(0, indices)
 
@@ -408,43 +409,12 @@ class TransferTopology:
 
         self._engines: dict[EngineId, EngineTransferInfo] = {}
 
-        # Figure out whether the first dimension of the cache is K/V
-        # or num_blocks.
-        attn_backend = self.attn_backends[0]
-        if not self.is_mamba:
-            _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
-                num_blocks=1,
-                block_size=_MOCK_BLOCK_SIZE,
-                num_kv_heads=1,
-                head_size=1,
-            )
-            logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
+        # Cross-layer layouts (BLHNC) have B outermost, so all layers
+        # for a block are contiguous — transfers can coalesce multiple
+        # layers into one operation.
+        from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
-        self._cross_layers_blocks = False
-        if self.tensor_shape is not None:
-            self._cross_layers_blocks = (
-                len(self.tensor_shape) == len(kv_cache_shape) + 1
-            )
-
-        if self._cross_layers_blocks:
-            logger.debug("Using cross-layer KV cache")
-            _MOCK_NUM_LAYERS = 80
-            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                assert self.tensor_shape is not None
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        self._is_kv_layout_blocks_first = not resolve_kv_cache_layout().is_layer_compact
 
     # ============================================================
     # Engine registration
@@ -479,26 +449,6 @@ class TransferTopology:
     @property
     def is_kv_layout_blocks_first(self) -> bool:
         return self._is_kv_layout_blocks_first
-
-    @property
-    def cross_layers_blocks(self) -> bool:
-        return self._cross_layers_blocks
-
-    @property
-    def virtually_split_kv_in_blocks(self) -> bool:
-        # Whether to logically split each block into K and V halves.
-        # Applies when K/V are interleaved within each block (blocks-first),
-        # but NOT when cross-layer blocks are used — cross-layer blocks have
-        # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
-        # simple half-split does not separate K from V.
-        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
-
-    @property
-    def split_k_and_v(self) -> bool:
-        # Whether to register regions for K and V separately (when present).
-        return not (
-            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
-        )
 
     # ============================================================
     # Common methods
@@ -570,31 +520,6 @@ class TransferTopology:
         # remote TP > local TP: read from |tp_ratio| remote workers
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
-
-    def get_transfer_cache_regions(
-        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
-    ) -> list[torch.Tensor] | torch.Tensor:
-        """Return the cache tensor(s) to register as NIXL memory regions,
-        also accounting for hybrid SSM models specificities.
-        """
-        if isinstance(layer_spec, MambaSpec):
-            # Register the whole kv cache shared tensor, including
-            # SSM/Conv.
-            conv, ssm = cache
-            return [conv]
-
-        # Check may be hacky but it's matching
-        # `_update_hybrid_attention_mamba_layout`.
-        if self.is_mamba and cache.shape[0] == 2:
-            # When MAMBA is present, all backends are blocks first, so
-            # that blocks can be shared between attention layers and mamba
-            # layers.  Runner already adjusted strides for FlashAttn-like
-            # backends so its num_blocks first.
-            # Swap [2<>num_blocks] dims for hybrid SSM layout.
-            cache = cache.transpose(0, 1)
-
-        # Regular case: backends like FA register K/V in separate regions
-        return cache if self.split_k_and_v else [cache]
 
     def describe(self, remote_engine_id: EngineId) -> str:
         """One-line summary of transfer config for logging."""

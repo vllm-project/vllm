@@ -1,36 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Unit tests for reshape_kv_cache."""
+
+import pytest
+import torch
+
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    compute_layer_kv_cache_shape_bytes,
+    reshape_kv_cache,
+)
+
+NUM_BLOCKS = 4
+BLOCK_SIZE = 4
+NUM_KV_HEADS = 2
+HEAD_SIZE = 8
+DTYPE = torch.bfloat16
 
 
-def test_mla_backend_rejects_cross_layer_kv_cache():
-    """MLA backends return identity permutation (layers dim first)
-    to signal cross-layer KV cache is unsupported."""
-    from vllm.model_executor.layers.attention.mla_attention import (
-        MLACommonBackend,
+@pytest.mark.parametrize(
+    "layout", [layer for layer in KVCacheLayout if layer.is_layer_compact]
+)
+def test_reshape_kv_cache(layout):
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
     )
+    num_slots = 2
+    total_bytes = spec.page_size_bytes * NUM_BLOCKS * num_slots
+    raw = torch.zeros(total_bytes, dtype=torch.int8, device="cuda")
+    views = reshape_kv_cache(raw, spec, NUM_BLOCKS, num_slots, layout)
 
-    stride_order = MLACommonBackend.get_kv_cache_stride_order(
-        include_num_layers_dimension=True
-    )
-    assert stride_order == (0, 1, 2, 3)
-    assert stride_order[0] == 0  # layers dim first => no cross-layer
-    assert MLACommonBackend.get_kv_cache_stride_order(
-        include_num_layers_dimension=False
-    ) == (0, 1, 2)
+    byte_4d = compute_layer_kv_cache_shape_bytes(spec, NUM_BLOCKS)
+    dtype_size = torch.tensor([], dtype=spec.dtype).element_size()
+    expected_shape = (*byte_4d[:3], byte_4d[3] // dtype_size)
 
+    assert len(views) == num_slots
+    for v in views:
+        assert v.shape == expected_shape
+        assert v.dtype == spec.dtype
 
-def test_deepseek_v32_indexer_rejects_cross_layer_kv_cache():
-    """DeepseekV32Indexer returns identity permutation (layers dim first)
-    to signal cross-layer KV cache is unsupported."""
-    from vllm.v1.attention.backends.mla.indexer import (
-        DeepseekV32IndexerBackend,
-    )
-
-    stride_order = DeepseekV32IndexerBackend.get_kv_cache_stride_order(
-        include_num_layers_dimension=True
-    )
-    assert stride_order == (0, 1, 2, 3)
-    assert stride_order[0] == 0  # layers dim first => no cross-layer
-    assert DeepseekV32IndexerBackend.get_kv_cache_stride_order(
-        include_num_layers_dimension=False
-    ) == (0, 1, 2)
+    # The physical layout's innermost 3 dims (H, N, C minus the L dim)
+    # should match the layout's stride_order permutation: dims later in
+    # the physical order have smaller strides.
+    stride_order = layout.layer_stride_order
+    strides = views[0].stride()
+    for i in range(3):
+        for j in range(i + 1, 4):
+            if stride_order[i] < stride_order[j]:
+                assert strides[i] >= strides[j], (
+                    f"layout {layout.name}: dim {i} (physical pos "
+                    f"{stride_order[i]}) should have >= stride than "
+                    f"dim {j} (physical pos {stride_order[j]}), got "
+                    f"strides={strides}"
+                )

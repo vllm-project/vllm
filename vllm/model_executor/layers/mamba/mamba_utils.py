@@ -28,7 +28,7 @@ def get_conv_state_layout() -> ConvStateLayoutType:
     """Return the SSM conv state layout.
 
     SD = (state_len, dim) — dim is the innermost contiguous dimension.
-    DS = (dim, state_len) — TP-sharded dim is on dim-1 (like HND for KV
+    DS = (dim, state_len) — TP-sharded dim is on dim-1 (like HNC for KV
          cache), consistent with SSM temporal state layout.
     """
     layout: ConvStateLayoutType | None = envs.VLLM_SSM_CONV_STATE_LAYOUT

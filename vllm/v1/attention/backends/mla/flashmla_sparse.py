@@ -135,19 +135,15 @@ class FlashMLASparseBackend(AttentionBackend):
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 
+
+class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # V3.2 main MLA: 656-byte custom storage format. See module docstring.
-            return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [256]
+
+    @staticmethod
+    def get_name() -> str:
+        return "V4_FLASHMLA_SPARSE"
 
 
 @dataclass
@@ -332,8 +328,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         self.compress_ratio = 1
         if self.is_deepseek_v4:
-            assert hasattr(self.kv_cache_spec, "compress_ratio")
-            self.compress_ratio = self.kv_cache_spec.compress_ratio
+            self.compress_ratio = self.kv_cache_spec.tokens_per_state
             # Pre-allocate compressed slot mapping buffer for CUDA graph
             # address stability when compress_ratio > 1.
             if self.compress_ratio > 1:
@@ -942,7 +937,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         out, lse = flash_mla_with_kvcache(
             q=q,
-            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(-2),
+            k_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(2),
             block_table=kernel_metadata.dummy_block_table,
             head_dim_v=512,
             cache_seqlens=kernel_metadata.cache_lens,
@@ -966,7 +961,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+            -1, 1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of

@@ -108,6 +108,10 @@ class TurboQuantAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "TURBOQUANT"
 
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> str | None:
+        return "LBNHC"
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [16, 32, 64, 128]
@@ -127,38 +131,6 @@ class TurboQuantAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["TurboQuantMetadataBuilder"]:
         return TurboQuantMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "turboquant_4bit_nc",
-    ) -> tuple[int, ...]:
-        """Combined K+V cache shape — no leading 2 dimension.
-
-        Standard attention backends use (2, num_blocks, block_size, num_kv_heads,
-        head_dim) with a leading 2 to separate K and V. TurboQuant packs K+V
-        into a single interleaved slot per head per position, so the cache is:
-
-            (num_blocks, block_size, num_kv_heads, slot_size_aligned)
-
-        Each slot = [key_packed | value_packed | padding].
-        This is safe because TQ has its own get_kv_cache_shape override and
-        never shares cache tensors with other backends. Layers that fall back
-        to native dtype via kv_cache_dtype_skip_layers get their own
-        standard-shaped cache allocation.
-
-        head_size is the model's real head_dim. slot_size_aligned is computed
-        from the TQ config to ensure correct cache allocation for all head dims.
-        """
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype_str, head_size)
-        return (num_blocks, block_size, num_kv_heads, tq_config.slot_size_aligned)
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -383,6 +355,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         k = key[:N].view(N, self.num_kv_heads, self.head_size)
         v = value[:N].view(N, self.num_kv_heads, self.head_size)
+        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
+        kv_cache = kv_cache.transpose(1, 2)
         self._store_kv(k, v, kv_cache, slot_mapping, layer)
 
     def forward(
@@ -410,13 +384,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         if attn_metadata is None:
             return output.fill_(0)
 
+        # (B, H, N, C) -> (B, N, H, C) for TQ kernels
+        kv_cache = kv_cache.transpose(1, 2)
+
         # Slice to actual tokens
         N = attn_metadata.num_actual_tokens
         if N <= 0:
             return output.fill_(0)
 
         q = query[:N].view(N, self.num_heads, self.head_size)
-
         # Get TQ buffers, ensure on device (one-time migration).
         # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.
         tq_layer: Any = layer
@@ -538,7 +514,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self,
         key: torch.Tensor,  # (N, Hk, D)
         value: torch.Tensor,  # (N, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, block_size, slot_size)
         slot_mapping: torch.Tensor,
         layer: Any,
     ):
@@ -564,7 +540,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query: torch.Tensor,  # (N, Hq, D)
         key: torch.Tensor,  # (N, Hk, D)
         value: torch.Tensor,  # (N, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, block_size, slot_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
@@ -715,7 +691,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         query: torch.Tensor,  # (q_len, Hq, D)
         key_chunk: torch.Tensor,  # (q_len, Hk, D)
         val_chunk: torch.Tensor,  # (q_len, Hk, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, block_size, slot_size)
         block_table: torch.Tensor,  # (1, max_num_blocks)
         cached_len: int,
         seq_len: int,
@@ -730,7 +706,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         q_len, Hq, D = query.shape
         Hk = key_chunk.shape[1]
         device = query.device
-        block_size = kv_cache.shape[1]
+        block_size = kv_cache.shape[2]
         BLOCK_D = triton.next_power_of_2(D)
 
         mse_bytes = self._mse_bytes
@@ -767,8 +743,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             v_cached.stride(1),
             v_cached.stride(2),
             kv_cache.stride(0),
-            kv_cache.stride(1),
             kv_cache.stride(2),
+            kv_cache.stride(1),
             block_table.stride(0),
             HEAD_DIM=D,
             BLOCK_SIZE=block_size,
@@ -858,7 +834,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     def _decode_attention(
         self,
         query: torch.Tensor,  # (B, Hq, D)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
+        kv_cache: torch.Tensor,  # (num_blocks, Hk, block_size, slot_size)
         attn_metadata: TurboQuantMetadata,
         Pi: torch.Tensor,
         centroids: torch.Tensor,
