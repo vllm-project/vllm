@@ -611,15 +611,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub middleware: Option<Unsupported>,
 
-    /// If specified, API server will add X-Request-Id header to responses.
-    #[arg(
-        long,
-        visible_alias = "no-enable-request-id-headers",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_request_id_headers: Option<Unsupported>,
-
     /// Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint.
     #[arg(
         long,

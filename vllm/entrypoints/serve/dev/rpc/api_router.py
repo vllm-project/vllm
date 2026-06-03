@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
@@ -56,6 +55,4 @@ async def collective_rpc(raw_request: Request):
 
 
 def attach_router(app: FastAPI):
-    if not envs.VLLM_SERVER_DEV_MODE:
-        return
     app.include_router(router)

@@ -43,6 +43,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -125,6 +126,46 @@ fn serve_args_accept_explicit_deepseek_v32_renderer() {
         panic!("expected serve args");
     };
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
+}
+
+#[test]
+fn serve_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--enable-request-id-headers",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.enable_request_id_headers);
+}
+
+#[test]
+fn frontend_args_json_passes_enable_request_id_headers_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_request_id_headers":true}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    assert!(config.enable_request_id_headers);
 }
 
 #[test]
@@ -229,6 +270,7 @@ fn frontend_args_accept_json() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -627,6 +669,7 @@ fn serve_args_accept_handshake_aliases() {
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
+                        enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
                     },
@@ -744,6 +787,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -806,6 +850,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
@@ -883,6 +928,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
             enable_log_requests: false,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
