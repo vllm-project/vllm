@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.parser.abstract_parser import _WrappedParser
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -45,9 +45,11 @@ def request_obj():
 
 
 def make_parser(tokenizer, reasoning=False, tool=False):
-    _WrappedParser.reasoning_parser_cls = ThinkReasoningParser if reasoning else None
-    _WrappedParser.tool_parser_cls = Hermes2ProToolParser if tool else None
-    return _WrappedParser(tokenizer)
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = ThinkReasoningParser if reasoning else None
+        tool_parser_cls = Hermes2ProToolParser if tool else None
+
+    return TestParser(tokenizer)
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
@@ -56,7 +58,11 @@ def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     for tid in token_ids:
         delta_text = tokenizer.decode([tid])
         result = parser.parse_delta(
-            delta_text, [tid], request, prompt_token_ids=prompt_token_ids
+            delta_text,
+            [tid],
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -144,7 +150,11 @@ def stream_chunks(parser, tokenizer, chunks, request_obj):
     for chunk in chunks:
         delta_text = tokenizer.decode(chunk)
         result = parser.parse_delta(
-            delta_text, chunk, request_obj, prompt_token_ids=prompt_token_ids
+            delta_text,
+            chunk,
+            request_obj,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)

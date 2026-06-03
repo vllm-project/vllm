@@ -13,6 +13,8 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    ConversationMessage,
+    _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
@@ -2714,3 +2716,29 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+def test_postprocess_messages_null_arguments_string():
+    """arguments="null" must not reach the chat template as Python None.
+
+    json.loads("null") returns None, which causes Jinja2 templates that call
+    tc.arguments.items() to raise 'None' has no attribute 'items'.
+    The function should coerce it to {} instead.
+    """
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": "null"},
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["arguments"] == {}
