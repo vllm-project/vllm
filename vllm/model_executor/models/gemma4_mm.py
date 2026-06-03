@@ -16,7 +16,7 @@ reason about temporal order.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
 import torch
@@ -41,6 +41,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -71,6 +72,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -78,6 +80,9 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
 
@@ -514,6 +519,25 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _apply_hf_processor_text_only(
+        self,
+        prompt_text: str,
+        tokenization_kwargs: Mapping[str, object],
+    ) -> list[int]:
+        # Bypass the HF processor and tokenize directly.  The HF
+        # processor expands multimodal placeholders (<|video|>, etc.)
+        # via get_text_with_replacements, which raises StopIteration
+        # when the prompt contains placeholders without matching data.
+        # The text-only path only needs token IDs, so the tokenizer
+        # alone is sufficient.
+        processor = self.info.get_hf_processor()
+        text_inputs = processor.tokenizer([prompt_text], **tokenization_kwargs)
+        input_ids = text_inputs["input_ids"]
+        if not isinstance(input_ids, list):
+            input_ids = input_ids.tolist()
+        (prompt_ids,) = input_ids
+        return prompt_ids
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -872,6 +896,9 @@ class Gemma4MultimodalEmbedder(nn.Module):
         self,
         multimodal_config: Gemma4VisionConfig | Gemma4AudioConfig,
         text_config: Gemma4TextConfig,
+        *,
+        quant_config: "QuantizationConfig | None" = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -895,6 +922,8 @@ class Gemma4MultimodalEmbedder(nn.Module):
             embedding_dim,
             self.text_hidden_size,
             bias=False,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embedding_projection"),
         )
 
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
@@ -917,6 +946,7 @@ class Gemma4MultimodalEmbedder(nn.Module):
 class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsQuant,
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
@@ -936,11 +966,14 @@ class Gemma4ForConditionalGeneration(
     # Maps checkpoint prefixes to vLLM module paths.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            "model.embed_audio.": "embed_audio.",
-            "model.embed_vision.": "embed_vision.",
-            "model.language_model.": "language_model.model.",
-            "model.vision_tower.": "vision_tower.",
+            # vision tower
+            "model.vision_tower": "vision_tower",
+            "model.embed_vision": "embed_vision",
+            # audio tower
             "model.audio_tower.": "audio_tower.",
+            "model.embed_audio.": "embed_audio.",
+            # backbone
+            "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
         }
@@ -959,7 +992,15 @@ class Gemma4ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
-                config.vision_config, config.text_config
+                config.vision_config,
+                config.text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "embed_vision"),
+            )
+            recursive_replace_linear(
+                self.vision_tower,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
@@ -972,7 +1013,15 @@ class Gemma4ForConditionalGeneration(
                 # position embeddings, softcap, gradient_clipping).
                 self.audio_tower.post_init()
                 self.embed_audio = Gemma4MultimodalEmbedder(
-                    config.audio_config, config.text_config
+                    config.audio_config,
+                    config.text_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "embed_audio"),
+                )
+                recursive_replace_linear(
+                    self.audio_tower,
+                    quant_config,
+                    prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
             self.audio_tower = None
@@ -1153,6 +1202,7 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Concurrent requests with different image resolutions may
         # arrive as a list of per-image tensors, while same-resolution
@@ -1193,7 +1243,11 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(pv_tensor, pp_tensor, pad_tensor)
+                inputs_embeds = vt.patch_embedder(
+                    pv_tensor,
+                    pp_tensor,
+                    pad_tensor,
+                ).to(target_dtype)
                 encoder_outputs = vt.encoder(
                     inputs_embeds=inputs_embeds,
                     attention_mask=~pad_tensor,
@@ -1230,7 +1284,9 @@ class Gemma4ForConditionalGeneration(
             all_valid_states[orig_idx] = valid_states
             valid_lens[orig_idx] = valid_states.shape[0]
 
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        # Use embed_tokens dtype as compute dtype; embedding_projection.weight
+        # may be uint8 under BnB 4-bit, which would corrupt the cast.
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         # Project all images in a single batched call.
         flat_valid_states = torch.cat(all_valid_states, dim=0).to(target_dtype)
@@ -1273,7 +1329,7 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         vision_cfg = self.config.vision_config
         pooling_k2 = vision_cfg.pooling_kernel_size**2
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        target_dtype = self.language_model.model.embed_tokens.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
@@ -1301,7 +1357,11 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(pv_chunk, pp_chunk, pad_chunk)
+            inputs_embeds = vt.patch_embedder(
+                pv_chunk,
+                pp_chunk,
+                pad_chunk,
+            ).to(target_dtype)
             encoder_outputs = vt.encoder(
                 inputs_embeds=inputs_embeds,
                 attention_mask=~pad_chunk,
