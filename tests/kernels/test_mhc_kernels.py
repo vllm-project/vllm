@@ -340,22 +340,17 @@ def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
     hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
     rms_eps = hc_eps = 1e-6
 
-    out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16)
-    out.fill_(float("nan"))
-
-    result = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+    out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
         residual,
         fn,
         hc_scale,
         hc_base,
-        out,
-        hidden_size,
         rms_eps,
         hc_eps,
-        hc_mult,
     )
 
-    assert result is None
+    assert out.shape == (num_tokens, hidden_size)
+    assert out.dtype == torch.bfloat16
     assert not torch.isnan(out).any()
 
     out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
