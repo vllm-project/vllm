@@ -27,18 +27,19 @@ use crate::error::Result;
 /// tokenizer.
 ///
 /// Optional tuning knobs (only effective when the cache is enabled):
-/// - `VLLM_RS_TOKENIZER_CACHE_SIZE`: max L0 entries (default 10 000)
-/// - `VLLM_RS_TOKENIZER_CACHE_ENABLE_L1=1`: enable L1 prefix cache
-const ENABLE_TOKENIZER_CACHE_ENV: &str = "VLLM_RS_ENABLE_TOKENIZER_CACHE";
-const TOKENIZER_CACHE_SIZE_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_SIZE";
-const TOKENIZER_CACHE_ENABLE_L1_ENV: &str = "VLLM_RS_TOKENIZER_CACHE_ENABLE_L1";
+/// - `VLLM_RS_LLM_TOKENIZER_CACHE_SIZE`: max L0 entries (default 10 000)
+/// - `VLLM_RS_LLM_TOKENIZER_CACHE_ENABLE_L1=1`: enable L1 prefix cache
+const TOKENIZER_CACHE_SIZE_ENV: &str = "VLLM_RS_LLM_TOKENIZER_CACHE_SIZE";
+const TOKENIZER_CACHE_ENABLE_L1_ENV: &str = "VLLM_RS_LLM_TOKENIZER_CACHE_ENABLE_L1";
+const TOKENIZER_L1_CACHE_MAX_MEMORY_ENV: &str = "VLLM_RS_LLM_TOKENIZER_L1_CACHE_MAX_MEMORY";
+/// Environment variable to enable the experimental LLM tokenizer.
+const ENABLE_LLM_TOKENIZER: &str = "VLLM_RS_ENABLE_LLM_TOKENIZER";
 
 fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
-    let enable_cache = std::env::var_os(ENABLE_TOKENIZER_CACHE_ENV)
+    let enable_llm_tokenizer = std::env::var_os(ENABLE_LLM_TOKENIZER)
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
-
-    if enable_cache {
+    if enable_llm_tokenizer {
         let max_entries: usize = std::env::var(TOKENIZER_CACHE_SIZE_ENV)
             .ok()
             .and_then(|v| v.parse().ok())
@@ -46,30 +47,31 @@ fn load_tokenizer(tokenizer: &TokenizerSource) -> Result<DynTokenizer> {
         let enable_l1 = std::env::var_os(TOKENIZER_CACHE_ENABLE_L1_ENV)
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
+        let l1_max_memory: usize = std::env::var(TOKENIZER_L1_CACHE_MAX_MEMORY_ENV)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50 * 1024 * 1024);
         let cache_config = LlmCacheConfig {
             enable_l0: true,
             l0_max_entries: max_entries,
             enable_l1,
-            l1_max_memory: 50 * 1024 * 1024,
+            l1_max_memory,
         };
         tracing::info!(
             max_entries,
             enable_l1,
-            "llm-tokenizer cache enabled (set by {ENABLE_TOKENIZER_CACHE_ENV})"
+            "llm-tokenizer cache enabled (set by {ENABLE_LLM_TOKENIZER})"
         );
         match tokenizer {
-            TokenizerSource::HuggingFace(path) => Ok(Arc::new(LlmCachedTokenizer::new(
-                HuggingFaceTokenizer::new(path)?,
-                cache_config,
-            ))),
-            TokenizerSource::Tiktoken(path) => Ok(Arc::new(LlmCachedTokenizer::new(
-                TiktokenTokenizer::new(path)?,
-                cache_config,
-            ))),
-            TokenizerSource::Tekken(path) => Ok(Arc::new(LlmCachedTokenizer::new(
-                TekkenTokenizer::new(path)?,
-                cache_config,
-            ))),
+            TokenizerSource::HuggingFace(path) => {
+                Ok(Arc::new(LlmCachedTokenizer::new(path, cache_config)))
+            }
+            TokenizerSource::Tiktoken(path) => {
+                Ok(Arc::new(LlmCachedTokenizer::new(path, cache_config)))
+            }
+            TokenizerSource::Tekken(path) => {
+                Ok(Arc::new(LlmCachedTokenizer::new(path, cache_config)))
+            }
         }
     } else {
         match tokenizer {
