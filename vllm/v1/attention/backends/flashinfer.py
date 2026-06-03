@@ -427,6 +427,22 @@ class FlashInferBackend(AttentionBackend):
         return supports_trtllm_attention()
 
     @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if kv_cache_dtype == "nvfp4" and device_capability.major != 10:
+            return "nvfp4 KV cache in FlashInfer requires SM100"
+        return None
+
+    @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
