@@ -91,9 +91,9 @@ def _get_priority_backends(
 
     # Marlin supports ZP and bias
     _AVAILABLE_BACKENDS += [
-        WNA16MoEBackend.TRITON,  # TEMP TESTING
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.TRITON,
     ]
 
     return _AVAILABLE_BACKENDS
