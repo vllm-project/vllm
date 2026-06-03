@@ -25,6 +25,57 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
+# Cached probe for the ROCm-side fused QK-norm + AllReduce kernel that AITER
+# ships via ``CustomAllreduce.custom_fused_qknorm_ar`` (ROCm/aiter#3163). The
+# kernel performs the per-token (q_var, k_var) fp32 AllReduce, folds in
+# ``rsqrt + per-channel weight``, and is CUDA-graph capture safe. We probe
+# lazily so importing this module on CUDA / older AITER builds is cheap and
+# does not require ``aiter`` to be importable at module load time.
+_AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE: bool | None = None
+
+
+def _aiter_has_custom_fused_qknorm_ar() -> bool:
+    global _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
+    if _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE is None:
+        if not current_platform.is_rocm():
+            _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
+        else:
+            try:
+                from aiter.dist.device_communicators.custom_all_reduce import (
+                    CustomAllreduce as _AiterCustomAllreduce,
+                )
+
+                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = hasattr(
+                    _AiterCustomAllreduce, "custom_fused_qknorm_ar"
+                )
+            except (ImportError, ModuleNotFoundError):
+                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
+    return _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
+
+
+def _get_aiter_custom_all_reduce():
+    """Return the AITER ``CustomAllreduce`` instance (initialised by
+    ``rocm_aiter_ops.initialize_aiter_allreduce`` during the ROCm AR+RMS
+    fusion pass setup) if it is enabled and not in a disabled state.
+
+    Returns ``None`` when AITER is off (``VLLM_ROCM_USE_AITER=0``), when CA
+    init failed, or when the fusion pass has not yet run. This is a
+    *separate* instance from ``device_communicator.ca_comm`` — the latter is
+    vLLM's stock CustomAllreduce, which does not provide
+    ``custom_fused_qknorm_ar``.
+    """
+    try:
+        from vllm._aiter_ops import rocm_aiter_ops
+    except (ImportError, ModuleNotFoundError):
+        return None
+    try:
+        aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    except AttributeError:
+        return None
+    if aiter_ar is None or getattr(aiter_ar, "disabled", False):
+        return None
+    return aiter_ar
+
 
 def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
     """All-reduce a per-token variance tensor across the TP group.
@@ -235,6 +286,26 @@ def _minimax_qk_norm_fusion(
             tp_world,
             eps,
         )
+    # ROCm fast path: route through AITER's ``custom_fused_qknorm_ar``
+    # (ROCm/aiter#3163). The kernel AllReduces only the per-token
+    # (q_var, k_var) fp32 partials and folds rsqrt + per-channel weight into a
+    # single graph-capture-safe launch. v is left to ``forward_qkv``'s
+    # post-split (matches the CUDA path's contract that this dispatcher
+    # returns only q, k). The AITER ``CustomAllreduce`` instance is fetched
+    # via ``rocm_aiter_ops.get_aiter_allreduce()``, *not*
+    # ``device_communicator.ca_comm`` — those are different objects, and only
+    # the AITER one exposes ``custom_fused_qknorm_ar``.
+    if (
+        tp_world > 1
+        and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
+        and _aiter_has_custom_fused_qknorm_ar()
+    ):
+        aiter_ar = _get_aiter_custom_all_reduce()
+        if aiter_ar is not None:
+            q_out, k_out, _ = aiter_ar.custom_fused_qknorm_ar(
+                qkv, q_weight, k_weight, eps
+            )
+            return q_out, k_out
     return _minimax_qk_norm_tp_fallback(
         qkv, q_weight, k_weight, q_size, kv_size, tp_rank, tp_world, eps
     )
