@@ -44,9 +44,18 @@ class CacheLayout:
     # (e.g. TP + PP), mirroring DistSpec's n-d mesh placements.
     shard_axis: int
 
+    def __post_init__(self) -> None:
+        assert 0 < self.shard_axis <= self.meta.ndim, (
+            f"shard_axis={self.shard_axis} out of range for {self.meta.ndim}-D tensor"
+        )
+
     @property
     def descriptor_size_bytes(self) -> int:
-        """Payload size of one descriptor (everything from shard_axis onward)."""
+        """Payload size of one descriptor (everything from shard_axis onward).
+
+        Only correct when dims from shard_axis onward are C-contiguous
+        (validated by ``_check_payload_contiguity``).
+        """
         elem = self.meta.element_size()
         payload = 1
         for d in range(self.shard_axis, self.meta.ndim):
@@ -75,9 +84,25 @@ class CacheLayout:
 
         The block_size dimension (at shard_axis + 1) is divided by ratio,
         and stride(0) is divided by ratio so sub-blocks tile the same memory.
+
+        Note: for MLA local tensors whose shape is (N, B, D) with
+        shard_axis=1, bsz_dim=2 would point at head_size — not block_size.
+        Currently MLA never hits ratio > 1 in practice; callers should guard.
         """
+        if ratio == 1:
+            return self
         bsz_dim = self.shard_axis + 1
-        assert self.meta.shape[bsz_dim] % ratio == 0
+        assert bsz_dim < self.meta.ndim, (
+            f"sub_block requires a block_size dim at axis {bsz_dim}, "
+            f"but tensor only has {self.meta.ndim} dims"
+        )
+        assert self.meta.shape[bsz_dim] % ratio == 0, (
+            f"block_size dim {self.meta.shape[bsz_dim]} not divisible by ratio {ratio}"
+        )
+        assert self.meta.stride(0) % ratio == 0, (
+            f"page stride {self.meta.stride(0)} not divisible by ratio "
+            f"{ratio}; sub-blocks would drift"
+        )
 
         new_shape = list(self.meta.shape)
         new_shape[0] *= ratio
@@ -108,6 +133,11 @@ class CacheLayout:
         if self.shard_axis <= 1:
             return self._block_descriptors(base_addr, device_id)
 
+        # Peel the outermost split axis (always dim 1, since dim 0 is
+        # blocks).  select(1, idx) removes that dim and decrements
+        # shard_axis, so the next split dim slides into position 1.
+        # For blocks-first attention with shape (N, 2, H, B, D) this
+        # yields K descriptors (idx=0) then V descriptors (idx=1).
         result: list[tuple[int, int, int]] = []
         for idx in range(self.meta.shape[1]):
             sub = self.select(1, idx)
@@ -141,7 +171,9 @@ class CacheLayout:
             tensor.stride(),
             tensor.storage_offset(),
         )
-        return cls(meta=meta, shard_axis=shard_axis)
+        layout = cls(meta=meta, shard_axis=shard_axis)
+        layout._check_payload_contiguity()
+        return layout
 
     @classmethod
     def from_physical(
@@ -160,7 +192,27 @@ class CacheLayout:
             stride=strides,
             storage_offset=offset_bytes // elem,
         )
-        return cls(meta=meta, shard_axis=shard_axis)
+        layout = cls(meta=meta, shard_axis=shard_axis)
+        layout._check_payload_contiguity()
+        return layout
+
+    def _check_payload_contiguity(self) -> None:
+        """Assert dims from shard_axis onward are C-contiguous.
+
+        NIXL copies [addr, addr+size) as a flat byte span, so the payload
+        portion of each descriptor must be contiguous in memory.
+        """
+        expected_stride = 1
+        for d in range(self.meta.ndim - 1, self.shard_axis - 1, -1):
+            if self.meta.stride(d) != expected_stride:
+                raise ValueError(
+                    f"Payload dims [{self.shard_axis}..{self.meta.ndim}) must "
+                    f"be C-contiguous, but dim {d} has stride "
+                    f"{self.meta.stride(d)} (expected {expected_stride}). "
+                    f"shape={tuple(self.meta.shape)}, "
+                    f"strides={tuple(self.meta.stride())}"
+                )
+            expected_stride *= self.meta.shape[d]
 
 
 def _c_strides(shape: tuple[int, ...]) -> tuple[int, ...]:

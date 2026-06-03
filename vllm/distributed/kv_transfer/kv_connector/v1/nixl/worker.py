@@ -930,25 +930,63 @@ class NixlConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                # Only record non-Mamba page sizes.
                 if isinstance(layer_spec, MambaSpec):
-                    self.block_len_per_layer.append(
+                    # Mamba FA-view: flat bytes with 1 "head".
+                    # Physical num_blocks (not logical) because
+                    # _build_fa_local always iterates physical blocks.
+                    blk_len = (
                         physical_page_size // self._physical_blocks_per_logical_kv_block
                     )
-                else:
-                    self.block_len_per_layer.append(physical_page_size)
-
-                if isinstance(layer_spec, MambaSpec):
-                    shard_ax = 1
+                    self.block_len_per_layer.append(blk_len)
+                    self._region_layouts.append(
+                        build_attn_layout(
+                            num_blocks=self.num_blocks,
+                            num_kv_heads=1,
+                            head_size=blk_len
+                            // (
+                                cache.dtype.itemsize
+                                * (
+                                    2
+                                    if self.transfer_topo.virtually_split_kv_in_blocks
+                                    else 1
+                                )
+                            ),
+                            block_size=1,
+                            dtype=cache.dtype,
+                            virtually_split_kv=(
+                                self.transfer_topo.virtually_split_kv_in_blocks
+                            ),
+                            page_stride_bytes=blk_len,
+                        )
+                    )
                 elif isinstance(layer_spec, AttentionSpec):
-                    shard_ax = (
-                        2 if self.transfer_topo.virtually_split_kv_in_blocks else 1
+                    self.block_len_per_layer.append(physical_page_size)
+                    # Build layout from spec parameters, not from_tensor.
+                    # The tensor's logical shape after permute is
+                    # (N, 2, B, H, D) with B and H swapped vs the
+                    # descriptor-correct order (N, 2, H, B, D).
+                    # build_attn_layout constructs the right logical
+                    # shape where shard_axis points to H (heads) for
+                    # TP slicing.  When #42374 standardizes tensor
+                    # layouts, from_tensor will become viable.
+                    self._region_layouts.append(
+                        build_attn_layout(
+                            num_blocks=self.num_blocks,
+                            num_kv_heads=layer_spec.num_kv_heads,
+                            head_size=layer_spec.head_size,
+                            block_size=self.block_size,
+                            dtype=layer_spec.dtype,
+                            virtually_split_kv=(
+                                self.transfer_topo.virtually_split_kv_in_blocks
+                            ),
+                            page_stride_bytes=physical_page_size,
+                        )
                     )
                 else:
-                    raise TypeError(f"Unsupported layer spec type: {type(layer_spec)}")
-                self._region_layouts.append(
-                    CacheLayout.from_tensor(cache, shard_axis=shard_ax)
-                )
+                    raise TypeError(
+                        f"Unsupported spec type for NIXL layout: "
+                        f"{type(layer_spec).__name__}"
+                    )
 
                 if cache.shape[0] != num_blocks:
                     raise AssertionError(
