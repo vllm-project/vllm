@@ -3430,25 +3430,53 @@ class GPUModelRunner(
         ec_connector_output = None
 
         if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
+            # Determine whether to time GPU stages for this step.
+            should_time_mm = bool(
+                self.observability_config
+                and self.observability_config.enable_mm_processor_stats
+                and scheduler_output.scheduled_encoder_inputs
+            )
+            # Collect unique request IDs that have encoder inputs for timing.
+            mm_req_ids = (
+                set(scheduler_output.scheduled_encoder_inputs.keys())
+                if should_time_mm
+                else set()
+            )
+
             # Run the multimodal encoder if any.
             with self.maybe_get_ec_connector_output(
                 scheduler_output,
                 encoder_cache=self.encoder_cache,
             ) as ec_connector_output:
                 self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+
+            with self._timed_gpu_stage(
+                should_time_mm,
+                "embedding_gather_secs",
+                mm_req_ids,
+            ):
+                mm_embeds, is_mm_embed = self._gather_mm_embeddings(
+                    scheduler_output,
+                )
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.embed_input_ids(
-                self.input_ids.gpu[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds,
-                is_multimodal=is_mm_embed,
-            )
+            with self._timed_gpu_stage(
+                should_time_mm,
+                "embedding_merge_secs",
+                mm_req_ids,
+            ):
+                inputs_embeds_scheduled = self.model.embed_input_ids(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
 
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
+                # TODO(woosuk): Avoid the copy. Optimize.
+                self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(
+                    inputs_embeds_scheduled,
+                )
 
             input_ids, inputs_embeds = self._prepare_mm_inputs(num_input_tokens)
             model_kwargs = {
@@ -4257,6 +4285,21 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+
+        # Identify prefill requests for timing.
+        should_time_prefill = bool(
+            self.observability_config
+            and self.observability_config.enable_mm_processor_stats
+            and scheduler_output.scheduled_encoder_inputs
+        )
+        prefill_req_ids: set[str] = set()
+        if should_time_prefill and num_reqs > 0:
+            num_computed = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+            num_prompt = self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs]
+            for i, req_id in enumerate(req_ids):
+                if num_computed[i] < num_prompt[i]:
+                    prefill_req_ids.add(req_id)
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -4274,6 +4317,11 @@ class GPUModelRunner(
                 scheduler_output,
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
+            self._timed_gpu_stage(
+                should_time_prefill and len(prefill_req_ids) > 0,
+                "prefill_forward_secs",
+                prefill_req_ids,
+            ),
         ):
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -7535,6 +7583,44 @@ class GPUModelRunner(
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
 
+    @contextmanager
+    def _timed_gpu_stage(
+        self,
+        should_time: bool,
+        stage_attr: str,
+        req_ids: set[str],
+    ):
+        """Context manager to time a GPU-side stage and record per-request.
+
+        Args:
+            should_time: Whether timing is enabled.
+            stage_attr: Attribute name on EncoderTimingStats to accumulate into.
+            req_ids: Set of request IDs to attribute the time to.
+        """
+        if not should_time or not req_ids:
+            yield
+            return
+
+        torch.accelerator.synchronize()
+        start_time = time.perf_counter()
+
+        try:
+            yield
+        finally:
+            torch.accelerator.synchronize()
+            elapsed = time.perf_counter() - start_time
+
+            per_request_time = elapsed / max(len(req_ids), 1)
+
+            with self._encoder_timing_lock:
+                for req_id in req_ids:
+                    if req_id not in self.encoder_timing_registry:
+                        self.encoder_timing_registry[req_id] = EncoderTimingStats()
+
+                    stats = self.encoder_timing_registry[req_id]
+                    current = getattr(stats, stage_attr, 0.0)
+                    setattr(stats, stage_attr, current + per_request_time)
+
 
 @dataclass
 class EncoderTimingStats:
@@ -7546,8 +7632,21 @@ class EncoderTimingStats:
     num_encoder_calls: int = 0
     """Number of times encoder was called for this request."""
 
+    # Extended timing for MM processing pipeline
+    embedding_gather_secs: float = 0.0
+    """Time spent in _gather_mm_embeddings (seconds)."""
+
+    embedding_merge_secs: float = 0.0
+    """Time spent in embed_input_ids + embedding copy (seconds)."""
+
+    prefill_forward_secs: float = 0.0
+    """Time spent in LLM forward pass for prefill requests (seconds)."""
+
     def to_dict(self) -> dict[str, float | int]:
         return {
             "encoder_forward_secs": self.encoder_forward_secs,
             "num_encoder_calls": self.num_encoder_calls,
+            "embedding_gather_secs": self.embedding_gather_secs,
+            "embedding_merge_secs": self.embedding_merge_secs,
+            "prefill_forward_secs": self.prefill_forward_secs,
         }

@@ -42,6 +42,12 @@ def register_vllm_dev_api_routers(app: FastAPI):
 
     attach_cache_router(app)
 
+    from vllm.entrypoints.serve.mm_processor.api_router import (
+        attach_router as attach_mm_processor_router,
+    )
+
+    attach_mm_processor_router(app)
+
     from .dev.rlhf.api_router import attach_router as attach_rlhf_router
 
     attach_rlhf_router(app)

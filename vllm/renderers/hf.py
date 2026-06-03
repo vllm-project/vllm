@@ -818,6 +818,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -840,6 +842,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            timing_ctx=timing_ctx,
         )
 
         # prompt_embeds tensors are carried by the tracker through mm_data,
@@ -925,6 +928,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
@@ -947,6 +952,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             ),
             media_io_kwargs=params.media_io_kwargs,
             mm_processor_kwargs=params.mm_processor_kwargs,
+            timing_ctx=timing_ctx,
         )
 
         prompt_embeds_tensors: list[torch.Tensor] | None = None
@@ -1024,6 +1030,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> TokensInput | MultiModalInput:
         """Pre-expand `prompt_embeds` sentinels before delegating to the MM
         processor, then attach `prompt_embeds` modality data to the result.
@@ -1042,7 +1050,12 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
             cast(dict, prompt)["prompt_token_ids"] = _expand_prompt_embeds_placeholders(
                 list(prompt["prompt_token_ids"]), mm_updates
             )
-        engine_input = super()._process_tokens(prompt, skip_mm_cache=skip_mm_cache)
+        engine_input = super()._process_tokens(
+            prompt,
+            skip_mm_cache=skip_mm_cache,
+            timing_ctx=timing_ctx,
+            mm_req_id=mm_req_id,
+        )
         if prompt_embeds_info is not None:
             tensors, _ = prompt_embeds_info
             self._apply_prompt_embeds_to_engine_input(
@@ -1058,6 +1071,8 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> TokensInput | MultiModalInput:
         """Async equivalent of `_process_tokens`."""
         prompt_embeds_info = cast(dict, prompt).pop("_prompt_embeds", None)
@@ -1068,7 +1083,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 list(prompt["prompt_token_ids"]), mm_updates
             )
         engine_input = await super()._process_tokens_async(
-            prompt, skip_mm_cache=skip_mm_cache
+            prompt,
+            skip_mm_cache=skip_mm_cache,
+            timing_ctx=timing_ctx,
+            mm_req_id=mm_req_id,
         )
         if prompt_embeds_info is not None:
             tensors, _ = prompt_embeds_info

@@ -2040,4 +2040,154 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
+    # ---- MM Processor Stats Collection ----
+    # If the server was started with --enable-mm-processor-stats, collect
+    # per-request stage timings and display them alongside client metrics.
+    try:
+        from vllm.benchmarks.mm_processor import (
+            calculate_mm_processor_metrics,
+        )
+
+        async with (
+            aiohttp.ClientSession() as stats_session,
+            stats_session.get(f"{base_url}/mm_processor_stats") as resp,
+        ):
+            if resp.status == 200:
+                body = await resp.json()
+                per_request_stats = body.get("mm_processor_stats", {})
+                if per_request_stats:
+                    # Flatten per-request data to stage-keyed lists
+                    stats_by_stage: dict[str, list[float]] = {}
+                    for _req_id, stages in per_request_stats.items():
+                        for stage, value in stages.items():
+                            stats_by_stage.setdefault(stage, []).append(value)
+
+                    selected_percentiles = [
+                        float(p) for p in args.metric_percentiles.split(",")
+                    ]
+                    mm_metrics = calculate_mm_processor_metrics(
+                        stats_by_stage,
+                        selected_percentiles,
+                    )
+
+                    print()
+                    print(
+                        "{s:{c}^{n}}".format(
+                            s=" MM Processor Stage Latency ", n=50, c="="
+                        )
+                    )
+
+                    # Pipeline-ordered stage names (keys from
+                    # calculate_mm_processor_metrics: _secs -> _ms)
+                    preprocess_stages = [
+                        "video_decode_ms",
+                        "image_decode_ms",
+                        "audio_decode_ms",
+                        "video_fetch_bytes_ms",
+                        "image_fetch_bytes_ms",
+                        "audio_fetch_bytes_ms",
+                        "get_mm_hashes_ms",
+                        "get_cache_missing_items_ms",
+                        "hf_data_prep_ms",
+                        "hf_processor_call_ms",
+                        "hf_postprocess_ms",
+                        "merge_mm_kwargs_ms",
+                        "apply_prompt_updates_ms",
+                    ]
+                    encoder_stages = [
+                        "encoder_forward_ms",
+                        "num_encoder_calls",
+                        "embedding_gather_ms",
+                        "embedding_merge_ms",
+                        "prefill_forward_ms",
+                    ]
+
+                    found_preprocess = [s for s in preprocess_stages if s in mm_metrics]
+                    found_encoder = [s for s in encoder_stages if s in mm_metrics]
+                    has_total = "preprocessor_total_ms" in mm_metrics
+
+                    if not (has_total or found_preprocess or found_encoder):
+                        print("=" * 50)
+                    else:
+                        # Column layout: label | mean | median | pXX
+                        col_labels = ["mean", "median"]
+                        for p in selected_percentiles:
+                            p_word = str(int(p)) if int(p) == p else str(p)
+                            col_labels.append(f"p{p_word}")
+
+                        # Collect display labels to compute column width
+                        all_display: list[str] = []
+                        if has_total:
+                            all_display.append("preprocessor_total_ms:")
+                        all_display.extend(f"  {s}:" for s in found_preprocess)
+                        all_display.extend(f"  {s}:" for s in found_encoder)
+                        label_w = max(len(d) for d in all_display)
+                        col_w = 10  # match serving benchmark style
+
+                        def _fmt_row(label: str, metrics: dict) -> str:
+                            vals = [f"{metrics['mean']:.2f}"]
+                            vals.append(f"{metrics['median']:.2f}")
+                            for p in selected_percentiles:
+                                vals.append(f"{metrics.get(f'p{p}', 0.0):.2f}")
+                            val_strs = [f"{v:>{col_w}}" for v in vals]
+                            return f"{label:<{label_w}}{''.join(val_strs)}"
+
+                        # Print header row right above data
+                        print()
+                        header_vals = "".join(f"{c:>{col_w}}" for c in col_labels)
+                        print(f"{'':{label_w}}{header_vals}")
+
+                        # Preprocess total (top-level summary)
+                        if has_total:
+                            print(
+                                _fmt_row(
+                                    "preprocessor_total_ms:",
+                                    mm_metrics["preprocessor_total_ms"],
+                                )
+                            )
+
+                        # Preprocessing stages
+                        if found_preprocess:
+                            print(
+                                "{s:{c}^{n}}".format(s=" Preprocessing ", n=50, c="-")
+                            )
+                            for s in found_preprocess:
+                                print(
+                                    _fmt_row(
+                                        f"  {s}:",
+                                        mm_metrics[s],
+                                    )
+                                )
+
+                        # Encoder stages
+                        if found_encoder:
+                            print("{s:{c}^{n}}".format(s=" Encoding ", n=50, c="-"))
+                            for s in found_encoder:
+                                print(
+                                    _fmt_row(
+                                        f"  {s}:",
+                                        mm_metrics[s],
+                                    )
+                                )
+
+                        print("=" * 50)
+
+                    result_json["mm_processor_stats"] = mm_metrics
+                else:
+                    print(
+                        "MM Processor Stats: endpoint returned empty data. "
+                        "Make sure the server was started with "
+                        "--enable-mm-processor-stats."
+                    )
+            else:
+                print(
+                    f"MM Processor Stats: endpoint returned status "
+                    f"{resp.status}. To enable, start the server with "
+                    f"--enable-mm-processor-stats."
+                )
+    except aiohttp.ClientError as e:
+        print(f"MM Processor Stats: failed to connect ({e}).")
+    except Exception as e:
+        print(f"MM Processor Stats: unexpected error ({type(e).__name__}: {e}).")
+
     return result_json

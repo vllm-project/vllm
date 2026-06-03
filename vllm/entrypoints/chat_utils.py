@@ -779,6 +779,16 @@ def _resolve_items(
 
 
 class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        *,
+        media_io_kwargs: dict[str, dict[str, Any]] | None = None,
+        timing_ctx: Any | None = None,
+    ):
+        super().__init__(model_config, media_io_kwargs=media_io_kwargs)
+        self._timing_ctx = timing_ctx
+
     def resolve_items(
         self,
     ) -> tuple[MultiModalDataDict | None, MultiModalUUIDDict | None]:
@@ -806,6 +816,10 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[tuple[object, str | None]]
 class AsyncMultiModalItemTracker(
     BaseMultiModalItemTracker[Awaitable[tuple[object, str | None]]]
 ):
+    def __init__(self, model_config, *, media_io_kwargs=None, timing_ctx=None):
+        super().__init__(model_config, media_io_kwargs=media_io_kwargs)
+        self._timing_ctx = timing_ctx
+
     async def resolve_items(
         self,
     ) -> tuple[MultiModalDataDict | None, MultiModalUUIDDict | None]:
@@ -944,7 +958,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
-        image = self._connector.fetch_image(image_url) if image_url else None
+        timing_ctx = self._tracker._timing_ctx
+        if image_url:
+            image = self._connector.fetch_image(
+                image_url,
+                timing_ctx=timing_ctx,
+            )
+        else:
+            image = None
 
         placeholder = self._tracker.add("image", (image, uuid))
         self._add_placeholder("image", placeholder)
@@ -1008,7 +1029,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
-        audio = self._connector.fetch_audio(audio_url) if audio_url else None
+        timing_ctx = self._tracker._timing_ctx
+        if audio_url:
+            audio = self._connector.fetch_audio(
+                audio_url,
+                timing_ctx=timing_ctx,
+            )
+        else:
+            audio = None
 
         placeholder = self._tracker.add("audio", (audio, uuid))
         self._add_placeholder("audio", placeholder)
@@ -1030,14 +1058,15 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
-        video = (
-            self._connector.fetch_video(
+        timing_ctx = self._tracker._timing_ctx
+        if video_url:
+            video = self._connector.fetch_video(
                 video_url=video_url,
                 video_processor=self._tracker.video_processor_name,
+                timing_ctx=timing_ctx,
             )
-            if video_url
-            else None
-        )
+        else:
+            video = None
 
         placeholder = self._tracker.add("video", (video, uuid))
         self._add_placeholder("video", placeholder)
@@ -1048,7 +1077,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             and self._mm_processor_kwargs
             and self._mm_processor_kwargs.get("use_audio_in_video", False)
         ):
-            audio = self._connector.fetch_audio(video_url) if video_url else None
+            audio = self._connector.fetch_audio(
+                video_url,
+                timing_ctx=timing_ctx,
+            )
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
 
@@ -1098,9 +1130,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return tensor, None
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
-        image = (
-            await self._connector.fetch_image_async(image_url) if image_url else None
-        )
+        timing_ctx = self._tracker._timing_ctx
+        if image_url:
+            image = await self._connector.fetch_image_async(
+                image_url,
+                timing_ctx=timing_ctx,
+            )
+        else:
+            image = None
         return image, uuid
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
@@ -1188,9 +1225,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     async def _audio_with_uuid_async(self, audio_url: str | None, uuid: str | None):
-        audio = (
-            await self._connector.fetch_audio_async(audio_url) if audio_url else None
-        )
+        timing_ctx = self._tracker._timing_ctx
+        if audio_url:
+            audio = await self._connector.fetch_audio_async(
+                audio_url,
+                timing_ctx=timing_ctx,
+            )
+        else:
+            audio = None
         return audio, uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
@@ -1216,14 +1258,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
-        video = (
-            await self._connector.fetch_video_async(
+        timing_ctx = self._tracker._timing_ctx
+        if video_url:
+            video = await self._connector.fetch_video_async(
                 video_url,
                 video_processor=self._tracker.video_processor_name,
+                timing_ctx=timing_ctx,
             )
-            if video_url
-            else None
-        )
+        else:
+            video = None
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
@@ -1865,6 +1908,8 @@ def parse_chat_messages(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    *,
+    timing_ctx: Any | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -1874,6 +1919,7 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
+        timing_ctx=timing_ctx,
     )
 
     for msg in messages:
@@ -1904,6 +1950,8 @@ async def parse_chat_messages_async(
     content_format: ChatTemplateContentFormat,
     media_io_kwargs: dict[str, dict[str, Any]] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    *,
+    timing_ctx: Any | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -1913,6 +1961,7 @@ async def parse_chat_messages_async(
     mm_tracker = AsyncMultiModalItemTracker(
         model_config,
         media_io_kwargs=media_io_kwargs,
+        timing_ctx=timing_ctx,
     )
 
     for msg in messages:

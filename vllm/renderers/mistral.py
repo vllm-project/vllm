@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -63,6 +65,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -91,6 +95,8 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(

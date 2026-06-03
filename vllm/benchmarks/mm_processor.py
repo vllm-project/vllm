@@ -42,43 +42,25 @@ else:
     LLMEngine = object
 
 
-def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, float]]:
-    """
-    Get all multimodal timing stats from the LLM engine.
-
-    Collects both preprocessing stats (HF processor, hashing, cache lookup,
-    prompt update) and encoder forward pass timing, merged by request_id.
+def merge_timing_stats(
+    preprocess_stats: dict[str, dict[str, float]],
+    encoder_results: list[dict[str, dict[str, float | int]] | None],
+) -> dict[str, dict[str, float]]:
+    """Merge preprocessing stats with encoder stats collected from workers.
 
     Args:
-        llm_engine: The LLM engine (has input_processor and workers).
+        preprocess_stats: Per-request preprocessing stats from
+            ``renderer._mm_timing_registry.stat()``.
+        encoder_results: List of per-worker results from
+            ``collective_rpc("get_encoder_timing_stats")``. Each element is
+            ``{request_id: {stage: value}}`` or ``None``.
 
     Returns:
-        Dictionary mapping request_id to merged stats dict containing
-        both preprocessing and encoder timing metrics.
-
-    Example:
-        {
-            'request-123': {
-                'get_mm_hashes_secs': 0.02,
-                'get_cache_missing_items_secs': 0.01,
-                'apply_hf_processor_secs': 0.45,
-                'merge_mm_kwargs_secs': 0.01,
-                'apply_prompt_updates_secs': 0.03,
-                'preprocessor_total_secs': 0.51,
-                'encoder_forward_secs': 0.23,
-                'num_encoder_calls': 1
-            }
-        }
+        Dictionary mapping request_id to merged stats dict.
     """
-    observability_config = llm_engine.vllm_config.observability_config
-    if not observability_config or not observability_config.enable_mm_processor_stats:
-        return {}
-
-    renderer = llm_engine.renderer
-    mm_processor_stats = renderer._mm_timing_registry.stat()
-
+    # Aggregate encoder stats across workers (take max)
     encoder_stats = dict[str, dict[str, float]]()
-    for worker_stats in llm_engine.collective_rpc("get_encoder_timing_stats"):
+    for worker_stats in encoder_results:
         if not worker_stats:
             continue
 
@@ -86,7 +68,6 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
             if request_id not in encoder_stats:
                 encoder_stats[request_id] = dict(stats_dict)
             else:
-                # Aggregate timing metrics across workers
                 current_time = encoder_stats[request_id].get(
                     "encoder_forward_secs", 0.0
                 )
@@ -101,9 +82,10 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
                     current_calls, new_calls
                 )
 
+    # Merge preprocessing + encoder by request_id
     merged_stats = dict[str, dict[str, float]]()
 
-    for request_id, prep_dict in mm_processor_stats.items():
+    for request_id, prep_dict in preprocess_stats.items():
         merged_stats[request_id] = dict(prep_dict)
 
     for request_id, enc_dict in encoder_stats.items():
@@ -122,6 +104,32 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
             merged_stats[request_id] = dict(enc_dict)
 
     return merged_stats
+
+
+def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, float]]:
+    """
+    Get all multimodal timing stats from the LLM engine.
+
+    Collects both preprocessing stats (HF processor, hashing, cache lookup,
+    prompt update) and encoder forward pass timing, merged by request_id.
+
+    Args:
+        llm_engine: The LLM engine (has input_processor and workers).
+
+    Returns:
+        Dictionary mapping request_id to merged stats dict containing
+        both preprocessing and encoder timing metrics.
+    """
+    observability_config = llm_engine.vllm_config.observability_config
+    if not observability_config or not observability_config.enable_mm_processor_stats:
+        return {}
+
+    renderer = llm_engine.renderer
+    mm_processor_stats = renderer._mm_timing_registry.stat()
+
+    encoder_results = llm_engine.collective_rpc("get_encoder_timing_stats")
+
+    return merge_timing_stats(mm_processor_stats, encoder_results)
 
 
 def collect_mm_processor_stats(llm_engine: LLMEngine) -> dict[str, list[float]]:
