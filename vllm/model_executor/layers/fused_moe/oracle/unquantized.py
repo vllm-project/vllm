@@ -298,15 +298,15 @@ def select_unquantized_moe_backend(
 
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
+    moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
-    is_act_and_mul: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        if is_act_and_mul:
+        if moe_config.is_act_and_mul:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
@@ -408,19 +408,20 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         activation_key: "QuantKey | None" = None,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
         assert weight_key is None and activation_key is None, (
-            "Weights and activations will never be quantized for UnquantizedMoEKernelOracle"
+            "Weights and activations will never be quantized for "
+            "UnquantizedMoEKernelOracle"
         )
         return select_unquantized_moe_backend(moe_config)
 
     def convert_to_kernel_format(
         self,
         backend: UnquantizedMoeBackend,
+        moe_config: FusedMoEConfig,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
-        is_act_and_mul: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return convert_to_unquantized_kernel_format(
-            backend, w13_weight, w2_weight, is_act_and_mul
+            backend, moe_config, w13_weight, w2_weight
         )
 
     def make_kernel(

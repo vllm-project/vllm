@@ -107,9 +107,9 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     def convert_to_kernel_format(
         self,
         backend: BackendT,
+        moe_config: FusedMoEConfig,
         w13_weight: torch.Tensor,
         w2_weight: torch.Tensor,
-        is_act_and_mul: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Shuffle weights into the layout expected by `backend`.
 
@@ -118,12 +118,12 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         (e.g. `UnquantizedMoEKernelOracle` handles AITER and FlashInfer
         layouts).
 
-        `is_act_and_mul` is the only piece of MoE-layer state the
-        unquantized conversion needs to avoid passing the layer into 
-        the oracle. Quantized oracles whose conversion needs
-        scales / zero-points / block shapes will override with a wider
-        signature (and ultimately a per-oracle config object — tracked
-        in the #37753 follow-up PRs).
+        `moe_config` carries MoE-layer state (e.g. `is_act_and_mul`)
+        that the conversion needs without coupling the oracle to a
+        `Module` reference. Quantized oracles whose conversion
+        additionally needs scales / zero-points / block shapes will
+        override with a wider signature (and ultimately a per-oracle
+        config object — tracked in the #37753 follow-up PRs).
         """
         return w13_weight, w2_weight
 

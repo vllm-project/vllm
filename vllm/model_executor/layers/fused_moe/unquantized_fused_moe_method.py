@@ -163,9 +163,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
+            moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
-            is_act_and_mul=layer.moe_config.is_act_and_mul,
         )
         # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
         # On the first call we replace the parameter normally. On subsequent
