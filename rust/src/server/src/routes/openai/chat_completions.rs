@@ -85,6 +85,7 @@ pub async fn chat_completions(
             log_request,
             prepared.include_usage,
             prepared.requested_logprobs,
+            prepared.include_reasoning,
             prepared.echo,
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
@@ -100,6 +101,7 @@ pub async fn chat_completions(
             created,
             prepared.requested_logprobs,
             prepared.include_prompt_logprobs,
+            prepared.include_reasoning,
             prepared.echo,
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
@@ -134,6 +136,7 @@ async fn collect_chat_completion(
     created: u64,
     requested_logprobs: bool,
     include_prompt_logprobs: bool,
+    include_reasoning: bool,
     echo: Option<String>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
@@ -207,7 +210,7 @@ async fn collect_chat_completion(
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
                 tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
-                reasoning: message.reasoning(),
+                reasoning: include_reasoning.then(|| message.reasoning()).flatten(),
             },
             logprobs,
             finish_reason: Some(finish_reason),
@@ -232,6 +235,7 @@ async fn chat_completion_chunk_stream(
     log_request: bool,
     include_usage: bool,
     requested_logprobs: bool,
+    include_reasoning: bool,
     echo: Option<String>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
@@ -269,8 +273,8 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
-                    pending_chunk.push_block_delta(kind, delta);
-                } else {
+                    pending_chunk.push_block_delta(kind, delta, include_reasoning);
+                } else if include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning) {
                     y.yield_ok(block_delta_chunk(
                         &request_id,
                         &response_model,
@@ -456,10 +460,18 @@ struct PendingChatChunk {
 impl PendingChatChunk {
     /// Append one assistant text/reasoning block delta to the buffered OpenAI
     /// delta payload.
-    fn push_block_delta(&mut self, kind: AssistantBlockKind, delta: String) {
+    fn push_block_delta(
+        &mut self,
+        kind: AssistantBlockKind,
+        delta: String,
+        include_reasoning: bool,
+    ) {
         match kind {
             AssistantBlockKind::Text => append_delta_text(&mut self.delta.content, delta),
-            AssistantBlockKind::Reasoning => append_delta_text(&mut self.delta.reasoning, delta),
+            AssistantBlockKind::Reasoning if include_reasoning => {
+                append_delta_text(&mut self.delta.reasoning, delta);
+            }
+            AssistantBlockKind::Reasoning => {}
             AssistantBlockKind::ToolCall => {
                 unreachable!("tool calls must flow through dedicated tool-call chunks")
             }
@@ -895,6 +907,7 @@ mod tests {
             false,
             false,
             true,
+            true,
             None,
             false,
             false,
@@ -958,6 +971,7 @@ mod tests {
             false,
             false,
             true,
+            true,
             None,
             false,
             false,
@@ -974,6 +988,63 @@ mod tests {
             Some("think")
         );
         assert!(chunks[1].choices[0].logprobs.is_some());
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_omits_reasoning_delta_when_disabled() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                prompt_token_count: 1,
+                output_token_count: 2,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            false,
+            false,
+            false,
+            false,
+            None,
+            false,
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks[1].choices[0].delta.content.as_deref(),
+            Some("answer")
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.choices.iter().all(|choice| choice.delta.reasoning.is_none()))
+        );
     }
 
     #[tokio::test]
@@ -1017,6 +1088,7 @@ mod tests {
             false,
             false,
             false,
+            true,
             None,
             false,
             false,

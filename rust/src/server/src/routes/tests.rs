@@ -3453,6 +3453,57 @@ async fn reasoning_blocks_are_mapped_to_reasoning_sse_chunks() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn include_reasoning_false_suppresses_reasoning_in_non_stream_chat() {
+    let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
+        vec![
+            (bytes_to_token_ids(b"<think>think</think>"), None),
+            (
+                bytes_to_token_ids(b"answer"),
+                Some(EngineCoreFinishReason::Length),
+            ),
+        ],
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "include_reasoning": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("decode json");
+
+    assert_eq!(json["choices"][0]["message"]["content"], "answer");
+    assert!(
+        json["choices"][0]["message"]
+            .as_object()
+            .is_some_and(|message| !message.contains_key("reasoning")),
+        "{text}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
