@@ -1794,7 +1794,10 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        if (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "squat"
+        ):
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -2127,12 +2130,15 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        if (
+            resolved_cache_dtype.startswith("turboquant_")
+            or resolved_cache_dtype == "squat"
+        ) and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):
             logger.warning(
-                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "TurboQuant/SQuat is not compatible with FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
                 "warning, pass --attention-config.flash_attn_version=2"
             )
