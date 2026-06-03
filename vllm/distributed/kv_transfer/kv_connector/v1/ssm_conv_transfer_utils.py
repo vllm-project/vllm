@@ -9,8 +9,8 @@ Supported model types:
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
-  - KDA (Kimi Delta Attention): conv = [Q, K, V], temporal = recurrent
-    — mapped into MambaConvSplitInfo via 4-shape dispatch.
+  - KDA (Kimi Delta Attention): same layout as GDN — conv = [Q, K, V],
+    temporal = recurrent.  Uses the same MambaSpec (2-shape) format.
 """
 
 import math
@@ -115,9 +115,7 @@ def derive_mamba_conv_split(
 
     Called once at init on both P and D.  Dispatches by mamba_type:
 
-    - GDN_ATTN with 4 shapes: KDA variant (conv_q, conv_k, conv_v, recurrent)
-      mapped to MambaConvSplitInfo.
-    - GDN_ATTN with 2 shapes: standard GDN (conv_state, ssm_state).
+    - GDN_ATTN: standard GDN / KDA (conv_state, ssm_state).
     - MAMBA2: conv_state with sub-projection decomposition.
     """
     _supported = (
@@ -132,47 +130,7 @@ def derive_mamba_conv_split(
 
     assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
 
-    # KDA variant of GDN: 4 separate states (conv_q, conv_k, conv_v, recurrent)
-    # mapped to MambaConvSplitInfo (first 3 → conv sub-projections, 4th → SSM).
-    if (
-        mamba_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
-        and len(mamba_spec.shapes) == 4
-    ):
-        conv_rows = mamba_spec.shapes[0][1]
-        assert all(s[1] == conv_rows for s in mamba_spec.shapes[:3]), (
-            "KDA conv states must all have the same conv_rows"
-        )
-        assert all(d == mamba_spec.dtypes[0] for d in mamba_spec.dtypes[:3]), (
-            "KDA conv states must all have the same dtype"
-        )
-        local_proj_dims = (
-            mamba_spec.shapes[0][0],  # q_dim_local
-            mamba_spec.shapes[1][0],  # k_dim_local
-            mamba_spec.shapes[2][0],  # v_dim_local
-        )
-        conv_dtype_size = torch.tensor(
-            [],
-            dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
-        ).element_size()
-        conv_state_bytes = sum(
-            torch.Size(s).numel() * torch.tensor([], dtype=d).element_size()  # type: ignore[misc]
-            for s, d in zip(mamba_spec.shapes[:3], mamba_spec.dtypes[:3])
-        )
-        ssm_state_bytes = (
-            torch.Size(mamba_spec.shapes[3]).numel()
-            * torch.tensor(
-                [],
-                dtype=mamba_spec.dtypes[3],  # type: ignore[misc]
-            ).element_size()
-        )
-        return MambaConvSplitInfo(
-            conv_rows=conv_rows,
-            local_proj_dims=local_proj_dims,
-            conv_dtype_size=conv_dtype_size,
-            ssm_sizes=(conv_state_bytes, ssm_state_bytes),
-        )
-
-    # --- Standard 2-shape path (Mamba2 / GDN) ---
+    # --- Standard 2-shape path (Mamba2 / GDN / KDA) ---
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 

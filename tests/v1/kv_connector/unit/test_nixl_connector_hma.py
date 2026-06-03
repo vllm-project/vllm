@@ -1072,12 +1072,16 @@ def test_mamba_conv_split_info_remote_conv_offsets_tp_negative():
     assert offsets == [(0, 60), (60, 30), (90, 30)]
 
 
-# ---- KDA dispatch and 4-tuple tests ----
+# ---- KDA (2-shape GDN path) tests ----
 
 
 @pytest.mark.cpu_test
-def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
-    """derive_mamba_conv_split returns MambaConvSplitInfo for 4 shapes (KDA)."""
+def test_derive_mamba_conv_split_kda_via_gdn_path(monkeypatch):
+    """derive_mamba_conv_split for KDA (now 2-shape) uses standard GDN path.
+
+    KDA fuses 3 conv states into a single contiguous conv_state tensor,
+    so it goes through the same GDN decomposition as standard GDN models.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
         MambaConvSplitInfo,
         derive_mamba_conv_split,
@@ -1087,19 +1091,27 @@ def test_derive_mamba_conv_split_kda_dispatch(monkeypatch):
 
     monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
 
+    # KDA with fused conv: num_heads=8, head_dim=10, tp=1
+    # fused_conv_dim = 3 * 8 * 10 = 240 (Q + K + V, all same dim)
+    # recurrent_shape = (8, 10, 10)
     spec = MambaSpec(
         block_size=64,
-        shapes=((100, 3), (100, 3), (100, 3), (256,)),
-        dtypes=(torch.bfloat16, torch.bfloat16, torch.bfloat16, torch.float32),
+        shapes=((240, 3), (8, 10, 10)),
+        dtypes=(torch.bfloat16, torch.float32),
         mamba_type=MambaAttentionBackendEnum.GDN_ATTN,
     )
     out = derive_mamba_conv_split(spec, local_tp=1)
     assert isinstance(out, MambaConvSplitInfo)
-    # conv states: 100*3*2=600 each (bfloat16=2 bytes), total=1800
-    # recurrent: 256*4=1024 (float32=4 bytes)
-    assert out.ssm_sizes == (1800, 1024)
-    assert out.local_proj_dims == (100, 100, 100)
+    # Standard GDN decomposition:
+    #   temporal_shape = (8, 10, 10) → value_dim_local = 8 * 10 = 80
+    #   local_conv_dim = 240, remainder = 240 - 80 = 160
+    #   key_dim_local = 80
+    #   local_proj_dims = (80, 80, 80)
+    assert out.local_proj_dims == (80, 80, 80)
     assert out.conv_rows == 3
+    # conv_state_bytes = 240 * 3 * 2 = 1440 (bfloat16)
+    # ssm_state_bytes = 8 * 10 * 10 * 4 = 3200 (float32)
+    assert out.ssm_sizes == (1440, 3200)
 
 
 @pytest.mark.cpu_test
