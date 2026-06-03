@@ -449,29 +449,6 @@ steps:
   commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
-#------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
-
-- label: Model Executor # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/engine/arg_utils.py
-  - vllm/config/model.py
-  - vllm/model_executor
-  - tests/model_executor
-  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - apt-get update && apt-get install -y curl libsodium23
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s model_executor -m '(not slow_test)'
-  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
-
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
@@ -1238,14 +1215,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
-  - pytest -v -s tool_use
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
 
 - label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
@@ -1261,7 +1235,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
 
 - label: Entrypoints Integration (API Server openai - Part 2) # TBD
   timeout_in_minutes: 180
@@ -1275,10 +1249,14 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180
@@ -1368,7 +1346,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/offline_mode --ignore=entrypoints/openai --ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: OpenAI API correctness # TBD
   timeout_in_minutes: 180
@@ -1484,7 +1462,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
-- label: DeepSeek V2-Lite Accuracy (4xH100-4xMI300) # TBD
+- label: DeepSeek V2-Lite Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -1526,7 +1504,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (4xH100-4xMI300) # TBD
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (4xH100-4xMI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
@@ -1737,6 +1715,29 @@ steps:
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+
+#------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
+
+- label: Model Executor # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - tests/model_executor
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - apt-get update && apt-get install -y curl libsodium23
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s model_executor -m '(not slow_test)'
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -2745,14 +2746,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/entrypoints/serve
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/instrumentator
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
-  - pytest -v -s tool_use
+  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
 
 - label: Entrypoints Integration (API Server openai - Part 1) # TBD
   timeout_in_minutes: 180
@@ -2768,7 +2766,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
 
 - label: Entrypoints Integration (API Server openai - Part 2) # TBD
   timeout_in_minutes: 180
@@ -2782,10 +2780,14 @@ steps:
   - vllm/
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/generate
+  - tests/tool_use
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  - pytest -v -s entrypoints/generate
+  - pytest -v -s tool_use
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
   timeout_in_minutes: 180
@@ -2895,7 +2897,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx-fp8-and-mixed.txt
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200-MI355) # TBD
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2

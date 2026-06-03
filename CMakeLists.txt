@@ -112,6 +112,8 @@ endif()
 #
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
 # CPU builds define the target before the early return)
+# This extension requires SABI 3.11 since it relies on Py_buffer support. Loading
+# failure is handled gracefully on vLLM side for lower Python versions.
 #
 set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
 set(SPINLOOP_COMPILE_FLAGS "")
@@ -144,14 +146,14 @@ endif()
 # Set up GPU language and check the torch version and warn if it isn't
 # what is expected.
 #
-if (NOT HIP_FOUND AND CUDA_FOUND)
+if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
   if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
-elseif(HIP_FOUND)
+elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   set(VLLM_GPU_LANG "HIP")
 
   # Importing torch recognizes and sets up some HIP/ROCm configuration but does
@@ -309,14 +311,9 @@ set(VLLM_EXT_SRC
   "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/custom_all_reduce.cu"
-  "csrc/torch_bindings.cpp"
-  "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+  "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_EXT_SRC
-    "csrc/minimax_reduce_rms_kernel.cu")
-
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
@@ -503,12 +500,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
     set(SRCS
-      "csrc/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
-      "csrc/moe/mxfp8_moe/mxfp8_experts_quant.cu")
+      "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+      "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
-    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
     message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
   else()
@@ -598,7 +595,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 if (VLLM_GPU_LANG STREQUAL "HIP")
-  # Add QuickReduce kernels
+  # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
   list(APPEND VLLM_EXT_SRC
     "csrc/custom_quickreduce.cu"
   )
@@ -633,6 +630,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
+    "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+    "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
     "csrc/libtorch_stable/quantization/gguf/gguf_kernel.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
@@ -647,7 +646,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/attention/paged_attention_v1.cu"
     "csrc/libtorch_stable/attention/paged_attention_v2.cu"
     "csrc/libtorch_stable/cache_kernels.cu"
-    "csrc/libtorch_stable/cache_kernels_fused.cu")
+    "csrc/libtorch_stable/cache_kernels.cu"
+    "csrc/libtorch_stable/cache_kernels_fused.cu"
+    "csrc/libtorch_stable/custom_all_reduce.cu"
+    "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
@@ -659,7 +661,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/permute_cols.cu"
       "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
-      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu")
+      "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
+      "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
 
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
@@ -681,6 +684,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
                    "in CUDA target architectures.")
+  endif()
+
+  # FP32 router GEMM (H=3072, E=256, M<=32). Requires SM90+ and CUDA >= 12.0.
+  cuda_archs_sm90plus(FP32_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND FP32_ROUTER_GEMM_ARCHS)
+    set(SRCS
+      "csrc/libtorch_stable/fp32_router_gemm_entry.cu"
+      "csrc/libtorch_stable/fp32_router_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FP32_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    message(STATUS "Building fp32_router_gemm for archs: ${FP32_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building fp32_router_gemm as no compatible archs found "
+                   "(requires SM90+ and CUDA >= 12.0).")
   endif()
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
@@ -1240,24 +1259,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  # DeepSeek V3 router GEMM kernel - requires SM90+
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-  endif()
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
+  # DeepSeek V3 router GEMM kernel requires SM90+ and CUDA >= 12.0.
+  # (fp32_router_gemm has been migrated to _C_stable_libtorch above.)
+  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
     set(DSV3_ROUTER_GEMM_SRC
       "csrc/moe/dsv3_router_gemm_entry.cu"
       "csrc/moe/dsv3_router_gemm_float_out.cu"
       "csrc/moe/dsv3_router_gemm_bf16_out.cu")
     set_gencode_flags_for_srcs(
       SRCS "${DSV3_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
     list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
-    message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+
+    message(STATUS "Building DSV3 router GEMM kernels for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
   else()
-    message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
+    message(STATUS "Not building DSV3 router GEMM kernels as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
