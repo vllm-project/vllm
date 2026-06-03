@@ -14,6 +14,7 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
+from vllm.platforms.interface import DeviceCapability
 
 # CudaPlatform and RocmPlatform import their respective compiled C extensions
 # at module level, raising ModuleNotFoundError on incompatible builds.
@@ -220,6 +221,8 @@ def test_backend_selection(
                         expected = "TRITON_MLA"
                         assert backend.get_name() == expected
                 elif name == "FLASHINFER":
+                    if capability < (8, 0):
+                        pytest.skip("FlashInfer attention requires SM80 or higher")
                     backend = get_attn_backend(64, torch.float16, None, use_mla=use_mla)
                     expected = "FLASHINFER"
                     assert backend.get_name() == expected
@@ -366,6 +369,32 @@ def test_auto_backend_selection_behavior():
 
     # Both should select the same backend
     assert backend_auto.get_name() == backend_none.get_name()
+
+
+def test_cuda_sm75_auto_selects_triton_attn(monkeypatch: pytest.MonkeyPatch):
+    """FlashInfer native prefill can crash on Turing; auto-select Triton."""
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+
+    def get_sm75_capability(cls, device_id: int = 0):
+        return DeviceCapability(major=7, minor=5)
+
+    monkeypatch.setattr(
+        CudaPlatform, "get_device_capability", classmethod(get_sm75_capability)
+    )
+
+    vllm_config = VllmConfig()
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        backend = get_attn_backend(
+            head_size=128,
+            dtype=torch.float16,
+            kv_cache_dtype=None,
+        )
+
+    assert backend.get_name() == "TRITON_ATTN"
 
 
 @pytest.mark.parametrize(
