@@ -1102,6 +1102,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
     ),
+    # Whether to use flydsl moe op.
+    # By default is disabled.
+    "VLLM_ROCM_USE_FLYDSL_MOE": lambda: (
+        os.getenv("VLLM_ROCM_USE_FLYDSL_MOE", "False").lower() in ("true", "1")
+    ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass
     #       for large batches

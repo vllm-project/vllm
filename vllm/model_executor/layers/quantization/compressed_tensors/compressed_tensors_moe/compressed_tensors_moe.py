@@ -9,6 +9,7 @@ from compressed_tensors.quantization import (
     QuantizationStrategy,
 )
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -21,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 logger = init_logger(__name__)
 
@@ -109,6 +111,21 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 ):
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
+                    )
+                if (
+                    weight_quant.strategy == QuantizationStrategy.GROUP
+                    and group_size == 32
+                    and weight_quant.num_bits == 4
+                    and on_gfx950()
+                    and envs.VLLM_ROCM_USE_FLYDSL_MOE
+                ):
+                    from .compressed_tensors_moe_w4a16_flydsl import (
+                        CompressedTensorsW4A16FlydslMoEMethod,
+                    )
+
+                    logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
+                    return CompressedTensorsW4A16FlydslMoEMethod(
+                        weight_quant, input_quant, layer.moe_config
                     )
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(
