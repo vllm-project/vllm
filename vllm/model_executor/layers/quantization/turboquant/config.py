@@ -181,17 +181,20 @@ class TurboQuantConfig:
         """Layer indices to skip TQ compression (boundary protection).
 
         For hybrid models (attention + Mamba/linear-attention), boundary
-        protection is disabled — hybrids typically have only 8-12
-        full-attention layers and a hard n=2 on each side would cover
-        ~40 % of them.  The dense GSM8K baselines that motivate n=2
-        don't apply to hybrids.
+        protection is disabled because KV-carrying layer indices are not a
+        dense attention-layer range. Mixed sliding-window/full-attention models
+        use targeted KV-sharing protection instead of generic boundary
+        protection. Native boundary layers have a high aggregate KV-cache cost
+        in these layouts and sharply reduce effective KV token capacity.
 
-        For dense models, skips first N and last N attention layers.
-        Empirically required for aggressive presets (k3v4_nc, 3bit_nc)
-        — without it GSM8K drops ~30 points on Qwen3-4B.
+        By default, dense models protect the first and last 2 attention layers
+        from TQ compression as a quality guard. Callers may pass ``n = 0`` to
+        use TQ on all dense layers when they explicitly prefer capacity over
+        this boundary protection.
         """
+        num_layers = model_config.hf_text_config.num_hidden_layers
+        attn_indices = _get_full_attention_layer_indices(model_config)
         if model_config.is_hybrid:
-            attn_indices = _get_full_attention_layer_indices(model_config)
             if not attn_indices:
                 raise NotImplementedError(
                     "TurboQuant KV cache requires identifiable "
@@ -201,7 +204,16 @@ class TurboQuantConfig:
             logger.info("TQ hybrid: full-attention layers %s", attn_indices)
             return []
 
-        num_layers = model_config.hf_text_config.num_hidden_layers
+        has_mixed_attention_layout = bool(attn_indices) and (
+            len(attn_indices) < num_layers
+        )
+        if has_mixed_attention_layout:
+            logger.info(
+                "TQ mixed attention layout: full-attention layers %s",
+                attn_indices,
+            )
+            return []
+
         if n <= 0 or num_layers <= 0:
             return []
         n = min(n, num_layers // 2)  # don't skip more than half
@@ -210,6 +222,92 @@ class TurboQuantConfig:
         # Deduplicate (if num_layers <= 2*n)
         indices = sorted(set(first + last))
         return [str(i) for i in indices]
+
+    @staticmethod
+    def align_kv_sharing_skip_layers(
+        model_config: ModelConfig,
+        skip_layers: list[str],
+    ) -> list[str]:
+        """Align skip layers with YOCO-style KV-sharing targets.
+
+        Some models let later layers reuse the KV cache of an earlier layer of
+        the same attention type. A shared layer and its target must agree on KV
+        cache dtype/layout because they read the same physical cache tensor.
+        """
+        hf_text_config = model_config.hf_text_config
+        num_layers = getattr(hf_text_config, "num_hidden_layers", 0)
+        num_kv_shared_layers = getattr(hf_text_config, "num_kv_shared_layers", 0)
+        layer_types = getattr(hf_text_config, "layer_types", None)
+        if not num_layers or not num_kv_shared_layers or not layer_types:
+            return _sort_skip_layers(skip_layers)
+
+        first_shared_layer = num_layers - num_kv_shared_layers
+        if first_shared_layer <= 0:
+            return _sort_skip_layers(skip_layers)
+
+        skip_indices: set[int] = set()
+        non_index_layers: set[str] = set()
+        for layer in skip_layers:
+            try:
+                skip_indices.add(int(layer))
+            except ValueError:
+                non_index_layers.add(layer)
+
+        removed_shared_layers: list[tuple[int, int]] = []
+        prev_layer_types = layer_types[:first_shared_layer]
+        for shared_idx in range(first_shared_layer, min(num_layers, len(layer_types))):
+            current_type = layer_types[shared_idx]
+            try:
+                target_idx = (
+                    len(prev_layer_types)
+                    - 1
+                    - prev_layer_types[::-1].index(current_type)
+                )
+            except ValueError:
+                continue
+
+            if target_idx in skip_indices:
+                skip_indices.add(shared_idx)
+            else:
+                if shared_idx in skip_indices:
+                    removed_shared_layers.append((shared_idx, target_idx))
+                    skip_indices.discard(shared_idx)
+
+        if removed_shared_layers:
+            logger.warning(
+                "Removed %d shared layer(s) from TurboQuant skip set because "
+                "their KV-sharing target layers are not skipped: %s",
+                len(removed_shared_layers),
+                ", ".join(
+                    f"{shared_idx}->target {target_idx}"
+                    for shared_idx, target_idx in removed_shared_layers
+                ),
+            )
+
+        aligned = [str(idx) for idx in skip_indices] + list(non_index_layers)
+        return _sort_skip_layers(aligned)
+
+    @staticmethod
+    def get_kv_sharing_target_skip_layers(
+        model_config: ModelConfig,
+    ) -> list[str]:
+        """High-fanout target layers whose KV cache is reused later.
+
+        If a later layer reuses a target layer's KV cache, both layers must
+        agree on the physical KV layout. Protect only targets consumed by at
+        least half of all shared layers: low-fanout targets are left compressed
+        to avoid over-padding the KV cache for little quality benefit.
+        """
+        target_fanout = _get_kv_sharing_target_fanout(model_config)
+        total_shared_consumers = sum(target_fanout.values())
+        if not total_shared_consumers:
+            return []
+        targets = {
+            target
+            for target, fanout in target_fanout.items()
+            if fanout * 2 >= total_shared_consumers
+        }
+        return _sort_skip_layers([str(idx) for idx in targets])
 
     @staticmethod
     def from_cache_dtype(cache_dtype: str, head_dim: int) -> TurboQuantConfig:
@@ -239,7 +337,7 @@ def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
     ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
     """
     text_cfg = model_config.hf_text_config
-    hf_cfg = model_config.hf_config
+    hf_cfg = getattr(model_config, "hf_config", None)
 
     layer_types = getattr(text_cfg, "layer_types", None)
     if layer_types is not None:
@@ -258,3 +356,47 @@ def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
         return [i for i, t in enumerate(attn_type_list) if t == 1]
 
     return []
+
+
+def _get_kv_sharing_target_fanout(
+    model_config: ModelConfig,
+    target_attention_type: str | None = None,
+) -> dict[int, int]:
+    hf_text_config = model_config.hf_text_config
+    num_layers = getattr(hf_text_config, "num_hidden_layers", 0)
+    num_kv_shared_layers = getattr(hf_text_config, "num_kv_shared_layers", 0)
+    layer_types = getattr(hf_text_config, "layer_types", None)
+    if not num_layers or not num_kv_shared_layers or not layer_types:
+        return {}
+
+    first_shared_layer = num_layers - num_kv_shared_layers
+    if first_shared_layer <= 0:
+        return {}
+
+    target_fanout: dict[int, int] = {}
+    prev_layer_types = layer_types[:first_shared_layer]
+    for shared_idx in range(first_shared_layer, min(num_layers, len(layer_types))):
+        current_type = layer_types[shared_idx]
+        try:
+            target_idx = (
+                len(prev_layer_types) - 1 - prev_layer_types[::-1].index(current_type)
+            )
+        except ValueError:
+            continue
+        if (
+            target_attention_type is not None
+            and layer_types[target_idx] != target_attention_type
+        ):
+            continue
+        target_fanout[target_idx] = target_fanout.get(target_idx, 0) + 1
+    return target_fanout
+
+
+def _sort_skip_layers(skip_layers: list[str]) -> list[str]:
+    def sort_key(layer: str) -> tuple[int, int | str]:
+        try:
+            return (0, int(layer))
+        except ValueError:
+            return (1, layer)
+
+    return sorted(set(skip_layers), key=sort_key)

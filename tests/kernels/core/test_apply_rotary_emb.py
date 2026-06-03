@@ -22,6 +22,7 @@ from vllm.config import (
     get_cached_compilation_config,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.rotary_embedding import common as rotary_common
 from vllm.platforms import current_platform
 
 CUDA_DEVICES = ["cuda:0"]
@@ -201,3 +202,86 @@ def test_rotary_embedding_dispatch(
     - forward_cuda/forward methods should call ApplyRotaryEmb.forward()
     """
     run_dispatch_test(test_case, device)
+
+
+def _make_apply_rotary_emb_inputs():
+    x = torch.randn(4, 2, 8, dtype=torch.float32)
+    cos = torch.randn(4, 4, dtype=torch.float32)
+    sin = torch.randn(4, 4, dtype=torch.float32)
+    return x, cos, sin
+
+
+def _make_apply_rotary_emb(**kwargs):
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["all", "+apply_rotary_emb"])
+    )
+    get_cached_compilation_config.cache_clear()
+    with set_current_vllm_config(vllm_config):
+        return rotary_common.ApplyRotaryEmb(**kwargs)
+
+
+def test_apply_rotary_emb_cuda_prefers_vllm_flash_attn(monkeypatch):
+    op = _make_apply_rotary_emb(is_neox_style=True)
+    x, cos, sin = _make_apply_rotary_emb_inputs()
+    calls = {"vllm": False, "flash_attn": False}
+
+    def fake_vllm_apply_rotary_emb(x, cos, sin, interleaved):
+        calls["vllm"] = True
+        assert not interleaved
+        return torch.zeros_like(x)
+
+    def fake_flash_attn_apply_rotary(*args, **kwargs):
+        calls["flash_attn"] = True
+        raise AssertionError("external flash-attn fallback should not be used")
+
+    monkeypatch.setattr(
+        rotary_common,
+        "_maybe_import_vllm_flash_attn_apply_rotary_emb",
+        lambda: fake_vllm_apply_rotary_emb,
+    )
+    op.apply_rotary_emb_flash_attn = fake_flash_attn_apply_rotary
+
+    output = op.forward_cuda(x, cos, sin)
+
+    assert calls == {"vllm": True, "flash_attn": False}
+    assert output.shape == x.shape
+
+
+def test_apply_rotary_emb_cuda_uses_flash_attn_fallback(monkeypatch):
+    op = _make_apply_rotary_emb(is_neox_style=False)
+    x, cos, sin = _make_apply_rotary_emb_inputs()
+    calls = {"flash_attn": False}
+
+    def fake_flash_attn_apply_rotary(x, cos, sin, *, interleaved):
+        calls["flash_attn"] = True
+        assert interleaved
+        return torch.ones_like(x)
+
+    monkeypatch.setattr(
+        rotary_common,
+        "_maybe_import_vllm_flash_attn_apply_rotary_emb",
+        lambda: None,
+    )
+    op.apply_rotary_emb_flash_attn = fake_flash_attn_apply_rotary
+
+    output = op.forward_cuda(x, cos, sin)
+
+    assert calls == {"flash_attn": True}
+    assert output.shape == x.shape
+
+
+def test_apply_rotary_emb_cuda_uses_native_fallback(monkeypatch):
+    op = _make_apply_rotary_emb(is_neox_style=True)
+    x, cos, sin = _make_apply_rotary_emb_inputs()
+
+    monkeypatch.setattr(
+        rotary_common,
+        "_maybe_import_vllm_flash_attn_apply_rotary_emb",
+        lambda: None,
+    )
+    op.apply_rotary_emb_flash_attn = None
+
+    output = op.forward_cuda(x, cos, sin)
+    expected = op.forward_native(x, cos, sin)
+
+    torch.testing.assert_close(output, expected)

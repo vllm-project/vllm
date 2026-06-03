@@ -228,12 +228,40 @@ class INCConfig(QuantizationConfig):
         return weight_bits < 16
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        def _map_extra_config_key(key: str) -> str | None:
+            mapped_key = hf_to_vllm_mapper._map_name(key)
+            if mapped_key != key:
+                return mapped_key
+
+            # ``extra_config`` may also contain regex patterns in HF names.
+            # WeightsMapper handles literal module names, but regex patterns
+            # escape literal dots (e.g. ``model\.layers``), so map those
+            # escaped prefixes/substrings as well.
+            for mapping in (
+                hf_to_vllm_mapper.orig_to_new_substr,
+                hf_to_vllm_mapper.orig_to_new_prefix,
+                hf_to_vllm_mapper.orig_to_new_suffix,
+            ):
+                for old, new in mapping.items():
+                    old_pattern = re.escape(old)
+                    if old_pattern not in key:
+                        continue
+                    if new is None:
+                        return None
+                    return key.replace(old_pattern, re.escape(new), 1)
+
+            return key
+
         if self.block_name_to_quantize is not None:
             self.block_name_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.block_name_to_quantize
             )
         if self.extra_config is not None:
-            self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
+            self.extra_config = {
+                mapped_key: value
+                for key, value in self.extra_config.items()
+                if (mapped_key := _map_extra_config_key(key)) is not None
+            }
 
     def apply_awq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (

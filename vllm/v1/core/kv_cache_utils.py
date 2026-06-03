@@ -31,6 +31,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
+    TQSlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
@@ -866,6 +868,11 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         # Encoder-only models do not have KV cache, kv_cache_type can be
         # regarded as uniform.
         return True
+    spec_types = {type(spec) for spec in kv_cache_spec.values()}
+    if (TQFullAttentionSpec in spec_types and FullAttentionSpec in spec_types) or (
+        TQSlidingWindowSpec in spec_types and SlidingWindowSpec in spec_types
+    ):
+        return False
     try:
         kv_cache_spec_values = list(kv_cache_spec.values())
         _ = kv_cache_spec_values[0].merge(kv_cache_spec_values)
@@ -1030,11 +1037,18 @@ def unify_kv_cache_spec_page_size(
         return kv_cache_spec
 
     max_page_size = max(page_sizes)
-    new_kv_cache_spec = {}
+    tq_spec_types = (TQFullAttentionSpec, TQSlidingWindowSpec)
+    new_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
         else:
+            if isinstance(layer_spec, tq_spec_types):
+                padded_spec = replace(layer_spec, page_size_padded=max_page_size)
+                assert padded_spec.page_size_bytes == max_page_size
+                new_kv_cache_spec[layer_name] = padded_spec
+                continue
+
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size != 0:
                 raise NotImplementedError(
@@ -1043,9 +1057,9 @@ def unify_kv_cache_spec_page_size(
                 )
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
-            new_kv_cache_spec[layer_name] = new_spec
+            resized_spec = replace(layer_spec, block_size=new_block_size)
+            assert resized_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = resized_spec
     return new_kv_cache_spec
 
 
@@ -1386,6 +1400,18 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     compress_ratio=spec.compress_ratio,
                     model_version=spec.model_version,
                 )
+            elif isinstance(spec, TQSlidingWindowSpec):
+                kv_cache_spec[layer_name] = TQFullAttentionSpec(
+                    block_size=spec.block_size,
+                    num_kv_heads=spec.num_kv_heads,
+                    head_size=spec.head_size,
+                    head_size_v=spec.head_size_v,
+                    dtype=spec.dtype,
+                    kv_quant_mode=spec.kv_quant_mode,
+                    sliding_window=spec.sliding_window,
+                    page_size_padded=spec.page_size_padded,
+                    tq_slot_size=spec.tq_slot_size,
+                )
             elif isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=spec.block_size,
@@ -1453,6 +1479,37 @@ def group_and_unify_kv_cache_specs(
         swa_uniform_specs.append(uniform_spec)
 
     return [mla_uniform_spec, *swa_uniform_specs]
+
+
+def _is_tq_native_mixed_kv_cache_spec(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> bool:
+    """Return whether the spec mixes TurboQuant and native attention storage.
+
+    Keep this predicate intentionally narrow. The special mixed path is only
+    for TQ attention specs plus exact native full/sliding attention specs.
+    All-TQ, pure-native, MLA, Mamba, and chunked-local layouts must keep their
+    existing routing.
+    """
+    supported_spec_types = {
+        FullAttentionSpec,
+        SlidingWindowSpec,
+        TQFullAttentionSpec,
+        TQSlidingWindowSpec,
+    }
+    specs = list(kv_cache_spec.values())
+    has_tq = any(
+        type(spec) in (TQFullAttentionSpec, TQSlidingWindowSpec) for spec in specs
+    )
+    has_native = any(
+        type(spec) in (FullAttentionSpec, SlidingWindowSpec) for spec in specs
+    )
+    return (
+        has_tq
+        and has_native
+        and all(type(spec) in supported_spec_types for spec in specs)
+        and any(isinstance(spec, SlidingWindowSpec) for spec in specs)
+    )
 
 
 def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -> int:
@@ -1635,6 +1692,18 @@ def get_kv_cache_groups(
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
         return []
+
+    if (
+        not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+        and _is_tq_native_mixed_kv_cache_spec(kv_cache_spec)
+    ):
+        # TQ+native mixed layouts need to preserve the hybrid block manager
+        # semantics. Converting them into one UniformTypeKVCacheSpecs group
+        # loses the sliding-window recycling benefit and significantly reduces
+        # the reported KV token capacity. Pad page sizes only for this mixed
+        # layout and keep all-TQ / pure-native routing unchanged.
+        kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
+        return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
 
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for

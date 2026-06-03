@@ -68,8 +68,10 @@ class Gemma4Config(VerifyAndUpdateConfig):
         numerical divergence and output corruption.
 
         The fix detects heterogeneous head dimensions from the model config
-        and forces TRITON_ATTN (which has no head_size ceiling) for all
-        layers when the user hasn't explicitly chosen a backend.
+        and forces a single backend for all layers when the user hasn't
+        explicitly chosen a backend. Use TurboQuant when the user requested a
+        TurboQuant KV cache; otherwise use TRITON_ATTN (which has no
+        head_size ceiling).
 
         TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
         require NixlConnector changes to support per-layer KV transfer
@@ -96,13 +98,19 @@ class Gemma4Config(VerifyAndUpdateConfig):
                 AttentionBackendEnum,
             )
 
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if isinstance(cache_dtype, str) and cache_dtype.startswith("turboquant_"):
+                backend = AttentionBackendEnum.TURBOQUANT
+            else:
+                backend = AttentionBackendEnum.TRITON_ATTN
+            vllm_config.attention_config.backend = backend
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
+                "(head_dim=%d, global_head_dim=%d). Forcing %s "
                 "backend to prevent mixed-backend numerical divergence.",
                 head_dim,
                 global_head_dim,
+                backend.name,
             )
 
 

@@ -50,6 +50,8 @@ from vllm.v1.kv_cache_interface import (
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
+    TQSlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
@@ -143,6 +145,40 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+    )
+
+
+def new_tq_full_attention_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    tq_slot_size=8,
+):
+    return TQFullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        tq_slot_size=tq_slot_size,
+    )
+
+
+def new_tq_sliding_window_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    sliding_window=1,
+    tq_slot_size=8,
+):
+    return TQSlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        sliding_window=sliding_window,
+        tq_slot_size=tq_slot_size,
     )
 
 
@@ -1782,6 +1818,163 @@ def test_get_kv_cache_config_one_worker():
     )
 
 
+def test_tq_native_mixed_kv_cache_uses_hybrid_page_groups():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    tq_sliding_1 = new_tq_sliding_window_spec(tq_slot_size=8)
+    tq_sliding_2 = new_tq_sliding_window_spec(tq_slot_size=8)
+    tq_full = new_tq_full_attention_spec(tq_slot_size=16)
+    native_sliding = new_sliding_window_spec()
+    kv_cache_specs = {
+        "layer_1": tq_sliding_1,
+        "layer_2": tq_sliding_2,
+        "layer_3": tq_full,
+        "layer_4": native_sliding,
+    }
+
+    assert kv_cache_utils._is_tq_native_mixed_kv_cache_spec(kv_cache_specs)
+
+    max_page_size = max(spec.page_size_bytes for spec in kv_cache_specs.values())
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [max_page_size * 32]
+    )[0]
+
+    assert kv_cache_config.num_blocks == 32
+    assert len(kv_cache_config.kv_cache_groups) == 4
+    assert [group.layer_names for group in kv_cache_config.kv_cache_groups] == [
+        ["layer_1"],
+        ["layer_2"],
+        ["layer_3"],
+        ["layer_4"],
+    ]
+    group_specs = [group.kv_cache_spec for group in kv_cache_config.kv_cache_groups]
+    assert all(not isinstance(spec, UniformTypeKVCacheSpecs) for spec in group_specs)
+    assert all(spec.page_size_bytes == max_page_size for spec in group_specs)
+    assert isinstance(group_specs[0], TQSlidingWindowSpec)
+    assert isinstance(group_specs[1], TQSlidingWindowSpec)
+    assert isinstance(group_specs[2], TQFullAttentionSpec)
+    assert isinstance(group_specs[3], SlidingWindowSpec)
+    assert group_specs[0].sliding_window == tq_sliding_1.sliding_window
+    assert group_specs[0].tq_slot_size == tq_sliding_1.tq_slot_size
+    assert group_specs[2].tq_slot_size == tq_full.tq_slot_size
+    assert group_specs[3].sliding_window == native_sliding.sliding_window
+    assert kv_cache_config.kv_cache_tensors == [
+        KVCacheTensor(
+            size=max_page_size * 32,
+            shared_by=["layer_1", "layer_2", "layer_3", "layer_4"],
+        ),
+    ]
+
+    vllm_config.cache_config.num_gpu_blocks_override = 7
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [max_page_size * 32]
+    )[0]
+    assert kv_cache_config.num_blocks == 7
+    assert kv_cache_config.kv_cache_tensors == [
+        KVCacheTensor(
+            size=max_page_size * 7,
+            shared_by=["layer_1", "layer_2", "layer_3", "layer_4"],
+        ),
+    ]
+
+    scheduler_config = generate_scheduler_kv_cache_config([kv_cache_config])
+    assert len(scheduler_config.kv_cache_groups) == 4
+    assert isinstance(
+        scheduler_config.kv_cache_groups[0].kv_cache_spec,
+        TQSlidingWindowSpec,
+    )
+    assert isinstance(
+        scheduler_config.kv_cache_groups[2].kv_cache_spec,
+        TQFullAttentionSpec,
+    )
+    assert isinstance(
+        scheduler_config.kv_cache_groups[3].kv_cache_spec,
+        SlidingWindowSpec,
+    )
+
+
+def test_tq_native_full_mixed_uses_uniform_type_per_layer_tensors():
+    model_config = ModelConfig(max_model_len=32)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    native_full = new_kv_cache_spec(num_kv_heads=8, head_size=128)
+    tq_full = new_tq_full_attention_spec(
+        num_kv_heads=8,
+        head_size=128,
+        tq_slot_size=134,
+    )
+    kv_cache_specs = {
+        "layer_0": native_full,
+        "layer_1": native_full,
+        "layer_2": tq_full,
+        "layer_3": tq_full,
+        "layer_4": tq_full,
+        "layer_5": tq_full,
+    }
+
+    assert not kv_cache_utils._is_tq_native_mixed_kv_cache_spec(kv_cache_specs)
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is not None
+
+    num_blocks = 8
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_specs],
+        [uniform_spec.page_size_bytes * num_blocks],
+    )[0]
+
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    assert isinstance(
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+        UniformTypeKVCacheSpecs,
+    )
+
+    tensor_sizes = {
+        tensor.shared_by[0]: tensor.size for tensor in kv_cache_config.kv_cache_tensors
+    }
+    assert tensor_sizes["layer_0"] == native_full.page_size_bytes * num_blocks
+    assert tensor_sizes["layer_2"] == tq_full.page_size_bytes * num_blocks
+    assert tensor_sizes["layer_2"] < tensor_sizes["layer_0"]
+
+
+def test_tq_native_mixed_path_does_not_match_all_tq_or_native():
+    all_tq_specs = {
+        "layer_1": new_tq_full_attention_spec(tq_slot_size=8),
+        "layer_2": new_tq_full_attention_spec(tq_slot_size=16),
+    }
+    native_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_sliding_window_spec(),
+    }
+    mla_specs = {
+        "layer_1": MLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=64,
+            dtype=torch.float32,
+        ),
+        "layer_2": new_tq_full_attention_spec(),
+    }
+
+    assert not kv_cache_utils._is_tq_native_mixed_kv_cache_spec(all_tq_specs)
+    assert not kv_cache_utils._is_tq_native_mixed_kv_cache_spec(native_specs)
+    assert not kv_cache_utils._is_tq_native_mixed_kv_cache_spec(mla_specs)
+
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+    available_memory = sum(spec.page_size_bytes for spec in all_tq_specs.values()) * 8
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [all_tq_specs], [available_memory]
+    )[0]
+
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    assert isinstance(
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+        UniformTypeKVCacheSpecs,
+    )
+
+
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
@@ -1836,6 +2029,26 @@ def test_generate_uniform_type_kv_cache_specs():
     kv_cache_specs = {
         "layer_1": new_kv_cache_spec(block_size=16),
         "layer_2": new_kv_cache_spec(block_size=32),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    # Full-attention TQ/native specs have the same scheduling semantics and can
+    # use UniformTypeKVCacheSpecs to keep per-layer physical page sizes.
+    kv_cache_specs = {
+        "layer_1": new_tq_full_attention_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs
+    )
+
+    # Keep mixed TQ/native sliding-window specs on the explicit mixed path until
+    # the sliding-window physical-layout interaction is validated separately.
+    kv_cache_specs = {
+        "layer_1": new_tq_sliding_window_spec(sliding_window=1),
+        "layer_2": new_sliding_window_spec(sliding_window=1),
     }
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
     assert uniform_spec is None

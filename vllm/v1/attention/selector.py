@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 
@@ -62,6 +63,7 @@ def get_attn_backend(
     use_per_head_quant_scales: bool = False,
     attn_type: str | None = None,
     num_heads: int | None = None,
+    backend_override: AttentionBackendEnum | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -104,7 +106,7 @@ def get_attn_backend(
     )
 
     return _cached_get_attn_backend(
-        backend=vllm_config.attention_config.backend,
+        backend=backend_override or vllm_config.attention_config.backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )
