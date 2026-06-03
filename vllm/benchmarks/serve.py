@@ -2023,6 +2023,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        default=None,
+        help="A JSON string of kwargs forwarded to the tokenizer's "
+        "apply_chat_template when a dataset renders prompts client-side "
+        "(e.g. custom / speed_bench). "
+        "Example: '{\"thinking\": true}' to enable reasoning models.",
+    )
+    parser.add_argument(
         "--extra-body",
         help="A JSON string representing extra body parameters to include "
         "in each request."
