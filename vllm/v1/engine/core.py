@@ -89,7 +89,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = int(os.environ.get("VLLM_HANDSHAKE_TIMEOUT_MINS", "5"))
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1836,40 +1836,26 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if current_platform.is_rocm():
-            # ROCm/Wide-EP first-wave wake fix: drop the
-            # ``request_wave != self.current_wave`` outer gate so the very
-            # first request after engine init also broadcasts
-            # ``start_wave`` (otherwise ``0 != 0`` skips the broadcast and
-            # the first DP rank hangs forever on the EP all2all collective
-            # because the other ranks never call ``execute_dummy_batch``).
-            # Steady-state remains correct because ``engines_running`` is
-            # already True so the inner branch short-circuits.
-            if self.has_coordinator:
-                if request_wave > self.current_wave:
-                    self.current_wave = request_wave
-                if (
-                    not self.engines_running
-                    and self.scheduler.pause_state == PauseState.UNPAUSED
-                ):
-                    self.engines_running = True
-                    self.output_queue.put_nowait(
-                        (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                    )
-        else:
-            if self.has_coordinator and request_wave != self.current_wave:
-                if request_wave > self.current_wave:
-                    self.current_wave = request_wave
-                elif (
-                    not self.engines_running
-                    and self.scheduler.pause_state == PauseState.UNPAUSED
-                ):
-                    # Request received for an already-completed wave, notify
-                    # front-end that we need to start the next one.
-                    self.engines_running = True
-                    self.output_queue.put_nowait(
-                        (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                    )
+        # First-wave wake: do NOT gate on ``request_wave != self.current_wave``.
+        # Both default to 0, so that gate skips the ``start_wave`` broadcast on
+        # the very first request after engine init -- the DP rank that received
+        # it then blocks forever on the first collective (EP/MoE all2all,
+        # ``has_unfinished_dp`` all-reduce) because the other ranks see
+        # ``engines_running == False`` and never call ``execute_dummy_batch``,
+        # until the multiproc_executor 1800s timeout fires. Reproduces 100% on
+        # DeepSeek-V3 DP=8/16 cold start. Steady state stays correct: once
+        # ``engines_running`` is True the wake branch short-circuits.
+        if self.has_coordinator:
+            if request_wave > self.current_wave:
+                self.current_wave = request_wave
+            if (
+                not self.engines_running
+                and self.scheduler.pause_state == PauseState.UNPAUSED
+            ):
+                self.engines_running = True
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
