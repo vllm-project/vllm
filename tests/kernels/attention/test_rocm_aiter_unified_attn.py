@@ -28,17 +28,20 @@ BLOCK_SIZES = [16, 64]
 DTYPES = [torch.bfloat16, torch.float16]
 FP8_DTYPE = current_platform.fp8_dtype()
 
-# (query_len, kv_len) per sequence; kv_len <= 512 (2D kernel path)
+# (query_len, kv_len) per sequence; 2D kernel path (no 3D segment buffers)
 MIXED_SEQ_LENS = [
     [(1, 128), (5, 18), (129, 463)],
     [(10, 256), (5, 64), (32, 128)],
+    [(1, 1024), (5, 18), (129, 1328)],
 ]
 DECODE_SEQ_LENS = [
     [(1, 128), (1, 256), (1, 384), (1, 512)],
+    [(1, 1024), (1, 1536), (1, 2048)],
 ]
 PREFILL_SEQ_LENS = [
     [(256, 256), (128, 512)],
     [(64, 128), (32, 256), (16, 512)],
+    [(256, 1024), (128, 2048)],
 ]
 
 DEFAULT_ATOL, DEFAULT_RTOL = 1.5e-2, 1e-2
@@ -58,7 +61,9 @@ FP8_VARIANTS = [
 FP8_SEQ_LENS = [
     MIXED_SEQ_LENS[0],
     DECODE_SEQ_LENS[0],
+    DECODE_SEQ_LENS[1],
     PREFILL_SEQ_LENS[0],
+    PREFILL_SEQ_LENS[2],
 ]
 
 
