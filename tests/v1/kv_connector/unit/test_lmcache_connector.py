@@ -757,6 +757,38 @@ class TestTakeEvents:
         assert mock_connector._kv_cache_events is None
 
 
+class TestLMCacheKVEvents:
+    """Test LMCacheKVEvents directly."""
+
+    def test_init_zero_workers_raises(self):
+        """Test that num_workers <= 0 raises ValueError."""
+        with pytest.raises(ValueError):
+            LMCacheKVEvents(num_workers=0)
+
+        with pytest.raises(ValueError):
+            LMCacheKVEvents(num_workers=-1)
+
+    def test_aggregate_direct_call(self):
+        """Test that aggregate() returns LMCacheKVEvents instance."""
+        kv_events = LMCacheKVEvents(num_workers=1)
+        event = BlockStored(
+            block_hashes=["hash_a"],
+            parent_block_hash=None,
+            token_ids=[1],
+            block_size=16,
+            lora_id=None,
+            medium="GPU",
+            lora_name=None,
+        )
+        kv_events.add_events([event])
+
+        result = kv_events.aggregate()
+
+        assert isinstance(result, LMCacheKVEvents)
+        assert result.get_number_of_workers() == 1
+        assert result.get_all_events() == [event]
+
+
 class TestIntegrationScenarios:
     """Test integration scenarios."""
 
