@@ -23,7 +23,23 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for NIXL KV connector transfer performance metrics.
+
+    Metrics are recorded per-rank via ``record_transfer()`` and then
+    **aggregated across all TP ranks** before summary statistics are
+    computed in ``reduce()``.  This means:
+
+    * **"Num successful transfers"** is the total count across all ranks,
+      not per-rank.
+    * **"Avg MB per transfer"** is the average over all individual
+      rank-level transfers, *not* the total bytes moved for a single
+      logical KV-cache transfer operation.
+    * **"Throughput (MB/s)"** is ``total_MB_all_ranks /
+      total_time_all_ranks`` — effectively a per-rank average throughput,
+      not the aggregate system throughput.
+    * **Percentiles (P90)** are computed over the combined distribution
+      of all ranks' transfer times.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -76,6 +92,13 @@ class NixlKVConnectorStats(KVConnectorStats):
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        """Merge stats from another TP rank by concatenating observations.
+
+        Each rank records its own per-transfer telemetry independently.
+        ``aggregate()`` collects observations from all ranks into a single
+        pool so that ``reduce()`` can compute statistics over the combined
+        dataset.  See the class docstring for the resulting semantics.
+        """
         if not other.is_empty():
             for k, v in other.data.items():
                 accumulator = self.data[k]
@@ -84,10 +107,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        # Compute compact representative stats suitable for CLI logging
+        """Compute summary statistics suitable for CLI logging.
+
+        After ``aggregate()`` has merged observations from all TP ranks,
+        this method computes statistics over the **combined pool**.  See the
+        class docstring for the resulting metric semantics.
+        """
         if self.num_successful_transfers == 0:
-            # CLI logging only reports successful transfers stats. If all requests in
-            # the interval were unsuccessful, Prom will report failures stats instead.
+            # CLI logging only reports successful transfers stats. If all
+            # requests in the interval were unsuccessful, Prom will report
+            # failure-related counters instead.
             return {
                 "Num successful transfers": 0,
                 "Avg xfer time (ms)": 0,
@@ -104,13 +133,19 @@ class NixlKVConnectorStats(KVConnectorStats):
         # Convert to MB for CLI logging.
         mb = np.asarray(self.data["bytes_transferred"]) / 2**20
         descs = np.asarray(self.data["num_descriptors"], dtype=np.uint32)
+        # n is the total number of rank-level transfers across ALL TP ranks,
+        # not the number of logical KV-cache transfer operations.
         n = len(descs)
         assert n == self.num_successful_transfers
 
         total_mb = mb.sum()
+        # Per-transfer average, where each "transfer" is one rank-level
+        # observation (not one logical multi-rank KV-cache transfer).
         avg_mb = total_mb / n
 
         total_time_seconds = xfer_time.sum()
+        # This is total_bytes_all_ranks / total_time_all_ranks, i.e. an
+        # average per-rank throughput rather than aggregate system throughput.
         throughput_mb_s = total_mb / total_time_seconds
 
         return {
