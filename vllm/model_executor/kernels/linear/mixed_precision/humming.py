@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Humming GEMM as a mixed-precision linear kernel.
-
-Consumes the canonical MPLinear weight layout (``weight_packed`` int32 +
-``weight_scale``) and runs a weight-only GEMM. Serves bit widths / shapes the
-packed Marlin and Machete kernels cannot (2-bit, non-64-aligned).
-"""
+"""Humming GEMM as a mixed-precision WNA16Int linear kernel."""
 
 import torch
 
@@ -39,7 +34,6 @@ class HummingLinearKernel(MPLinearKernel):
         )
 
         name_map = {"weight": self.w_q_name, "weight_scale": self.w_s_name}
-        # vLLM uses group_size == -1 for channelwise; humming expects 0.
         group_size = self.config.group_size
         quant_config = {
             "quant_method": "humming",

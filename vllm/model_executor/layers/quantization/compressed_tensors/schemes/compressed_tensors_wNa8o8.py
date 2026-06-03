@@ -2,16 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Weight N-bit INT scheme with static INT8 input/output activation quant.
 
-Handles compressed-tensors INT weight checkpoints (pack-quantized int32 for
-sub-byte weights, int-quantized plain int8 for 8-bit) that carry static per-tensor
+Handles compressed-tensors INT weight checkpoints that carry static per-tensor
 INT8 ``input_activations`` and/or ``output_activations``. The activation quant is
 reproduced as a float fake-quant on the layer input and output, around a
 weight-only matmul, rather than a fused int8 GEMM.
-
-The weight matmul is delegated to a mixed-precision linear kernel chosen by
-``choose_mp_linear_kernel`` (humming for 2-bit and non-64-aligned shapes, marlin /
-machete for 64-aligned 4/8-bit). The scheme normalizes both checkpoint formats to
-the canonical packed layout the kernels expect before dispatching.
 """
 
 from collections.abc import Callable
@@ -48,11 +42,7 @@ WNA8O8_SUPPORTED_TYPES_MAP = {
 
 
 def fake_quant_static_int8(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Static per-tensor symmetric INT8 quantize-dequantize, in x's dtype.
-
-    Kept as plain aten ops so it fuses into the surrounding compiled kernels; an
-    isolated ``@torch.compile`` region would block that fusion.
-    """
+    """Static per-tensor symmetric INT8 quantize-dequantize, in x's dtype."""
     scale = scale.to(x.dtype)
     q = torch.clamp(torch.round(x / scale), -128.0, 127.0)
     return q * scale
