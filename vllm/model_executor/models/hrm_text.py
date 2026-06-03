@@ -32,9 +32,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.encoder_only_attention import (
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import PrefixLMAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -48,7 +46,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -206,26 +203,25 @@ class HrmTextAttention(nn.Module):
                 for high_cycle_idx in range(H_cycles)
             ]
 
-        # `EncoderOnlyAttention` already wraps the attention backend so
-        # `causal=False` is set on every metadata build (PrefixLM
-        # bidirectional prefill); passing `attn_type=DECODER` keeps the
-        # KV cache allocation needed by the recurrent forward.
+        # `PrefixLMAttention` forces `causal=False` on every metadata build, so
+        # the prompt attends bidirectionally during prefill (matching the
+        # HRM-Text training distribution), while `attn_type=DECODER` keeps the
+        # KV cache allocation needed by the recurrent forward. At single-token
+        # decode `causal=False` is a no-op. See `PrefixLMAttention`.
         self.attn_per_step = nn.ModuleDict()
         for step in steps_used:
             global_idx = step * num_layers_per_stack + layer_idx_in_stack
             unique_prefix = prefix.replace(
                 f"layers.{layer_idx_in_stack}", f"layers.{global_idx}"
             )
-            self.attn_per_step[str(step)] = EncoderOnlyAttention(
+            self.attn_per_step[str(step)] = PrefixLMAttention(
                 num_heads=self.num_heads,
                 head_size=self.head_dim,
                 scale=self.scaling,
                 num_kv_heads=self.num_kv_heads,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                attn_type=AttentionType.DECODER,
                 prefix=f"{unique_prefix}.attn",
-                raise_on_invalid_attn_type=False,
             )
 
     def forward(
