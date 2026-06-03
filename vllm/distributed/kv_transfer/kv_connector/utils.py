@@ -20,12 +20,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -522,18 +520,6 @@ class TransferTopology:
         # remote TP > local TP: read from |tp_ratio| remote workers
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
-
-    def get_transfer_cache_regions(
-        self, cache: torch.Tensor, layer_spec: "KVCacheSpec"
-    ) -> list[torch.Tensor] | torch.Tensor:
-        """Return the cache tensor(s) to register as NIXL memory regions,
-        also accounting for hybrid SSM models specificities.
-        """
-        if isinstance(layer_spec, MambaSpec):
-            # Standardized layout: Mamba cache is a single 4D tensor.
-            return [cache]
-
-        return [cache]
 
     def describe(self, remote_engine_id: EngineId) -> str:
         """One-line summary of transfer config for logging."""
