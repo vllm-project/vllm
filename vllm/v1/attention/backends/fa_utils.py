@@ -333,10 +333,11 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     return False
 
+
 def should_pack_gqa(seqlen_q: int, qhead_per_khead: int, blockM: int) -> bool:
     """
     Decide whether to pack GQA heads for decoding (fixed-length queries).
-
+    Same code as https://github.com/vllm-project/flash-attention/blob/dd62dac706b1cf7895bd99b18c6cb7e7e117ee25/hopper/heuristics.h#L16
     Args:
         seqlen_q: length of the query sequence (fixed)
         qhead_per_khead: number of Q heads per KV head
@@ -345,6 +346,7 @@ def should_pack_gqa(seqlen_q: int, qhead_per_khead: int, blockM: int) -> bool:
     Returns:
         True if PackGQA is beneficial
     """
+
     # Helper to round up to nearest multiple of blockM
     def round_up(a: int, b: int) -> int:
         return ((a + b - 1) // b) * b
@@ -353,7 +355,9 @@ def should_pack_gqa(seqlen_q: int, qhead_per_khead: int, blockM: int) -> bool:
     nopack_eff = seqlen_q / round_up(seqlen_q, blockM)
 
     # Efficiency if we pack multiple Q heads together
-    pack_eff = (seqlen_q * qhead_per_khead) / round_up(seqlen_q * qhead_per_khead, blockM)
+    pack_eff = (seqlen_q * qhead_per_khead) / round_up(
+        seqlen_q * qhead_per_khead, blockM
+    )
 
     # Heuristic: pack if it improves tile utilization by ~10%
     return nopack_eff < 0.9 * pack_eff

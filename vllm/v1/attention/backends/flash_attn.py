@@ -1417,10 +1417,10 @@ def use_cascade_attention(
     num_prefix_tiles = cdiv(common_prefix_len, kv_tile_size)
 
     fa_version = get_flash_attn_version()
-    pack_gqa = should_pack_gqa(seqlen_q=1,
-                               qhead_per_khead=num_queries_per_kv,
-                               blockM=q_tile_size)
-    
+    pack_gqa = should_pack_gqa(
+        seqlen_q=1, qhead_per_khead=num_queries_per_kv, blockM=q_tile_size
+    )
+
     if fa_version == 3 and pack_gqa:
         # By using PackGQA
         # [Q_0, Q_1,...., Q_15] are packed together and is processed by one CTA
@@ -1428,7 +1428,12 @@ def use_cascade_attention(
         cascade_waves = cdiv(cascade_ctas, num_sms)
         cascade_time = cascade_waves * num_prefix_tiles
 
-        flash_decoding_ctas = num_prefix_tiles * num_kv_heads * cdiv(num_queries_per_kv * num_reqs, q_tile_size)
+        flash_decoding_ctas = (
+            num_prefix_tiles
+            * num_kv_heads
+            * cdiv(num_queries_per_kv * num_reqs, q_tile_size)
+        )
+
     else:
         cascade_ctas = num_query_heads * cdiv(num_tokens, q_tile_size)
         cascade_waves = cdiv(cascade_ctas, num_sms)
@@ -1438,13 +1443,17 @@ def use_cascade_attention(
             num_reqs * num_kv_heads * cdiv(num_queries_per_kv, q_tile_size)
         )
         flash_decoding_ctas *= num_prefix_tiles
-        
+
     # FA2 uses 128 threads per block, allowing each SM to run 2 blocks concurrently.
     # Therefore, the effective SM count is num_sms * 2
     # ref:https://github.com/vllm-project/flash-attention/blob/dd62dac706b1cf7895bd99b18c6cb7e7e117ee25/csrc/flash_attn/flash_api.cpp#L316
     # FA3 directly using num_sms pass to num_splits_heuristic
     # ref:https://github.com/vllm-project/flash-attention/blob/dd62dac706b1cf7895bd99b18c6cb7e7e117ee25/hopper/flash_api.cpp#L501
-    flash_decoding_time = cdiv(flash_decoding_ctas, 2 * num_sms) if fa_version == 2 else cdiv(flash_decoding_ctas, num_sms)
+    flash_decoding_time = (
+        cdiv(flash_decoding_ctas, 2 * num_sms)
+        if fa_version == 2
+        else cdiv(flash_decoding_ctas, num_sms)
+    )
     # Use cascade attention if it is faster than FlashDecoding.
     return cascade_time < flash_decoding_time
 
