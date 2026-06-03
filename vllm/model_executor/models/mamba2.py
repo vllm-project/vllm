@@ -35,6 +35,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -190,6 +191,11 @@ class Mamba2Model(nn.Module):
 class Mamba2ForCausalLM(
     nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
 ):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"model.": ""},
+        orig_to_new_substr={"backbone.embedding.": "backbone.embeddings."},
+    )
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
@@ -292,4 +298,4 @@ class Mamba2ForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
