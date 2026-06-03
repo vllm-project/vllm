@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
+    VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -875,6 +876,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
+    ),
+    # When True, GroupCoordinator constructs its CPU/device subgroups via
+    # ``torch.distributed.split_group(backend=...)``
+    # and ``init_distributed_environment`` initializes the default PG with
+    # mixed ``cpu:gloo,cuda:nccl`` backend + eager ``device_id`` binding.
+    "VLLM_DISTRIBUTED_USE_SPLIT_GROUP": lambda: bool(
+        int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
