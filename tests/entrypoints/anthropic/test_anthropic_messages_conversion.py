@@ -635,3 +635,143 @@ class TestThinkingBlockConversion:
         # Redacted thinking is ignored, normal thinking still becomes reasoning.
         assert asst.get("reasoning") == "Thinking..."
         assert asst.get("content") == "Hi!"
+
+
+class TestInlineSystemMessageInMessagesArray:
+    """Verify that ``role: system`` messages embedded inside the ``messages``
+    array are accepted and merged with the top-level ``system`` prompt.
+
+    This handles clients that place system messages inside the messages array
+    instead of the Anthropic-standard top-level ``system`` field.
+    """
+
+    def test_inline_system_merged_with_top_level_system(self):
+        """Full integration: inline system + top-level system + user message."""
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "<system-reminder>\n.....\n</system-reminder>\n\n",
+                        },
+                        {
+                            "type": "text",
+                            "text": "help?",
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                    ],
+                },
+                {
+                    "role": "system",
+                    "content": ".....",
+                },
+            ],
+            system=[
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: "
+                    "cc_version=2.1.160.bca; cc_entrypoint=cli; cch=d1d48;",
+                },
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": "....",
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+            tools=[],
+        )
+
+        result = _convert(request)
+
+        # First message should be the merged system prompt.
+        assert result.messages[0]["role"] == "system"
+        # Billing header stripped, inline system appended.
+        assert (
+            result.messages[0]["content"]
+            == "You are Claude Code, Anthropic's official CLI for Claude."
+            "...."
+            "....."
+        )
+
+        # Second message should be the user message, content preserved.
+        assert result.messages[1]["role"] == "user"
+        user_content = result.messages[1]["content"]
+        assert len(user_content) == 2
+        assert user_content[0] == {
+            "type": "text",
+            "text": "<system-reminder>\n.....\n</system-reminder>\n\n",
+        }
+        assert user_content[1] == {
+            "type": "text",
+            "text": "help?",
+        }
+
+    def test_inline_system_string_only(self):
+        """Only an inline system string, no top-level system."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Be concise."},
+            ]
+        )
+        result = _convert(request)
+
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "Be concise."
+        assert result.messages[1]["role"] == "user"
+
+    def test_inline_system_list_content(self):
+        """Inline system with list content blocks."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "Part one. "},
+                        {"type": "text", "text": "Part two."},
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "Part one. Part two."
+
+    def test_multiple_inline_system_messages(self):
+        """Multiple inline system messages should all be merged."""
+        request = _make_request(
+            [
+                {"role": "system", "content": "First system."},
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Second system."},
+            ]
+        )
+        result = _convert(request)
+
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "First system.Second system."
+        assert result.messages[1]["role"] == "user"
+
+    def test_inline_system_with_top_level_string(self):
+        """Top-level system is a string, inline system is also present."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Inline hint."},
+            ],
+            system="Top-level prompt.",
+        )
+        result = _convert(request)
+
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "Top-level prompt.Inline hint."
+        assert result.messages[1]["role"] == "user"
