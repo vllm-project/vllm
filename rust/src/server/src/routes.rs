@@ -1,3 +1,4 @@
+mod abort_requests;
 mod cache;
 mod collective_rpc;
 mod health;
@@ -51,6 +52,7 @@ fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> R
             .route("/reset_mm_cache", post(cache::reset_mm_cache))
             .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
             .route("/collective_rpc", post(collective_rpc::collective_rpc))
+            .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
