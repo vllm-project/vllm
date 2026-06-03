@@ -51,6 +51,15 @@ def run_do_bench(
     return result
 
 
+def run_ncu_profile(benchmark_fn) -> None:
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
+
+
 # Mock classes for vLLM attention infrastructure
 
 

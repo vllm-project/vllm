@@ -20,6 +20,7 @@ from common import (
     MockKVBProj,
     MockLayer,
     run_do_bench,
+    run_ncu_profile,
     setup_mla_dims,
 )
 
@@ -845,6 +846,18 @@ def _run_single_benchmark(
     def benchmark_fn():
         for _ in range(config.num_layers):
             forward_fn()
+
+    if config.ncu_profile:
+        run_ncu_profile(benchmark_fn)
+        return BenchmarkResult(
+            config=config,
+            mean_time=0.0,
+            median_time=0.0,
+            std_time=0.0,
+            min_time=0.0,
+            max_time=0.0,
+            throughput_tokens_per_sec=0.0,
+        )
 
     all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
 

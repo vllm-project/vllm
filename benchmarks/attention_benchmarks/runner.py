@@ -21,6 +21,7 @@ from common import (
     MockLayer,
     get_attention_scale,
     run_do_bench,
+    run_ncu_profile,
 )
 
 from vllm.config import (
@@ -420,26 +421,9 @@ def _run_single_benchmark(
                 output=out,
             )
 
-    # ncu profiling mode: run the kernel once inside a cudaProfilerStart/Stop
-    # bracket, then return a dummy time.  The benchmark script handles
-    # launching ncu automatically when --ncu-profile is passed.
     if config.ncu_profile:
-        # Single warmup to trigger lazy init (JIT, CUDA context, etc.)
-        benchmark_fn()
-        torch.accelerator.synchronize()
-
-        torch.cuda.cudart().cudaProfilerStart()
-        benchmark_fn()
-        torch.accelerator.synchronize()
-        torch.cuda.cudart().cudaProfilerStop()
-
-        timing_stats = {
-            "mean": 0.0,
-            "median": 0.0,
-            "std": 0.0,
-            "min": 0.0,
-            "max": 0.0,
-        }
+        run_ncu_profile(benchmark_fn)
+        timing_stats = dict.fromkeys(("mean", "median", "std", "min", "max"), 0.0)
     else:
         all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
 
