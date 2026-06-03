@@ -66,14 +66,12 @@ def import_triton_kernels():
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
     elif _has_module("vllm.third_party.triton_kernels"):
         import vllm.third_party.triton_kernels as triton_kernels
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
         sys.modules["triton_kernels"] = triton_kernels
     else:
@@ -394,12 +392,24 @@ class LazyLoader(ModuleType):
 # Optional dependency detection utilities
 @cache
 def _has_module(module_name: str) -> bool:
-    """Return True if *module_name* can be found in the current environment.
+    """Return True if *module_name* can be imported in the current environment.
 
-    The result is cached so that subsequent queries for the same module incur
-    no additional overhead.
+    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
+    trial import to verify that native dependencies (shared libraries, etc.)
+    are also satisfied. Any failure during the trial import is treated as the
+    module being unavailable. The result is cached so that subsequent queries
+    for the same module incur no additional overhead.
     """
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return False
+        importlib.import_module(module_name)
+    except Exception:
+        logger.warning(
+            "Module %s was found but failed to import", module_name, exc_info=True
+        )
+        return False
+    return True
 
 
 def has_deep_ep() -> bool:
@@ -408,8 +418,13 @@ def has_deep_ep() -> bool:
 
 
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return _has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    override with a newer version), then falls back to the vendored copy
+    bundled in the vLLM wheel.
+    """
+    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
 def has_nixl_ep() -> bool:
@@ -427,6 +442,7 @@ def has_triton_kernels() -> bool:
     return is_available
 
 
+@cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")
@@ -466,3 +482,8 @@ def has_mori() -> bool:
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")
+
+
+def has_cutedsl() -> bool:
+    """Whether the optional `cutelass` package is available."""
+    return _has_module("cutlass")

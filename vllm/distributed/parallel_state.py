@@ -335,6 +335,10 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
+
+        timeout = get_cpu_distributed_timeout_or_none()
+
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
@@ -342,7 +346,9 @@ class GroupCoordinator:
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(
+                    ranks, backend="gloo", timeout=timeout
+                )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -352,6 +358,9 @@ class GroupCoordinator:
 
         assert self_cpu_group is not None
         assert self_device_group is not None
+
+        self.group_ranks = group_ranks
+        self.torch_distributed_backend = torch_distributed_backend
 
         self.cpu_group = self_cpu_group
         self.device_group = self_device_group
@@ -394,9 +403,27 @@ class GroupCoordinator:
             current_platform.is_tpu() or current_platform.use_custom_op_collectives()
         )
 
-        self.use_cpu_custom_send_recv = current_platform.is_cpu() and hasattr(
-            torch.ops._C, "init_shm_manager"
+        self.use_cpu_custom_send_recv = (
+            current_platform.is_cpu()
+            and self.device_communicator
+            and getattr(self.device_communicator, "supports_tensor_dict", False)
         )
+
+    def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
+        """Create a new device-side ProcessGroup with the same per-rank membership
+        as this coordinator's `device_group`, but backed by a distinct communicator.
+        This is a collective call: every world rank must invoke it. Used where we
+        want to issue ops that can run concurrently with ops on `device_group`.
+        """
+        sibling: ProcessGroup | None = None
+        for ranks in self.group_ranks:
+            pg = torch.distributed.new_group(
+                ranks, backend=self.torch_distributed_backend, group_desc=group_desc
+            )
+            if self.rank in ranks:
+                sibling = pg
+        assert sibling is not None
+        return sibling
 
     def create_mq_broadcaster(
         self, writer_rank=0, external_writer_handle=None, blocking=True
@@ -470,15 +497,29 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
         )
+        from vllm.distributed.device_communicators.xpu_communicator import (
+            XpuCommunicator,
+        )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator)
+            assert isinstance(
+                self.device_communicator,
+                (CudaCommunicator, XpuCommunicator),
+            )
             ca_comm = self.device_communicator.ca_comm
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
+
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled():
+                aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+                if aiter_ar is not None:
+                    maybe_aiter_context = aiter_ar.capture()  # type: ignore
 
         # ensure all initialization operations complete before attempting to
         # capture the graph on another stream
@@ -486,7 +527,7 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context:
+        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

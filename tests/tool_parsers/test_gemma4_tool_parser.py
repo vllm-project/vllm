@@ -85,6 +85,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_null_value(self):
+        # Bare `null` must parse as None (Python), not the string "null".
+        # Without this, tool_choice=auto would emit `{"param": "null"}`
+        # instead of `{"param": null}` for nullable tool parameters.
+        result = _parse_gemma4_args("param:null")
+        assert result == {"param": None}
+        assert json.dumps(result) == '{"param": null}'
+
     def test_mixed_types(self):
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
@@ -114,6 +122,44 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("key:")
         assert result == {"key": ""}
 
+    def test_empty_value_partial_withheld(self):
+        """Key with no value is withheld in partial mode to avoid premature emission."""
+        result = _parse_gemma4_args("key:", partial=True)
+        assert result == {}
+        # also with a space after the colon
+        result = _parse_gemma4_args("key: ", partial=True)
+        assert result == {}
+
+    def test_empty_value_after_other_keys_partial_withheld(self):
+        """Trailing key with no value is withheld; earlier keys are kept."""
+        result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
+        assert result == {"name": "test"}
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Bare float ending with '.' is withheld in partial mode.
+
+        Regression test for #42047: float("108.") → 108.0 causes
+        streaming diff corruption (108.0 → 108.2 becomes 108.02).
+        """
+        # Single key with trailing dot — withheld entirely
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=True)
+        assert result == {}
+
+        # Stable key before trailing-dot key — stable key is kept
+        result = _parse_gemma4_args(
+            'name:<|"|>test<|"|>,score:3.,count:1', partial=True
+        )
+        assert result == {"name": "test"}
+
+        # Non-partial mode parses trailing dot normally
+        result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
+        assert result == {"left": 108.0, "right": 22.8}
+
+    @pytest.mark.timeout(5)
+    def test_malformed_partial_array(self):
+        result = _parse_gemma4_args(":[t:[]")
+        assert isinstance(result, dict)
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -127,6 +173,25 @@ class TestParseGemma4Array:
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
+
+    @pytest.mark.timeout(5)
+    def test_string_element_with_closing_bracket(self):
+        result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
+        assert result == [["a]b", "c"], "tail"]
+
+    @pytest.mark.timeout(5)
+    def test_stray_closing_bracket(self):
+        result = _parse_gemma4_array("42,]trailing")
+        assert result == [42]
+
+    def test_trailing_dot_float_partial_withheld(self):
+        """Array elements with trailing dot withheld in partial mode."""
+        result = _parse_gemma4_array("108.,22.8", partial=True)
+        assert result == []
+
+        # Stable elements before trailing-dot element are kept
+        result = _parse_gemma4_array("42,108.,3", partial=True)
+        assert result == [42]
 
 
 # ---------------------------------------------------------------------------
@@ -636,3 +701,30 @@ class TestStreamingExtraction:
             '    <meta charset="UTF-8">\n'
             '    <meta name="viewport" content="width=device-width">\n'
         )
+
+    def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
+        """Trailing bare boolean must not be streamed twice."""
+        chunks = [
+            "<|tool_call>",
+            "call:Edit{",
+            'file_path:<|"|>src/env.py<|"|>,',
+            'old_string:<|"|>old_val<|"|>,',
+            'new_string:<|"|>new_val<|"|>,',
+            "replace_all:",
+            "false}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {
+            "file_path": "src/env.py",
+            "old_string": "old_val",
+            "new_string": "new_val",
+            "replace_all": False,
+        }
+
+        assert args_text.count("replace_all") == 1
