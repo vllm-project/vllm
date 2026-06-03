@@ -38,6 +38,7 @@ CMakeUserPresets.json
 develop-eggs/
 dist/
 downloads/
+/.hf_downloads/
 eggs/
 .eggs/
 lib/

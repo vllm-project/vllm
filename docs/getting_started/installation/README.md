@@ -12,6 +12,7 @@ vLLM supports the following hardware platforms:
     - [ARM AArch64](cpu.md#arm-aarch64)
     - [Apple silicon](cpu.md#apple-silicon)
     - [IBM Z (S390X)](cpu.md#ibm-z-s390x)
+    - [SiFive P550 (RISC-V)](cpu.md#sifive-p550-risc-v)
 
 ## Hardware Plugins
 

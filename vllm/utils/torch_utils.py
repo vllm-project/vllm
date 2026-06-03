@@ -14,10 +14,10 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.torch_schema import Library, infer_schema
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -27,6 +27,56 @@ else:
     IntermediateTensors = object
 
 logger = init_logger(__name__)
+
+
+class _TorchAcceleratorCompat:
+    def current_device_index(self) -> int:
+        return 0
+
+    def device_count(self) -> int:
+        return 0
+
+    @contextlib.contextmanager
+    def device_index(self, device: int | None = None):
+        yield
+
+    def empty_cache(self) -> None:
+        pass
+
+    def max_memory_allocated(self, device: Any | None = None) -> int:
+        return 0
+
+    def memory_allocated(self, device: Any | None = None) -> int:
+        return 0
+
+    def memory_reserved(self, device: Any | None = None) -> int:
+        return 0
+
+    def memory_stats(self, device: Any | None = None) -> dict[str, int]:
+        return {}
+
+    def reset_peak_memory_stats(self, device: Any | None = None) -> None:
+        pass
+
+    def set_device_index(self, device: Any) -> None:
+        pass
+
+    def synchronize(self) -> None:
+        pass
+
+
+if not hasattr(torch, "accelerator"):
+    torch.accelerator = _TorchAcceleratorCompat()
+if hasattr(torch, "cpu") and not hasattr(torch.cpu, "_is_amx_tile_supported"):
+    torch.cpu._is_amx_tile_supported = lambda: False
+if hasattr(torch, "cpu") and not hasattr(torch.cpu, "_is_avx512_supported"):
+    torch.cpu._is_avx512_supported = getattr(
+        torch.cpu, "_is_cpu_support_avx512", lambda: False
+    )
+if hasattr(torch, "cpu") and not hasattr(torch.cpu, "_is_avx512_bf16_supported"):
+    torch.cpu._is_avx512_bf16_supported = lambda: False
+if hasattr(torch, "Tag") and not hasattr(torch.Tag, "flexible_layout"):
+    torch.Tag.flexible_layout = torch.Tag.pt2_compliant_tag
 
 
 STR_DTYPE_TO_TORCH_DTYPE = {

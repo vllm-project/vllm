@@ -19,7 +19,15 @@ from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 if TYPE_CHECKING:
     from vllm.config.utils import Range
 
-from torch._inductor.custom_graph_pass import CustomGraphPass
+try:
+    from torch._inductor.custom_graph_pass import CustomGraphPass
+except ModuleNotFoundError:
+
+    class CustomGraphPass:
+        """Fallback base for torch builds without custom graph pass support."""
+
+        def __call__(self, graph: fx.Graph) -> None:
+            raise NotImplementedError("Custom graph passes are not available.")
 
 _pass_context = None
 P = ParamSpec("P")

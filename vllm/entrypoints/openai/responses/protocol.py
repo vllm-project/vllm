@@ -4,7 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
@@ -47,7 +47,6 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
-from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
@@ -70,6 +69,11 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from openai_harmony import Message as OpenAIHarmonyMessage
+else:
+    OpenAIHarmonyMessage = Any
 
 logger = init_logger(__name__)
 

@@ -1,0 +1,2 @@
+tools/p550_probe.sh text eol=lf
+tools/p550_smoke_test.sh text eol=lf
