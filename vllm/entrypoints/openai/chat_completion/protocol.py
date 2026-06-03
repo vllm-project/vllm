@@ -608,8 +608,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
-            thinking_token_budget=thinking_token_budget,
-            continue_thinking=continue_thinking,  # cohere
+            thinking_token_budget=self.thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone

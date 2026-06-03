@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# cohere start
+import json
+# cohere end
+
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -48,10 +52,19 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
+        # cohere start
+        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model", "ngram-eagle"],
+        # cohere end
     )
     parser.add_argument("--backend", type=str, default="openai")
     parser.add_argument("--num-spec-tokens", type=int, default=2)
+    # cohere start
+    parser.add_argument(
+        "--num-speculative-tokens-per-method",
+        type=str,
+        default='{"ngram": 2, "eagle": 2}',
+    )
+    # cohere end
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
     parser.add_argument("--tp", type=int, default=1)
@@ -136,6 +149,26 @@ def main(args):
             "max_model_len": args.max_model_len,
             "parallel_drafting": args.parallel_drafting,
         }
+    # cohere start
+    elif args.method == "ngram-eagle":
+        num_speculative_tokens_per_method = json.loads(
+            args.num_speculative_tokens_per_method
+        )
+        eagle_dir = args.eagle_dir
+        if eagle_dir is None:
+            eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
+        args.num_spec_tokens = max(
+            num_speculative_tokens_per_method["ngram"],
+            num_speculative_tokens_per_method["eagle"],
+        )
+        speculative_config = {
+            "method": "ngram-eagle",
+            "model": eagle_dir,
+            "num_speculative_tokens_per_method": num_speculative_tokens_per_method,
+            "prompt_lookup_max": args.prompt_lookup_max,
+            "prompt_lookup_min": args.prompt_lookup_min,
+        }
+    # cohere end
     elif args.method == "mtp":
         speculative_config = {
             "method": "mtp",
@@ -148,26 +181,41 @@ def main(args):
         model=model_dir,
         trust_remote_code=True,
         tensor_parallel_size=args.tp,
-        enable_chunked_prefill=args.enable_chunked_prefill,
+        # cohere start
+        # enable_chunked_prefill=args.enable_chunked_prefill,
+        enable_prefix_caching=True,
+        # cohere end
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        # cohere start
+        # gpu_memory_utilization=args.gpu_memory_utilization,
+        # cohere end
         speculative_config=speculative_config,
         disable_log_stats=False,
-        max_model_len=args.max_model_len,
+        # cohere start
+        max_model_len=16384,
+        # cohere end
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
-        max_num_seqs=args.max_num_seqs,
+        # cohere start
+        max_num_seqs=16,
+        # cohere end
         allowed_local_media_path=args.allowed_local_media_path,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
-    if args.backend == "openai-chat":
+    # cohere start
+    if (
+        args.backend == "openai-chat"
+        or args.custom_mm_prompts
+        or args.dataset_name == "custom_mm"
+    ):
         outputs = llm.chat(llm_prompts, sampling_params=sampling_params)
     else:
         outputs = llm.generate(
             llm_prompts,
             sampling_params=sampling_params,
         )
+    # cohere end
 
     # print the generated text
     if args.print_output:
@@ -178,6 +226,9 @@ def main(args):
             else:
                 print(f"prompt: {prompts[i]}")
             print(f"generated text: {output.outputs[0].text}")
+            # cohere start
+            print(f"num of generated tokens: {len(output.outputs[0].token_ids)}")
+            # cohere end
             print("-" * 50)
 
     metrics = llm.get_metrics()
@@ -189,6 +240,9 @@ def main(args):
     num_draft_tokens = 0
     num_accepted_tokens = 0
     acceptance_counts = [0] * args.num_spec_tokens
+    # cohere start
+    total_tokens_generated = 0
+    # cohere end
     for metric in metrics:
         if metric.name == "vllm:spec_decode_num_drafts":
             assert isinstance(metric, Counter)
@@ -203,6 +257,12 @@ def main(args):
             assert isinstance(metric, Vector)
             for pos in range(len(metric.values)):
                 acceptance_counts[pos] += metric.values[pos]
+        # cohere start
+        elif metric.name == "vllm:generation_tokens":
+            assert isinstance(metric, Counter)
+            print(f"num generation tokens: {metric.value}")
+            total_tokens_generated = metric.value
+        # cohere end
 
     print("-" * 50)
     print(f"total_num_output_tokens: {total_num_output_tokens}")
@@ -211,6 +271,16 @@ def main(args):
     print(f"num_accepted_tokens: {num_accepted_tokens}")
     acceptance_length = 1 + (num_accepted_tokens / num_drafts) if num_drafts > 0 else 1
     print(f"mean acceptance length: {acceptance_length:.2f}")
+    # cohere start
+    num_tokens_generated_without_sd = total_tokens_generated - (
+        num_drafts + num_accepted_tokens
+    )
+    seq_normalized_acceptance_length = (total_tokens_generated) / (
+        num_drafts + num_tokens_generated_without_sd
+    )
+    print(f"num_tokens_generated_without_sd: {num_tokens_generated_without_sd}")
+    print(f"seq normalized acceptance length: {seq_normalized_acceptance_length:.2f}")
+    # cohere end
     print("-" * 50)
 
     # print acceptance at each token position

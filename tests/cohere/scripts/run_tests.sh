@@ -478,6 +478,7 @@ run_speculative_decoding() {
     C4_EXPECTED_AL=2.5
     C4_LOG_OFF=${OUTPUT_DIR}/speculative_decoding_c4_mm_fp32_off.log
     C4_LOG_ON=${OUTPUT_DIR}/speculative_decoding_c4_mm_fp32_on.log
+    SPEC_DECODE_SCRIPT="${VLLM_WORKSPACE}/examples/features/speculative_decoding/spec_decode_offline.py"
 
     run_c4_spec_decode_case() {
         local fp32_mode="$1"
@@ -485,7 +486,7 @@ run_speculative_decoding() {
 
         VLLM_USE_V1=1 \
         VLLM_USE_LOGITS_FP32_COMPUTATION="$fp32_mode" \
-        python3 examples/offline_inference/spec_decode.py \
+        python3 "$SPEC_DECODE_SCRIPT" \
             --method eagle \
             --model-dir "$C4_TARGET_MODEL_DIR" \
             --eagle-dir "$C4_DRAFT_MODEL_DIR" \
@@ -547,7 +548,7 @@ run_speculative_decoding() {
 
         VLLM_USE_V1=1 \
         VLLM_USE_LOGITS_FP32_COMPUTATION="$fp32_mode" \
-        python3 examples/offline_inference/spec_decode.py \
+        python3 "$SPEC_DECODE_SCRIPT" \
             --method eagle \
             --model-dir "$C3_TARGET_MODEL_DIR" \
             --eagle-dir "$C3_DRAFT_MODEL_DIR" \
