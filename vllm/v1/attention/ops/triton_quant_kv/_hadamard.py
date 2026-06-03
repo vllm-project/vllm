@@ -3,12 +3,7 @@
 """Walsh-Hadamard transform and Randomized Hadamard Transform (RHT).
 
 Used by INT4 (single RHT + asymmetric quantization) per-token-head KV
-cache backend.
-
-Three-tier dispatch for ``fast_hadamard_transform``:
-  1. Hadacore CUDA Tensor Core kernel (sm_80+).
-  2. Triton MMA matmul kernel (CUDA fallback + ROCm MFMA/WMMA path).
-  3. PyTorch butterfly (CPU and any GPU/dtype combo Triton can't take).
+cache backend.  See :func:`fast_hadamard_transform` for the dispatch tiers.
 """
 
 from __future__ import annotations
@@ -23,15 +18,17 @@ from vllm.triton_utils import tl, triton
 # ---------------------------------------------------------------------------
 # Hadacore's CUDA impl is only registered when built for sm_80+, but the
 # schema def is unconditional — on ROCm ``hasattr`` is True yet dispatch
-# would crash, so we also gate on ``is_cuda()``.
+# would crash, so we also gate on ``is_cuda()`` and the sm_80 capability.
 _HADACORE_AVAILABLE: bool | None = None
 
 
 def _hadacore_available() -> bool:
     global _HADACORE_AVAILABLE
     if _HADACORE_AVAILABLE is None:
-        _HADACORE_AVAILABLE = current_platform.is_cuda() and hasattr(
-            torch.ops._C, "hadacore_transform"
+        _HADACORE_AVAILABLE = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability(80)
+            and hasattr(torch.ops._C, "hadacore_transform")
         )
     return _HADACORE_AVAILABLE
 
@@ -225,7 +222,3 @@ def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
         return fast_hadamard_transform(x) * d1
     else:
         return fast_hadamard_transform(x * d1)
-
-
-# Backwards-compat alias (was a private name in the old location).
-_single_rht = single_rht

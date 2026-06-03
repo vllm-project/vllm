@@ -443,9 +443,10 @@ class TritonAttentionBackend(AttentionBackend):
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            data_head_size = get_kv_quant_mode(cache_dtype_str).packed_head_size(
-                head_size
-            )
+            if get_kv_quant_mode(cache_dtype_str) == KVQuantMode.INT4_PER_TOKEN_HEAD:
+                data_head_size = head_size // 2
+            else:
+                data_head_size = head_size
             return (num_blocks, 2, block_size, num_kv_heads, data_head_size + scale_pad)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
@@ -744,10 +745,7 @@ class TritonAttentionImpl(AttentionImpl):
             if num_dec > 0 and num_dec_tok < num_actual_tokens and pref_first_chunk:
                 self._ensure_scale_caches(kv_cache)
                 key_cache, value_cache = kv_cache.unbind(1)
-                if (
-                    self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
-                    and key_cache.dtype == torch.uint8
-                ):
+                if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
 
@@ -800,9 +798,9 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 return output
 
-            # FP3: pure prefill with at least one continuation chunk.
-            # Reads paged cache with inline per-token-head dequant via a
-            # flash-attention-shaped kernel — avoids falling through to the
+            # Pure prefill with at least one continuation chunk.
+            # Reads paged cache with inline per-token-head dequant via the
+            # dedicated prefill kernel — avoids falling through to the
             # decode-shaped unified_attention which wastes K loads across
             # query tiles.
             if (
@@ -814,10 +812,7 @@ class TritonAttentionImpl(AttentionImpl):
                 key_cache, value_cache = kv_cache.unbind(1)
                 k_scale_cache = self._k_scale_cache
                 v_scale_cache = self._v_scale_cache
-                if (
-                    self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
-                    and key_cache.dtype == torch.uint8
-                ):
+                if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
                 num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1
@@ -838,10 +833,10 @@ class TritonAttentionImpl(AttentionImpl):
                 )
                 return output
 
-            # FP4: mixed decode + prefill where the prefill portion includes
+            # Mixed decode + prefill where the prefill portion includes
             # at least one continuation chunk. Decode portion goes through
             # unified_attention (decode-tuned); prefill portion uses the
-            # flash-attention prefill kernel.
+            # dedicated prefill kernel.
             if (
                 num_dec > 0
                 and num_dec_tok < num_actual_tokens
@@ -851,10 +846,7 @@ class TritonAttentionImpl(AttentionImpl):
                 key_cache, value_cache = kv_cache.unbind(1)
                 k_scale_cache = self._k_scale_cache
                 v_scale_cache = self._v_scale_cache
-                if (
-                    self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
-                    and key_cache.dtype == torch.uint8
-                ):
+                if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
 
@@ -918,10 +910,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.unbind(1)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
-            if (
-                self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
-                and key_cache.dtype == torch.uint8
-            ):
+            if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             q_descale = None
@@ -1105,10 +1094,7 @@ class TritonAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.unbind(1)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
-            if (
-                self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD
-                and key_cache.dtype == torch.uint8
-            ):
+            if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             triton_reshape_and_cache_flash_per_token_head_quant(

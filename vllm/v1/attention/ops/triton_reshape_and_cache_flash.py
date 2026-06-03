@@ -5,12 +5,9 @@
 This file owns the canonical (mode NONE / FP8 per-tensor) reshape kernels
 and the diff-kv variant.  All per-token-head and packed-int modes
 (INT8 / FP8 / INT4) live in dedicated backend modules under
-:mod:`vllm.v1.attention.ops.triton_quant_kv`.
-
-For backwards compatibility this module still exposes
-``triton_reshape_and_cache_flash_per_token_head_quant``,
-``fast_hadamard_transform`` and ``_single_rht`` as thin re-exports /
-dispatchers, so existing tests and benchmarks keep working.
+:mod:`vllm.v1.attention.ops.triton_quant_kv`; this module only keeps the
+``triton_reshape_and_cache_flash_per_token_head_quant`` dispatcher that
+routes to them.
 """
 
 import warnings
@@ -20,18 +17,6 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
-
-# ---------------------------------------------------------------------------
-# Backwards-compat re-exports
-# ---------------------------------------------------------------------------
-# Tests and a few external callers import these names from this module.
-# The implementations live in ``quant_kv._hadamard``; we re-export here so
-# the public surface stays stable.
-from vllm.v1.attention.ops.triton_quant_kv._hadamard import (  # noqa: E402, F401
-    _single_rht,
-    fast_hadamard_transform,
-    single_rht,
-)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}

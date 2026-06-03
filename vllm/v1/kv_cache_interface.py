@@ -57,22 +57,6 @@ class KVQuantMode(IntEnum):
         """True for NVFP4 packed quantization mode."""
         return self == KVQuantMode.NVFP4
 
-    @property
-    def packing_factor(self) -> int:
-        """Number of quantized values stored per cache byte (1 unless packed)."""
-        if self == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            return 2
-        return 1
-
-    def packed_head_size(self, head_size: int) -> int:
-        """Storage head size after packing: ``head_size // packing_factor``."""
-        factor = self.packing_factor
-        assert head_size % factor == 0, (
-            f"head_size={head_size} is not divisible by packing factor "
-            f"{factor} required by {self.name}"
-        )
-        return head_size // factor
-
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -187,19 +171,16 @@ class AttentionSpec(KVCacheSpec):
     def real_page_size_bytes(self) -> int:
         if self.kv_quant_mode.is_nvfp4:
             # Packed layout: fp4 data + fp8 block scales per head.
-            full_dim = nvfp4_kv_cache_full_dim(self.head_size)
-            return (
-                2
-                * self.block_size
-                * self.num_kv_heads
-                * full_dim
-                * get_dtype_size(self.dtype)
-            )
+            head_dim = nvfp4_kv_cache_full_dim(self.head_size)
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
+        else:
+            head_dim = self.head_size
         return (
             2
             * self.block_size
             * self.num_kv_heads
-            * self.kv_quant_mode.packed_head_size(self.head_size)
+            * head_dim
             * get_dtype_size(self.dtype)
         )
 
@@ -304,20 +285,12 @@ class FullAttentionSpec(AttentionSpec):
             last_dim = nvfp4_kv_cache_full_dim(
                 self.head_size
             ) + nvfp4_kv_cache_full_dim(self.head_size_v)
-            return (
-                self.block_size
-                * self.num_kv_heads
-                * last_dim
-                * get_dtype_size(self.dtype)
-            )
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            last_dim = self.head_size // 2 + self.head_size_v // 2
+        else:
+            last_dim = self.head_size + self.head_size_v
         return (
-            self.block_size
-            * self.num_kv_heads
-            * (
-                self.kv_quant_mode.packed_head_size(self.head_size)
-                + self.kv_quant_mode.packed_head_size(self.head_size_v)
-            )
-            * get_dtype_size(self.dtype)
+            self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
         )
 
 
@@ -383,10 +356,14 @@ class MLAAttentionSpec(FullAttentionSpec):
             # V3.2 main MLA: 656-byte custom layout (kv_lora_rank=512 +
             # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
             return self.block_size * 656
+        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
+        else:
+            head_dim = self.head_size
         return (
             self.storage_block_size
             * self.num_kv_heads
-            * self.kv_quant_mode.packed_head_size(self.head_size)
+            * head_dim
             * get_dtype_size(self.dtype)
         )
 

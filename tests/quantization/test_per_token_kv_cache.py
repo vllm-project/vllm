@@ -262,8 +262,8 @@ def test_reshape_and_cache_per_token_head(
         off = slot % block_size
 
         if is_int4:
-            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-                _single_rht,
+            from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
+                single_rht,
             )
 
             for label, data, cache, sc in [
@@ -285,7 +285,7 @@ def test_reshape_and_cache_per_token_head(
                 full[:, 1::2] = hi
                 # Asymmetric dequant in RHT domain, then IRHT/d → original
                 deq_rht = (full - zp[:, None]) * clean_scale[:, None]
-                deq = _single_rht(deq_rht, inverse=True) / head_size
+                deq = single_rht(deq_rht, inverse=True) / head_size
                 ref_deq = data[i].float()
                 torch.testing.assert_close(deq, ref_deq, atol=deq_atol, rtol=deq_rtol)
         else:
@@ -410,8 +410,8 @@ def test_per_token_head_round_trip_accuracy(
                 orig = data[i, h].float()
                 actual_sc = sc[blk, off, h]
                 if is_int4:
-                    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (  # noqa: E501
-                        _single_rht,
+                    from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
+                        single_rht,
                     )
 
                     sc_bits = actual_sc.view(torch.int32)
@@ -425,7 +425,7 @@ def test_per_token_head_round_trip_accuracy(
                     full[1::2] = hi
                     deq_rht = (full - zp) * clean_sc
                     actual_deq = (
-                        _single_rht(deq_rht.unsqueeze(0), inverse=True).squeeze(0)
+                        single_rht(deq_rht.unsqueeze(0), inverse=True).squeeze(0)
                         / head_size
                     )
                 else:
