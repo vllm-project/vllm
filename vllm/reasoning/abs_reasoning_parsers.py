@@ -185,6 +185,17 @@ class ReasoningParser:
         """
         return None
 
+    def get_boundary_token_ids(self) -> frozenset[int]:
+        """Token ids that delimit reasoning and must not be FSM-advanced.
+
+        Subclasses with thinking start/end tokens should override this.
+        """
+        return frozenset()
+
+    def get_transition_whitespace_token_ids(self) -> frozenset[int]:
+        """Whitespace token ids that may appear around reasoning boundaries."""
+        return frozenset()
+
 
 class ReasoningParserManager:
     """

@@ -9,7 +9,10 @@ import pytest
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.v1.request import Request
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import (
+    StructuredOutputManager,
+    filter_reasoning_boundary_tokens,
+)
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 
@@ -17,6 +20,14 @@ class MockReasoner:
     def __init__(self, tokenizer):
         self.is_reasoning_end = Mock(return_value=False)
         self.is_reasoning_end_streaming = Mock(return_value=False)
+        self.start_token_id = 248068
+        self.end_token_id = 248069
+
+    def get_boundary_token_ids(self):
+        return frozenset({self.start_token_id, self.end_token_id})
+
+    def get_transition_whitespace_token_ids(self):
+        return frozenset({198})
 
 
 class TestReasoningStructuredOutput:
@@ -258,3 +269,80 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_filter_reasoning_boundary_tokens_strips_end_and_whitespace(self):
+        """Boundary tokens must be removed before FSM advance."""
+        reasoner = MockReasoner(tokenizer=Mock())
+        tool_token = 151644
+        filtered = filter_reasoning_boundary_tokens(
+            [198, reasoner.end_token_id, 198, tool_token],
+            reasoner,
+        )
+        assert filtered == [tool_token]
+
+    def test_filter_reasoning_boundary_tokens_no_boundary_unchanged(self):
+        reasoner = MockReasoner(tokenizer=Mock())
+        tokens = [151644, 151645]
+        assert filter_reasoning_boundary_tokens(tokens, reasoner) == tokens
+
+    def test_filter_tokens_for_fsm_advance_structural_tag(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            "{}",
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        structured_req.reasoner = reasoner
+        tool_token = 151644
+
+        filtered = manager_with_reasoner.filter_tokens_for_fsm_advance(
+            mock_request_with_structured_output,
+            [198, reasoner.end_token_id, tool_token],
+        )
+        assert filtered == [tool_token]
+
+    def test_filter_tokens_for_fsm_advance_skipped_when_enable_in_reasoning(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        manager_with_reasoner.enable_in_reasoning = True
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            "{}",
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        structured_req.reasoner = reasoner
+        tokens = [198, reasoner.end_token_id, 151644]
+
+        assert (
+            manager_with_reasoner.filter_tokens_for_fsm_advance(
+                mock_request_with_structured_output, tokens
+            )
+            == tokens
+        )
+
+    def test_build_fsm_advance_skip_mask(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            "{}",
+        )
+        reasoner = MockReasoner(tokenizer=Mock())
+        structured_req.reasoner = reasoner
+        tool_token = 151644
+        req_tokens = [198, reasoner.end_token_id, tool_token]
+
+        mask = manager_with_reasoner._build_fsm_advance_skip_mask(
+            mock_request_with_structured_output, req_tokens
+        )
+        assert mask == [False, False, True]
