@@ -163,9 +163,13 @@ python benchmark.py \
 # Model configuration
 --num-layers N                      # Number of layers
 --head-dim N                        # Head dimension
+--v-head-dim N                      # Value head dimension (defaults to --head-dim)
 --num-q-heads N                     # Query heads
 --num-kv-heads N                    # KV heads
 --block-size N                      # Block size
+--kv-lora-rank N                    # MLA KV LoRA rank
+--qk-nope-head-dim N                # MLA non-RoPE QK head dim
+--qk-rope-head-dim N                # MLA RoPE QK head dim
 
 # Benchmark settings
 --device DEVICE                     # Device (default: cuda:0)

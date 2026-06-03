@@ -217,7 +217,7 @@ class ModelParameterSweep:
     """
 
     param_name: str | None = None
-    values: list[Any] = None  # type: ignore[assignment]
+    values: list[Any] | None = None
     label_format: str = "{backend}_{param_name}_{value}"
 
     def get_label(self, backend: str, value: Any) -> str:

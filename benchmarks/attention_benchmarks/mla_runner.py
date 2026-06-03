@@ -824,7 +824,7 @@ def _run_single_benchmark(
             num_prefill, mla_dims, query_fmt, device, torch.bfloat16
         )
 
-    # Build forward function (runs all layers once)
+    # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
         if has_decode:

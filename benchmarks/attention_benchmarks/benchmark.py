@@ -494,6 +494,23 @@ def main():
     parser.add_argument("--num-q-heads", type=int, default=32, help="Query heads")
     parser.add_argument("--num-kv-heads", type=int, default=8, help="KV heads")
     parser.add_argument("--block-size", type=int, default=16, help="Block size")
+    parser.add_argument(
+        "--v-head-dim",
+        type=int,
+        default=None,
+        help="Value head dimension (defaults to --head-dim if unset)",
+    )
+
+    # MLA-specific model dimensions
+    parser.add_argument(
+        "--kv-lora-rank", type=int, default=None, help="MLA KV LoRA rank"
+    )
+    parser.add_argument(
+        "--qk-nope-head-dim", type=int, default=None, help="MLA non-RoPE QK head dim"
+    )
+    parser.add_argument(
+        "--qk-rope-head-dim", type=int, default=None, help="MLA RoPE QK head dim"
+    )
 
     # Benchmark settings
     parser.add_argument("--device", default="cuda:0", help="Device")
@@ -651,20 +668,14 @@ def main():
             model = yaml_config["model"]
             args.num_layers = model.get("num_layers", args.num_layers)
             args.head_dim = model.get("head_dim", args.head_dim)
-            args.v_head_dim = model.get("v_head_dim", getattr(args, "v_head_dim", None))
+            args.v_head_dim = model.get("v_head_dim", args.v_head_dim)
             args.num_q_heads = model.get("num_q_heads", args.num_q_heads)
             args.num_kv_heads = model.get("num_kv_heads", args.num_kv_heads)
             args.block_size = model.get("block_size", args.block_size)
             # MLA-specific dimensions
-            args.kv_lora_rank = model.get(
-                "kv_lora_rank", getattr(args, "kv_lora_rank", None)
-            )
-            args.qk_nope_head_dim = model.get(
-                "qk_nope_head_dim", getattr(args, "qk_nope_head_dim", None)
-            )
-            args.qk_rope_head_dim = model.get(
-                "qk_rope_head_dim", getattr(args, "qk_rope_head_dim", None)
-            )
+            args.kv_lora_rank = model.get("kv_lora_rank", args.kv_lora_rank)
+            args.qk_nope_head_dim = model.get("qk_nope_head_dim", args.qk_nope_head_dim)
+            args.qk_rope_head_dim = model.get("qk_rope_head_dim", args.qk_rope_head_dim)
 
         # Benchmark settings (top-level keys)
         if "device" in yaml_config:
@@ -746,6 +757,12 @@ def main():
             "[yellow]Warning: --warmup-ms is ignored with CUDA graphs "
             "(do_bench_cudagraph warms up internally). Pass --no-cuda-graphs "
             "to use it.[/]"
+        )
+    if args.num_splits == 0 and args.cuda_graphs:
+        console.print(
+            "[yellow]Warning: --num-splits 0 (FA3 heuristic) is not CUDA-graph "
+            "compatible and may fail or fall back. Pass --no-cuda-graphs or use "
+            "--num-splits >=1.[/]"
         )
     console.print()
 
@@ -952,7 +969,7 @@ def main():
         base_config_args = {
             "num_layers": args.num_layers,
             "head_dim": args.head_dim,
-            "v_head_dim": getattr(args, "v_head_dim", None),
+            "v_head_dim": args.v_head_dim,
             "num_q_heads": args.num_q_heads,
             "num_kv_heads": args.num_kv_heads,
             "block_size": args.block_size,
@@ -962,10 +979,10 @@ def main():
             "use_cuda_graphs": args.cuda_graphs,
             "ncu_profile": args.ncu_profile,
             "warmup_ms": args.warmup_ms,
-            "num_splits": getattr(args, "num_splits", None),
-            "kv_lora_rank": getattr(args, "kv_lora_rank", None),
-            "qk_nope_head_dim": getattr(args, "qk_nope_head_dim", None),
-            "qk_rope_head_dim": getattr(args, "qk_rope_head_dim", None),
+            "num_splits": args.num_splits,
+            "kv_lora_rank": args.kv_lora_rank,
+            "qk_nope_head_dim": args.qk_nope_head_dim,
+            "qk_rope_head_dim": args.qk_rope_head_dim,
         }
         all_results = run_model_parameter_sweep(
             backends,
@@ -981,7 +998,7 @@ def main():
         base_config_args = {
             "num_layers": args.num_layers,
             "head_dim": args.head_dim,
-            "v_head_dim": getattr(args, "v_head_dim", None),
+            "v_head_dim": args.v_head_dim,
             "num_q_heads": args.num_q_heads,
             "num_kv_heads": args.num_kv_heads,
             "block_size": args.block_size,
@@ -991,7 +1008,7 @@ def main():
             "use_cuda_graphs": args.cuda_graphs,
             "ncu_profile": args.ncu_profile,
             "warmup_ms": args.warmup_ms,
-            "num_splits": getattr(args, "num_splits", None),
+            "num_splits": args.num_splits,
         }
         all_results = run_parameter_sweep(
             backends, args.batch_specs, base_config_args, args.parameter_sweep, console
@@ -1025,7 +1042,7 @@ def main():
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
                             warmup_ms=args.warmup_ms,
-                            num_splits=getattr(args, "num_splits", None),
+                            num_splits=args.num_splits,
                         )
 
                         result = run_benchmark(config)
