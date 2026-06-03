@@ -1305,9 +1305,12 @@ class SpecDecodeBaseProposer:
                 target_embed_tokens = inner_model.embed_tokens
             elif hasattr(inner_model, "embedding"):
                 target_embed_tokens = inner_model.embedding
+            elif hasattr(inner_model, "word_embeddings"):
+                target_embed_tokens = inner_model.word_embeddings
             else:
                 raise AttributeError(
-                    "Target model does not have 'embed_tokens' or 'embedding' attribute"
+                    "Target model does not have 'embed_tokens', 'embedding', "
+                    "or 'word_embeddings' attribute"
                 )
 
             share_embeddings = False
