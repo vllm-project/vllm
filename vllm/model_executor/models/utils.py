@@ -463,8 +463,8 @@ def _merge_multimodal_embeddings(
     positions in `inputs_embeds` corresponding to placeholder tokens in
     `input_ids`.
 
-    Note:
-        This updates `inputs_embeds` in place.
+    This function returns a new merged tensor functionally, which is preferred
+    for compiler fusion.
     """
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
@@ -472,22 +472,43 @@ def _merge_multimodal_embeddings(
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
+    num_actual_tokens = len(mm_embeds_flat)
+    num_expected_tokens = is_multimodal.sum().item()
+    if num_actual_tokens != num_expected_tokens:
+        expr = _embedding_count_expression(multimodal_embeddings)
+        raise ValueError(
+            f"Attempted to assign {expr} = {num_actual_tokens} "
+            f"multimodal tokens to {num_expected_tokens} placeholders"
+        )
+
     try:
-        # If is_multimodal is on CPU this avoids a D2H sync
-        inputs_embeds[is_multimodal] = mm_embeds_flat.to(dtype=input_dtype)
-    except RuntimeError as e:
-        num_actual_tokens = len(mm_embeds_flat)
-        num_expected_tokens = is_multimodal.sum().item()
+        mm_embeds_device = mm_embeds_flat.to(
+            dtype=input_dtype, device=inputs_embeds.device
+        )
+        is_mm_device = is_multimodal.to(device=inputs_embeds.device)
 
-        if num_actual_tokens != num_expected_tokens:
-            expr = _embedding_count_expression(multimodal_embeddings)
+        # 1. Pad Embeddings: Prepend a single zero-filled dummy row
+        dummy_row = torch.zeros(
+            (1, mm_embeds_device.shape[1]),
+            dtype=input_dtype,
+            device=inputs_embeds.device,
+        )
+        mm_embeds_padded = torch.cat([dummy_row, mm_embeds_device], dim=0)
 
-            raise ValueError(
-                f"Attempted to assign {expr} = {num_actual_tokens} "
-                f"multimodal tokens to {num_expected_tokens} placeholders"
-            ) from e
+        # 2. Direct Mapping: cumsum gives 0 for all positions before the first True.
+        # It increments by 1 for each True, cleanly pointing to the
+        # corresponding mm_embed.
+        gather_indices = torch.cumsum(is_mm_device, dim=0, dtype=torch.long)
+        mapped_mm_embeds = mm_embeds_padded[gather_indices]
 
-        raise ValueError("Error during index put operation") from e
+        # 3. Execution: Pointwise select to avoid dynamic slicing
+        inputs_embeds = torch.where(
+            is_mm_device.unsqueeze(-1),
+            mapped_mm_embeds,
+            inputs_embeds,
+        )
+    except (RuntimeError, IndexError) as e:
+        raise ValueError("Error during multimodal embedding merge operation") from e
 
     return inputs_embeds
 
