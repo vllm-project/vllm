@@ -148,13 +148,6 @@ class OffloadingManager(ABC):
     def __init__(self, spec: "OffloadingSpec"):
         self.spec = spec
 
-    @classmethod
-    def get_metric_definitions(
-        cls, spec: "OffloadingSpec"
-    ) -> dict[str, OffloadingMetricMetadata]:
-        """Return Prometheus metric definitions emitted by this manager."""
-        return {}
-
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
@@ -414,10 +407,11 @@ class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
     @classmethod
-    @abstractmethod
-    def get_manager_cls(cls) -> type[OffloadingManager]:
-        """Return the scheduler-side offloading manager class for this spec."""
-        pass
+    def build_metric_definitions(
+        cls, spec: "OffloadingSpec | VllmConfig"
+    ) -> dict[str, OffloadingMetricMetadata]:
+        """Return Prometheus metric definitions emitted by this spec."""
+        return {}
 
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
@@ -430,7 +424,7 @@ class OffloadingSpec(ABC):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
-        self.metric_definitions = self.get_manager_cls().get_metric_definitions(self)
+        self.metric_definitions = self.build_metric_definitions(self)
 
         # When True, only prompt (prefill) blocks are offloaded; decode-phase
         # blocks (KV generated after the prompt) are skipped. Useful when prior

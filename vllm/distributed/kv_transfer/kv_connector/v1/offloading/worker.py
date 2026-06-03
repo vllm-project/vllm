@@ -270,15 +270,13 @@ class OffloadingConnectorWorker:
                 and transfer_result.transfer_size is not None
             ):
                 if is_load:
-                    self._connector_worker_meta.record_load(
-                        transfer_result.transfer_size,
-                        transfer_result.transfer_time,
-                    )
+                    stats = self._connector_worker_meta.transfer_stats.load
                 else:
-                    self._connector_worker_meta.record_store(
-                        transfer_result.transfer_size,
-                        transfer_result.transfer_time,
-                    )
+                    stats = self._connector_worker_meta.transfer_stats.store
+                stats.record(
+                    transfer_result.transfer_size,
+                    transfer_result.transfer_time,
+                )
 
             self._connector_worker_meta.mark_completed(job_id)
             req_id = self._load_jobs.pop(job_id, None)

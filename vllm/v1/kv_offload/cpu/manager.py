@@ -12,10 +12,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
-    OffloadingCounterMetadata,
     OffloadingEvent,
     OffloadingManager,
-    OffloadingMetricMetadata,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
@@ -27,16 +25,12 @@ from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
     "arc": ARCCachePolicy,
 }
-
-# metrics
-METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
 class CPUOffloadingManager(OffloadingManager):
@@ -48,28 +42,6 @@ class CPUOffloadingManager(OffloadingManager):
     Policy-specific block organization and eviction decisions are delegated
     to the CachePolicy implementation.
     """
-
-    @classmethod
-    def get_metric_definitions(
-        cls, spec: "OffloadingSpec | VllmConfig"
-    ) -> dict[str, OffloadingMetricMetadata]:
-        if hasattr(spec, "extra_config"):
-            extra_config = spec.extra_config
-        else:
-            kv_transfer_config = spec.kv_transfer_config
-            assert kv_transfer_config is not None
-            extra_config = kv_transfer_config.kv_connector_extra_config
-        store_threshold = int(extra_config.get("store_threshold", 0))
-        if store_threshold < 2:
-            return {}
-        return {
-            METRIC_STORES_SKIPPED: OffloadingCounterMetadata(
-                documentation=(
-                    "Number of KV offload stores skipped because the reuse "
-                    "threshold was not reached."
-                ),
-            )
-        }
 
     def __init__(
         self,
@@ -301,7 +273,8 @@ class CPUOffloadingManager(OffloadingManager):
 
         stats = OffloadingConnectorStats(metric_metadata=self.spec.metric_definitions)
         stats.increase_counter(
-            METRIC_STORES_SKIPPED, self.stores_skipped_in_current_batch
+            "vllm:kv_offload_stores_skipped",
+            self.stores_skipped_in_current_batch,
         )
         self.stores_skipped_in_current_batch = 0
         return stats

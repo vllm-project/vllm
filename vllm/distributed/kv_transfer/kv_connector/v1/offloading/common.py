@@ -46,12 +46,6 @@ class TransferStats:
             store=self.store.aggregate(other.store),
         )
 
-    def record_load(self, num_bytes: int, time: float) -> None:
-        self.load.record(num_bytes, time)
-
-    def record_store(self, num_bytes: int, time: float) -> None:
-        self.store.record(num_bytes, time)
-
     def is_empty(self) -> bool:
         return self.load.is_empty() and self.store.is_empty()
 
@@ -93,14 +87,6 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     def mark_completed(self, job_id: int) -> None:
         """Record a transfer job completion from this worker."""
         self.completed_jobs[job_id] = 1
-
-    def record_load(self, num_bytes: int, time: float) -> None:
-        """Record a load transfer from this worker."""
-        self.transfer_stats.record_load(num_bytes, time)
-
-    def record_store(self, num_bytes: int, time: float) -> None:
-        """Record a store transfer from this worker."""
-        self.transfer_stats.record_store(num_bytes, time)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"

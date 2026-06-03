@@ -193,7 +193,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        connector_metric_metadata: dict[str, OffloadingMetricMetadata],
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
@@ -204,17 +203,13 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
         spec_cls = OffloadingSpecFactory.get_spec_cls(vllm_config)
-        manager_cls = spec_cls.get_manager_cls()
-        manager_metric_metadata = manager_cls.get_metric_definitions(vllm_config)
         self._offloading_metric_metadata: dict[str, OffloadingMetricMetadata] = {
-            **connector_metric_metadata,
-            **manager_metric_metadata,
+            **spec_cls.build_metric_definitions(vllm_config),
+            **get_connector_metric_definitions(),
         }
-        from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
-        self._observe_deprecated_metrics = issubclass(
-            manager_cls, CPUOffloadingManager
-        )
+        self._observe_deprecated_metrics = issubclass(spec_cls, CPUOffloadingSpec)
         self._offloading_metric_defs: dict[str, PromMetricT] = {}
         self.offloading_metrics: dict[tuple[int, str], PromMetricT] = {}
 

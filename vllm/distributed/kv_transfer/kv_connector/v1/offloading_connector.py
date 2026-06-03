@@ -39,7 +39,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.base import OffloadingMetricMetadata
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -59,13 +58,12 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
+        spec.metric_definitions.update(get_connector_metric_definitions())
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = OffloadingConnectorScheduler(
-                spec, self.get_metric_definitions(vllm_config)
-            )
+            self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec)
 
@@ -189,9 +187,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_scheduler is None:
-            # Emit empty worker-side stats so the scheduler-side connector can
-            # aggregate its stats without changing scheduler aggregation here.
-            return OffloadingConnectorStats()
+            return None
         return self.connector_scheduler.get_stats()
 
     @classmethod
@@ -205,12 +201,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @classmethod
-    def get_metric_definitions(
-        cls, vllm_config: VllmConfig
-    ) -> dict[str, OffloadingMetricMetadata]:
-        return get_connector_metric_definitions()
-
-    @classmethod
     def build_prom_metrics(
         cls,
         vllm_config: VllmConfig,
@@ -220,7 +210,6 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorPromMetrics:
         return OffloadPromMetrics(
             vllm_config,
-            cls.get_metric_definitions(vllm_config),
             metric_types,
             labelnames,
             per_engine_labelvalues,

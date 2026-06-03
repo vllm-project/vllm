@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     OffloadingManager,
-    OffloadingMetricMetadata,
     OffloadingSpec,
     OffloadKey,
     OffloadPolicy,
@@ -272,14 +271,10 @@ class OffloadingConnectorScheduler:
     def __init__(
         self,
         spec: OffloadingSpec,
-        connector_metric_metadata: dict[str, OffloadingMetricMetadata],
     ):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
-        self._offloading_metric_metadata = {
-            **connector_metric_metadata,
-            **spec.metric_definitions,
-        }
+        self._offloading_metric_metadata = spec.metric_definitions
         self._connector_stats: OffloadingConnectorStats | None = None
 
         full_attention_groups: list[int] = []
