@@ -5,9 +5,9 @@ use std::sync::LazyLock;
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, HyV3ToolParser,
-    KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
-    ToolParserOutput,
+    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
+    MistralToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser,
+    ToolParserError, ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
@@ -24,6 +24,9 @@ pub mod names {
     pub const GEMMA4: &str = "gemma4";
     pub const HERMES: &str = "hermes";
     pub const HY_V3: &str = "hy_v3";
+    // Matches the Python CLI name `--tool-call-parser internlm`, which Python
+    // also routes to `Internlm2ToolParser` despite the version-agnostic name.
+    pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
@@ -62,6 +65,7 @@ impl ToolParserFactory {
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
+            .register_parser::<Internlm2ToolParser>(names::INTERNLM)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
@@ -80,6 +84,12 @@ impl ToolParserFactory {
             .register_pattern("hermes", names::HERMES)
             .register_pattern("hy3", names::HY_V3)
             .register_pattern("hy_v3", names::HY_V3)
+            // Narrow to `internlm2` substring so it matches `internlm2-chat-7b`
+            // and `internlm2_5-7b-chat` but NOT `internlm-chat-7b` (InternLM v1,
+            // routes to Llama), `internlm3-*` (also Llama-architecture per
+            // vllm/model_executor/models/registry.py:146), or `Intern-S1` /
+            // `Intern-S1-Pro` (separate intern-s1 parser, see PR #40115).
+            .register_pattern("internlm2", names::INTERNLM)
             .register_pattern("llama-4", names::LLAMA4_JSON)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)
