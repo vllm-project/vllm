@@ -34,6 +34,21 @@ _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
 
 
+def _mock_cpu_offloading_spec(
+    num_blocks: int,
+    eviction_policy: str = "lru",
+    enable_events: bool = False,
+):
+    spec = MagicMock()
+    spec.num_blocks = num_blocks
+    spec.eviction_policy = eviction_policy
+    spec.enable_events = enable_events
+    spec.store_threshold = 0
+    spec.max_tracker_size = 64_000
+    spec.metric_definitions = {}
+    return spec
+
+
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
     """Create a mock SharedOffloadRegion for testing."""
     mock = MagicMock()
@@ -99,8 +114,9 @@ class TestTieringOffloadingManager:
     def manager_setup(self):
         # Create primary tier (CPU-based)
         mock_region = _mock_mmap_region(5)
+        self.spec = _mock_cpu_offloading_spec(num_blocks=5)
         self.primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=5, mmap_region=mock_region
+            spec=self.spec, mmap_region=mock_region
         )
 
         mock_view = mock_region.create_kv_memoryview()
@@ -119,6 +135,7 @@ class TestTieringOffloadingManager:
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
+            spec=self.spec,
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
@@ -496,13 +513,14 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
+        spec = _mock_cpu_offloading_spec(num_blocks=5)
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=5, mmap_region=_mock_mmap_region(5)
+            spec=spec, mmap_region=_mock_mmap_region(5)
         )
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(
-            primary_tier=primary_tier, secondary_tiers=[]
+            spec=spec, primary_tier=primary_tier, secondary_tiers=[]
         )
 
         blocks = to_keys(range(3))

@@ -145,10 +145,8 @@ The class provides the following primitives:
 
 
 class OffloadingManager(ABC):
-    def __init__(
-        self, metric_definitions: dict[str, OffloadingMetricMetadata] | None = None
-    ):
-        self.metric_definitions = metric_definitions or {}
+    def __init__(self, spec: "OffloadingSpec"):
+        self.spec = spec
 
     @classmethod
     def get_metric_definitions(

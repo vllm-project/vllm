@@ -91,10 +91,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             TieringOffloadingManager instance
         """
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
+            if self.store_threshold >= 2:
+                raise ValueError(
+                    "store_threshold is not supported for TieringOffloadingSpec"
+                )
 
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
@@ -109,9 +109,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create primary tier (CPU-based)
             primary_tier = CPUPrimaryTierOffloadingManager(
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
+                spec=self,
                 mmap_region=scheduler_mmap,
             )
 
@@ -141,14 +139,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             # get_handlers(); secondary tier transfers are handled by the
             # secondary tier managers and need no additional handlers here.
             tiering_manager = TieringOffloadingManager(
+                spec=self,
                 primary_tier=primary_tier,
                 secondary_tiers=secondary_tiers,
-                enable_events=enable_events,
+                enable_events=self.enable_events,
             )
-            if int(self.extra_config.get("store_threshold", 0)) >= 2:
-                raise ValueError(
-                    "store_threshold is not supported for TieringOffloadingSpec"
-                )
             self._manager = tiering_manager
 
             logger.info(

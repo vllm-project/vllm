@@ -73,31 +73,25 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+        kv_events_config = self.vllm_config.kv_events_config
+        self.enable_events: bool = (
+            kv_events_config is not None and kv_events_config.enable_kv_cache_events
+        )
+
+        # store_threshold: how many times a block must appear in lookup()
+        # before it is eligible for CPU offloading.  Values < 2 disable
+        # filtering (a threshold of 1 equals no filter; 0 is the default).
+        self.store_threshold: int = int(self.extra_config.get("store_threshold", 0))
+
+        # Maximum entries in the internal tracker's LRU table.
+        self.max_tracker_size: int = int(
+            self.extra_config.get("max_tracker_size", 64_000)
+        )
 
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
-
-            # store_threshold: how many times a block must appear in lookup()
-            # before it is eligible for CPU offloading.  Values < 2 disable
-            # filtering (a threshold of 1 equals no filter; 0 is the default).
-            store_threshold = int(self.extra_config.get("store_threshold", 0))
-
-            # Maximum entries in the internal tracker's LRU table.
-            max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
-
-            self._manager = CPUOffloadingManager(
-                num_blocks=self.num_blocks,
-                cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
-                store_threshold=store_threshold,
-                max_tracker_size=max_tracker_size,
-                metric_definitions=self.metric_definitions,
-            )
+            self._manager = CPUOffloadingManager(self)
         return self._manager
 
     def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
