@@ -164,6 +164,9 @@ arange = "arange"
 thw = "thw"
 subtile = "subtile"
 HSA = "HSA"
+# n_occurences is the real column name emitted by uplift-plan CSV output;
+# fixing the spelling here would break CSV key lookups in tests
+occurences = "occurences"
 setp = "setp"
 CPY = "CPY"
 thr = "thr"

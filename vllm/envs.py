@@ -123,6 +123,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP4_QUANT: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -1165,6 +1167,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
+    # Whether to use aiter triton fused RMSNorm + MXFP4 dynamic quantization.
+    # Enables F2 kernel fusion via torch.compile pattern match.
+    # Requires upstream aiter MXFP4 support. By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP4_QUANT": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP4_QUANT", "False").lower()
+        in ("true", "1")
+    ),
+    # Whether to use aiter triton fused RoPE + zero-init + MLA KV-cache write.
+    # Enables F3 kernel fusion via torch.compile pattern match.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE": lambda: (
+        os.getenv(
+            "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "False"
+        ).lower()
+        in ("true", "1")
+    ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP8BMM": lambda: (
@@ -2174,6 +2192,9 @@ def compile_factors() -> dict[str, object]:
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
+        # F2/F3 direct-dispatch gates: runtime flags only, not compile-time
+        "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP4_QUANT",
+        "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE",
     }
 
     from vllm.config.utils import normalize_value
