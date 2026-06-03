@@ -45,6 +45,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt8Static,
     kMxfp4Static,
     kMxfp8Static,
@@ -611,6 +613,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kInt4Static,
             kInt8Static,
             kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
         ]
         return weight_key in SUPPORTED_W
 
@@ -685,9 +689,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
 
 class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
     """Marlin-based fused MoE expert implementation."""
-
-    def supports_expert_map(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -919,9 +920,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             w2_g_idx_sort_indices=w2_g_idx_sort_indices,
             is_k_full=is_k_full,
         )
-
-    def supports_expert_map(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceDelegate()
