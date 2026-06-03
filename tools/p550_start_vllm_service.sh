@@ -25,6 +25,7 @@ port="${PORT:-8000}"
 model="${VLLM_P550_MODEL:-$PWD/.p550_models/tiny-llama}"
 served_model="${VLLM_P550_SERVED_MODEL_NAME:-p550-tiny}"
 kv_cache_bytes="${VLLM_P550_KV_CACHE_BYTES:-536870912}"
+max_model_len="${VLLM_P550_MAX_MODEL_LEN:-64}"
 
 if [ ! -d "$model" ]; then
     echo "Local tiny model not found at $model; generating it now..." >&2
@@ -52,6 +53,7 @@ PORT = int(os.environ.get("P550_SERVICE_PORT", "8000"))
 MODEL = os.environ["P550_SERVICE_MODEL"]
 SERVED_MODEL = os.environ.get("P550_SERVICE_MODEL_NAME", "p550-tiny")
 KV_CACHE_BYTES = int(os.environ.get("P550_SERVICE_KV_CACHE_BYTES", "536870912"))
+MAX_MODEL_LEN = int(os.environ.get("P550_SERVICE_MAX_MODEL_LEN", "64"))
 
 generate_lock = threading.Lock()
 llm: LLM | None = None
@@ -184,7 +186,7 @@ def main() -> None:
     llm = LLM(
         model=MODEL,
         dtype="float",
-        max_model_len=64,
+        max_model_len=MAX_MODEL_LEN,
         max_num_seqs=1,
         enforce_eager=True,
         disable_log_stats=True,
@@ -204,6 +206,7 @@ export P550_SERVICE_PORT="$port"
 export P550_SERVICE_MODEL="$model"
 export P550_SERVICE_MODEL_NAME="$served_model"
 export P550_SERVICE_KV_CACHE_BYTES="$kv_cache_bytes"
+export P550_SERVICE_MAX_MODEL_LEN="$max_model_len"
 
 echo "Starting minimal vLLM HTTP service. Stop with Ctrl-C."
 echo "Health: http://127.0.0.1:${port}/health"

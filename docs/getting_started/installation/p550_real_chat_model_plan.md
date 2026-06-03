@@ -98,6 +98,36 @@ Result:
 assistant: 1+2 = 3
 ```
 
+## Qwen 0.5B Validation
+
+`Qwen/Qwen2.5-0.5B-Instruct` was validated as the next trained chat model. The
+model was downloaded outside the repository and copied to a local model
+directory on the P550 board; model weights are not stored in this repository.
+
+Start the minimal HTTP service with:
+
+```bash
+VLLM_P550_MODEL=$PWD/.p550_models/qwen2.5-0.5b-instruct \
+VLLM_P550_SERVED_MODEL_NAME=qwen2.5-0.5b-instruct \
+VLLM_P550_MAX_MODEL_LEN=128 \
+VLLM_P550_KV_CACHE_BYTES=536870912 \
+    tools/p550_start_vllm_service.sh
+```
+
+The Qwen service was then tested through `/v1/chat/completions` with five short
+chat sessions:
+
+```text
+What is 1+2? Answer with only the number. -> 3
+What is 2*3? Answer with only the number. -> 6
+Translate to Chinese: hello. Answer with only the translation. -> 你好。
+What is the capital of France? Answer with one word. -> Paris
+Answer yes or no: Is water wet? -> Yes.
+```
+
+Observed latency was about 19 to 20 seconds per short request on the scalar
+RISC-V CPU path.
+
 ## Known Limits
 
 - This target validates correctness of the model/runtime path, not performance.
