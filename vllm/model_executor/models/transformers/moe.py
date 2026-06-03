@@ -25,10 +25,7 @@ from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
@@ -161,37 +158,18 @@ class MoEMixin(MixtureOfExperts):
         Params for weights, fp8 weight scales, fp8 activation scales
         (param_name, weight_name, expert_id, shard_id)
         """
-        # Models saved with fused experts. These are checkpoints released:
-        # - After Transformers v5
-        # - Before Transformers v5, but re-saved with save_original_format=False
-        # In the fused experts case, we repurpose the expert_id as shard_idx for
-        # deconcatenating w1 and w3 in FusedMoE.load_weights.
-        expert_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-        # Models saved with ModuleList experts
-        ckpt_names = [
-            # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
-            ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
-            ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
-            ("linear", "linear_1", "linear_v"),  # Grok1 style
-        ]
         num_experts = self.model_config.get_num_experts()
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        for gate_proj, down_proj, up_proj in ckpt_names:
-            expert_mapping.extend(
-                fused_moe_make_expert_params_mapping(
-                    self,
-                    ckpt_gate_proj_name=gate_proj,
-                    ckpt_down_proj_name=down_proj,
-                    ckpt_up_proj_name=up_proj,
-                    num_experts=num_experts,
-                    num_redundant_experts=num_redundant_experts,
-                )
-            )
-        return expert_mapping
+        return FusedMoE.make_expert_params_mapping(
+            self,
+            # (Most common style, Granite/Mixtral/Phi style, Grok1 style)
+            ckpt_gate_proj_name=("gate_proj", "w1", "linear"),
+            ckpt_down_proj_name=("down_proj", "w2", "linear_1"),
+            ckpt_up_proj_name=("up_proj", "w3", "linear_v"),
+            ckpt_gate_up_proj_name=("gate_up_proj", None, None),
+            num_experts=num_experts,
+            num_redundant_experts=num_redundant_experts,
+        )
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
@@ -235,9 +213,6 @@ class MoEMixin(MixtureOfExperts):
             activation = "swigluoai"
         elif "grok1" in wrapped_arch:
             activation = "gelu"
-
-        # Expert mapping for `AutoWeightsLoader`
-        expert_mapping = self.get_expert_mapping()
 
         # Expert parallel load balancing kwargs
         enable_eplb = self.parallel_config.enable_eplb
@@ -303,7 +278,11 @@ class MoEMixin(MixtureOfExperts):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
-                        expert_mapping=expert_mapping,
+                        # (Most common style, Granite/Mixtral/Phi style, Grok1 style)
+                        ckpt_gate_proj_name=("gate_proj", "w1", "linear"),
+                        ckpt_down_proj_name=("down_proj", "w2", "linear_1"),
+                        ckpt_up_proj_name=("up_proj", "w3", "linear_v"),
+                        ckpt_gate_up_proj_name=("gate_up_proj", None, None),
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)

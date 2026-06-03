@@ -220,6 +220,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            ckpt_gate_up_proj_name="gate_up_proj",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -523,6 +524,7 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            ckpt_gate_up_proj_name="gate_up_proj",
             num_experts=self.config.num_experts,
             num_redundant_experts=self.num_redundant_experts,
         )
@@ -533,6 +535,8 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
 
         # Skip loading extra parameters for GPTQ/modelopt models.
@@ -566,8 +570,10 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                 if name is None:
                     continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers
+                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
+                    continue
+                if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
 
@@ -594,9 +600,14 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra parameters for GPTQ/modelopt models.
+                if name.endswith(ignore_suffixes) and name not in params_dict:
+                    continue
+                # Skip layers on other devices.
+                if is_pp_missing_parameter(name, self):
+                    continue
                 if "mlp.experts" in name:
-                    layer_idx = int(name.split(".", 2)[1])
-                    fused_moe = self.layers[layer_idx].mlp.experts
+                    fused_moe = self.layers[extract_layer_index(name)].mlp.experts
                     _, _, expert_name = name.partition(".experts.")
                     # FusedMoE.load_weights handles both:
                     # - 2D expert weights (nn.ModuleList)
@@ -606,12 +617,6 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                     # We have already updated loaded_params, continue to the next weight
                     continue
                 else:
-                    # Skip loading extra parameters for GPTQ/modelopt models.
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
                     if name not in params_dict:
                         continue
                     param = params_dict[name]
