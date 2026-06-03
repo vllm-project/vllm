@@ -71,7 +71,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
                 moe,
                 kInt4Static,
-                self.num_bits,
             )
 
     def create_weights(
