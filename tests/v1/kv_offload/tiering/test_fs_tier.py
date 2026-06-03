@@ -8,6 +8,7 @@ The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import mmap
 import os
 import time
 from unittest.mock import MagicMock
@@ -26,8 +27,8 @@ from vllm.v1.kv_offload.tiering.fs.manager import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BLOCK_ELEMENTS = 512 * 1024  # 2 MB per block (float32 × 512K = 2MB)
-_DTYPE = torch.float32
+_BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
+_DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
 
 _MOCK_VLLM_CONFIG = MagicMock()
@@ -90,6 +91,32 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
     return results
 
 
+def _page_aligned_zero_tensor(
+    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+) -> torch.Tensor:
+    page_size = mmap.PAGESIZE
+    dtype_num_bytes = torch.tensor([], dtype=dtype).element_size()
+
+    num_bytes = num_blocks * block_elements * dtype_num_bytes
+    num_bytes_aligned = num_bytes + page_size
+    t = torch.zeros(num_bytes_aligned, dtype=torch.uint8)
+
+    ptr = t.data_ptr()
+    alignment_offset = ptr % page_size
+    # Move tensor to next page regardless.
+    shift = page_size - alignment_offset
+    t = t[shift : shift + num_bytes]
+    return t.view(dtype).view(num_blocks, block_elements)
+
+
+def _page_aligned_rand_tensor(
+    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+) -> torch.Tensor:
+    rand_tensor = _page_aligned_zero_tensor(num_blocks, block_elements)
+    rand_tensor[:] = torch.rand(num_blocks, block_elements, dtype=dtype)
+    return rand_tensor
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -97,7 +124,7 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
 
 @pytest.fixture
 def fs_tier(tmp_path):
-    tensor = torch.zeros((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
@@ -155,7 +182,7 @@ def test_store_then_load_roundtrip(fs_tier):
 
 def test_invalid_path_raises_at_construction():
     """Construction must fail immediately when the config file cannot be written."""
-    tensor = torch.zeros((32, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor = _page_aligned_zero_tensor(32, _BLOCK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
 
     with pytest.raises(OSError):
@@ -228,7 +255,7 @@ def test_store_load_data_integrity(fs_tier):
     """Data written by store must be exactly recovered by load."""
     tier, tensor = fs_tier
     # Populate tensor with random data
-    tensor[:] = torch.rand((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor[:] = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
 
     # Store first 2 blocks
     num_store = 2
