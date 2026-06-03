@@ -1,0 +1,297 @@
+<!doctype html>
+<!--
+SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>P550 vLLM Chat Test</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #1f2933;
+      --muted: #687586;
+      --line: #d8dde6;
+      --accent: #0b6bcb;
+      --accent-dark: #084f98;
+      --ok: #116d3f;
+      --bad: #b42318;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(980px, calc(100vw - 32px));
+      margin: 28px auto;
+    }
+
+    h1 {
+      margin: 0 0 18px;
+      font-size: 24px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 14px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 220px 140px;
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+
+    input,
+    textarea {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--ink);
+      background: #fff;
+      font: inherit;
+      padding: 10px 11px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 104px;
+      resize: vertical;
+    }
+
+    input:focus,
+    textarea:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(11, 107, 203, 0.15);
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+
+    button.secondary {
+      background: #e8edf4;
+      color: var(--ink);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+
+    .status {
+      min-height: 22px;
+      color: var(--muted);
+      margin-top: 10px;
+    }
+
+    .status.ok {
+      color: var(--ok);
+    }
+
+    .status.bad {
+      color: var(--bad);
+    }
+
+    .answer {
+      white-space: pre-wrap;
+      min-height: 120px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fbfcfe;
+      padding: 12px;
+    }
+
+    .examples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .examples button {
+      background: #eef6ff;
+      color: var(--accent-dark);
+      padding: 8px 10px;
+      font-weight: 500;
+    }
+
+    @media (max-width: 760px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>P550 vLLM Chat Test</h1>
+
+    <section class="panel">
+      <div class="grid">
+        <div>
+          <label for="endpoint">Endpoint</label>
+          <input id="endpoint" value="http://127.0.0.1:8000">
+        </div>
+        <div>
+          <label for="model">Model</label>
+          <input id="model" value="smollm2-135m-instruct">
+        </div>
+        <div>
+          <label for="maxTokens">Max Tokens</label>
+          <input id="maxTokens" type="number" min="1" max="64" value="16">
+        </div>
+      </div>
+      <div class="actions">
+        <button id="healthBtn" class="secondary" type="button">Check Health</button>
+        <button id="sendBtn" type="button">Send</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+
+    <section class="panel">
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt">What is 1+2? Answer with only the number.</textarea>
+      <div class="examples">
+        <button type="button" data-prompt="What is 1+2? Answer with only the number.">1+2</button>
+        <button type="button" data-prompt="Name one color of the sky on a clear day.">Sky color</button>
+        <button type="button" data-prompt="What animal says meow? Answer with one word.">Meow</button>
+        <button type="button" data-prompt="Translate to Chinese: hello.">Translate hello</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <label>Answer</label>
+      <div id="answer" class="answer"></div>
+    </section>
+  </main>
+
+  <script>
+    const endpointEl = document.getElementById("endpoint");
+    const modelEl = document.getElementById("model");
+    const maxTokensEl = document.getElementById("maxTokens");
+    const promptEl = document.getElementById("prompt");
+    const answerEl = document.getElementById("answer");
+    const statusEl = document.getElementById("status");
+    const sendBtn = document.getElementById("sendBtn");
+    const healthBtn = document.getElementById("healthBtn");
+
+    const savedEndpoint = localStorage.getItem("p550.vllm.endpoint");
+    if (savedEndpoint) {
+      endpointEl.value = savedEndpoint;
+    }
+
+    function endpoint() {
+      return endpointEl.value.replace(/\/+$/, "");
+    }
+
+    function setStatus(text, kind = "") {
+      statusEl.textContent = text;
+      statusEl.className = `status ${kind}`;
+    }
+
+    async function checkHealth() {
+      setStatus("Checking service...");
+      const start = performance.now();
+      const response = await fetch(`${endpoint()}/health`, { method: "GET" });
+      const data = await response.json();
+      const seconds = ((performance.now() - start) / 1000).toFixed(1);
+      if (!response.ok) {
+        throw new Error(JSON.stringify(data));
+      }
+      setStatus(`Service OK: ${data.model || "unknown"} (${seconds}s)`, "ok");
+    }
+
+    async function sendPrompt() {
+      const prompt = promptEl.value.trim();
+      if (!prompt) {
+        setStatus("Prompt is empty.", "bad");
+        return;
+      }
+
+      localStorage.setItem("p550.vllm.endpoint", endpoint());
+      answerEl.textContent = "";
+      setStatus("Sending request...");
+      sendBtn.disabled = true;
+      healthBtn.disabled = true;
+      const start = performance.now();
+
+      try {
+        const response = await fetch(`${endpoint()}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: modelEl.value.trim(),
+            messages: [{ role: "user", content: prompt }],
+            max_tokens: Number(maxTokensEl.value || 16),
+            temperature: 0
+          })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(JSON.stringify(data));
+        }
+        const answer = data.choices?.[0]?.message?.content ?? "";
+        const seconds = ((performance.now() - start) / 1000).toFixed(1);
+        answerEl.textContent = answer;
+        setStatus(`Response received in ${seconds}s.`, "ok");
+      } catch (error) {
+        setStatus(`Request failed: ${error.message}`, "bad");
+      } finally {
+        sendBtn.disabled = false;
+        healthBtn.disabled = false;
+      }
+    }
+
+    healthBtn.addEventListener("click", () => {
+      checkHealth().catch(error => setStatus(`Health check failed: ${error.message}`, "bad"));
+    });
+    sendBtn.addEventListener("click", sendPrompt);
+    document.querySelectorAll("[data-prompt]").forEach(button => {
+      button.addEventListener("click", () => {
+        promptEl.value = button.dataset.prompt;
+        promptEl.focus();
+      });
+    });
+  </script>
+</body>
+</html>
