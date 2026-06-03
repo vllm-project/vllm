@@ -418,6 +418,21 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_kv_head_size(
+        cls,
+        head_size: int,
+        head_size_v: int | None,
+        kv_cache_dtype: CacheDType | None,
+    ) -> str | None:
+        if (
+            kv_cache_dtype == "nvfp4"
+            and head_size_v is not None
+            and head_size_v != head_size
+        ):
+            return "nvfp4 requires head_size_v equal to head_size in Triton attention"
+        return None
+
+    @classmethod
     def supports_combination(
         cls,
         head_size: int,

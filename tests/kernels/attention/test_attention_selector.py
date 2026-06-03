@@ -549,6 +549,36 @@ def test_nvfp4_auto_selects_triton_on_non_sm100(monkeypatch: pytest.MonkeyPatch)
     assert backend.get_name() == "TRITON_ATTN"
 
 
+def test_triton_nvfp4_rejects_diff_kv(monkeypatch: pytest.MonkeyPatch):
+    """Triton NVFP4 uses one packed K/V head dimension today."""
+    _cached_get_attn_backend.cache_clear()
+
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+
+    monkeypatch.setattr(
+        CudaPlatform,
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(9, 0)),
+    )
+
+    vllm_config = VllmConfig(
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_ATTN),
+        cache_config=CacheConfig(block_size=16),
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+        pytest.raises(ValueError, match="head_size_v equal to head_size"),
+    ):
+        get_attn_backend(
+            head_size=128,
+            head_size_v=64,
+            dtype=torch.float16,
+            kv_cache_dtype="nvfp4",
+        )
+
+
 def test_flashinfer_nvfp4_requires_sm100():
     flashinfer_mod = pytest.importorskip("vllm.v1.attention.backends.flashinfer")
     flashinfer_backend = flashinfer_mod.FlashInferBackend
