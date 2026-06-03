@@ -425,7 +425,6 @@ def rocm_fp8_paged_mqa_logits(
             (out_logits,) = current_workspace_manager().get_simultaneous(
                 ((batch_size * next_n, max_model_len), torch.float32),
             )
-            out_logits.fill_(float("-inf"))
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
