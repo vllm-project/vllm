@@ -27,29 +27,27 @@ logger = logging.getLogger(__name__)
 _ONNX_FILENAME = "qwen2_5_vl_vision_stitched_7b.onnx"
 
 
-def _resolve_onnx_model_path(model_cache_dir: str) -> str:
-    """Locate the stitched vision ONNX model next to the NPU cache directory."""
-    # model_cache_dir is typically: .../qwen2_5_vl_vision_stitched_7b/vaiml_par_0
-    candidates = (
-        os.path.join(
-            os.path.dirname(os.path.dirname(model_cache_dir)),
-            _ONNX_FILENAME,
-        ),
-        os.path.join(os.path.dirname(model_cache_dir), _ONNX_FILENAME),
-    )
-    for path in candidates:
-        if os.path.exists(path):
-            return path
+def _resolve_onnx_model_path(model_path: str) -> str:
+    """Locate the stitched vision ONNX next to the .rai file (same bundle dir)."""
+    from vllm.vision_npu.paths import resolve_vision_bundle_dir
+
+    bundle_dir = resolve_vision_bundle_dir(model_path)
+    for onnx_path in (
+        os.path.join(bundle_dir, _ONNX_FILENAME),
+        os.path.join(os.path.dirname(bundle_dir), _ONNX_FILENAME),
+    ):
+        if os.path.exists(onnx_path):
+            return onnx_path
     raise FileNotFoundError(
-        f"Cannot find ONNX model {_ONNX_FILENAME} near {model_cache_dir}"
+        f"Cannot find ONNX model {_ONNX_FILENAME} near RAI bundle {bundle_dir}"
     )
 
 
 class Qwen2_5_VLCpuPreprocessor:
     """CPU preprocessing for Qwen2.5-VL vision models before NPU execution."""
 
-    def __init__(self, model_cache_dir: str):
-        onnx_model_path = _resolve_onnx_model_path(model_cache_dir)
+    def __init__(self, model_path: str):
+        onnx_model_path = _resolve_onnx_model_path(model_path)
         logger.info("[Qwen2.5-VL CPU Preprocess] Loading ONNX model from %s", onnx_model_path)
 
         model = onnx.load(onnx_model_path)

@@ -22,6 +22,6 @@ class CpuPreprocessor(Protocol):
     def postprocess(self, npu_output: np.ndarray) -> np.ndarray: ...
 
 
-def get_cpu_preprocessor(model_cache_dir: str) -> CpuPreprocessor:
-    """Return the CPU preprocessor for the compiled model at model_cache_dir."""
-    return Qwen2_5_VLCpuPreprocessor(model_cache_dir)
+def get_cpu_preprocessor(model_path: str) -> CpuPreprocessor:
+    """Return the CPU preprocessor for the vision bundle (.rai path)."""
+    return Qwen2_5_VLCpuPreprocessor(model_path)

@@ -23,7 +23,7 @@ class NPUVisionBackend(ABC):
         """Load vision model onto NPU.
 
         Args:
-            model_cache_path: Path to pre-compiled NPU model cache
+            model_cache_path: Path to compiled .rai cache file
             device_name: NPU device identifier (e.g., "stx" for Strix)
         """
         pass

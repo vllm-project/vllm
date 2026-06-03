@@ -36,7 +36,9 @@ message(STATUS "FlexMLRT library: ${FLEXMLRT_LIB_DIR}")
 
 # Create pybind11 module for FlexMLRT NPU vision inference
 pybind11_add_module(_vision_flexmlrt_npu vision_flexmlrt.cpp)
-target_include_directories(_vision_flexmlrt_npu PRIVATE ${FLEXMLRT_INCLUDE_DIR})
+target_include_directories(_vision_flexmlrt_npu PRIVATE
+    ${FLEXMLRT_INCLUDE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_directories(_vision_flexmlrt_npu PRIVATE ${FLEXMLRT_LIB_DIR})
 target_link_libraries(_vision_flexmlrt_npu PRIVATE flexmlrt)
 target_compile_features(_vision_flexmlrt_npu PRIVATE cxx_std_17)

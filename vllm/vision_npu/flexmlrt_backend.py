@@ -47,10 +47,12 @@ class FlexMLRTVisionBackend(NPUVisionBackend):
 
     def __init__(self, model_cache_path: str, device_name: str = "stx"):
         from vllm.vision_npu._vision_flexmlrt_npu import VisionFlexMLRTModel
+        from vllm.vision_npu.paths import normalize_vision_npu_cache_path
 
-        self.model = VisionFlexMLRTModel(model_cache_path, device_name)
-        self.preprocessor = get_cpu_preprocessor(model_cache_path)
-        logger.info("[FlexMLRT Backend] Initialized with CPU preprocessing")
+        rai_path = normalize_vision_npu_cache_path(model_cache_path)
+        self.model = VisionFlexMLRTModel(rai_path, device_name)
+        self.preprocessor = get_cpu_preprocessor(rai_path)
+        logger.info("[FlexMLRT Backend] Loaded RAI cache %s", rai_path)
 
     def forward(self, pixel_values: np.ndarray, grid_thw: np.ndarray) -> np.ndarray:
         """Run vision encoding with CPU preprocessing + NPU execution."""
