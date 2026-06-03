@@ -191,9 +191,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         """
