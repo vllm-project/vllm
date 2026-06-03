@@ -761,10 +761,16 @@ _ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
 )
 
 
-def get_act_and_mul_fn(act_fn_name: str) -> nn.Module:
+def get_act_and_mul_fn(act_fn_name: str, *, compile_native: bool = True) -> nn.Module:
     """Get an activation-and-mul (i.e. SiluAndMul) function by name."""
     act_fn_name = act_fn_name.lower()
-    if act_fn_name not in _ACTIVATION_AND_MUL_REGISTRY:
-        raise ValueError(f"Activation function {act_fn_name!r} is not supported.")
 
-    return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    if not compile_native and act_fn_name in ("silu", "swish"):
+        return SiluAndMul(compile_native=False)
+
+    try:
+        return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    except KeyError:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported."
+        ) from None

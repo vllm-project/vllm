@@ -7,7 +7,7 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.parser.abstract_parser import _WrappedParser
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -45,9 +45,11 @@ def request_obj():
 
 
 def make_parser(tokenizer, reasoning=False, tool=False):
-    _WrappedParser.reasoning_parser_cls = ThinkReasoningParser if reasoning else None
-    _WrappedParser.tool_parser_cls = Hermes2ProToolParser if tool else None
-    return _WrappedParser(tokenizer)
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = ThinkReasoningParser if reasoning else None
+        tool_parser_cls = Hermes2ProToolParser if tool else None
+
+    return TestParser(tokenizer)
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
@@ -56,7 +58,11 @@ def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     for tid in token_ids:
         delta_text = tokenizer.decode([tid])
         result = parser.parse_delta(
-            delta_text, [tid], request, prompt_token_ids=prompt_token_ids
+            delta_text,
+            [tid],
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -144,7 +150,11 @@ def stream_chunks(parser, tokenizer, chunks, request_obj):
     for chunk in chunks:
         delta_text = tokenizer.decode(chunk)
         result = parser.parse_delta(
-            delta_text, chunk, request_obj, prompt_token_ids=prompt_token_ids
+            delta_text,
+            chunk,
+            request_obj,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -235,3 +245,86 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert "Hello" in content
     assert "assist" in content
     assert len(tool_calls) == 0
+
+
+def test_parse_delta_finished_no_flush_without_tool_call_delta(tokenizer, request_obj):
+    """When finished=True but the final parse_delta produces no
+    tool-call delta, unstreamed args are not flushed."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    _, _, tool_calls = collect_fields(results)
+    assert len(tool_calls) > 0
+
+    streamed = parser._tool_parser.streamed_args_for_tool[0]
+    assert len(streamed) > 5
+    parser._tool_parser.streamed_args_for_tool[0] = streamed[:-5]
+
+    # Prevent normal extraction from catching the gap — without a
+    # tool-call delta to merge into, the flush is skipped.
+    parser._tool_parser.extract_tool_calls_streaming = lambda *a, **kw: None
+
+    flush_result = parser.parse_delta("", [], request_obj, finished=True)
+    assert flush_result is None or flush_result.tool_calls is None
+
+
+def test_parse_delta_finished_no_extra_args_when_fully_streamed(tokenizer, request_obj):
+    """When all args have been streamed, finished=True must not
+    produce extra or duplicate arguments."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    _, _, tool_calls = collect_fields(results)
+
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_weather"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {"city": "Dallas"}
+
+    flush_result = parser.parse_delta("", [], request_obj, finished=True)
+    assert flush_result is None or flush_result.tool_calls is None
+
+
+def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
+    """When finished=True and the tool parser has unstreamed args,
+    parse_delta appends the remaining arguments to the tool-call delta."""
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    token_ids = tokenizer.encode(MODEL_OUTPUT, add_special_tokens=False)
+
+    remainder = ',"unit":"celsius"}'
+    prompt_ids: list[int] | None = []
+    results: list[DeltaMessage | None] = []
+    for i, tid in enumerate(token_ids):
+        prev = results[-1] if results else None
+        prev_had_args = (
+            prev
+            and prev.tool_calls
+            and any(tc.function and tc.function.arguments for tc in prev.tool_calls)
+        )
+
+        if prev_had_args:
+            parser._tool_parser.get_remaining_unstreamed_args = lambda: remainder
+
+        result = parser.parse_delta(
+            tokenizer.decode([tid]),
+            [tid],
+            request_obj,
+            prompt_token_ids=prompt_ids,
+            finished=prev_had_args,
+        )
+        prompt_ids = None
+        results.append(result)
+
+        if prev_had_args:
+            break
+
+    _, _, tool_calls = collect_fields(results)
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert tool_args.endswith(remainder)

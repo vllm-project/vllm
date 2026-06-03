@@ -386,8 +386,6 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
         "max_num_seqs": 1,
-        # NOTE: Make sure HMA is enabled
-        "disable_hybrid_kv_cache_manager": False,
         "max_num_batched_tokens": 2048,
         "enable_prefix_caching": False,
         "block_size": block_size,
