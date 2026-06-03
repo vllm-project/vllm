@@ -66,7 +66,6 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
-    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -488,7 +487,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3, SupportsQuant
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -512,7 +511,6 @@ class LlamaForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.quant_config = quant_config
 
         self.model = self._init_model(
             vllm_config=vllm_config,
