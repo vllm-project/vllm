@@ -630,6 +630,28 @@ class Qwen3VLVideoBackend(VideoBackend):
         indices = np.linspace(0, max_frame_idx, num_frames).round().astype(int).tolist()
         return indices
 
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
 
 @VIDEO_LOADER_REGISTRY.register(
     "opencv_dynamic",
