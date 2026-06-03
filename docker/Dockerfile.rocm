@@ -524,9 +524,25 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
-# Install RIXL wheel
+
+# cohere start
+# Install RIXL wheel and runtime deps for disaggregated serving (nixl Python bindings)
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
+RUN apt-get update -q -y && apt-get install -q -y \
+    librdmacm1 \
+    libibverbs1 \
+    ibverbs-providers \
+    ibverbs-utils \
+    && rm -rf /var/lib/apt/lists/*
+# cohere end
+
+# cohere start
+# Keep wheel artifacts for Dockerfile.cohere overlay and CI extraction (app/cohere/dist).
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    mkdir -p /app/cohere/dist \
+    && cp -R /install/*.whl /app/cohere/dist/
+# cohere end
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
