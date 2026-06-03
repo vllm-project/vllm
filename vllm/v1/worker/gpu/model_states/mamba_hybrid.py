@@ -561,7 +561,9 @@ class MambaHybridModelState(DefaultModelState):
 
     def _copy_mamba_temporal_batched(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
+        num_reqs: int,
+        query_start_loc: torch.Tensor | None,
         num_computed_tokens: torch.Tensor,
         mamba_spec: MambaSpec,
         *,
@@ -575,7 +577,7 @@ class MambaHybridModelState(DefaultModelState):
         block_bytes = 1024
         grid = (
             copy_info.count,
-            input_batch.num_reqs,
+            num_reqs,
             triton.cdiv(copy_info.max_block_bytes, block_bytes),
         )
         _copy_mamba_temporal_batched_kernel[grid](
@@ -584,12 +586,12 @@ class MambaHybridModelState(DefaultModelState):
             copy_info.gpu("block_table_strides"),
             copy_info.gpu("state_block_strides"),
             copy_info.gpu("block_bytes"),
-            input_batch.idx_mapping,
+            idx_mapping,
             info.state_idx_gpu,
             num_computed_tokens,
-            input_batch.query_start_loc,
+            query_start_loc,
             self.num_accepted_tokens_gpu,
-            input_batch.num_reqs,
+            num_reqs,
             mamba_spec.block_size,
             postprocess,
             BLOCK_BYTES=block_bytes,
@@ -597,7 +599,9 @@ class MambaHybridModelState(DefaultModelState):
 
     def _copy_mamba_conv_sd_batched(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
+        num_reqs: int,
+        query_start_loc: torch.Tensor | None,
         num_computed_tokens: torch.Tensor,
         mamba_spec: MambaSpec,
         *,
@@ -611,7 +615,7 @@ class MambaHybridModelState(DefaultModelState):
         block_bytes = 1024
         grid = (
             copy_info.count,
-            input_batch.num_reqs,
+            num_reqs,
             triton.cdiv(copy_info.max_block_bytes, block_bytes),
         )
         _copy_mamba_conv_sd_batched_kernel[grid](
@@ -621,12 +625,12 @@ class MambaHybridModelState(DefaultModelState):
             copy_info.gpu("state_block_strides"),
             copy_info.gpu("state_token_strides"),
             copy_info.gpu("state_lens"),
-            input_batch.idx_mapping,
+            idx_mapping,
             info.state_idx_gpu,
             num_computed_tokens,
-            input_batch.query_start_loc,
+            query_start_loc,
             self.num_accepted_tokens_gpu,
-            input_batch.num_reqs,
+            num_reqs,
             mamba_spec.block_size,
             postprocess,
             BLOCK_BYTES=block_bytes,
@@ -710,27 +714,32 @@ class MambaHybridModelState(DefaultModelState):
 
     def _copy_mamba_state(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
+        num_reqs: int,
+        query_start_loc: torch.Tensor | None,
         num_computed_tokens: torch.Tensor,
         mamba_spec: MambaSpec,
         *,
         postprocess: bool,
     ) -> None:
-        if input_batch.num_reqs == 0:
+        if num_reqs == 0:
             return
 
         info = self.mamba_cache_align_info
-        num_reqs = input_batch.num_reqs
 
         self._copy_mamba_temporal_batched(
-            input_batch,
+            idx_mapping,
+            num_reqs,
+            query_start_loc,
             num_computed_tokens,
             mamba_spec,
             postprocess=postprocess,
         )
 
         self._copy_mamba_conv_sd_batched(
-            input_batch,
+            idx_mapping,
+            num_reqs,
+            query_start_loc,
             num_computed_tokens,
             mamba_spec,
             postprocess=postprocess,
@@ -744,11 +753,11 @@ class MambaHybridModelState(DefaultModelState):
             grid = (num_reqs, triton.cdiv(dim, block_dim))
             _copy_mamba_conv_state_kernel[grid](
                 state,
-                input_batch.idx_mapping,
+                idx_mapping,
                 block_table,
                 info.state_idx_gpu,
                 num_computed_tokens,
-                input_batch.query_start_loc,
+                query_start_loc,
                 self.num_accepted_tokens_gpu,
                 num_reqs,
                 block_table.stride(0),
@@ -788,18 +797,18 @@ class MambaHybridModelState(DefaultModelState):
 
     def _reset_postprocess_accepted_tokens(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
+        num_reqs: int,
         num_computed_tokens: torch.Tensor,
         mamba_spec: MambaSpec,
     ) -> None:
         """Reset num_accepted=1 when this step's accepted tokens crossed an
         aligned block boundary, so next step's src computation is correct."""
         info = self.mamba_cache_align_info
-        num_reqs = input_batch.num_reqs
         block_size = 256
         grid = (triton.cdiv(num_reqs, block_size),)
         _reset_mamba_postprocess_accepted_tokens_kernel[grid](
-            input_batch.idx_mapping,
+            idx_mapping,
             info.state_idx_gpu,
             num_computed_tokens,
             self.num_accepted_tokens_gpu,
@@ -876,8 +885,10 @@ class MambaHybridModelState(DefaultModelState):
 
     def _postprocess_mamba_cache_align(
         self,
-        input_batch: InputBatch,
+        idx_mapping: torch.Tensor,
         num_computed_tokens: torch.Tensor,
+        num_reqs: int,
+        query_start_loc: torch.Tensor | None,
     ) -> None:
         info = self.mamba_cache_align_info
         block_tables = info.current_step_block_tables
@@ -888,13 +899,16 @@ class MambaHybridModelState(DefaultModelState):
 
         self._create_mamba_copy_info(block_tables, mamba_group_ids)
         self._copy_mamba_state(
-            input_batch,
+            idx_mapping,
+            num_reqs,
+            query_start_loc,
             num_computed_tokens,
             mamba_spec,
             postprocess=True,
         )
         self._reset_postprocess_accepted_tokens(
-            input_batch,
+            idx_mapping,
+            num_reqs,
             num_computed_tokens,
             mamba_spec,
         )
@@ -943,13 +957,10 @@ class MambaHybridModelState(DefaultModelState):
             # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
             if input_batch.num_draft_tokens_per_req is not None:
-                spec_decode_mask = (
-                    input_batch.num_draft_tokens_per_req > 0
-                ) & ~input_batch.is_prefilling_np
+                has_draft_tokens = input_batch.num_draft_tokens_per_req > 0
+                spec_decode_mask = has_draft_tokens & ~input_batch.is_prefilling_np
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask,
-                    input_batch.num_draft_tokens_per_req,
-                    -1,
+                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
@@ -996,18 +1007,49 @@ class MambaHybridModelState(DefaultModelState):
 
     def postprocess_state(
         self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = torch.clamp(
-            num_sampled, min=1
-        )
-
-        if self.cache_config.mamba_cache_mode == "align":
-            self._postprocess_mamba_cache_align(
-                input_batch,
-                num_computed_tokens,
+        if not isinstance(num_sampled, int):
+            # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+            # kernel skips them rather than scattering with a host-side gather.
+            n = idx_mapping.shape[0]
+            if n:
+                _scatter_num_accepted_kernel[(n,)](
+                    idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+                )
+        else:
+            self.num_accepted_tokens_gpu.index_fill_(
+                0, idx_mapping, max(num_sampled, 1)
             )
+
+        if (
+            self.cache_config.mamba_cache_mode == "align"
+            and num_computed_tokens is not None
+            and num_reqs is not None
+        ):
+            self._postprocess_mamba_cache_align(
+                idx_mapping,
+                num_computed_tokens,
+                num_reqs,
+                query_start_loc,
+            )
+
+
+@triton.jit
+def _scatter_num_accepted_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_sampled_ptr,  # [num_reqs]
+    num_accepted_ptr,  # [max_num_reqs]
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    num_sampled = tl.load(num_sampled_ptr + row)
+    tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))

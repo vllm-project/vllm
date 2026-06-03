@@ -70,18 +70,17 @@ class ModelState(ABC):
 
     def postprocess_state(
         self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
-        num_computed_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         return None
 
     @abstractmethod
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
