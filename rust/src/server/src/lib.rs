@@ -4,6 +4,7 @@ mod config;
 mod error;
 mod grpc;
 mod listener;
+mod lora;
 mod middleware;
 mod routes;
 mod state;

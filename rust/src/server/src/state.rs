@@ -5,6 +5,9 @@ use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::lora::LoraRequest;
+
+use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -21,6 +24,8 @@ pub struct AppState {
     pub enable_request_id_headers: bool,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
+    /// Dynamic LoRA adapter registry.
+    lora_manager: LoraManager,
 }
 
 impl AppState {
@@ -43,6 +48,7 @@ impl AppState {
             enable_log_requests: false,
             enable_request_id_headers: false,
             server_load: AtomicU64::new(0),
+            lora_manager: LoraManager::new(),
         }
     }
 
@@ -67,6 +73,49 @@ impl AppState {
     /// All model names served by this frontend.
     pub fn served_model_names(&self) -> &[String] {
         &self.served_model_names
+    }
+
+    /// Return base served model names plus dynamically loaded LoRA adapter
+    /// names.
+    pub async fn served_model_names_with_loras(&self) -> Vec<String> {
+        self.lora_manager.served_model_names(&self.served_model_names).await
+    }
+
+    /// Resolve the requested model against one dynamic LoRA registry snapshot.
+    pub async fn resolve_model_with_loras(&self, model_name: Option<&str>) -> LoraModelResolution {
+        self.lora_manager.resolve_model(&self.served_model_names, model_name).await
+    }
+
+    /// Load one dynamic LoRA adapter and register it as a public model name.
+    pub async fn load_lora(
+        &self,
+        lora_name: String,
+        lora_path: String,
+        load_inplace: bool,
+        is_3d_lora_weight: bool,
+    ) -> Result<LoraRequest, LoadLoraError> {
+        self.lora_manager
+            .load_lora(
+                self.engine_core_client(),
+                &self.served_model_names,
+                lora_name,
+                lora_path,
+                load_inplace,
+                is_3d_lora_weight,
+            )
+            .await
+    }
+
+    /// Remove one dynamic LoRA adapter from the engine and public model
+    /// registry.
+    pub async fn unload_lora(
+        &self,
+        lora_name: &str,
+        lora_int_id: Option<u64>,
+    ) -> Result<LoraRequest, UnloadLoraError> {
+        self.lora_manager
+            .unload_lora(self.engine_core_client(), lora_name, lora_int_id)
+            .await
     }
 
     /// Return a reference to the underlying engine core client for utility
