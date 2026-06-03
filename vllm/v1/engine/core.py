@@ -183,11 +183,6 @@ class EngineCore:
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)
-
-                # Connectors receive metadata keyed by (pp_rank, tp_rank). The
-                # base method default keeps only pp_rank==0 and forwards
-                # {tp_rank: metadata} to set_xfer_handshake_metadata; PP-aware
-                # connectors override it to consume all PP producer shards.
                 kv_connector.set_xfer_handshake_metadata_pp_aware(content)
 
         # Setup batch queue for pipeline parallelism.

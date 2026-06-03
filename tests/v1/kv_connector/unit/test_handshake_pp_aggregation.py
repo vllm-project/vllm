@@ -175,11 +175,9 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
 ) -> None:
     """Engine core always asks workers for `(pp_rank, tp_rank)`-keyed metadata,
     then unwraps to `{tp_rank: metadata}` for a connector that has not opted
-    into PP-aware handshake. Entries with `pp_rank != 0` are dropped because
-    the legacy connector cannot consume them."""
+    into PP-aware handshake (single-PP producer, all `pp_rank == 0`)."""
     metadata_0 = _Metadata()
     metadata_1 = _Metadata()
-    dropped = _Metadata()
     connector = _LegacyConnector()
 
     executor = _run_engine_core_handshake(
@@ -188,12 +186,27 @@ def test_engine_unwraps_handshake_metadata_for_legacy_connector(
         handshake_metadata=[
             {(0, 0): metadata_0},
             None,
-            {(0, 1): metadata_1, (1, 0): dropped},
+            {(0, 1): metadata_1},
         ],
     )
 
     assert executor.handshake_calls == 1
     assert connector.legacy_metadata == {0: metadata_0, 1: metadata_1}
+
+
+def test_engine_rejects_pp_producer_for_legacy_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A connector that has not opted into PP-aware handshake must not silently
+    drop metadata from `pp_rank > 0`; engine core init raises instead."""
+    connector = _LegacyConnector()
+
+    with pytest.raises(ValueError, match="does not support PP-disaggregated"):
+        _run_engine_core_handshake(
+            monkeypatch,
+            connector,
+            handshake_metadata=[{(0, 0): _Metadata()}, {(1, 0): _Metadata()}],
+        )
 
 
 def test_engine_passes_handshake_metadata_through_for_pp_aware_connector(

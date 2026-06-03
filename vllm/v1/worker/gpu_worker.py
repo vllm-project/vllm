@@ -521,9 +521,7 @@ class Worker(WorkerBase):
     ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
         """Get KV connector metadata from this worker if available.
 
-        Returned dict is keyed by `(pp_rank, tp_rank)`. Engine core unwraps
-        the tuple keys for connectors that do not declare PP-aware support
-        (see ``KVConnectorBase_V1.supports_pp_aware_handshake``).
+        Returned dict is keyed by `(pp_rank, tp_rank)`.
         """
 
         if not has_kv_transfer_group():

@@ -648,20 +648,17 @@ class KVConnectorBase_V1(ABC):
         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         """
-        Set handshake metadata keyed by ``(pp_rank, tp_rank)``.
-
-        Default implementation supports only single-PP-rank producers: it keeps
-        the ``pp_rank == 0`` entries, drops the rest, and forwards the resulting
-        ``{tp_rank: metadata}`` to ``set_xfer_handshake_metadata``. Connectors
-        that support PP-disaggregated transfer override this to consume metadata
-        from all PP producer shards.
+        Set handshake metadata keyed by (pp_rank, tp_rank).
+        - Default implementation assumes pp_rank is always 0
+        - PP-aware connectors override this to consume all PP producer shards.
         """
+        if any(pp_rank != 0 for pp_rank, _ in metadata):
+            raise ValueError(
+                f"{type(self).__name__} received pp_rank > 0 handshake metadata "
+                "but does not support PP-disaggregated KV transfer."
+            )
         self.set_xfer_handshake_metadata(
-            {
-                tp_rank: meta
-                for (pp_rank, tp_rank), meta in metadata.items()
-                if pp_rank == 0
-            }
+            {tp_rank: meta for (_, tp_rank), meta in metadata.items()}
         )
 
     @classmethod
