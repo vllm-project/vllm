@@ -46,7 +46,7 @@ def make_host_fp32w(k_val: int, bs: int = 128):
         for m in cutlass.range_constexpr(M):
             acc[m] = cutlass.Float32(0.0)
 
-        #cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_wait()
 
         # Main K-loop: load B, then per-token load A + FMA (no ar_all staging)
         for ki in cutlass.range_constexpr(K_MAIN):
@@ -130,7 +130,7 @@ def make_host_fp32w(k_val: int, bs: int = 128):
                 for w in cutlass.range_constexpr(NW):
                     t = t + sm[m, w]
                 gC[m * N_dim + n_idx] = t
-        #cute.arch.griddepcontrol_launch_dependents()
+        cute.arch.griddepcontrol_launch_dependents()
 
     @cute.jit
     def host_fp32w_lf(
@@ -140,7 +140,7 @@ def make_host_fp32w(k_val: int, bs: int = 128):
     ):
         dotprod_fp32w_lf(gA, gB, gC, M, K_dim, N_dim).launch(
             grid=[N_dim, 1, 1], block=[128, 1, 1],
-            smem=M * 4 * 4, stream=stream, use_pdl=False, min_blocks_per_mp=1,
+            smem=M * 4 * 4, stream=stream, use_pdl=True, min_blocks_per_mp=1,
         )
 
     return host_fp32w_lf
