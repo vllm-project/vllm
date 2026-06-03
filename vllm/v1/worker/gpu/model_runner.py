@@ -101,6 +101,7 @@ from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -731,6 +732,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return cuda_graph_size
 
+    def _can_use_distributed_rejection_sampling(
+        self,
+        input_batch: InputBatch,
+        grammar_output: GrammarOutput | None,
+    ) -> bool:
+        assert self.sampler is not None
+        sampling_states = self.sampler.sampling_states
+        idx = input_batch.idx_mapping_np
+        return (
+            self.parallel_config.tensor_parallel_size > 1
+            and input_batch.num_draft_tokens > 0
+            # The below sampling params are skipped during distributed rejection
+            # sampling to achieve optimal performance. We fall back to standard
+            # rejection sampling when any are requested.
+            and grammar_output is None
+            and sampling_states.max_num_logprobs(idx) == NO_LOGPROBS
+            and self.sampler.logprob_token_ids_state.max_num_token_ids(idx) == 0
+            and not np.any(sampling_states.top_k.np[idx] != sampling_states.vocab_size)
+            and not np.any(sampling_states.top_p.np[idx] != 1.0)
+            and not np.any(self.sampler.penalties_state.use_penalty[idx])
+            and self.sampler.bad_words_state.num_bad_words.np[idx].max() == 0
+            and not np.any(self.sampler.logit_bias_state.use_logit_bias[idx])
+        )
+
     def _remove_request(self, req_id: str) -> bool:
         # Call model_state.remove_request *before* req_states.remove_request
         # so the model_state can still look up the slot index.
@@ -1042,30 +1067,45 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
-        if grammar_output is not None:
-            # Apply grammar bitmask to the logits in-place.
-            assert self.structured_outputs_worker is not None
-            self.structured_outputs_worker.apply_grammar_bitmask(
-                logits,
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.grammar_bitmask,
-            )
-
-        if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
-            assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
-        else:
-            # Rejection sampling for spec decoding.
+        if self._can_use_distributed_rejection_sampling(input_batch, grammar_output):
+            # Distributed rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
+            local_logits = self.model.logits_processor.get_local_logits(
+                self.model.lm_head, sample_hidden_states
+            )
+            shard_vocab_start = self.model.lm_head.shard_indices.org_vocab_start_index
+            sampler_output = self.rejection_sampler.forward_distributed(
+                local_logits,
+                shard_vocab_start,
                 input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
             )
+        else:
+            logits = self.model.compute_logits(sample_hidden_states)
+            if grammar_output is not None:
+                # Apply grammar bitmask to the logits in-place.
+                assert self.structured_outputs_worker is not None
+                self.structured_outputs_worker.apply_grammar_bitmask(
+                    logits,
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.grammar_bitmask,
+                )
+
+            if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
+                assert self.sampler is not None
+                sampler_output = self.sampler(logits, input_batch)
+            else:
+                # Rejection sampling for spec decoding.
+                assert self.rejection_sampler is not None
+                assert self.speculator is not None
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    # Draft logits are needed for probabilistic rejection sampling.
+                    self.speculator.draft_logits,
+                )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
