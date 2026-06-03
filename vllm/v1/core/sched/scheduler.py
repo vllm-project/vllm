@@ -733,12 +733,17 @@ class Scheduler(SchedulerInterface):
                 # extra block gets allocated which
                 # creates a mismatch between the number
                 # of local and remote blocks.
+                is_pd_prefill_producer = (
+                    request.num_computed_tokens == 0
+                    and request.kv_transfer_params is not None
+                    and request.kv_transfer_params.get("do_remote_decode", False)
+                )
                 effective_lookahead_tokens = (
                     0
                     if (
                         self.use_eagle
                         and not self.use_dflash
-                        and request.num_computed_tokens == 0
+                        and (load_kv_async or is_pd_prefill_producer)
                     )
                     else self.num_lookahead_tokens
                 )
