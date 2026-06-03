@@ -204,6 +204,16 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 request_id,
             )
             raise GenerationError("Internal server error")
+        elif finish_reason == "validation":
+            logger.warning(
+                "Request %s failed structured output grammar compilation",
+                request_id,
+            )
+            raise GenerationError(
+                "Structured output grammar compilation failed. Check your "
+                "grammar, regex, or JSON schema for syntax errors.",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
     def _convert_generation_error_to_streaming_response(
         self, e: GenerationError

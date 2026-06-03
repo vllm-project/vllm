@@ -378,8 +378,12 @@ def create_error_response(
             status_code = HTTPStatus.NOT_IMPLEMENTED
             param = None
         elif isinstance(exc, GenerationError):
-            err_type = "InternalServerError"
             status_code = exc.status_code
+            err_type = (
+                "BadRequestError"
+                if status_code == HTTPStatus.BAD_REQUEST
+                else "InternalServerError"
+            )
             param = None
         elif any(cls.__name__ == "TemplateError" for cls in type(exc).__mro__):
             # jinja2.TemplateError and its subclasses (avoid importing jinja2)
