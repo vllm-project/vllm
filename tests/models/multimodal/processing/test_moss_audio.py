@@ -98,9 +98,12 @@ class _FakeAudioEncoder:
     def __init__(self, deepstack_layers=0):
         self.deepstack_layers = deepstack_layers
         self.output_deepstack_hidden_states = None
+        self.input_shape = None
+        self.feature_lens = None
 
     def __call__(self, audio_data, *, feature_lens, output_deepstack_hidden_states):
-        del audio_data
+        self.input_shape = tuple(audio_data.shape)
+        self.feature_lens = feature_lens.detach().cpu().clone()
         self.output_deepstack_hidden_states = output_deepstack_hidden_states
         lengths = MossAudioEncoder._compute_downsampled_length(feature_lens)
         hidden_states = torch.ones(1, int(lengths.sum().item()), 8)
@@ -416,6 +419,16 @@ def test_moss_audio_error_paths():
         )
 
 
+def test_moss_audio_rejects_audio_data_list_seqlen_count_mismatch():
+    model = object.__new__(MossAudioModel)
+
+    with pytest.raises(ValueError, match="audio_data batch size"):
+        model._parse_and_validate_audio_input(
+            audio_data=[torch.zeros(128, 8), torch.zeros(128, 11)],
+            audio_data_seqlens=torch.tensor([8], dtype=torch.long),
+        )
+
+
 @pytest.mark.parametrize("deepstack_scales", [(), (7, 11)])
 def test_moss_audio_embed_multimodal_packs_by_audio(deepstack_scales):
     model = object.__new__(MossAudioModel)
@@ -457,6 +470,33 @@ def test_moss_audio_embed_multimodal_packs_by_audio(deepstack_scales):
             deepstack_embeddings[idx][0],
             torch.full((1, 8), float((idx + 2) * scale)),
         )
+
+
+def test_moss_audio_embed_multimodal_pads_variable_length_batched_audio():
+    field = _moss_audio_field_config({})["audio_data"].field
+    tensors = [torch.zeros(128, 8), torch.ones(128, 11)]
+    elems = field.build_elems("audio", "audio_data", tensors)
+    reduced = field.reduce_data(list(elems))
+    assert isinstance(reduced, list)
+
+    model = object.__new__(MossAudioModel)
+    model.audio_encoder = _FakeAudioEncoder()
+    model.audio_adapter = lambda hidden_states: hidden_states
+    model.deepstack_audio_merger_list = []
+    model.deepstack_input_embeds = None
+
+    audio_data_seqlens = torch.tensor([8, 11], dtype=torch.long)
+    embeddings = model.embed_multimodal(
+        audio_data=reduced,
+        audio_data_seqlens=audio_data_seqlens,
+    )
+
+    assert model.audio_encoder.input_shape == (2, 128, 11)
+    assert torch.equal(model.audio_encoder.feature_lens, audio_data_seqlens)
+    expected_lens = MossAudioEncoder._compute_downsampled_length(
+        audio_data_seqlens
+    ).tolist()
+    assert [embed.shape[0] for embed in embeddings] == expected_lens
 
 
 def test_moss_audio_embed_input_ids_caches_packed_deepstack():

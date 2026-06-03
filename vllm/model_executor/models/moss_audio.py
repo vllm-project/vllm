@@ -6,7 +6,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
 import numpy as np
 import torch
@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -96,6 +97,18 @@ MOSS_AUDIO_PROCESSOR_CONFIG_KEYS = {
     "enable_time_marker",
     "mel_config",
 }
+
+
+class MossAudioAudioInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - nmb: Number of mel bins
+        - t: Time frames
+    """
+
+    audio_data: Annotated[torch.Tensor, TensorShape("b", "nmb", "t")]
+    audio_data_seqlens: Annotated[torch.Tensor, TensorShape("b")]
 
 
 def _normalize_moss_audio_mel_config(
@@ -986,7 +999,18 @@ class MossAudioProcessor:
         return_tensors: str = "pt",
         **kwargs: object,
     ) -> BatchFeature:
+        """Build text tokens and audio tensors for one MossAudio prompt.
+
+        Example:
+            text="Describe this.", audio=[waveform]
+            -> input_ids contains audio_start, N audio tokens, audio_end
+            -> audio_data has shape [1, mel_dim, max_time]
+            -> mel_dim is the number of mel filter-bank bins, 128 by default
+            -> audio_data_seqlens stores the unpadded mel length
+        """
         del kwargs
+
+        # Step 1. Normalize text input; this processor handles one prompt.
         if isinstance(text, (list, tuple)):
             if len(text) != 1:
                 raise ValueError(f"Expected text batch size 1, got {len(text)}")
@@ -996,9 +1020,12 @@ class MossAudioProcessor:
         else:
             prompt_text = text
 
+        # Step 2. Accept either `audios` or `audio` and normalize to a list.
         audio_list = audios if audios is not None else audio
         audio_list = [] if audio_list is None else list(audio_list)
 
+        # Step 3. Convert waveforms to [mel_dim, time] mel features and token
+        # counts. mel_dim is the number of mel filter-bank bins.
         mels: list[torch.Tensor] = []
         raw_lengths: list[int] = []
         token_lens: list[int] = []
@@ -1012,6 +1039,7 @@ class MossAudioProcessor:
             raw_lengths.append(raw_len)
             token_lens.append(num_tokens)
 
+        # Step 4. Pad variable-length mel features into a batch tensor.
         if mels:
             max_length = max(raw_lengths)
             audio_batch = torch.zeros(
@@ -1025,9 +1053,12 @@ class MossAudioProcessor:
             audio_batch = None
             audio_data_seqlens = None
 
+        # Step 5. Ensure each audio item has a placeholder span in the prompt.
         prompt_text = self._ensure_audio_placeholders(prompt_text, len(audio_list))
         input_ids = []
         cursor = 0
+
+        # Step 6. Text-only path: tokenize and preserve placeholder spans.
         if not audio_list:
             for match in MOSS_AUDIO_SPAN_RE.finditer(prompt_text):
                 prefix = prompt_text[cursor : match.start()]
@@ -1046,6 +1077,7 @@ class MossAudioProcessor:
             }
             return BatchFeature(data=data, tensor_type=return_tensors)
 
+        # Step 7. Audio path: expand each placeholder to its audio-token count.
         span_iter = iter(MOSS_AUDIO_SPAN_RE.finditer(prompt_text))
         for item_idx, _ in enumerate(audio_list):
             match = next(span_iter, None)
@@ -1061,6 +1093,7 @@ class MossAudioProcessor:
             input_ids.append(self.audio_end_id)
             cursor = match.end()
 
+        # Step 8. Reject extra placeholder spans after all audio items are used.
         suffix = prompt_text[cursor:]
         if MOSS_AUDIO_SPAN_RE.search(suffix):
             raise ValueError(
@@ -1069,6 +1102,7 @@ class MossAudioProcessor:
             )
         input_ids.extend(self.tokenizer.encode(suffix, add_special_tokens=False))
 
+        # Step 9. Return tokenizer output plus audio tensors for embed_multimodal.
         data = {
             "input_ids": torch.tensor([input_ids], dtype=torch.long),
             "attention_mask": torch.ones((1, len(input_ids)), dtype=torch.long),
@@ -1406,11 +1440,13 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.tensor_parallel_size != 1:
+            # TODO:tp
             raise ValueError(
                 "MossAudioModel currently supports only tensor_parallel_size=1; "
                 f"got {parallel_config.tensor_parallel_size}."
             )
         if parallel_config.pipeline_parallel_size != 1:
+            # TODO:PP
             raise ValueError(
                 "MossAudioModel currently supports only pipeline_parallel_size=1; "
                 f"got {parallel_config.pipeline_parallel_size}."
@@ -1469,9 +1505,77 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
             self.language_model.make_empty_intermediate_tensors
         )
 
+    @staticmethod
+    def _validate_audio_batch_size(
+        audio_batch_size: int, audio_data_seqlens: torch.Tensor
+    ) -> None:
+        if audio_batch_size != audio_data_seqlens.numel():
+            raise ValueError(
+                "audio_data batch size does not match audio_data_seqlens: "
+                f"{audio_batch_size} != {audio_data_seqlens.numel()}."
+            )
+
+    @staticmethod
+    def _pad_audio_data_list(
+        audio_data: list[torch.Tensor],
+        audio_data_seqlens: torch.Tensor,
+    ) -> torch.Tensor:
+        if len(audio_data) == 0:
+            raise ValueError("audio_data list must not be empty.")
+        MossAudioModel._validate_audio_batch_size(
+            len(audio_data), audio_data_seqlens
+        )
+
+        # pad_sequence needs every item to share the same trailing feature
+        # layout, so validate the mel-major audio tensors before transposing.
+        first = audio_data[0]
+        if not isinstance(first, torch.Tensor):
+            raise TypeError("audio_data list items must be torch.Tensor.")
+        if first.ndim != 2:
+            raise ValueError(
+                "audio_data list items must have shape [mel_dim, time]."
+            )
+
+        mel_dim = first.shape[0]
+        dtype = first.dtype
+        device = first.device
+        for item in audio_data[1:]:
+            if not isinstance(item, torch.Tensor):
+                raise TypeError("audio_data list items must be torch.Tensor.")
+            if item.ndim != 2:
+                raise ValueError(
+                    "audio_data list items must have shape [mel_dim, time]."
+                )
+            if item.shape[0] != mel_dim:
+                raise ValueError(
+                    "audio_data list items must have the same mel_dim."
+                )
+            if item.dtype != dtype:
+                raise TypeError(
+                    "audio_data list items must have the same dtype."
+                )
+            if item.device != device:
+                raise ValueError(
+                    "audio_data list items must be on the same device."
+                )
+
+        # Each item arrives as [mel_dim, time]. pad_sequence pads along dim 1
+        # after converting to [time, mel_dim], then we restore [batch, mel, time].
+        time_major = [item.transpose(0, 1) for item in audio_data]
+        padded = torch.nn.utils.rnn.pad_sequence(time_major, batch_first=True)
+        return padded.transpose(1, 2).contiguous()
+
     def _parse_and_validate_audio_input(
         self, **kwargs: object
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+    ) -> MossAudioAudioInputs | None:
+        """Normalize and validate model-side audio kwargs.
+
+        If audio_data is provided, this checks that audio_data_seqlens is also
+        present, flattens sequence lengths to a long tensor, pads list inputs
+        to [batch, mel_dim, time], validates batch-size/sequence-length
+        agreement, and rejects empty, non-positive, or downsampled-zero audio
+        lengths.
+        """
         audio_data = kwargs.pop("audio_data", None)
         audio_data_seqlens = kwargs.pop("audio_data_seqlens", None)
         if audio_data is None:
@@ -1480,11 +1584,22 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
             raise ValueError(
                 "audio_data_seqlens is required when audio_data is provided."
             )
-        if not isinstance(audio_data, torch.Tensor):
-            raise TypeError("audio_data must be a torch.Tensor.")
         if not isinstance(audio_data_seqlens, torch.Tensor):
             audio_data_seqlens = torch.tensor(audio_data_seqlens, dtype=torch.long)
         audio_data_seqlens = audio_data_seqlens.to(dtype=torch.long).reshape(-1)
+
+        if isinstance(audio_data, list):
+            audio_data = self._pad_audio_data_list(audio_data, audio_data_seqlens)
+        elif isinstance(audio_data, torch.Tensor):
+            if audio_data.ndim == 3:
+                self._validate_audio_batch_size(
+                    audio_data.shape[0], audio_data_seqlens
+                )
+        else:
+            raise TypeError(
+                "audio_data must be a torch.Tensor or list[torch.Tensor]."
+            )
+
         audio_token_lens = MossAudioEncoder._compute_downsampled_length(
             audio_data_seqlens
         )
@@ -1494,13 +1609,24 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
             or torch.any(audio_token_lens <= 0).item()
         ):
             raise ValueError("The audio is too short to be represented.")
-        return audio_data, audio_data_seqlens
+        return MossAudioAudioInputs(
+            audio_data=audio_data,
+            audio_data_seqlens=audio_data_seqlens,
+        )
 
     def _process_audio_input(
         self,
-        audio_data: torch.Tensor,
-        audio_data_seqlens: torch.Tensor,
+        audio_input: MossAudioAudioInputs,
     ) -> tuple[torch.Tensor, ...]:
+        """Run the audio encoder and return one embedding tensor per audio.
+
+        Example:
+            audio_data=[2, 128, 1200], audio_data_seqlens=[800, 1200]
+            -> returns (audio0_embeds, audio1_embeds), split by token length
+            -> DeepStack packs each item as [main, layer0, ...] on dim -1
+        """
+        audio_data = audio_input["audio_data"]
+        audio_data_seqlens = audio_input["audio_data_seqlens"]
         last_hidden_state, deepstack = self.audio_encoder(
             audio_data.to(self.audio_encoder.dtype),
             feature_lens=audio_data_seqlens,
@@ -1548,13 +1674,25 @@ class MossAudioModel(nn.Module, SupportsMultiModal):
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return ()
-        return self._process_audio_input(*audio_input)
+        return self._process_audio_input(audio_input)
 
     def _split_multimodal_embeddings(
         self,
         multimodal_embeddings: MultiModalEmbeddings,
         hidden_size: int,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[tuple[torch.Tensor, ...], ...]]:
+        """Unpack audio embeddings before merging them into token embeddings.
+
+        embed_input_ids calls this on the output of embed_multimodal. Plain
+        audio embeddings already have width hidden_size and are returned as the
+        main embeddings for _merge_multimodal_embeddings. When DeepStack is
+        enabled, _process_audio_input packs each audio item as
+        [main, layer0, layer1, ...] along the last dimension so the standard
+        multimodal path can carry a single embedding object. This method splits
+        that packed layout back into main embeddings plus per-layer DeepStack
+        embeddings, which _cache_deepstack_input_embeds scatters and forward
+        passes into MossQwen3Model for layer injection.
+        """
         if isinstance(multimodal_embeddings, torch.Tensor):
             embeddings = tuple(multimodal_embeddings.unbind(0))
         else:
