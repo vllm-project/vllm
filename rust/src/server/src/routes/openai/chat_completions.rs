@@ -160,6 +160,8 @@ async fn collect_chat_completion(
     } = collected;
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
+    let reasoning = message.reasoning();
+    let suppress_output_metadata = !include_reasoning && reasoning.is_some();
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
     let tool_calls = message
         .tool_calls()
@@ -172,7 +174,7 @@ async fn collect_chat_completion(
             },
         })
         .collect::<Vec<_>>();
-    let logprobs = if requested_logprobs {
+    let logprobs = if requested_logprobs && !suppress_output_metadata {
         Some(decoded_logprobs_to_openai_chat(
             logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
@@ -210,12 +212,12 @@ async fn collect_chat_completion(
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
                 tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
-                reasoning: include_reasoning.then(|| message.reasoning()).flatten(),
+                reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
-            token_ids: return_token_ids.then_some(token_ids),
+            token_ids: (return_token_ids && !suppress_output_metadata).then_some(token_ids),
         }],
         usage: Some(usage),
         system_fingerprint: None,
