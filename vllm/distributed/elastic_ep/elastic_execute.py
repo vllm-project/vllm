@@ -5,7 +5,7 @@ import gc
 import weakref
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -344,67 +344,6 @@ class ElasticEPScalingExecutor:
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
 
-    def _save_and_clear_block_tables(self) -> tuple[str, dict[str, Any]]:
-        runner = self.worker.model_runner
-        if hasattr(runner, "block_tables"):
-            block_tables = runner.block_tables
-            saved_state = {
-                "block_tables": block_tables,
-                "block_table_rows": [
-                    bt.gpu.clone() for bt in block_tables.block_tables
-                ],
-                "input_block_tables": [
-                    input_bt.clone() for input_bt in block_tables.input_block_tables
-                ],
-                "num_blocks": block_tables.num_blocks.cpu.clone(),
-            }
-
-            for bt in block_tables.block_tables:
-                bt.gpu.zero_()
-                bt.clear_staged_writes()
-            for input_bt in block_tables.input_block_tables:
-                input_bt.zero_()
-            block_tables.num_blocks.cpu.zero_()
-            block_tables.num_blocks.copy_to_uva()
-            return "v2", saved_state
-
-        multi_block_table = runner.input_batch.block_table
-        saved_state = {
-            "block_table": multi_block_table,
-            "block_tables": [
-                (bt.block_table.gpu.clone(), bt.block_table.cpu.clone())
-                for bt in multi_block_table.block_tables
-            ],
-        }
-        multi_block_table.clear()
-        return "v1", saved_state
-
-    def _restore_block_tables(
-        self, block_table_state: tuple[str, dict[str, Any]]
-    ) -> None:
-        version, saved_state = block_table_state
-        if version == "v2":
-            block_tables = saved_state["block_tables"]
-            for bt, saved_gpu in zip(
-                block_tables.block_tables, saved_state["block_table_rows"]
-            ):
-                bt.gpu.copy_(saved_gpu)
-                bt.clear_staged_writes()
-            for input_bt, saved_input in zip(
-                block_tables.input_block_tables, saved_state["input_block_tables"]
-            ):
-                input_bt.copy_(saved_input)
-            block_tables.num_blocks.cpu.copy_(saved_state["num_blocks"])
-            block_tables.num_blocks.copy_to_uva()
-            return
-
-        multi_block_table = saved_state["block_table"]
-        for bt, (saved_gpu, saved_cpu) in zip(
-            multi_block_table.block_tables, saved_state["block_tables"]
-        ):
-            bt.block_table.gpu.copy_(saved_gpu)
-            bt.block_table.cpu.copy_(saved_cpu)
-
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
         _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
@@ -552,13 +491,11 @@ class ElasticEPScalingExecutor:
             compilation_counter.stock_torch_compile_count += 1
             self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
 
-        block_table_state = self._save_and_clear_block_tables()
-
+        saved_state = self.worker.model_runner.save_serving_state()
         unlock_workspace()
         self.worker.compile_or_warm_up_model()
         lock_workspace()
-
-        self._restore_block_tables(block_table_state)
+        self.worker.model_runner.restore_serving_state(saved_state)
         if new_dp_size < old_dp_size:
             self._set_eplb_suppressed(False)
 
@@ -685,7 +622,7 @@ class ElasticEPScalingExecutor:
         # Save and clear block tables so profile_run/compile_or_warm_up_model
         # don't write dummy slot mappings into real KV-cache blocks (mirrors
         # switch_and_prepare's pattern).
-        block_table_state = self._save_and_clear_block_tables()
+        saved_state = self.worker.model_runner.save_serving_state()
 
         # _ensure_workspace_size allocates a fresh tensor on grow, leaving
         # captured CUDA graphs with stale data pointers; drop graphs before
@@ -706,5 +643,4 @@ class ElasticEPScalingExecutor:
         self.worker.compile_or_warm_up_model()
 
         lock_workspace()
-
-        self._restore_block_tables(block_table_state)
+        self.worker.model_runner.restore_serving_state(saved_state)
