@@ -4,6 +4,7 @@ set -euo pipefail
 COMMIT=${1:-${FORK_POINT:-${GITHUB_SHA:-}}}
 BASELINE_BRANCH=${PERFGATE_BASELINE_BRANCH:-benchmark-baselines}
 OUTPUT_DIR=${PERFGATE_BASELINE_OUTPUT_DIR:-${RUNNER_TEMP:-/tmp}/perfgate-baselines}
+ALLOW_BASELINE_FALLBACK=${PERFGATE_ALLOW_BASELINE_FALLBACK:-0}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
 
 if [[ -z "$COMMIT" ]]; then
@@ -23,6 +24,10 @@ git clone --depth 1 --branch "$BASELINE_BRANCH" "$(git remote get-url origin)" "
 baseline_file="$OUTPUT_DIR/branch/baselines/$COMMIT/run_leaderboard.json"
 baseline_commit="$COMMIT"
 if [[ ! -f "$baseline_file" ]]; then
+  if [[ "$ALLOW_BASELINE_FALLBACK" != "1" ]]; then
+    echo "No exact perfgate baseline found for $COMMIT" >&2
+    exit 2
+  fi
   baseline_file="$OUTPUT_DIR/branch/latest-main.json"
   baseline_commit="latest-main"
 fi

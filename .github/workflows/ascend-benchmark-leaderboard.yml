@@ -66,7 +66,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -258,10 +258,15 @@ jobs:
       - name: Deepen clone for fork-point detection
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git fetch --deepen=200 origin main || git fetch --unshallow origin main || true
-          fork_point="$(git merge-base HEAD origin/main)"
+          git fetch --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
+          git checkout --force "$PR_HEAD_SHA"
+          fork_point="$(git merge-base "$PR_HEAD_SHA" "$PR_BASE_SHA")"
           echo "FORK_POINT=$fork_point" >> "$GITHUB_ENV"
           echo "Fork point: $fork_point"
 
@@ -684,6 +689,8 @@ jobs:
       - name: Performance gate - fetch Stage 1 baseline
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
+        env:
+          PERFGATE_ALLOW_BASELINE_FALLBACK: "0"
         run: bash .github/workflows/scripts/perfgate_fetch_baseline.sh "$FORK_POINT"
 
       - name: Run benchmark CI and optional formal publish

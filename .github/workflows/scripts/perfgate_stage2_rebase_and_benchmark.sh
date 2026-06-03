@@ -61,8 +61,32 @@ if [[ -n "${PYTHON_BIN:-}" ]]; then
   "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 fi
 
-RUN_ID="$STAGE2_RUN_ID" RESULT_ROOT="$STAGE2_RESULT_ROOT" PUBLISH_TO_HF=0 \
-  bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+run_stage2_benchmark() {
+  local max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
+  local retry_delay_seconds=${NODE_ENV_RETRY_DELAY_SECONDS:-30}
+  local attempt=1
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    echo "[perfgate-stage2] benchmark attempt ${attempt}/${max_attempts}"
+    set +e
+    RUN_ID="$STAGE2_RUN_ID" RESULT_ROOT="$STAGE2_RESULT_ROOT" PUBLISH_TO_HF=0 \
+      bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
+    local rc=$?
+    set -e
+    if [[ "$rc" -eq 0 ]]; then
+      return 0
+    fi
+    if [[ "$rc" -eq 86 && "$attempt" -lt "$max_attempts" ]]; then
+      echo "Detected node-level Ascend runtime failure in Stage 2; retrying after ${retry_delay_seconds}s."
+      bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh || true
+      sleep "$retry_delay_seconds"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    return "$rc"
+  done
+}
+
+run_stage2_benchmark
 
 b1prime_file="$STAGE2_RESULT_ROOT/submissions/$STAGE2_RUN_ID/run_leaderboard.json"
 if [[ ! -f "$b1prime_file" ]]; then
@@ -71,6 +95,7 @@ if [[ ! -f "$b1prime_file" ]]; then
 fi
 
 PERFGATE_BASELINE_OUTPUT_DIR="${RUNNER_TEMP:-/tmp}/perfgate-stage2-baseline" \
+  PERFGATE_ALLOW_BASELINE_FALLBACK=0 \
   GITHUB_ENV="$GITHUB_ENV.stage2" \
   bash .github/workflows/scripts/perfgate_fetch_baseline.sh "$M2_COMMIT"
 # shellcheck disable=SC1090
