@@ -719,9 +719,13 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@pytest.mark.parametrize("head_size", [128, 256, 320, 512])
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
-def test_triton_unified_attn_nvfp4_kv(seq_threshold_3D: int) -> None:
+def test_triton_unified_attn_nvfp4_kv(
+    seq_threshold_3D: int,
+    head_size: int,
+) -> None:
     """Test BF16 Q with packed NVFP4 KV cache and inline Triton dequant."""
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
@@ -732,7 +736,6 @@ def test_triton_unified_attn_nvfp4_kv(seq_threshold_3D: int) -> None:
     num_seqs = len(seq_lens)
     num_query_heads = 8
     num_kv_heads = 2
-    head_size = 256
     block_size = 16
     num_blocks = 256
     dtype = torch.bfloat16
