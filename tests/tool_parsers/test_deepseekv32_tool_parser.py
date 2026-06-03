@@ -10,6 +10,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -718,6 +719,81 @@ class TestExtractToolCallsStreaming:
             "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
         }
 
+    def test_responses_function_tool_schema_in_streaming(self):
+        """Responses API FunctionTool schemas must drive streaming conversion."""
+        tool = FunctionTool(
+            type="function",
+            name="toggle",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "count": {"type": "integer"},
+                },
+            },
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}toggle">\n'
+            f'{PARAM_START}enabled" string="false">true{PARAM_END}\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+
+        deltas = self._stream(parser, full_text)
+        args = json.loads(self._reconstruct_args(deltas))
+
+        assert args == {"enabled": True, "count": 42}
+        assert isinstance(args["enabled"], bool)
+        assert isinstance(args["count"], int)
+
+    def test_streaming_matches_non_streaming_conversion_fallbacks(self):
+        """Streaming must reuse conversion fallback semantics for string=false."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="coerce",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "union_value": {"type": ["null", "string"]},
+                        "bad_int": {"type": "integer"},
+                        "nullable_string": {"type": ["null", "string"]},
+                        "null_string": {"type": "string"},
+                        "whole_number": {"type": "number"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}coerce">\n'
+            f'{PARAM_START}union_value" string="false">hello{PARAM_END}\n'
+            f'{PARAM_START}bad_int" string="false">abc{PARAM_END}\n'
+            f'{PARAM_START}nullable_string" string="false">null{PARAM_END}\n'
+            f'{PARAM_START}null_string" string="false">null{PARAM_END}\n'
+            f'{PARAM_START}whole_number" string="false">3.0{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+
+        non_stream = parser.extract_tool_calls(full_text, None)
+        non_stream_args = json.loads(non_stream.tool_calls[0].function.arguments)
+
+        deltas = self._stream(parser, full_text)
+        stream_args = json.loads(self._reconstruct_args(deltas))
+
+        assert stream_args == non_stream_args
+        assert stream_args == {
+            "union_value": "hello",
+            "bad_int": "abc",
+            "nullable_string": None,
+            "null_string": "null",
+            "whole_number": 3,
+        }
+
     def test_multiple_tools_streaming(self, parser):
         full_text = (
             f"{FC_START}\n"
@@ -890,8 +966,8 @@ class TestExtractToolCallsStreaming:
         assert json.loads(self._reconstruct_args(deltas, tool_index=0)) == {"p": "v1"}
         assert json.loads(self._reconstruct_args(deltas, tool_index=1)) == {"q": "v2"}
 
-    def test_no_emission_while_incomplete(self, parser):
-        """No tool calls should be emitted until an invoke block completes."""
+    def test_emits_arguments_before_invoke_completes(self, parser):
+        """Argument deltas should stream before the invoke block closes."""
         # Stream only a partial invoke (no closing tag)
         partial_text = (
             f"{FC_START}\n"
@@ -899,8 +975,13 @@ class TestExtractToolCallsStreaming:
             f'{PARAM_START}k" string="true">val{PARAM_END}\n'
         )
         deltas = self._stream(parser, partial_text)
-        # Should have no tool call deltas yet
-        assert all(not d.tool_calls for d in deltas)
+        arg_chunks = [
+            tc.function.arguments
+            for delta in deltas
+            for tc in delta.tool_calls or []
+            if tc.function and tc.function.arguments is not None
+        ]
+        assert "".join(arg_chunks) == '{"k":"val"'
 
     def test_no_marker_leak_chunked(self, parser):
         """Chunked streaming must NOT leak DSML start-marker fragments
