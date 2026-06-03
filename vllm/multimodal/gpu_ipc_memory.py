@@ -121,20 +121,25 @@ def get_mm_gpu_ipc_pool() -> MultiModalGPUMemoryPool | None:
 
 def maybe_init_mm_gpu_ipc_pool(
     mm_ipc_gpu_memory_gb: float,
+    api_process_count: int = 1,
 ) -> MultiModalGPUMemoryPool | None:
     """Create and install the global pool from the configured GiB budget.
 
-    Returns ``None`` (and leaves gating disabled) when the budget is 0.
+    Returns ``None`` (and leaves gating disabled) when the budget is 0. When
+    multiple API-server processes share one engine, each process gets an equal
+    slice of the user-provided frontend budget.
     """
     if mm_ipc_gpu_memory_gb <= 0:
         set_mm_gpu_ipc_pool(None)
         return None
-    total_bytes = int(mm_ipc_gpu_memory_gb * GiB_bytes)
+    total_bytes = int(mm_ipc_gpu_memory_gb * GiB_bytes) // api_process_count
     pool = MultiModalGPUMemoryPool(total_bytes)
     set_mm_gpu_ipc_pool(pool)
     logger.info(
-        "Initialized multimodal GPU IPC memory pool with %.2f GiB (%d bytes).",
-        mm_ipc_gpu_memory_gb,
+        "Initialized multimodal GPU IPC memory pool with %d bytes for this API "
+        "process (%.2f GiB total budget across %d API process(es)).",
         total_bytes,
+        mm_ipc_gpu_memory_gb,
+        api_process_count,
     )
     return pool

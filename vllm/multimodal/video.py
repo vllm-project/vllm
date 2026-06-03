@@ -636,33 +636,6 @@ def gpu_decode_roundtrip(frames: npt.NDArray) -> npt.NDArray:
     return host_frames
 
 
-def profile_gpu_decoder(
-    num_frames: int,
-    height: int,
-    width: int,
-    channels: int = 3,
-) -> None:
-    """Allocate a worst-case decoded-video buffer on the GPU during profiling.
-
-    Video decoders need device working memory (codec context, reference-frame
-    pools, scratch) that is not captured by the decoded-frame byte count and is
-    not exercised by the encoder profiling pass. Calling this from the worker's
-    ``profile_run`` while memory profiling is active makes that working set
-    visible to the memory snapshot that sizes the KV cache.
-
-    This bypasses the frontend memory pool (which only exists in the API-server
-    process) and allocates directly so the peak is observed in the worker.
-    """
-    import torch
-
-    frames = torch.empty(
-        (num_frames, height, width, channels), dtype=torch.uint8, device="cuda"
-    )
-    # Exercise the device->host copy path a real decoder hands off through.
-    host_frames = frames.cpu()
-    del frames, host_frames
-
-
 @VIDEO_LOADER_REGISTRY.register("gpu")
 class GPUVideoBackend(VideoBackend):
     """Stub GPU-decode video backend.

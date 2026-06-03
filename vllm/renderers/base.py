@@ -114,7 +114,10 @@ class BaseRenderer(ABC, Generic[_T]):
             # is 0). Lives in the API-server process only.
             mm_config = config.model_config.multimodal_config
             if mm_config is not None:
-                maybe_init_mm_gpu_ipc_pool(mm_config.mm_ipc_gpu_memory_gb)
+                maybe_init_mm_gpu_ipc_pool(
+                    mm_config.mm_ipc_gpu_memory_gb,
+                    config.parallel_config._api_process_count,
+                )
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
