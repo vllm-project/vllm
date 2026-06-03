@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import functools
 import json
 import logging
@@ -312,8 +311,6 @@ def maybe_convert_bool(value: str | None) -> bool | None:
 def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
     if value is None:
         return None
-    if value in ["float8e4m3", "float8e5m2", "float4e2m1", "int8", "int4"]:
-        return {"dtype": value}
     if os.path.exists(value):
         with open(value) as f:
             return json.load(f)

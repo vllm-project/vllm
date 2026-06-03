@@ -138,7 +138,6 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
-  - "export VLLM_HUMMING_INPUT_QUANT_CONFIG=float8e4m3"
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
 
 - label: LM Eval Humming (B200 - TEMPORARY)
@@ -154,7 +153,6 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
-  - "export VLLM_HUMMING_INPUT_QUANT_CONFIG=float8e4m3"
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-act-fp8.txt
 
 - label: LM Eval TurboQuant KV Cache
