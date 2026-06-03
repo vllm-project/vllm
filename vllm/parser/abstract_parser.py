@@ -706,14 +706,10 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        assert self._tool_parser is not None
-        if not request.tool_choice or request.tool_choice == "none":
-            # tool_choice="none", or explicitly disabled via JSON null
-            # (request.tool_choice is None): never invoke the tool parser;
-            # surface any remaining (post-reasoning) model output as plain
-            # content, mirroring the non-streaming Chat Completions guard
-            # (not request.tool_choice or request.tool_choice == "none").
+        if request.tool_choice == "none":
             return (DeltaMessage(content=delta_text) if delta_text else None), False
+
+        assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
         if (
             supports_required_and_named
