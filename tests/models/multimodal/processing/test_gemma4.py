@@ -1,12 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 from collections.abc import Mapping
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
 from PIL import Image as PILImage
 
+try:
+    importlib.import_module("vllm.vllm_flash_attn")
+except ImportError:
+    import sys
+    import types
+
+    fake_flash_attn: Any = types.ModuleType("vllm.vllm_flash_attn")
+    fake_flash_attn.flash_attn_varlen_func = None
+    fake_flash_attn.get_scheduler_metadata = lambda *args, **kwargs: None
+    sys.modules["vllm.vllm_flash_attn"] = fake_flash_attn
+
+import vllm.model_executor.models.gemma4_mm as gemma4_mm
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -172,6 +188,88 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
     assert tokens is not None
     assert tokens["image"] == 280
     assert tokens["video"] == expected_video_tokens
+
+
+def test_per_layer_embeddings_use_model_dtype_and_language_model_device(monkeypatch):
+    class FakeEmbedder(torch.nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+
+    class FakeLanguageModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = torch.nn.Parameter(torch.empty(1))
+            self.model = SimpleNamespace(
+                embed_tokens=SimpleNamespace(
+                    # Regression guard: old code read dtype from this tensor.
+                    weight=torch.empty(1, dtype=torch.uint8),
+                ),
+            )
+            self.make_empty_intermediate_tensors = lambda *args, **kwargs: None
+            self.expert_weights = []
+            self.moe_layers = []
+            self.num_moe_layers = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_expert_groups = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+
+    fake_language_model = FakeLanguageModel()
+
+    monkeypatch.setattr(
+        gemma4_mm.Gemma4ForConditionalGeneration,
+        "_mark_tower_model",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        gemma4_mm.Gemma4ForConditionalGeneration,
+        "_mark_language_model",
+        lambda *args, **kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        gemma4_mm.AutoModel,
+        "from_config",
+        lambda *args, **kwargs: torch.nn.Module(),
+    )
+    monkeypatch.setattr(gemma4_mm, "Gemma4MultimodalEmbedder", FakeEmbedder)
+    monkeypatch.setattr(
+        gemma4_mm,
+        "init_vllm_registered_model",
+        lambda *args, **kwargs: fake_language_model,
+    )
+
+    text_config = SimpleNamespace(
+        hidden_size=16,
+        hidden_size_per_layer_input=5,
+        num_hidden_layers=2,
+        use_bidirectional_attention=None,
+        layer_types=None,
+    )
+    hf_config = SimpleNamespace(
+        vision_config=SimpleNamespace(),
+        audio_config=None,
+        text_config=text_config,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=hf_config,
+            multimodal_config=SimpleNamespace(),
+            dtype=torch.float16,
+        ),
+        quant_config=None,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=3),
+    )
+
+    model = gemma4_mm.Gemma4ForConditionalGeneration(vllm_config=vllm_config)
+
+    assert fake_language_model.model.embed_tokens.weight.dtype == torch.uint8
+    assert model.per_layer_embeddings is not None
+    assert model.per_layer_embeddings.shape == (3, 2, 5)
+    assert model.per_layer_embeddings.device == fake_language_model.param.device
+    assert model.per_layer_embeddings.dtype == torch.float16
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
