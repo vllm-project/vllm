@@ -73,17 +73,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
     // conditionally compiled so impl registration is in source file
   #endif
 
-  // Quantized GEMM for AWQ.
-  ops.def(
-      "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
-  ops.impl("awq_gemm", torch::kCUDA, &awq_gemm);
-
-  // Dequantization for AWQ.
-  ops.def(
-      "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
-      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
-  ops.impl("awq_dequantize", torch::kCUDA, &awq_dequantize);
+  // AWQ ops are registered in libtorch_stable/torch_bindings.cpp
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
