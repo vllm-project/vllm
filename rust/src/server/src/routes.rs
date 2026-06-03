@@ -6,6 +6,7 @@ mod load;
 mod lora;
 mod metrics;
 pub(crate) mod openai;
+mod server_info;
 mod sleep;
 mod version;
 
@@ -89,6 +90,7 @@ fn build_router_with_options(
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
+            .route("/server_info", get(server_info::server_info))
     }
 
     let enable_request_id_headers = state.enable_request_id_headers;
