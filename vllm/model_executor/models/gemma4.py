@@ -1052,9 +1052,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
-        # mixed-precision drift from bf16 * fp32 across deep stacks. Read the
-        # dtype from the config rather than embed_tokens.weight, which does not
-        # exist when the embedding is quantized.
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
         self.register_buffer(
             "normalizer",
             torch.tensor(
