@@ -513,6 +513,7 @@ async def test_stream_prompt_tokens_details():
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
 
+
 @pytest.mark.asyncio
 async def test_stream_prompt_tokens_details_zero_cached():
     """enable_prompt_tokens_details includes cached_tokens=0 in final usage.

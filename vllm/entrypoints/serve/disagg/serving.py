@@ -307,7 +307,10 @@ class ServingTokens(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens is not None:
+        if (
+            self.enable_prompt_tokens_details
+            and final_res.num_cached_tokens is not None
+        ):
             # This info is not available at the /coordinator level
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
