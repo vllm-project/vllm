@@ -189,9 +189,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # a linear; only true embedding lookups land here.
         if isinstance(layer, VocabParallelEmbedding):
             scheme_dict = self.get_scheme_dict(layer, layer_name=prefix)
-            if scheme_dict and scheme_dict.get("weights") is not None:
-                return CompressedTensorsEmbeddingWNA16Int(scheme_dict["weights"])
-            return None
+            weight_quant = scheme_dict.get("weights") if scheme_dict else None
+            if weight_quant is None:
+                return None  # unquantized embedding
+            if not (
+                isinstance(weight_quant, QuantizationArgs)
+                and self._is_wNa16_group_channel(weight_quant, None)
+                and weight_quant.type == QuantizationType.INT
+            ):
+                raise ValueError(
+                    "compressed-tensors embeddings only support weight-only INT "
+                    f"group/channel (WNA16) quantization, got: {weight_quant}"
+                )
+            return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
@@ -629,6 +639,45 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return is_channel_group and input_quant_none and is_static
 
+    @staticmethod
+    def _is_wNa8o8_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        output_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
+        with static per-tensor INT8 input/output activation quant, applied as a float
+        fake-quant around a weight-only matmul."""
+        is_int_pack_format = format in (
+            CompressionFormat.pack_quantized.value,
+            CompressionFormat.int_quantized.value,
+        )
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_static_int = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_intN_weight = is_static_int and is_channel_group and is_int_pack_format
+        is_static_int8_in = (
+            input_quant is not None
+            and input_quant.type == QuantizationType.INT
+            and input_quant.strategy == QuantizationStrategy.TENSOR.value
+            and input_quant.num_bits == 8
+            and not input_quant.dynamic
+        )
+        is_static_int8_out = (
+            output_quant is not None
+            and output_quant.type == QuantizationType.INT
+            and output_quant.strategy == QuantizationStrategy.TENSOR.value
+            and output_quant.num_bits == 8
+            and not output_quant.dynamic
+        )
+        needs_wNa8o8 = is_intN_weight and is_static_int8_in and is_static_int8_out
+        return needs_wNa8o8
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
@@ -659,31 +708,9 @@ class CompressedTensorsConfig(QuantizationConfig):
                 actorder=weight_quant.actorder,
             )
 
-        # Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
-        # with static INT8 output (and input) activation quant, applied as a float
-        # fake-quant around a weight-only matmul (not a real int8 GEMM). Selected
-        # when an output-activation scale is present, or for sub-4-bit weights that
-        # marlin-backed WNA16 cannot handle. Must come before the WNA16 check;
-        # standard 4/8-bit weight-only (no output-activation scale) still falls
-        # through to WNA16.
-        if (
-            format
-            in (
-                CompressionFormat.pack_quantized.value,
-                CompressionFormat.int_quantized.value,
-            )
-            and weight_quant.type == QuantizationType.INT
-            and not weight_quant.dynamic
-            and weight_quant.strategy
-            in (
-                QuantizationStrategy.CHANNEL.value,
-                QuantizationStrategy.GROUP.value,
-            )
-            and (
-                output_quant is not None
-                or weight_quant.num_bits not in WNA16_SUPPORTED_BITS
-            )
-        ):
+        # Must come before the WNA16 check; standard 4/8-bit weight-only (no
+        # output-activation scale) still falls through to WNA16.
+        if self._is_wNa8o8_int(weight_quant, input_quant, output_quant, format):
             return CompressedTensorsWNA8O8Int(
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
