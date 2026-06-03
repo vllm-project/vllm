@@ -94,6 +94,14 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+# Find xxhash library (required for chunked_hash_tree)
+find_library(XXHASH_LIB NAMES xxhash)
+find_path(XXHASH_INCLUDE_DIR NAMES xxhash.h)
+if (NOT XXHASH_LIB OR NOT XXHASH_INCLUDE_DIR)
+  message(FATAL_ERROR "xxhash library not found. Install it with: sudo apt-get install libxxhash-dev")
+endif()
+message(STATUS "Found xxhash: ${XXHASH_LIB} (include: ${XXHASH_INCLUDE_DIR})")
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -312,6 +320,8 @@ set(VLLM_EXT_SRC
   "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp"
   "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+  "csrc/cpu/scheduler/chunked_hash_tree.cpp"
+  "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
@@ -623,6 +633,8 @@ define_extension_target(
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+target_link_libraries(_C PRIVATE ${XXHASH_LIB})
+target_include_directories(_C PRIVATE ${XXHASH_INCLUDE_DIR})
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #

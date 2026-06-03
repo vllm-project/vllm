@@ -8,6 +8,10 @@
 #include <torch/library.h>
 #include <torch/version.h>
 
+#include "cpu/scheduler/chunked_hash_tree.hpp"
+
+namespace py = pybind11;
+
 // Note on op signatures:
 // The X_meta signatures are for the meta functions corresponding to op X.
 // They must be kept in sync with the signature for X. Generally, only
@@ -249,4 +253,122 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
 #endif
 }
 
-REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
+// ── ChunkedHashTree pure stable-ABI binding (Py_LIMITED_API compatible) ─────
+
+struct CHTObject {
+  PyObject_HEAD ChunkedHashTree* tree;
+};
+
+static PyObject* cht_new(PyTypeObject* type, PyObject* args, PyObject*) {
+  unsigned int chunk_size;
+  if (!PyArg_ParseTuple(args, "I", &chunk_size)) return nullptr;
+  CHTObject* self = reinterpret_cast<CHTObject*>(PyType_GenericAlloc(type, 0));
+  if (self) self->tree = new ChunkedHashTree(static_cast<uint32_t>(chunk_size));
+  return reinterpret_cast<PyObject*>(self);
+}
+
+static void cht_dealloc(PyObject* self) {
+  delete reinterpret_cast<CHTObject*>(self)->tree;
+  PyObject_Free(self);
+}
+
+// insert(request_id: int, tokens: list[int]) -> int
+static PyObject* cht_insert(PyObject* self, PyObject* args) {
+  unsigned int request_id;
+  PyObject* tokens_list;
+  if (!PyArg_ParseTuple(args, "IO!", &request_id, &PyList_Type, &tokens_list))
+    return nullptr;
+  Py_ssize_t n = PyList_Size(tokens_list);
+  if (n < 0) return nullptr;
+  std::vector<uint32_t> tokens;
+  tokens.reserve(static_cast<size_t>(n));
+  for (Py_ssize_t i = 0; i < n; i++) {
+    PyObject* item = PyList_GetItem(tokens_list, i);
+    if (!item) return nullptr;
+    unsigned long v = PyLong_AsUnsignedLong(item);
+    if (PyErr_Occurred()) return nullptr;
+    tokens.push_back(static_cast<uint32_t>(v));
+  }
+  uint32_t result = reinterpret_cast<CHTObject*>(self)->tree->insert(
+      static_cast<uint32_t>(request_id), tokens);
+  return PyLong_FromUnsignedLong(result);
+}
+
+// find_best_request() -> tuple[int, int, int, int]
+static PyObject* cht_find_best_request(PyObject* self, PyObject*) {
+  auto [rid, before, after, sharing] =
+      reinterpret_cast<CHTObject*>(self)->tree->find_best_request();
+  return Py_BuildValue(
+      "(IIII)", static_cast<unsigned>(rid), static_cast<unsigned>(before),
+      static_cast<unsigned>(after), static_cast<unsigned>(sharing));
+}
+
+// activate_request(request_id: int) -> tuple[int, int]
+static PyObject* cht_activate_request(PyObject* self, PyObject* args) {
+  unsigned int request_id;
+  if (!PyArg_ParseTuple(args, "I", &request_id)) return nullptr;
+  auto [added, total] =
+      reinterpret_cast<CHTObject*>(self)->tree->activate_request(
+          static_cast<uint32_t>(request_id));
+  return Py_BuildValue("(II)", static_cast<unsigned>(added),
+                       static_cast<unsigned>(total));
+}
+
+// finish_request(request_id: int) -> tuple[int, int]
+static PyObject* cht_finish_request(PyObject* self, PyObject* args) {
+  unsigned int request_id;
+  if (!PyArg_ParseTuple(args, "I", &request_id)) return nullptr;
+  auto [evicted, total] =
+      reinterpret_cast<CHTObject*>(self)->tree->finish_request(
+          static_cast<uint32_t>(request_id));
+  return Py_BuildValue("(II)", static_cast<unsigned>(evicted),
+                       static_cast<unsigned>(total));
+}
+
+// remove(request_id: int) -> None
+static PyObject* cht_remove(PyObject* self, PyObject* args) {
+  unsigned int request_id;
+  if (!PyArg_ParseTuple(args, "I", &request_id)) return nullptr;
+  reinterpret_cast<CHTObject*>(self)->tree->remove(
+      static_cast<uint32_t>(request_id));
+  Py_RETURN_NONE;
+}
+
+static PyMethodDef cht_methods[] = {
+    {"insert", cht_insert, METH_VARARGS, nullptr},
+    {"find_best_request", cht_find_best_request, METH_NOARGS, nullptr},
+    {"activate_request", cht_activate_request, METH_VARARGS, nullptr},
+    {"finish_request", cht_finish_request, METH_VARARGS, nullptr},
+    {"remove", cht_remove, METH_VARARGS, nullptr},
+    {nullptr, nullptr, 0, nullptr}};
+
+static PyType_Slot cht_slots[] = {
+    {Py_tp_new, reinterpret_cast<void*>(cht_new)},
+    {Py_tp_dealloc, reinterpret_cast<void*>(cht_dealloc)},
+    {Py_tp_methods, reinterpret_cast<void*>(cht_methods)},
+    {0, nullptr}};
+
+static PyType_Spec cht_spec = {"_C.ChunkedHashTree",
+                               static_cast<int>(sizeof(CHTObject)), 0,
+                               Py_TPFLAGS_DEFAULT, cht_slots};
+
+// ── Module init ──────────────────────────────────────────────────────────────
+
+PyMODINIT_FUNC CONCAT(PyInit_, TORCH_EXTENSION_NAME)() {
+  static struct PyModuleDef module = {PyModuleDef_HEAD_INIT,
+                                      STRINGIFY(TORCH_EXTENSION_NAME), nullptr,
+                                      0, nullptr};
+  PyObject* mod = PyModule_Create(&module);
+  if (!mod) return nullptr;
+  PyObject* cht_type = PyType_FromSpec(&cht_spec);
+  if (!cht_type) {
+    Py_DECREF(mod);
+    return nullptr;
+  }
+  if (PyModule_AddObject(mod, "ChunkedHashTree", cht_type) < 0) {
+    Py_DECREF(cht_type);
+    Py_DECREF(mod);
+    return nullptr;
+  }
+  return mod;
+}

@@ -569,6 +569,11 @@ class Scheduler(SchedulerInterface):
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
 
+                if not request_queue.should_add_more_to_batch(
+                    current_batch_size=len(self.running)
+                ):
+                    break
+
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
@@ -1870,7 +1875,7 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
         assert request.is_finished()
-
+        self.waiting.free_request(request)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
