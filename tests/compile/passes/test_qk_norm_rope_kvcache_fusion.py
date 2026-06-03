@@ -69,12 +69,14 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         rms_norm_eps: float,
         dtype: torch.dtype,
         device: torch.device,
+        rotary_dim: int | None = None,
         prefix: str = "model.layers.0.self_attn.attn",
     ):
         super().__init__()
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
+        self.rotary_dim = rotary_dim if rotary_dim is not None else head_size
         self.block_size = vllm_config.cache_config.block_size
         self.q_size = num_heads * head_size
         self.kv_size = num_kv_heads * head_size
@@ -88,7 +90,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 
         self.rotary_emb = RotaryEmbedding(
             head_size,
-            rotary_dim=head_size,
+            rotary_dim=self.rotary_dim,
             max_position_embeddings=4096,
             base=10000,
             is_neox_style=is_neox,
@@ -226,33 +228,14 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default]
 
 
-@pytest.mark.parametrize(
-    "attn_backend",
-    [
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    ],
-)
-@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
-@pytest.mark.parametrize("num_heads", [64])
-@pytest.mark.parametrize("num_kv_heads", [8])
-@pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("is_neox", [True, False])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
-@pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
-)
-def test_qk_norm_rope_kvcache_fusion(
+def _run_qk_norm_rope_kvcache_fusion_test(
+    *,
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
     num_heads: int,
     num_kv_heads: int,
     head_size: int,
+    rotary_dim: int,
     block_size: int,
     is_neox: bool,
     dtype: torch.dtype,
@@ -260,7 +243,7 @@ def test_qk_norm_rope_kvcache_fusion(
     rms_norm_eps: float,
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -296,6 +279,7 @@ def test_qk_norm_rope_kvcache_fusion(
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
+            rotary_dim=rotary_dim,
             is_neox=is_neox,
             rms_norm_eps=rms_norm_eps,
             dtype=dtype,
@@ -381,51 +365,74 @@ def test_qk_norm_rope_kvcache_fusion(
             rtol=cache_rtol,
         )
 
-        # TODO: Re-enable this branch after part1 of QK Norm Rope KVCache
-        # fusion lands as this test pertains to ROCM_ATTN only which lands
-        # in part 2.
-        # uses_interleaved_v = getattr(
-        #     model.attn.impl, "_use_interleaved_v_cache", False
-        # )
-        # if uses_interleaved_v:
-        #     # The fused AITER kernel writes V-cache in interleaved layout
-        #     # [blocks, heads, block_size/x, head_dim, x] while the unfused
-        #     # write_to_paged_cache uses standard [blocks, heads, head_dim,
-        #     # block_size].  Transform interleaved → standard before comparing.
-        #     #
-        #     # split_kv_cache views the raw [n, BS, H, D] as [n, H, D, BS].
-        #     # In that view the interleaved data is laid out as
-        #     # [BS//x, D, x] per (block, head), so:
-        #     #   reshape → [n, H, BS//x, D, x]
-        #     #   permute → [n, H, D, BS//x, x]
-        #     #   reshape → [n, H, D, BS]   (standard layout)
-        #     x_il = 16 // kv_cache_fused.element_size()
-        #     n_blk = kv_cache_fused.shape[1]
 
-        #     v_unfused_view = kv_cache_unfused[1].view(
-        #         n_blk, num_kv_heads, head_size, block_size
-        #     )
-        #     v_fused_view = kv_cache_fused[1].view(
-        #         n_blk, num_kv_heads, head_size, block_size
-        #     )
-        #     v_fused_std = (
-        #         v_fused_view.reshape(
-        #             n_blk, num_kv_heads, block_size // x_il, head_size, x_il
-        #         )
-        #         .permute(0, 1, 3, 2, 4)
-        #         .contiguous()
-        #         .reshape(n_blk, num_kv_heads, head_size, block_size)
-        #     )
-        #     torch.testing.assert_close(
-        #         v_unfused_view.view(dtype),
-        #         v_fused_std.view(dtype),
-        #         atol=cache_atol,
-        #         rtol=cache_rtol,
-        #     )
-        # else:
-        #     torch.testing.assert_close(
-        #         kv_cache_unfused[1].view(dtype),
-        #         kv_cache_fused[1].view(dtype),
-        #         atol=cache_atol,
-        #         rtol=cache_rtol,
-        #     )
+_FUSION_CONFIGS = [
+    # Full rotary, both neox styles (the original coverage).
+    pytest.param(64, 8, 64, 64, True, id="full-neox"),
+    pytest.param(64, 8, 64, 64, False, id="full-non_neox"),
+    # GLM-4.5/4.6/4.7 (glm4_moe.py:275 partial_rotary_factor=0.5, neox-style)
+    pytest.param(32, 8, 128, 64, True, id="glm4_moe"),
+    # GLM-4 dense (glm4.py:97,124 partial_rotary_factor=0.5, non-neox)
+    pytest.param(32, 2, 128, 64, False, id="glm4_dense"),
+    # Moondream3-style small head (head_size=64, rotary_dim=32)
+    pytest.param(16, 2, 64, 32, True, id="partial_small_head"),
+]
+
+
+@pytest.mark.parametrize(
+    "num_heads, num_kv_heads, head_size, rotary_dim, is_neox",
+    _FUSION_CONFIGS,
+)
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    ],
+)
+@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
+def test_qk_norm_rope_kvcache_fusion(
+    num_heads: int,
+    num_kv_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    is_neox: bool,
+    attn_backend: AttentionBackendEnum,
+    enable_aiter_triton_rope: bool,
+    block_size: int,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    rms_norm_eps: float,
+    custom_op: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """QK-norm + RoPE + KV-cache fusion for full and partial rotary.
+
+    The ``rotary_dim < head_size`` configs exercise the
+    ``kernel_rotary_dim = 0 if rotary_dim == head_dim else rotary_dim`` branch
+    in ``do_qk_norm_rope_kvcache_update`` for both AITER backends.
+    """
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=attn_backend,
+        enable_aiter_triton_rope=enable_aiter_triton_rope,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        rotary_dim=rotary_dim,
+        block_size=block_size,
+        is_neox=is_neox,
+        dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype,
+        rms_norm_eps=rms_norm_eps,
+        custom_op=custom_op,
+        monkeypatch=monkeypatch,
+    )
