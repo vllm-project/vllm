@@ -6,6 +6,7 @@ mod grpc;
 mod listener;
 mod middleware;
 mod routes;
+mod server_info;
 mod state;
 mod utils;
 
@@ -29,7 +30,8 @@ use vllm_text::TextLlm;
 
 use crate::listener::Listener;
 use crate::routes::build_router;
-use crate::state::{AppState, ServerInfoSnapshot};
+use crate::server_info::ServerInfoSnapshot;
+use crate::state::AppState;
 
 /// Build the shared application state for one configured model and one engine
 /// client.

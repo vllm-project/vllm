@@ -5,7 +5,8 @@ use axum::extract::{Query, State};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::state::{AppState, ServerInfoConfigFormat};
+use crate::server_info::ServerInfoConfigFormat;
+use crate::state::AppState;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
