@@ -97,6 +97,14 @@ This matrix is part of a three-layer documentation structure:
 - 6.1.2 `test_post_init_disabled_by_default`
 - 6.1.3 `test_post_init_no_op_for_non_cohere`
 
+#### 6.2 [SWA Window Semantics](./features/swa_window.md)
+
+- 6.2.1 `test_swa_layer_adds_one`
+- 6.2.2 `test_full_attention_layer_has_no_window`
+- 6.2.3 `test_v1_model_has_no_window`
+- 6.2.4 `test_window_propagated_to_attention_layer`
+- 6.2.5 `test_nemo_convention_no_eviction_at_exactly_w`
+
 ### 7. ASR
 
 #### 7.1 [Cohere ASR](./features/asr.md)

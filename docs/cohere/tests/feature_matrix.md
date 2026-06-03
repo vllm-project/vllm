@@ -187,6 +187,38 @@ not exercised; entries are intentionally blank. The suite gates the
 | --- | --- | --- | --- | --- | --- |
 | | | | | | |
 
+### SWA Window Semantics
+
+Pure CPU unit suite — no model inputs, no GPU, no engine launch. Input,
+Quantization, Hardware, and vLLM Feature axes are not exercised; entries are
+intentionally blank. The suite gates the NeMo-inclusive `+1` offset in
+`CohereAttention` and the downstream FlashAttention and KV-cache eviction
+formulas.
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
+| --- | --- | --- | --- | --- |
+| | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
+| --- | --- | --- | --- | --- |
+| | | | T.6.2.1 | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
 ### Online Quantization Config Parsing
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |

@@ -272,9 +272,16 @@ class CohereAttention(nn.Module):
         # Model v2 has interleaved sliding windows, v1 does not
         self.v1 = isinstance(config, CohereConfig)
 
+        # cohere start: NeMo (FaxServer) uses inclusive window semantics —
+        # a SWA layer sees [pos - sliding_window, pos], i.e. sliding_window + 1
+        # tokens.  vLLM's FlashAttention backend does (value - 1, 0) internally,
+        # so we pass sliding_window + 1 here to cancel that offset and match the
+        # training convention.  The same +1 propagates into the KV-cache eviction
+        # formula (single_type_kv_cache_manager.py), keeping both paths consistent.
         self.sliding_window = None
         if not self.v1 and config.layer_types[self.layer_idx] == "sliding_attention":
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
+        # cohere end
 
         self.attn = Attention(
             self.num_heads,
