@@ -44,6 +44,8 @@ Now supports 9 types of connectors:
   --kv-transfer-config '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"block_size": 64, "cpu_bytes_to_use": 1000000000}}'
   ```
 
+  For multi-tier offloading (e.g., CPU + filesystem tier) and the full configuration reference, see the [KV Offloading Usage Guide](kv_offloading_usage.md).
+
 - **FlexKVConnectorV1**: refer to [examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py](../../examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
 
   ```bash
