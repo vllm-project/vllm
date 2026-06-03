@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import functools
 import json
 import logging
@@ -314,7 +315,15 @@ def maybe_convert_json_str_or_file(value: str | None) -> dict[str, Any] | None:
     if os.path.exists(value):
         with open(value) as f:
             return json.load(f)
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        # Some environments (e.g. CI pipeline generators) re-serialize the value
+        # and turn the JSON double quotes into single quotes, producing a
+        # Python-style dict literal like ``{'dtype': 'float8e4m3'}`` that
+        # ``json.loads`` cannot parse. Fall back to ``ast.literal_eval`` so the
+        # value is still accepted.
+        return ast.literal_eval(value)
 
 
 def disable_compile_cache() -> bool:
