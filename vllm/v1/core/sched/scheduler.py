@@ -1508,10 +1508,9 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
-        if self._enable_adaptive_k:
-            if self._pos_accepted is None:
-                self._pos_accepted = [0] * self.num_spec_tokens
-                self._pos_reached = [0] * self.num_spec_tokens
+        if self._enable_adaptive_k and self._pos_accepted is None:
+            self._pos_accepted = [0] * self.num_spec_tokens
+            self._pos_reached = [0] * self.num_spec_tokens
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
@@ -1589,8 +1588,12 @@ class Scheduler(SchedulerInterface):
                 num_rejected = num_draft_tokens - num_accepted
                 if self._enable_adaptive_k:
                     actual_k = scheduler_output.adaptive_k_for_step or num_draft_tokens
-                    limit = min(actual_k, num_accepted + 1,
-                                self.num_spec_tokens)
+                    limit = min(
+                        actual_k,
+                        num_draft_tokens,
+                        num_accepted + 1,
+                        self.num_spec_tokens,
+                    )
                     for j in range(limit):
                         self._pos_reached[j] += 1
                         if j < num_accepted:
@@ -1847,7 +1850,8 @@ class Scheduler(SchedulerInterface):
                 if self._pos_reached[j] > 0:
                     raw = self._pos_accepted[j] / self._pos_reached[j]
                     self._per_position_ema[j] += self._adaptive_k_ema_alpha * (
-                        raw - self._per_position_ema[j])
+                        raw - self._per_position_ema[j]
+                    )
             for j in range(self.num_spec_tokens):
                 self._pos_accepted[j] = 0
                 self._pos_reached[j] = 0

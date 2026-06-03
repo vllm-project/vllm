@@ -179,9 +179,9 @@ from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
 from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
@@ -4484,7 +4484,8 @@ class GPUModelRunner(
             assert spec_decode_common_attn_metadata is not None
             adaptive_k = scheduler_output.adaptive_k_for_step
             if adaptive_k is not None and isinstance(
-                    self.drafter, SpecDecodeBaseProposer):
+                self.drafter, SpecDecodeBaseProposer
+            ):
                 self.drafter.current_spec_tokens = adaptive_k
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(

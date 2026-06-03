@@ -560,11 +560,9 @@ class SpecDecodeBaseProposer:
                 self._last_draft_probs = draft_probs.view(
                     -1, self.current_spec_tokens, draft_probs.shape[-1]
                 ).contiguous()
-            draft_token_ids = draft_token_ids.view(
-                -1, self.current_spec_tokens)
+            draft_token_ids = draft_token_ids.view(-1, self.current_spec_tokens)
             if self.current_spec_tokens < self.num_speculative_tokens:
-                draft_token_ids = self._pad_draft_tokens(
-                    draft_token_ids, batch_size)
+                draft_token_ids = self._pad_draft_tokens(draft_token_ids, batch_size)
             return draft_token_ids
 
         if self.uses_mrope:
@@ -698,10 +696,10 @@ class SpecDecodeBaseProposer:
                 self._last_draft_probs = None
             else:
                 self._last_draft_probs = torch.stack(
-                    draft_probs_list, dim=1).contiguous()
+                    draft_probs_list, dim=1
+                ).contiguous()
         if self.current_spec_tokens < self.num_speculative_tokens:
-            draft_token_ids = self._pad_draft_tokens(
-                draft_token_ids, batch_size)
+            draft_token_ids = self._pad_draft_tokens(draft_token_ids, batch_size)
         return draft_token_ids
 
     def _pad_draft_tokens(
