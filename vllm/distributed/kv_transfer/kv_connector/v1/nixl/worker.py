@@ -77,7 +77,7 @@ from vllm.v1.worker.utils import select_common_block_size
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -94,7 +94,7 @@ class ReadSpec:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def _get_representative_spec(self, group) -> "KVCacheSpec":
+    def _get_representative_spec(self, group: "KVCacheGroupSpec") -> "KVCacheSpec":
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
             return next(iter(spec.kv_cache_specs.values()))
@@ -938,24 +938,23 @@ class NixlConnectorWorker:
                         physical_page_size // self._physical_blocks_per_logical_kv_block
                     )
                     self.block_len_per_layer.append(blk_len)
+                    elem = cache.dtype.itemsize
+                    divisor = elem * (
+                        2 if self.transfer_topo.virtually_split_kv_in_blocks else 1
+                    )
+                    assert blk_len % divisor == 0, (
+                        f"Mamba blk_len={blk_len} not divisible by "
+                        f"{divisor} (elem={elem}, split="
+                        f"{self.transfer_topo.virtually_split_kv_in_blocks})"
+                    )
                     self._region_layouts.append(
                         build_attn_layout(
                             num_blocks=self.num_blocks,
                             num_kv_heads=1,
-                            head_size=blk_len
-                            // (
-                                cache.dtype.itemsize
-                                * (
-                                    2
-                                    if self.transfer_topo.virtually_split_kv_in_blocks
-                                    else 1
-                                )
-                            ),
+                            head_size=blk_len // divisor,
                             block_size=1,
                             dtype=cache.dtype,
-                            virtually_split_kv=(
-                                self.transfer_topo.virtually_split_kv_in_blocks
-                            ),
+                            split_kv=(self.transfer_topo.virtually_split_kv_in_blocks),
                             page_stride_bytes=blk_len,
                         )
                     )
@@ -966,7 +965,7 @@ class NixlConnectorWorker:
                     # (N, 2, B, H, D) with B and H swapped vs the
                     # descriptor-correct order (N, 2, H, B, D).
                     # build_attn_layout constructs the right logical
-                    # shape where shard_axis points to H (heads) for
+                    # shape where shard_axes marks H (heads) for
                     # TP slicing.  When #42374 standardizes tensor
                     # layouts, from_tensor will become viable.
                     self._region_layouts.append(
@@ -976,9 +975,7 @@ class NixlConnectorWorker:
                             head_size=layer_spec.head_size,
                             block_size=self.block_size,
                             dtype=layer_spec.dtype,
-                            virtually_split_kv=(
-                                self.transfer_topo.virtually_split_kv_in_blocks
-                            ),
+                            split_kv=(self.transfer_topo.virtually_split_kv_in_blocks),
                             page_stride_bytes=physical_page_size,
                         )
                     )
@@ -1224,22 +1221,24 @@ class NixlConnectorWorker:
         # equal (see _validate_remote_kv_caches), so page_stride_bytes is
         # the same across layers and we build the layout once outside the loop.
         # MLA would need per-layer layouts if block_lens vary.
+        assert self.use_mla or len(set(nixl_agent_meta.block_lens)) == 1, (
+            f"Expected uniform block_lens for non-MLA, got {nixl_agent_meta.block_lens}"
+        )
         remote_layout = build_attn_layout(
             num_blocks=nixl_agent_meta.num_blocks,
             num_kv_heads=remote_heads,
             head_size=attn_spec.head_size,
             block_size=nixl_agent_meta.block_size,
             dtype=attn_spec.dtype,
-            virtually_split_kv=(self.transfer_topo.virtually_split_kv_in_blocks),
+            split_kv=self.transfer_topo.virtually_split_kv_in_blocks,
             page_stride_bytes=nixl_agent_meta.block_lens[0],
-            # Assume all attention layers have the same block length.
         )
 
         if block_size_ratio > 1:
             remote_layout = remote_layout.sub_block(block_size_ratio)
 
         local_layout = remote_layout.narrow(
-            remote_layout.shard_axis,
+            remote_layout.shard_axes[0],
             fa_slice.remote_read_offset,
             len(fa_slice.transfer_range),
         )
