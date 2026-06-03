@@ -555,7 +555,7 @@ class VllmConfig:
         ):
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        return not model_config.is_moe
 
     @property
     def needs_dp_coordinator(self) -> bool:
