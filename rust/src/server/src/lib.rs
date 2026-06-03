@@ -89,6 +89,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
             .with_log_requests(config.enable_log_requests)
+            .with_request_id_headers(config.enable_request_id_headers)
             .with_server_info(ServerInfoSnapshot::from_config(config)),
     ))
 }

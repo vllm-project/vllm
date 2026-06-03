@@ -315,6 +315,7 @@ mod tests {
             default_chat_template_kwargs: None,
             chat_template_content_format: ChatTemplateContentFormatOption::OpenAi,
             enable_log_requests: true,
+            enable_request_id_headers: false,
             disable_log_stats: false,
             grpc_port: Some(9000),
             shutdown_timeout: Duration::from_secs(10),
