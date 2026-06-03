@@ -448,9 +448,17 @@ class TestTakeEvents:
         assert mock_connector._kv_cache_events is None
 
     def test_aggregates_before_yielding(self, mock_connector):
-        """Test that events are aggregated before yielding."""
-        # Set up events from multiple workers
-        kv_events = LMCacheKVEvents(num_workers=3)
+        """Test that events are aggregated before yielding.
+
+        Simulates real aggregation flow: start with 1 worker,
+        increment as each additional worker reports.
+        Worker 0: [common, uncommon]
+        Worker 1: [common]
+        Worker 2: [common]
+        Only common_event should survive (reported by all 3).
+        """
+        # Start with 1 worker, increment as more workers report
+        kv_events = LMCacheKVEvents(num_workers=1)
         common_event = BlockStored(
             block_hashes=["hash_common"],
             parent_block_hash=None,
@@ -470,22 +478,25 @@ class TestTakeEvents:
             lora_name=None,
         )
 
-        # All 3 workers report common_event
-        kv_events.add_events([common_event])
-        kv_events.add_events([common_event])
-        kv_events.add_events([common_event])
+        # Worker 0 reports both events
+        kv_events.add_events([common_event, uncommon_event])
 
-        # Only 1 worker reports uncommon_event
-        kv_events.add_events([uncommon_event])
+        # Worker 1 reports only common_event
+        kv_events.add_events([common_event])
+        kv_events.increment_workers(1)  # workers = 2
+
+        # Worker 2 reports only common_event
+        kv_events.add_events([common_event])
+        kv_events.increment_workers(1)  # workers = 3
 
         mock_connector._kv_cache_events = kv_events
 
-        # Take events
         events = list(mock_connector.take_events())
 
-        # Only the common event should be yielded
+        # Only the common event was reported by all 3 workers
         assert len(events) == 1
         assert events[0] == common_event
+        assert mock_connector._kv_cache_events is None
 
     def test_multiple_take_events_calls(self, mock_connector):
         """Test calling take_events multiple times."""
