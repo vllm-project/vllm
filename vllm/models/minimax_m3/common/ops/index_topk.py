@@ -74,9 +74,6 @@ def _bitonic_merge(
 # 128-token block of (idx_q . index_k), causal-masked. BLOCK_SIZE_K == 128 so
 # each K-tile is exactly one page (BLOCKS_PER_K_BLOCK == 1).
 # ---------------------------------------------------------------------------
-@triton.heuristics(
-    {"BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"])}
-)
 @triton.jit
 def _index_block_score_kernel(
     q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
@@ -87,7 +84,7 @@ def _index_block_score_kernel(
     seq_lens,  # [batch] total K length
     prefix_lens,  # [batch] context length before this chunk's queries
     num_idx_heads,
-    head_dim,
+    head_dim: tl.constexpr,
     sm_scale,
     stride_q_n,
     stride_q_h,
@@ -101,7 +98,6 @@ def _index_block_score_kernel(
     stride_bt_b,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
-    BLOCK_SIZE_D: tl.constexpr,
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
     pid_q = tl.program_id(0)
@@ -115,22 +111,21 @@ def _index_block_score_kernel(
     prefix_len = tl.load(prefix_lens + pid_b)
     if BLOCK_SIZE_Q * pid_q >= q_len:
         return
-    block_num = (seq_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
 
     q_ptrs = tl.make_block_ptr(
         base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
         shape=(q_len, head_dim),
         strides=(stride_q_n, stride_q_d),
         offsets=(pid_q * BLOCK_SIZE_Q, 0),
-        block_shape=(BLOCK_SIZE_Q, BLOCK_SIZE_D),
+        block_shape=(BLOCK_SIZE_Q, head_dim),
         order=(1, 0),
     )
-    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+    q = tl.load(q_ptrs, boundary_check=(0,), padding_option="zero")
+    q_start = prefix_len + pid_q * BLOCK_SIZE_Q
 
     off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
     off_k = tl.arange(0, BLOCK_SIZE_K)
-    off_d = tl.arange(0, BLOCK_SIZE_D)
-    d_mask = off_d < head_dim
+    off_d = tl.arange(0, head_dim)
     # Block table row for this request.
     bt_row = block_table_ptr + pid_b * stride_bt_b
     # Causal window: only blocks up to the last query token's position.
@@ -139,18 +134,20 @@ def _index_block_score_kernel(
         blk = i // BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
         pos = i + off_k
-        pos_mask = pos < seq_len
         # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
+        # we don't need masked load for K, because KV cache ensures
+        # allocation is multiple of BLOCK_SIZE_K.
+        # for tokens beyond seqlen, they will be masked in qk later.
         k = tl.load(
             ik_cache_ptr
             + page * stride_ik_blk
             + off_k[None, :] * stride_ik_pos
             + off_d[:, None] * stride_ik_d,
-            mask=d_mask[:, None] & pos_mask[None, :],
-            other=0.0,
         )
         qk = tl.dot(q, k) * sm_scale_log2e
-        qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
+        # apply causal mask as needed
+        if q_start < i + BLOCK_SIZE_K:
+            qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
         # one sparse block per K-tile -> max over the 128 positions
         score = tl.max(qk, axis=1)  # [BLOCK_SIZE_Q]
         s_ptrs = (
@@ -161,7 +158,7 @@ def _index_block_score_kernel(
             + blk * stride_s_k
         )
         q_store_mask = (pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)) < q_len
-        tl.store(s_ptrs, score, mask=q_store_mask & (blk < block_num))
+        tl.store(s_ptrs, score, mask=q_store_mask)
 
 
 # ---------------------------------------------------------------------------
