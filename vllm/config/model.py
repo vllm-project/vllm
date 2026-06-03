@@ -80,22 +80,10 @@ else:
 
 logger = init_logger(__name__)
 
-
-def is_cumem_allocator_available() -> bool:
-    try:
-        from vllm.device_allocator.cumem import cumem_available
-    except ImportError:
-        return False
-
-    return cumem_available
-
-
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal[
-    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "fastokens"
-]
+TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -148,10 +136,13 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
-    - "fastokens" loads a Hugging Face fast tokenizer powered by the
-      [fastokens](https://github.com/crusoecloud/fastokens) Rust BPE backend
-      (requires the `fastokens` package to be installed).
-    - Other custom values can be supported via plugins."""
+    - Other custom values can be supported via plugins.
+
+    To swap the Rust BPE backend that powers HF fast tokenizers for the
+    [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
+    `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
+    `qwen_vl`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -541,7 +532,10 @@ class ModelConfig:
                     "Enabling cumem allocator because sleep mode requires it."
                 )
                 self.enable_cumem_allocator = True
-        if self.enable_cumem_allocator and not is_cumem_allocator_available():
+        if (
+            self.enable_cumem_allocator
+            and not current_platform.is_cumem_allocator_available()
+        ):
             raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
@@ -790,7 +784,7 @@ class ModelConfig:
                 f"{type(self.tokenizer).__name__}: {self.tokenizer!r}. "
                 "Please provide a valid tokenizer path or HuggingFace model ID."
             )
-        if not isinstance(self.max_model_len, int):
+        if not isinstance(self.max_model_len, int) or self.max_model_len < 1:
             raise ValueError(
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
@@ -887,7 +881,7 @@ class ModelConfig:
         if is_runai_obj_uri(tokenizer):
             object_storage_tokenizer = ObjectStorageModel(url=tokenizer)
             object_storage_tokenizer.pull_files(
-                model,
+                tokenizer,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
             )
             self.tokenizer = object_storage_tokenizer.dir
@@ -1027,7 +1021,6 @@ class ModelConfig:
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "deepseek_v4_fp8",
-                "cpu_awq",
                 "humming",
                 "gguf",
             ]

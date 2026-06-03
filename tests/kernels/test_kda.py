@@ -10,7 +10,11 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.fla.ops.kda import chunk_kda
+from vllm.model_executor.layers.fla.ops.kda import (
+    chunk_kda,
+    chunk_kda_with_fused_gate,
+    fused_kda_gate,
+)
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 
 DEVICE = "cuda"
@@ -155,3 +159,68 @@ def test_chunk_kda(
     assert not torch.isnan(tri_ht).any(), "Triton output ht contains NaN"
     assert_close("o", ref_o, tri_o, 0.005)
     assert_close("ht", ref_ht, tri_ht.transpose(-1, -2).contiguous(), 0.005)
+
+
+@pytest.mark.parametrize(
+    ("cu_seqlens", "dtype"),
+    [
+        ([0, 64], torch.float16),
+        ([0, 15, 100, 300], torch.bfloat16),
+    ],
+)
+@torch.inference_mode()
+def test_chunk_kda_fused_gate_cumsum_matches_unfused(
+    cu_seqlens: list[int],
+    dtype: torch.dtype,
+):
+    H, D = 8, 64
+    T = cu_seqlens[-1]
+    N = len(cu_seqlens) - 1
+    torch.manual_seed(123)
+
+    cu_seqlens_t = torch.tensor(cu_seqlens, dtype=torch.int32, device=DEVICE)
+    q = torch.randn(1, T, H, D, dtype=dtype, device=DEVICE)
+    k = torch.randn(1, T, H, D, dtype=dtype, device=DEVICE)
+    v = torch.randn(1, T, H, D, dtype=dtype, device=DEVICE)
+    raw_g = torch.randn(1, T, H, D, dtype=dtype, device=DEVICE)
+    beta = torch.rand(1, T, H, dtype=dtype, device=DEVICE).sigmoid()
+    A_log = (torch.randn(H, dtype=torch.float32, device=DEVICE) * 0.5).contiguous()
+    dt_bias = (
+        torch.randn(H * D, dtype=torch.float32, device=DEVICE) * 0.1
+    ).contiguous()
+    h0 = torch.randn(N, H, D, D, dtype=torch.float32, device=DEVICE)
+    initial_state = h0.transpose(-1, -2).contiguous()
+
+    gate = fused_kda_gate(
+        raw_g.reshape(T, H * D),
+        A_log,
+        D,
+        g_bias=dt_bias,
+    ).unsqueeze(0)
+    old_o, old_ht = chunk_kda(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        g=gate,
+        beta=beta.clone(),
+        initial_state=initial_state.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+        use_qk_l2norm_in_kernel=True,
+    )
+    new_o, new_ht = chunk_kda_with_fused_gate(
+        q=q.clone(),
+        k=k.clone(),
+        v=v.clone(),
+        raw_g=raw_g,
+        beta=beta.clone(),
+        A_log=A_log,
+        g_bias=dt_bias,
+        initial_state=initial_state.clone(),
+        output_final_state=True,
+        cu_seqlens=cu_seqlens_t,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    assert_close("o", old_o, new_o, 1e-3, err_atol=1e-3)
+    assert_close("ht", old_ht, new_ht, 1e-3, err_atol=1e-3)

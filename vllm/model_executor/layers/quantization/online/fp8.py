@@ -371,18 +371,17 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
 
-        quant_config = make_fp8_moe_quant_config(
+        return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
             block_shape=self.weight_block_size,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
-
-        self._maybe_inject_biases(quant_config, layer)
-        return quant_config
 
 
 class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):
