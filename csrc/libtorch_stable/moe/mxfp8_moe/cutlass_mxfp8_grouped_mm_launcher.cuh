@@ -4,9 +4,9 @@
 // https://github.com/sgl-project/sglang/blob/ded068a76e00878881d52d5bfb791e0f60d7311b/sgl-kernel/csrc/expert_specialization/es_sm100_mxfp8_blockscaled_launcher.cuh
 
 #pragma once
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <torch/all.h>
+
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Exception.h>
 
 #include <cassert>
 #include <iostream>
@@ -15,18 +15,22 @@
 #include "cute/tensor.hpp"
 #include "cutlass_mxfp8_grouped_mm_functor.cuh"
 #include "cutlass_mxfp8_grouped_mm_traits.cuh"
+#include "libtorch_stable/torch_utils.h"
 
 namespace expert_specialization {
 
 template <typename GemmTraits>
 void cutlass_mxfp8_grouped_mm_pre_compute(
-    torch::Tensor& a_ptrs, torch::Tensor& b_ptrs, torch::Tensor& sfa_ptrs,
-    torch::Tensor& sfb_ptrs, torch::Tensor& d_ptrs, torch::Tensor& stride_a,
-    torch::Tensor& stride_b, torch::Tensor& stride_d, torch::Tensor& layout_sfa,
-    torch::Tensor& layout_sfb, const torch::Tensor& a, const torch::Tensor& b,
-    const torch::Tensor& sfa, const torch::Tensor& sfb, const torch::Tensor& d,
-    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
-    const torch::Tensor& blockscale_offsets, cudaStream_t stream) {
+    torch::stable::Tensor& a_ptrs, torch::stable::Tensor& b_ptrs,
+    torch::stable::Tensor& sfa_ptrs, torch::stable::Tensor& sfb_ptrs,
+    torch::stable::Tensor& d_ptrs, torch::stable::Tensor& stride_a,
+    torch::stable::Tensor& stride_b, torch::stable::Tensor& stride_d,
+    torch::stable::Tensor& layout_sfa, torch::stable::Tensor& layout_sfb,
+    const torch::stable::Tensor& a, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& sfa, const torch::stable::Tensor& sfb,
+    const torch::stable::Tensor& d, const torch::stable::Tensor& problem_sizes,
+    const torch::stable::Tensor& expert_offsets,
+    const torch::stable::Tensor& blockscale_offsets, cudaStream_t stream) {
   using OffsetFunctor = CutlassMxfp8GroupedMmOffsetFunctor<GemmTraits>;
   using ElementA = typename OffsetFunctor::ElementA;
   using ElementB = typename OffsetFunctor::ElementB;
@@ -42,10 +46,10 @@ void cutlass_mxfp8_grouped_mm_pre_compute(
   using StrideB = typename StrideFunctor::StrideB;
   using StrideD = typename StrideFunctor::StrideD;
 
-  int num_experts = (int)expert_offsets.size(0);
-  TORCH_CHECK(num_experts <= 1024,
-              "Number of experts cannot exceed 1024, the maximum number of "
-              "threads per block.");
+  int num_experts = static_cast<int>(expert_offsets.size(0));
+  STD_TORCH_CHECK(num_experts <= 1024,
+                  "Number of experts cannot exceed 1024, the maximum number of "
+                  "threads per block.");
 
   OffsetFunctor offset_functor(
       reinterpret_cast<int*>(expert_offsets.data_ptr()),
@@ -72,13 +76,18 @@ void cutlass_mxfp8_grouped_mm_pre_compute(
 }
 
 template <typename GemmTraits>
-void cutlass_mxfp8_grouped_mm(
-    const torch::Tensor& a_ptrs, const torch::Tensor& b_ptrs,
-    const torch::Tensor& sfa_ptrs, const torch::Tensor& sfb_ptrs,
-    const torch::Tensor& d_ptrs, const torch::Tensor& stride_a,
-    const torch::Tensor& stride_b, const torch::Tensor& stride_d,
-    const torch::Tensor& layout_sfa, const torch::Tensor& layout_sfb,
-    const torch::Tensor& problem_sizes, cudaStream_t stream) {
+void cutlass_mxfp8_grouped_mm(const torch::stable::Tensor& a_ptrs,
+                              const torch::stable::Tensor& b_ptrs,
+                              const torch::stable::Tensor& sfa_ptrs,
+                              const torch::stable::Tensor& sfb_ptrs,
+                              const torch::stable::Tensor& d_ptrs,
+                              const torch::stable::Tensor& stride_a,
+                              const torch::stable::Tensor& stride_b,
+                              const torch::stable::Tensor& stride_d,
+                              const torch::stable::Tensor& layout_sfa,
+                              const torch::stable::Tensor& layout_sfb,
+                              const torch::stable::Tensor& problem_sizes,
+                              cudaStream_t stream) {
   using Gemm = typename GemmTraits::Gemm;
   using ElementA = typename Gemm::ElementA;
   using ElementB = typename Gemm::ElementB;
@@ -93,13 +102,12 @@ void cutlass_mxfp8_grouped_mm(
       typename GemmTraits::ProblemShape::UnderlyingProblemShape;
 
   cutlass::KernelHardwareInfo hw_info;
-  hw_info.device_id = c10::cuda::current_device();
-  hw_info.sm_count =
-      at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  hw_info.device_id = d_ptrs.get_device_index();
+  hw_info.sm_count = get_device_prop()->multiProcessorCount;
   hw_info.cluster_shape = GemmTraits::MMAConfig::preferred_cluster;
   hw_info.cluster_shape_fallback = GemmTraits::MMAConfig::fallback_cluster;
 
-  int num_experts = (int)problem_sizes.size(0);
+  int num_experts = static_cast<int>(problem_sizes.size(0));
 
   UnderlyingProblemShape* underlying_problem_shape =
       reinterpret_cast<UnderlyingProblemShape*>(problem_sizes.data_ptr());
@@ -127,44 +135,55 @@ void cutlass_mxfp8_grouped_mm(
   Gemm gemm;
 
   auto can_implement_status = gemm.can_implement(arguments);
-  TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
-              "Failed to implement GEMM");
+  STD_TORCH_CHECK(can_implement_status == cutlass::Status::kSuccess,
+                  "Failed to implement GEMM");
 
-  torch::TensorOptions options_uint8 =
-      torch::TensorOptions().dtype(torch::kUInt8).device(d_ptrs.device());
   size_t workspace_size = gemm.get_workspace_size(arguments);
-  torch::Tensor workspace = torch::empty(workspace_size, options_uint8);
+  torch::stable::Tensor workspace = torch::stable::empty(
+      {static_cast<int64_t>(workspace_size)},
+      torch::headeronly::ScalarType::Byte, std::nullopt, d_ptrs.device());
 
   auto status = gemm.initialize(arguments, workspace.data_ptr(), stream);
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to initialize GEMM");
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess,
+                  "Failed to initialize GEMM");
 
   status = gemm.run(stream, nullptr, true);  // Enable PDL
-  TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
+  STD_TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
 template <typename OutType>
 void cutlass_mxfp8_grouped_mm_dispatch_out_dtype(
-    const torch::Tensor& a, const torch::Tensor& b, const torch::Tensor& sfa,
-    const torch::Tensor& sfb, torch::Tensor& d,
-    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
-    const torch::Tensor& blockscale_offsets, cudaStream_t stream) {
-  int num_experts = (int)problem_sizes.size(0);
-  torch::TensorOptions options_int64 =
-      torch::TensorOptions().dtype(torch::kInt64).device(a.device());
-  torch::TensorOptions options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(a.device());
+    const torch::stable::Tensor& a, const torch::stable::Tensor& b,
+    const torch::stable::Tensor& sfa, const torch::stable::Tensor& sfb,
+    torch::stable::Tensor& d, const torch::stable::Tensor& problem_sizes,
+    const torch::stable::Tensor& expert_offsets,
+    const torch::stable::Tensor& blockscale_offsets, cudaStream_t stream) {
+  int num_experts = static_cast<int>(problem_sizes.size(0));
+  auto device = a.device();
 
-  torch::Tensor a_ptrs = torch::empty(num_experts, options_int64);
-  torch::Tensor b_ptrs = torch::empty(num_experts, options_int64);
-  torch::Tensor sfa_ptrs = torch::empty(num_experts, options_int64);
-  torch::Tensor sfb_ptrs = torch::empty(num_experts, options_int64);
-  torch::Tensor d_ptrs = torch::empty(num_experts, options_int64);
+  torch::stable::Tensor a_ptrs = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor b_ptrs = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor sfa_ptrs = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor sfb_ptrs = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor d_ptrs = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
 
-  torch::Tensor stride_a = torch::empty(num_experts, options_int64);
-  torch::Tensor stride_b = torch::empty(num_experts, options_int64);
-  torch::Tensor stride_d = torch::empty(num_experts, options_int64);
-  torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int32);
-  torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int32);
+  torch::stable::Tensor stride_a = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor stride_b = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor stride_d = torch::stable::empty(
+      num_experts, torch::headeronly::ScalarType::Long, std::nullopt, device);
+  torch::stable::Tensor layout_sfa =
+      torch::stable::empty({num_experts, 5}, torch::headeronly::ScalarType::Int,
+                           std::nullopt, device);
+  torch::stable::Tensor layout_sfb =
+      torch::stable::empty({num_experts, 5}, torch::headeronly::ScalarType::Int,
+                           std::nullopt, device);
 
   using GemmTraits = CutlassMxfp8GroupedMmGemmTraits<MMA1SMConfig, OutType>;
   cutlass_mxfp8_grouped_mm_pre_compute<GemmTraits>(
