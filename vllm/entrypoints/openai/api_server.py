@@ -43,9 +43,7 @@ from vllm.entrypoints.openai.server_utils import (
     validation_exception_handler,
 )
 from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
-)
+from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
@@ -195,8 +193,13 @@ def build_app(
 
     register_sagemaker_api_router(app, supported_tasks, model_config)
 
+    if envs.VLLM_SERVER_DEV_MODE:
+        from vllm.entrypoints.serve import register_vllm_dev_api_routers
+
+        register_vllm_dev_api_routers(app)
+
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import (
+        from vllm.entrypoints.generate.api_router import (
             register_generate_api_routers,
         )
 
@@ -208,23 +211,11 @@ def build_app(
 
         attach_disagg_router(app)
 
-        from vllm.entrypoints.serve.rlhf.api_router import (
-            attach_router as attach_rlhf_router,
-        )
-
-        attach_rlhf_router(app)
-
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
         )
 
         elastic_ep_attach_router(app)
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            register_generative_scoring_api_router,
-        )
-
-        register_generative_scoring_api_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
@@ -402,17 +393,11 @@ async def init_app_state(
     )
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generate.api_router import init_generate_state
+        from vllm.entrypoints.generate.api_router import init_generate_state
 
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            init_generative_scoring_state,
-        )
-
-        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state

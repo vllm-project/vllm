@@ -21,7 +21,7 @@ repos:
   rev: v21.1.2
   hooks:
   - id: clang-format
-    exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
+    exclude: 'csrc/(moe/topk_softmax_kernels.cu|libtorch_stable/quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/DavidAnson/markdownlint-cli2
@@ -222,6 +222,12 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
+  - id: test-nonroot-entrypoint
+    name: Test non-root entrypoint wrapper
+    entry: bash docker/entrypoints/test_vllm_nonroot_entrypoint.sh
+    language: system
+    pass_filenames: false
+    files: ^docker/entrypoints/(vllm-nonroot-entrypoint|test_vllm_nonroot_entrypoint)\.sh$
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/pre_commit/check_forbidden_imports.py
