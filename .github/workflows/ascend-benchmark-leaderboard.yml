@@ -739,7 +739,7 @@ jobs:
 
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
-        if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
+        if: ${{ github.event_name == 'pull_request' && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
         shell: bash
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}

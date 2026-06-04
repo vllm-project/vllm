@@ -8,6 +8,29 @@ MODE=${PERFGATE_MODE:-report}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 
+if [[ "${PERFGATE_BASELINE_AVAILABLE:-1}" != "1" || -z "${PERFGATE_BASELINE_FILE:-}" ]]; then
+  reason=${PERFGATE_BASELINE_UNAVAILABLE_REASON:-Stage 1 baseline is unavailable}
+  mkdir -p "$(dirname "$REPORT_FILE")"
+  {
+    echo "## Performance Gate Report"
+    echo
+    echo "**Overall: UNKNOWN**"
+    echo
+    echo "Stage 1 baseline is unavailable: $reason"
+    echo
+    echo "Stage 2: NOT RUN — Stage 1 baseline is unavailable."
+  } > "$REPORT_FILE"
+  {
+    echo "PERFGATE_RESULT=unknown"
+    echo "PERFGATE_REPORT_FILE=$REPORT_FILE"
+  } >> "$GITHUB_ENV"
+  echo "Performance gate report generated with unavailable baseline: $reason"
+  if [[ "$MODE" == "report" ]]; then
+    exit 0
+  fi
+  exit 2
+fi
+
 args=(
   compare2
   --stage1-current "$STAGE1_CURRENT"
