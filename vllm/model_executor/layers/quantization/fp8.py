@@ -648,10 +648,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
 
         # WEIGHTS
+        w13_up_dim = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -677,7 +682,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_up_dim,
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
@@ -700,7 +705,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # For block quant, the scales are per block (typically 128x128).
             w13_scale_data = torch.ones(
                 num_experts,
-                2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                (w13_up_dim + block_n - 1) // block_n,
                 (hidden_size + block_k - 1) // block_k,
                 dtype=torch.float32,
             )
@@ -960,10 +965,15 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer.weight_block_size = None
 
         # WEIGHTS
+        w13_up_dim = (
+            2 * intermediate_size_per_partition
+            if self.moe.is_act_and_mul
+            else intermediate_size_per_partition
+        )
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 device="meta",
                 dtype=params_dtype,
@@ -991,7 +1001,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_up_dim,
                     device="meta",  # materialized and processed during loading
                     dtype=layer.orig_dtype,
                 ),
