@@ -94,18 +94,20 @@ class EplbMetricsState:
         self.cumulative_tokens: torch.Tensor = torch.zeros(
             num_layers, dtype=torch.int64, device=device
         )
-        self.pinned_buffer: torch.Tensor = torch.zeros(
-            num_layers, dtype=torch.int64, pin_memory=True
+        self.cumulative_tokens_cpu: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device="cpu", pin_memory=True
         )
         self.event: torch.cuda.Event = torch.cuda.Event()
-        self.last_pushed: list[int] = [0] * num_layers
+        self.previous_cumulative_tokens: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device="cpu"
+        )
         self.pending: bool = False
         self.delta: list[int] | None = None
 
     def accumulate(self, expert_load_pass: torch.Tensor) -> None:
         """
-        Records a snapshot of the number of tokens routed to this rank.
-        This code assumes that expert_load_pass has been zeroed out between calls.
+        Adds the per-rank routed tokens from this step into the cumulative total.
+        This code assumes that expert_load_pass is zeroed out between calls.
         Args:
             expert_load_pass: (num_moe_layers, num_physical_experts) contains the number
             of routed tokens for each layer and physical expert across all ranks.
@@ -131,15 +133,16 @@ class EplbMetricsState:
         previous snapshot."""
         # If there's not a device to host transfer in-flight, start one
         if not self.pending:
-            self.pinned_buffer.copy_(self.cumulative_tokens, non_blocking=True)
+            self.cumulative_tokens_cpu.copy_(self.cumulative_tokens, non_blocking=True)
             self.event.record()
             self.pending = True
             self.delta = None
         # if the transfer from device to host has finished, compute the result
         elif self.event.query():
-            current = self.pinned_buffer.tolist()
-            self.delta = [c - prev for c, prev in zip(current, self.last_pushed)]
-            self.last_pushed = current
+            self.delta = (
+                self.cumulative_tokens_cpu - self.previous_cumulative_tokens
+            ).tolist()
+            self.previous_cumulative_tokens.copy_(self.cumulative_tokens_cpu)
             self.pending = False
 
 
@@ -687,6 +690,7 @@ class EplbState:
             )
 
     def get_latest_metric_delta(self) -> dict[str, list[int]]:
+        """Returns per-model routed tokens since the last snapshot."""
         return {
             state.model_name: state.metrics_state.delta
             for state in self.model_states.values()
