@@ -11,7 +11,12 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
+from vllm.v1.kv_offload.tiering.base import (
+    JobMetadata,
+    JobResult,
+    RequestOffloadingContext,
+    SecondaryTierManager,
+)
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 if TYPE_CHECKING:
@@ -192,7 +197,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
         )
 
-    def get_finished(self) -> Iterable[JobResult]:
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
         results: list[JobResult] = self._failed_jobs
         self._failed_jobs = []
