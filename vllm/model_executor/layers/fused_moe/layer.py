@@ -407,7 +407,6 @@ class FusedMoE(PluggableLayer):
         # need full intermediate size pre-sharding for WNA16 act order
         if self.quant_method.__class__.__name__ in (
             "AutoGPTQMoEMethod",
-            "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
@@ -886,10 +885,7 @@ class FusedMoE(PluggableLayer):
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
-        if quant_method_name in (
-            "CompressedTensorsWNA16MarlinMoEMethod",
-            "CompressedTensorsWNA16MoEMethod",
-        ):
+        if quant_method_name in ("CompressedTensorsWNA16MoEMethod",):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
             else:

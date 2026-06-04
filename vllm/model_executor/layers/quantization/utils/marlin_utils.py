@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -230,13 +231,14 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+def check_moe_marlin_supports_config(
+    config: FusedMoEConfig,
+    group_size: int,
+) -> bool:
     if current_platform.is_rocm():
         return False
-    hidden_size = layer.hidden_size
-    intermediate_size_per_partition = layer.intermediate_size_per_partition
-    # apply_router_weight_on_input is not supported for moe marlin
-    supports_router_weight = not layer.apply_router_weight_on_input
+    hidden_size = config.hidden_dim
+    intermediate_size_per_partition = config.intermediate_size_per_partition
 
     # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
     # down: (n, k) = (hidden_size, intermediate_size_per_partition)
@@ -246,7 +248,11 @@ def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bo
         and intermediate_size_per_partition % max(64, group_size) == 0
     )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size and supports_router_weight
+    return supports_shape and supports_group_size
+
+
+def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+    return check_moe_marlin_supports_config(layer.moe_config, group_size)
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):
@@ -367,6 +373,47 @@ def marlin_zero_points(
     zp = pack_cols(zp, num_bits, size_k, size_n)
 
     return zp
+
+
+def marlin_moe_permute_zero_points(
+    zp: torch.Tensor,
+    size_k: int,
+    size_n: int,
+    num_bits: int,
+    is_a_8bit: bool = False,
+) -> torch.Tensor:
+    """Permute standard MoE zero points into Marlin format.
+
+    Args:
+        zp: Unpacked zero points, shape (num_experts, num_groups, size_n).
+            Values should be integer zero point values (not packed).
+            num_groups = K // group_size.
+        size_k: Number of groups (K // group_size), NOT the original K.
+        size_n: Output feature dimension N (not packed).
+        num_bits: Quantization bit width (4 or 8).
+        is_a_8bit: Whether activations are 8-bit quantized.
+
+    Returns:
+        Marlin-formatted zero points, shape
+        (num_experts, num_groups, size_n // pack_factor) as int32.
+
+    The transformation per expert applies three steps:
+      1. Permute columns with scale_perm (not scale_perm_single) to match
+         the Marlin dequantization MMA layout.
+      2. Interleave columns for the dequantize code.
+      3. Pack multiple values into int32.
+    """
+    pack_factor = 32 // num_bits
+    num_experts = zp.shape[0]
+    # marlin_zero_points packs size_n values into size_n // pack_factor int32s
+    output = torch.empty(
+        (num_experts, size_k, size_n // pack_factor),
+        device=zp.device,
+        dtype=torch.int32,
+    )
+    for e in range(num_experts):
+        output[e] = marlin_zero_points(zp[e], size_k, size_n, num_bits, is_a_8bit)
+    return output
 
 
 def awq_to_marlin_zero_points(
