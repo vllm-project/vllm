@@ -42,6 +42,9 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
+    /// Whether the engine has tracing enabled; gates trace-header forwarding.
+    #[serde(default)]
+    pub tracing_enabled: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

@@ -390,6 +390,18 @@ impl EngineCoreClient {
             .as_str()
     }
 
+    /// Return whether OpenTelemetry tracing is enabled on the engine.
+    ///
+    /// The frontend forwards request trace headers only when this is true.
+    /// Engines that do not report the field are treated as tracing-disabled.
+    pub fn tracing_enabled(&self) -> bool {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .tracing_enabled
+    }
+
     /// Return the total number of GPU blocks summed across all connected
     /// engines.
     pub fn total_num_gpu_blocks(&self) -> u64 {

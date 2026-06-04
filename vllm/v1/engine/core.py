@@ -1468,6 +1468,10 @@ class EngineCoreProc(EngineCore):
                 dp_stats_address=self.frontend_stats_publish_address,
                 dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
                 vllm_version=VLLM_VERSION,
+                tracing_enabled=(
+                    self.vllm_config.observability_config.otlp_traces_endpoint
+                    is not None
+                ),
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:

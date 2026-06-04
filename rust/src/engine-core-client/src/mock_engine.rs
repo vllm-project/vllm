@@ -49,6 +49,7 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         dp_stats_address: None,
         dtype: ModelDtype::Float32,
         vllm_version: "test-vllm-version".to_string(),
+        tracing_enabled: false,
     }
 }
 

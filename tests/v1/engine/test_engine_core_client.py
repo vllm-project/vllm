@@ -255,6 +255,7 @@ def test_apply_ready_response_syncs_block_size():
             dp_stats_address=None,
             dtype="bfloat16",
             vllm_version="test",
+            tracing_enabled=False,
         )
     )
     client._apply_ready_response(payload)
