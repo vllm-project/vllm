@@ -35,7 +35,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     ExtractedToolCallInformation,
     StructuralTagResponseFormat,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall as VllmFunctionCall
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -44,7 +43,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.mistral_tool_parser import (
     _DEFAULT_JSON_SCHEMA,
     MistralStreamingResult,
-    MistralToolCall,
     MistralToolParser,
 )
 
@@ -1578,48 +1576,6 @@ def test_grammar_from_tool_parser_set_by_adjust_request(
     request = _make_request()
     result = mistral_tool_parser.adjust_request(request)
     assert result._grammar_from_tool_parser is True
-
-
-@pytest.mark.parametrize(
-    "tool_calls, expected_len",
-    [
-        (None, 0),
-        ([], 0),
-        ([VllmFunctionCall(id="abc123xyz", name="f", arguments="{}")], 1),
-        ([VllmFunctionCall(name="f", arguments="{}")], 1),
-        (
-            [
-                VllmFunctionCall(id="fixed1234", name="a", arguments='{"x": 1}'),
-                VllmFunctionCall(name="b", arguments='{"y": 2}'),
-            ],
-            2,
-        ),
-    ],
-    ids=["none", "empty", "with_id", "without_id", "mixed"],
-)
-def test_build_non_streaming_tool_calls(
-    tool_calls: list[VllmFunctionCall] | None,
-    expected_len: int,
-) -> None:
-    result = MistralToolParser.build_non_streaming_tool_calls(tool_calls)
-    assert len(result) == expected_len
-
-    if tool_calls is None:
-        return
-
-    for i, tc in enumerate(result):
-        assert isinstance(tc, MistralToolCall)
-        assert tc.type == "function"
-
-        input_tc = tool_calls[i]
-        if input_tc.id:
-            assert tc.id == input_tc.id
-        else:
-            assert len(tc.id) == 9
-            assert tc.id.isalnum()
-
-        assert tc.function.name == input_tc.name
-        assert tc.function.arguments == input_tc.arguments
 
 
 class TestExtractMaybeReasoningAndToolStreaming:

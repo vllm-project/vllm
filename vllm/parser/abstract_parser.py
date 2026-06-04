@@ -43,7 +43,6 @@ from vllm.tool_parsers.streaming import (
     extract_required_tool_call_streaming,
 )
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -546,14 +545,6 @@ class DelegatingParser(Parser):
         if tool_parser is None:
             return [], content
 
-        # When the Mistral grammar factory injected structured outputs,
-        # let the parser handle the output.
-        use_mistral_tool_parser = (
-            is_mistral_tool_parser(type(tool_parser))
-            and isinstance(request, ChatCompletionRequest)
-            and request._grammar_from_tool_parser
-        )
-
         supports_required_and_named = tool_parser.supports_required_and_named
         is_named_tool_choice = request.tool_choice and isinstance(
             request.tool_choice,
@@ -570,11 +561,7 @@ class DelegatingParser(Parser):
         )
 
         tool_calls = list[FunctionCall]()
-        if (
-            is_named_tool_choice
-            and supports_required_and_named
-            and not use_mistral_tool_parser
-        ):
+        if is_named_tool_choice and supports_required_and_named:
             if content is None:
                 return [], None
             tool_calls.append(
@@ -584,11 +571,7 @@ class DelegatingParser(Parser):
                 )
             )
             content = None
-        elif (
-            is_required_tool_choice
-            and supports_required_and_named
-            and not use_mistral_tool_parser
-        ):
+        elif is_required_tool_choice and supports_required_and_named:
             # "required" with standard JSON-based parsing
             parsed_calls = []
             with contextlib.suppress(ValidationError):
@@ -604,7 +587,7 @@ class DelegatingParser(Parser):
                     )
                 )
             content = None
-        elif is_auto_tool_choice or use_mistral_tool_parser:
+        elif is_auto_tool_choice:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
             tool_call_info = tool_parser.extract_tool_calls(
