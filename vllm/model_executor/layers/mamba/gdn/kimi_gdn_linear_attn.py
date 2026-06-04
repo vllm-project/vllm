@@ -168,20 +168,37 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.b_proj",
         )
 
+        # q/k/v keep separate convs (compute is NOT fused), but their conv
+        # states are stored as a single contiguous cache tensor (see
+        # `kda_state_shape`); `_forward` slices that one tensor into q/k/v views.
         self.q_dim = projection_size
         self.k_dim = projection_size
         self.v_dim = projection_size
-        self.conv_dim = self.q_dim + self.k_dim + self.v_dim
-        self.conv1d = ColumnParallelLinear(
+        self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
-            output_size=self.conv_dim,
+            output_size=self.q_dim,
             bias=False,
             params_dtype=torch.float32,
-            prefix=f"{prefix}.conv1d",
+            prefix=f"{prefix}.q_conv1d",
+        )
+        self.k_conv1d = ColumnParallelLinear(
+            input_size=self.conv_size,
+            output_size=self.k_dim,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.k_conv1d",
+        )
+        self.v_conv1d = ColumnParallelLinear(
+            input_size=self.conv_size,
+            output_size=self.v_dim,
+            bias=False,
+            params_dtype=torch.float32,
+            prefix=f"{prefix}.v_conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
-        self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-        self.conv1d.weight.weight_loader = self._make_conv_packed_loader()
+        self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
+        self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
+        self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -215,31 +232,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-    def _make_conv_packed_loader(self):
-        """Build a weight loader that routes the separate q/k/v conv checkpoint
-        tensors into the matching segments of the fused ``conv1d`` weight.
-
-        ``mamba_v2_sharded_weight_loader`` cannot be reused here because it splits
-        a single fused checkpoint tensor; KDA stores three separate ones. Each
-        source conv is column-parallel, so every rank simply takes its own slice
-        of each segment and writes it at the segment's offset in the fused param.
-        """
-        seg_dim = {"q": self.q_dim, "k": self.k_dim, "v": self.v_dim}
-        local = {s: divide(d, self.tp_size) for s, d in seg_dim.items()}
-        offset = {"q": 0, "k": local["q"], "v": local["q"] + local["k"]}
-
-        def loader(
-            param: torch.Tensor, loaded_weight: torch.Tensor, shard_id: str
-        ) -> None:
-            if loaded_weight.dim() == 2:
-                loaded_weight = loaded_weight.unsqueeze(1)
-            size = local[shard_id]
-            dst = offset[shard_id]
-            src = self.tp_rank * size
-            param.data[dst : dst + size] = loaded_weight[src : src + size]
-
-        return loader
 
     def forward(
         self,
@@ -317,19 +309,57 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        # The q/k/v conv states share a single contiguous cache tensor; slice it
+        # into three channel views. The conv kernels honor tensor strides, so the
+        # in-place state updates write back to the correct sub-region. Compute is
+        # NOT fused: q/k/v still run as three separate depthwise convs.
+        local_q = divide(self.q_dim, self.tp_size)
+        local_k = divide(self.k_dim, self.tp_size)
+        conv_state_q = conv_state[..., :local_q, :]
+        conv_state_k = conv_state[..., local_q : local_q + local_k, :]
+        conv_state_v = conv_state[..., local_q + local_k :, :]
+
+        q_conv_weights = self.q_conv1d.weight.view(
+            self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
         )
-        # Fuse q/k/v into a single sequence so the depthwise short conv runs in
-        # one call against the single fused conv state (same scheme as GDN).
-        mixed_qkv = torch.cat((q_proj_states, k_proj_states, v_proj_states), dim=-1)
+        k_conv_weights = self.k_conv1d.weight.view(
+            self.k_conv1d.weight.size(0), self.k_conv1d.weight.size(2)
+        )
+        v_conv_weights = self.v_conv1d.weight.view(
+            self.v_conv1d.weight.size(0), self.v_conv1d.weight.size(2)
+        )
         if attn_metadata_narrowed.num_prefills > 0:
-            mixed_qkv = causal_conv1d_fn(
-                mixed_qkv.transpose(0, 1),
-                conv_weights,
-                self.conv1d.bias,
+            q_proj_states = q_proj_states.transpose(0, 1)
+            k_proj_states = k_proj_states.transpose(0, 1)
+            v_proj_states = v_proj_states.transpose(0, 1)
+            q = causal_conv1d_fn(
+                q_proj_states,
+                q_conv_weights,
+                self.q_conv1d.bias,
                 activation="silu",
-                conv_states=conv_state,
+                conv_states=conv_state_q,
+                has_initial_state=has_initial_state,
+                cache_indices=non_spec_state_indices_tensor,
+                query_start_loc=non_spec_query_start_loc,
+                metadata=attn_metadata_narrowed,
+            ).transpose(0, 1)
+            k = causal_conv1d_fn(
+                k_proj_states,
+                k_conv_weights,
+                self.k_conv1d.bias,
+                activation="silu",
+                conv_states=conv_state_k,
+                has_initial_state=has_initial_state,
+                cache_indices=non_spec_state_indices_tensor,
+                query_start_loc=non_spec_query_start_loc,
+                metadata=attn_metadata_narrowed,
+            ).transpose(0, 1)
+            v = causal_conv1d_fn(
+                v_proj_states,
+                v_conv_weights,
+                self.v_conv1d.bias,
+                activation="silu",
+                conv_states=conv_state_v,
                 has_initial_state=has_initial_state,
                 cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
@@ -340,24 +370,34 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             decode_conv_indices = non_spec_state_indices_tensor[
                 : attn_metadata_narrowed.num_actual_tokens
             ]
-            mixed_qkv = causal_conv1d_update(
-                mixed_qkv,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
+            q = causal_conv1d_update(
+                q_proj_states,
+                conv_state_q,
+                q_conv_weights,
+                self.q_conv1d.bias,
+                activation="silu",
+                conv_state_indices=decode_conv_indices,
+                validate_data=True,
+            )
+            k = causal_conv1d_update(
+                k_proj_states,
+                conv_state_k,
+                k_conv_weights,
+                self.k_conv1d.bias,
+                activation="silu",
+                conv_state_indices=decode_conv_indices,
+                validate_data=True,
+            )
+            v = causal_conv1d_update(
+                v_proj_states,
+                conv_state_v,
+                v_conv_weights,
+                self.v_conv1d.bias,
                 activation="silu",
                 conv_state_indices=decode_conv_indices,
                 validate_data=True,
             )
 
-        q, k, v = mixed_qkv.split(
-            [
-                divide(self.q_dim, self.tp_size),
-                divide(self.k_dim, self.tp_size),
-                divide(self.v_dim, self.tp_size),
-            ],
-            dim=-1,
-        )
         q, k, v = map(
             lambda x: rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim), (q, k, v)
         )

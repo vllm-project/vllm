@@ -461,11 +461,6 @@ class KimiLinearModel(nn.Module):
             # (param_name, shard_name, shard_id)
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            # KDA fuses q/k/v short convs into a single conv1d; route each
-            # checkpoint conv weight into the matching segment of the fused param.
-            (".conv1d", ".q_conv1d", "q"),
-            (".conv1d", ".k_conv1d", "k"),
-            (".conv1d", ".v_conv1d", "v"),
         ]
         if self.config.is_moe:
             # Params for weights, fp8 weight scales, fp8 activation scales
