@@ -85,6 +85,20 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+## Logging and client payloads
+
+For `vllm serve`, `--enable-log-requests` records request metadata at INFO (for
+example sampling parameters). By design it does **not** include raw prompt
+content at INFO: prompts can contain secrets or PII, and logs are often copied
+to less-controlled systems.
+
+To debug prompts without raising the global log level, you can:
+
+- Set `VLLM_LOGGING_LEVEL=DEBUG` for full prompt details in logs, **or**
+- Explicitly pass `--enable-log-request-prompts` **in addition to**
+  `--enable-log-requests` for **truncated** prompt summaries at INFO (still
+  treat log sinks as sensitive if you enable this).
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to

@@ -35,6 +35,8 @@ You can check if this is happening by trying the old defaults with `--generation
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
+- For the OpenAI-compatible server, `--enable-log-requests` logs request IDs and sampling parameters at INFO. **Full** prompt inputs (text, token IDs, shapes) appear only at DEBUG unless you also opt in to bounded INFO previews (see below).
+- `--enable-log-request-prompts` (requires `--enable-log-requests`) adds **truncated** prompt summaries to INFO lines. It is **off by default** because prompts can contain sensitive data that may end up in log aggregation systems. See [Security](security.md#logging-and-client-payloads).
 - `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
