@@ -23,6 +23,7 @@ from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
     LogitsProcessor,
+    _load_logitsprocs_by_fqcns,
 )
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
@@ -40,6 +41,20 @@ sampling_params_list = [
     ),
     SamplingParams(temperature=TEMP_GREEDY, max_tokens=MAX_TOKENS),
 ]
+
+
+@pytest.mark.parametrize(
+    "fqcn",
+    [
+        "tests.v1.logits_processors.utils.DummyLogitsProcessor",
+        "tests.v1.logits_processors.utils:DummyLogitsProcessor:extra",
+        ":DummyLogitsProcessor",
+        "tests.v1.logits_processors.utils:",
+    ],
+)
+def test_rejects_malformed_logits_processor_fqcn(fqcn: str):
+    with pytest.raises(ValueError, match="Expected format '<module>:<type>'"):
+        _load_logitsprocs_by_fqcns([fqcn])
 
 
 def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
