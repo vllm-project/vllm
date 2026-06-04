@@ -1811,15 +1811,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
-    # DeepEP v2 ElasticBuffer: enable two-tier NVLink+RDMA hybrid mode
+    # DeepEP v2: enable two-tier NVLink+RDMA hybrid mode
     "VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "1"))
+        int(os.getenv("VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE", "0"))
     ),
-    # DeepEP v2 ElasticBuffer: use fewer SMs at slight throughput cost
+    # DeepEP v2: use fewer SMs at slight throughput cost
     "VLLM_DEEPEP_V2_PREFER_OVERLAP": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_PREFER_OVERLAP", "0"))
     ),
-    # DeepEP v2 ElasticBuffer: trade precision for transfer size in combine
+    # DeepEP v2: trade precision for transfer size in combine
     "VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION", "0"))
     ),
