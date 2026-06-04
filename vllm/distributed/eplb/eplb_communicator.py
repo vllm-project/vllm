@@ -24,6 +24,7 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
+from vllm.distributed.utils import is_weak_contiguous
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_pp_group,
@@ -64,7 +65,12 @@ class EplbCommunicator(ABC):
 
     @abstractmethod
     def execute(self) -> None:
-        pass
+        """Complete all enqueued transfers.
+
+        Some backends perform communication here; others (e.g. NIXL)
+        issue transfers eagerly in add_recv and only wait here.
+        On return, all data is available in the destination buffers.
+        """
 
     def set_transfer_context(  # noqa: B027
         self, old_indices: np.ndarray, layer_idx: int
@@ -260,15 +266,17 @@ class NixlEplbCommunicator(EplbCommunicator):
 
         for layer_tensors in all_expert_weights:
             for tensor in layer_tensors:
-                assert tensor.is_contiguous(), (
-                    "Expert weight tensors must be contiguous"
+                assert is_weak_contiguous(tensor), (
+                    "Expert weight tensors must be contiguous in memory"
                 )
                 assert tensor.device == self._device, (
                     "All local EPLB tensors are expected to be on the same "
                     f"device: expected={self._device}, got={tensor.device}"
                 )
         for tensor in expert_buffer:
-            assert tensor.is_contiguous(), "expert_buffer tensors must be contiguous"
+            assert is_weak_contiguous(tensor), (
+                "expert_buffer tensors must be contiguous in memory"
+            )
 
         # (local_dlist, remote_dlist, xfer_handle) for in-flight READs;
         # accumulated by add_recv, drained by execute.
@@ -316,6 +324,9 @@ class NixlEplbCommunicator(EplbCommunicator):
         pp_suffix = f"-pp{get_pp_group().rank_in_group}" if pp_size > 1 else ""
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
+
+    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+        pass
 
     def add_send(
         self,
