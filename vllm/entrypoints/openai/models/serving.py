@@ -194,10 +194,16 @@ class OpenAIServingModels:
                         lora_request.lora_name, lora_request.lora_path
                     )
                 ) in str(e):
-                    raise LoRAAdapterNotFoundError(
-                        lora_request.lora_name, lora_request.lora_path
-                    ) from e
-                raise
+                    return create_error_response(
+                        LoRAAdapterNotFoundError(
+                            lora_request.lora_name, lora_request.lora_path
+                        )
+                    )
+                return create_error_response(
+                    message=str(e),
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
             self.lora_requests[lora_name] = lora_request
             logger.info(

@@ -370,11 +370,11 @@ class SparseAttnCompressNormRopeStoreC4Kernel:
                 inv_scale = _recast_val((Uint32(254) - ue8m0) << Uint32(23), Float32)
                 for pair in cutlass.range_constexpr(self.elems_per_lane // 2):
                     elem = const_expr(pair * 2)
-                    y0 = cute.arch.fmin(
+                    y0 = cutlass.min(
                         cute.arch.fmax(q[elem] * inv_scale, Float32(-self.fp8_max)),
                         Float32(self.fp8_max),
                     )
-                    y1 = cute.arch.fmin(
+                    y1 = cutlass.min(
                         cute.arch.fmax(q[elem + 1] * inv_scale, Float32(-self.fp8_max)),
                         Float32(self.fp8_max),
                     )
@@ -994,11 +994,11 @@ class SparseAttnNormRopeStoreKernel:
                 bits = _recast_val(scale_raw, Uint32)
                 ue8m0 = ((bits + Uint32(0x7FFFFF)) >> Uint32(23)) & Uint32(0xFF)
                 inv_scale = _recast_val((Uint32(254) - ue8m0) << Uint32(23), Float32)
-                y0 = cute.arch.fmin(
+                y0 = cutlass.min(
                     cute.arch.fmax(q0 * inv_scale, Float32(-self.fp8_max)),
                     Float32(self.fp8_max),
                 )
-                y1 = cute.arch.fmin(
+                y1 = cutlass.min(
                     cute.arch.fmax(q1 * inv_scale, Float32(-self.fp8_max)),
                     Float32(self.fp8_max),
                 )
