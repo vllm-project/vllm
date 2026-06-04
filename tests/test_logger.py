@@ -267,6 +267,7 @@ def test_prepare_object_to_dump():
 
     assert prepare_object_to_dump(CustomClass(1, "b")) == "CustomClass(a=1, b='b')"
 
+
 # Add vllm prefix to make sure logs go through the vllm logger
 test_logger = init_logger("vllm.test_logger")
 
