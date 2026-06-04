@@ -1015,6 +1015,15 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
+    # Defensive fallback: if bmm_batch_size is 0, disable BMM mode to avoid
+    # ZeroDivisionError. This can happen when TP size exceeds n_groups.
+    if is_bmm and bmm_batch_size == 0:
+        logger.warning_once(
+            "bmm_batch_size is 0, falling back to non-BMM mode for FP8 weight "
+            "block processing. This may impact performance."
+        )
+        is_bmm = False
+
     if ws.dtype == torch.float8_e8m0fnu:
         # Scales already in E8M0 from checkpoint — upcast to fp32
         # and skip requantization (weights already have power-of-two scales).
@@ -1033,6 +1042,20 @@ def deepgemm_post_process_fp8_weight_block(
         # ws: (g*r/128, d/128) -> (g, r/128, d/128)
         g = bmm_batch_size
         assert wq.ndim == 2 and ws.ndim == 2
+        assert g > 0, (
+            f"bmm_batch_size must be > 0, got {g}. "
+            f"This indicates TP size exceeds n_groups."
+        )
+        # NOTE: This is a sanity check to catch cases where the weight output
+        # dimension is not evenly divisible by the batch size. The primary
+        # guard for n_groups % tp_size is in model.py's __init__ where
+        # is_deep_gemm_supported() is checked.
+        assert wq.size(0) % g == 0, (
+            f"Weight output dimension {wq.size(0)} is not evenly divisible by "
+            f"bmm_batch_size {g}. This indicates n_groups is not evenly "
+            f"divisible by TP size, which would cause groups to be lost."
+        )
+
         d = wq.size(1)
         r = wq.size(0) // g
         wq = wq.view(g, r, d)

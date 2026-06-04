@@ -54,6 +54,8 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.logger import init_logger
+from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Indexer,
@@ -63,6 +65,7 @@ from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
 
+logger = init_logger(__name__)
 
 class DeepseekV4MLP(nn.Module):
     def __init__(
@@ -786,8 +789,19 @@ class DeepseekV4Attention(nn.Module):
             return_bias=False,
             prefix=f"{prefix}.wo_a",
         )
-        self.wo_a.is_bmm = True
-        self.wo_a.bmm_batch_size = self.n_local_groups
+        # DeepGEMM BMM mode requires n_groups to be evenly divisible by tp_size.
+        # If not, fall back to non-BMM mode with a warning.
+        if self.n_groups % tp_size == 0:
+            self.wo_a.is_bmm = True
+            self.wo_a.bmm_batch_size = self.n_local_groups
+        elif is_deep_gemm_supported():
+            logger.warning_once(
+                "n_groups (%d) is not evenly divisible by tp_size (%d). "
+                "DeepGEMM BMM mode is disabled for wo_a layer. "
+                "This may impact performance.",
+                self.n_groups,
+                tp_size,
+            )
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,
