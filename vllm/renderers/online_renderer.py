@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.utils import create_error_response
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.inputs import EngineInput, SingletonPrompt, tokens_input
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
