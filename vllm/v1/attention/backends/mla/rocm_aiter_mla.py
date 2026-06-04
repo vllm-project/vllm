@@ -242,7 +242,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.max_num_batched_tokens,
             )
-            self._init_fp8_prefill_ps_buffers(max_num_reqs, max_prefill_qlen, device)
+            self._init_fp8_prefill_ps_buffers(
+                max_num_reqs,
+                max_prefill_qlen,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                device,
+            )
 
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
@@ -257,6 +262,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         self,
         max_num_reqs: int,
         max_prefill_qlen: int,
+        max_num_batched_tokens: int,
         device: torch.device,
     ) -> None:
         """Pre-allocate persistent buffers for FP8 MLA prefill PS metadata.
@@ -271,9 +277,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_num_reqs: Maximum number of concurrent requests.
             max_prefill_qlen: Maximum Q-length for a single request in one
                 prefill batch.  Should be ``min(max_model_len,
-                max_num_batched_tokens)`` — the chunked-prefill scheduler
-                never emits more than ``max_num_batched_tokens`` new tokens
-                per batch.
+                max_num_batched_tokens)`` — a single request never exceeds
+                ``max_model_len`` tokens, nor the per-batch token budget.
+            max_num_batched_tokens: Maximum number of tokens scheduled in one
+                batch.  The ``final_lse`` scratch is sized by ``total_q`` (the
+                summed Q-length over all prefill requests in the batch), which
+                is bounded by this budget rather than by a single request's
+                ``max_prefill_qlen`` — concurrent requests can sum to more than
+                ``max_model_len`` when ``max_model_len < max_num_batched_tokens``.
             device: Target device for the buffers.
         """
         from aiter import get_ps_metadata_info_v1
@@ -333,7 +344,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 (max_num_partial_tiles * _FP8_PREFILL_TILE_Q, num_head_k),
                 torch.float32,
             ),
-            ((max_prefill_qlen, num_head_k), torch.float32),
+            ((max_num_batched_tokens, num_head_k), torch.float32),
         )
 
         logger.info(
@@ -782,14 +793,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # Per-call scratch (logits, attn_lse, final_lse) is served from the
         # workspace manager so allocator churn in the prefill hot path is
         # bounded after warmup, matching the pattern in PR #41002.
-        workspace_manager = current_workspace_manager()
-        scratch_shapes = (
+        logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
             ((num_partial_tiles * tile_q, nhead, v_head_dim), torch.float32),
             ((num_partial_tiles * tile_q, nhead), torch.float32),
             ((total_q, nhead), torch.float32),
-        )
-        logits, attn_lse, final_lse = workspace_manager.get_simultaneous(
-            *scratch_shapes,
         )
 
         # Phase 1: persistent-scheduling assembly prefill kernel.
