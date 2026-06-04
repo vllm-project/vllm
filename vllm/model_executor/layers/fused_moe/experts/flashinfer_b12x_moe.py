@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
+
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -20,7 +23,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    flashinfer_b12x_fused_moe,
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
@@ -42,6 +44,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
 
+    _ACTIVATION_MAP: dict[MoEActivation, str] = {
+        MoEActivation.SILU: "silu",
+        MoEActivation.RELU2_NO_MUL: "relu2",
+    }
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -60,7 +67,117 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # one. Holding it on the instance keeps apply() alloc-free.
         self._fc2_input_scale: torch.Tensor | None = None
 
+        # Shape params for B12xMoEWrapper construction.
+        self.global_num_experts = moe_config.num_experts
+        self.topk = moe_config.experts_per_token
+        self.hidden_dim = moe_config.hidden_dim
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.max_num_tokens = moe_config.max_num_tokens
+        self.local_expert_offset = self.ep_rank * self.num_local_experts
+
+        activation = moe_config.activation
+        if activation not in self._ACTIVATION_MAP:
+            raise ValueError(
+                f"FlashInferB12xExperts does not support "
+                f"activation {activation!r}. "
+                f"Supported: {list(self._ACTIVATION_MAP.keys())}"
+            )
+        self._activation_str = self._ACTIVATION_MAP[activation]
+
+        # Hybrid CUTLASS-prefill / B12x-decode dispatch. When > 0, the
+        # wrapper routes batches with num_tokens >= threshold through
+        # cutlass_fused_moe; see register_cutlass_prefill_weights() in
+        # _ensure_wrapper. Requires a FlashInfer build exposing the
+        # `cutlass_prefill_threshold` kwarg on B12xMoEWrapper.
+        self.cutlass_prefill_threshold = (
+            envs.VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD
+        )
+
+        # Lazily created on first apply() call.
+        self._wrapper: Any | None = None
+        self._cutlass_registered: bool = False
+        self.w1_sf_mma: torch.Tensor | None = None
+        self.w2_sf_mma: torch.Tensor | None = None
+
+        # CUTLASS-format scales saved before the in-place B12x rewrite in
+        # process_weights_after_loading. Only populated when
+        # cutlass_prefill_threshold > 0.
+        self._cutlass_w13_scale: torch.Tensor | None = None
+        self._cutlass_w2_scale: torch.Tensor | None = None
+        self._cutlass_a1_gscale: torch.Tensor | None = None
+        self._cutlass_a2_gscale: torch.Tensor | None = None
+        self._cutlass_g1_alphas: torch.Tensor | None = None
+        self._cutlass_g2_alphas: torch.Tensor | None = None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # When hybrid CUTLASS prefill is enabled, save copies of the
+        # CUTLASS-format scales BEFORE the in-place B12x rewrite below
+        # destroys them. The FP4 weight bytes themselves are reusable —
+        # prepare_nvfp4_moe_layer_for_fi_or_cutlass produces the same
+        # [w3, w1] reorder + swizzled SF for both FLASHINFER_CUTLASS and
+        # FLASHINFER_B12X — so we only need to clone the scales.
+        #
+        # g_alphas: B12x leaves g1_alphas = 1/w_gs (does NOT fold
+        # a_input_scale). CUTLASS wants 1/(a_gs * w_gs) = (1/w_gs) / a_gs,
+        # hence the division.
+        #
+        # The clones are registered as nn.Parameter on the layer so
+        # FusedMoE.get_expert_weights picks them up and EPLB rearranges
+        # them in lockstep with the live b12x scales.
+        if self.cutlass_prefill_threshold > 0:
+            assert layer.w13_weight_scale.dtype == torch.float8_e4m3fn, (
+                "Expected swizzled FP8 SF before B12x rewrite, got "
+                f"{layer.w13_weight_scale.dtype}"
+            )
+            cutlass_w13_scale = layer.w13_weight_scale.clone()
+            cutlass_w2_scale = layer.w2_weight_scale.clone()
+            cutlass_a1_gscale = self.a1_gscale.clone()
+            cutlass_a2_gscale = self.a2_gscale.clone()
+            cutlass_g1_alphas = (
+                self.g1_alphas.float() / self.a1_gscale
+            ).contiguous()
+            cutlass_g2_alphas = (
+                self.g2_alphas.float() / self.a2_gscale
+            ).contiguous()
+
+            layer.register_parameter(
+                "w13_cutlass_weight_scale",
+                torch.nn.Parameter(cutlass_w13_scale, requires_grad=False),
+            )
+            layer.register_parameter(
+                "w2_cutlass_weight_scale",
+                torch.nn.Parameter(cutlass_w2_scale, requires_grad=False),
+            )
+            layer.register_parameter(
+                "w13_cutlass_a_gscale",
+                torch.nn.Parameter(cutlass_a1_gscale, requires_grad=False),
+            )
+            layer.register_parameter(
+                "w2_cutlass_a_gscale",
+                torch.nn.Parameter(cutlass_a2_gscale, requires_grad=False),
+            )
+            layer.register_parameter(
+                "w13_cutlass_g_alphas",
+                torch.nn.Parameter(cutlass_g1_alphas, requires_grad=False),
+            )
+            layer.register_parameter(
+                "w2_cutlass_g_alphas",
+                torch.nn.Parameter(cutlass_g2_alphas, requires_grad=False),
+            )
+
+            # Hold references on the experts class so _ensure_wrapper can
+            # build the quant_scales list without re-fetching from layer.
+            # These alias the registered Parameters' storage, so EPLB
+            # rearrangement of the parameters is observed here too.
+            self._cutlass_w13_scale = layer.w13_cutlass_weight_scale.data
+            self._cutlass_w2_scale = layer.w2_cutlass_weight_scale.data
+            self._cutlass_a1_gscale = layer.w13_cutlass_a_gscale.data
+            self._cutlass_a2_gscale = layer.w2_cutlass_a_gscale.data
+            self._cutlass_g1_alphas = layer.w13_cutlass_g_alphas.data
+            self._cutlass_g2_alphas = layer.w2_cutlass_g_alphas.data
+
         # Normalise block scales to absorb the per-expert weight global scale
         # (w_gs).  vLLM's NVFP4 convention stores:
         #   block_scale = max_abs * w_gs / fp4_max,  g1_alphas = 1/w_gs
@@ -141,7 +258,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -158,7 +275,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -190,12 +307,72 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # b12x_fused_moe expects BF16 hidden states and performs its own FP4
+        # B12xMoEWrapper expects BF16 hidden states and performs its own FP4
         # quantization internally.  Returning True prevents the modular kernel
-        # from pre-quantizing activations, which would produce an FP4-packed
-        # tensor with size(-1)=k//2 and break the scale-factor conversion that
-        # expects size(-1)=k.
+        # from pre-quantizing activations.
         return True
+
+    def _ensure_wrapper(self, w1: torch.Tensor, w2: torch.Tensor) -> None:
+        """Lazily create B12xMoEWrapper on first use.
+
+        Also registers CUTLASS-format prefill weights when hybrid dispatch
+        is enabled; the FP4 byte tensors are shared with the b12x decode
+        path (only scales differ — saved in process_weights_after_loading).
+        """
+        if self._wrapper is None:
+            from flashinfer.fused_moe import B12xMoEWrapper
+
+            b12x_kwargs = dict(
+                num_experts=self.global_num_experts,
+                top_k=self.topk,
+                hidden_size=self.hidden_dim,
+                intermediate_size=self.intermediate_size_per_partition,
+                use_cuda_graph=True,
+                max_num_tokens=self.max_num_tokens,
+                num_local_experts=self.num_local_experts,
+                activation=self._activation_str,
+            )
+            # cutlass_prefill_threshold is gated on a FlashInfer build that
+            # exposes the kwarg. Skip silently if absent and threshold is 0;
+            # error cleanly if the user is asking for the hybrid path.
+            if "cutlass_prefill_threshold" in inspect.signature(
+                B12xMoEWrapper.__init__
+            ).parameters:
+                b12x_kwargs["cutlass_prefill_threshold"] = (
+                    self.cutlass_prefill_threshold
+                )
+            elif self.cutlass_prefill_threshold > 0:
+                raise RuntimeError(
+                    "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD > 0 "
+                    "requires a FlashInfer build that exposes the "
+                    "`cutlass_prefill_threshold` kwarg on B12xMoEWrapper; "
+                    "current FlashInfer does not."
+                )
+            self._wrapper = B12xMoEWrapper(**b12x_kwargs)
+
+        if self.cutlass_prefill_threshold > 0 and not self._cutlass_registered:
+            assert self._cutlass_w13_scale is not None, (
+                "cutlass_prefill_threshold > 0 but CUTLASS scales were "
+                "not saved in process_weights_after_loading"
+            )
+            # quant_scales order matches FlashInferExperts (NVFP4 mode):
+            # [a1_gs, w1_blockscale_int32, 1/(a1_gs*w1_gs),
+            #  a2_gs, w2_blockscale_int32, 1/(a2_gs*w2_gs)].
+            # register_cutlass_prefill_weights does .contiguous().view(long)
+            # on w*_q internally — pass uint8 directly.
+            self._wrapper.register_cutlass_prefill_weights(
+                w1_q=w1,
+                w2_q=w2,
+                quant_scales=[
+                    self._cutlass_a1_gscale,
+                    self._cutlass_w13_scale.view(torch.int32),
+                    self._cutlass_g1_alphas,
+                    self._cutlass_a2_gscale,
+                    self._cutlass_w2_scale.view(torch.int32),
+                    self._cutlass_g2_alphas,
+                ],
+            )
+            self._cutlass_registered = True
 
     def apply(
         self,
@@ -224,13 +401,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self._fc2_input_scale is not None, (
             "_fc2_input_scale must be set by process_weights_after_loading"
         )
+        assert self.w1_sf_mma is not None and self.w2_sf_mma is not None, (
+            "process_weights_after_loading must run before FlashInferB12xExperts.apply"
+        )
 
-        top_k = topk_ids.shape[1]
+        self._ensure_wrapper(w1, w2)
 
-        flashinfer_b12x_fused_moe(
+        result = self._wrapper.run(
             x=hidden_states,
-            token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
@@ -238,9 +416,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
-            num_experts=global_num_experts,
-            top_k=top_k,
-            num_local_experts=self.num_local_experts,
-            output_dtype=self.out_dtype,
-            output=output,
+            token_selected_experts=topk_ids.to(torch.int32),
+            token_final_scales=topk_weights,
         )
+        output.copy_(result)
