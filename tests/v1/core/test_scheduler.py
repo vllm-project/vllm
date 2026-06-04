@@ -256,6 +256,108 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
+def test_throttle_prefills_excludes_remote_kv_resume():
+    """A request resuming after a completed async KV load (num_computed_tokens
+    > 0, e.g. the decode side of P/D disaggregation) must NOT be throttled by
+    the DP prefill cadence: only fresh prefills are deferred. Otherwise the
+    resumed request's first (single-token) step would be needlessly delayed.
+    """
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    BLOCK_SIZE = 16
+    NUM_MATCHED = BLOCK_SIZE * 2
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED, is_async=True),
+        block_size=BLOCK_SIZE,
+    )
+
+    # Two remote-KV requests with distinct prompts (so r2 gets no local prefix
+    # cache hit from r1, only the connector's external async load).
+    r1, r2 = create_requests(
+        num_requests=2,
+        num_tokens=NUM_MATCHED * 2,
+        max_tokens=20,
+        block_size=BLOCK_SIZE,
+        req_ids=["r1", "r2"],
+    )
+
+    # r1: drive through its async KV load and into the running (decode) state,
+    # so that self.running is non-empty for the assertion below.
+    scheduler.add_request(r1)
+    _step_until_kv_transfer_finished(scheduler, ["r1"])
+    output = scheduler.schedule()  # promote + schedule r1
+    assert "r1" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output, create_model_runner_output([r1], token_id=1000)
+    )
+    assert scheduler.running  # r1 now decoding
+
+    # r2: a second remote-KV request; complete its async load while r1 decodes.
+    scheduler.add_request(r2)
+    output = scheduler.schedule()  # r1 decodes; r2 -> WAITING_FOR_REMOTE_KVS
+    assert r2.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        output, create_model_runner_output([r1], finished_recving={"r2"})
+    )
+    assert "r2" in scheduler.finished_recving_kv_req_ids
+
+    # Throttle prefills. r2's load is complete, so it must be promoted and
+    # scheduled (a resume, not a fresh prefill) even though the running decode
+    # (r1) would otherwise make this a throttled step.
+    scheduler.throttle_prefills = True
+    output = scheduler.schedule()
+    assert "r2" in output.num_scheduled_tokens
+    assert "r1" in output.num_scheduled_tokens
+
+
+def test_throttle_prefills_defers_inflight_chunk():
+    """On a throttled step, an in-progress prefill chunk (a running request
+    still in its prompt phase) is deferred while decoding requests keep running;
+    once the cadence opens, the chunk resumes.
+    """
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=64, max_model_len=2048
+    )
+
+    def _output(req_ids, sampled):
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={r: i for i, r in enumerate(req_ids)},
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+
+    # D: short request driven into the decoding state.
+    (d,) = create_requests(num_requests=1, num_tokens=8, req_ids=["D"])
+    scheduler.add_request(d)
+    out = scheduler.schedule()
+    assert "D" in out.num_scheduled_tokens
+    scheduler.update_from_output(out, _output(["D"], [[0]]))
+
+    # P: long prompt that needs multiple chunks; admit its first chunk while D
+    # decodes (P still prefilling -> empty sampled token list).
+    (p,) = create_requests(num_requests=1, num_tokens=200, req_ids=["P"])
+    scheduler.add_request(p)
+    out = scheduler.schedule()
+    assert "P" in out.num_scheduled_tokens
+    scheduler.update_from_output(out, _output(["D", "P"], [[0], []]))
+    assert p in scheduler.running and p.num_computed_tokens < p.num_prompt_tokens
+
+    # Throttled step: P's in-progress chunk is deferred, D keeps decoding.
+    scheduler.throttle_prefills = True
+    out = scheduler.schedule()
+    assert "D" in out.num_scheduled_tokens
+    assert "P" not in out.num_scheduled_tokens
+
+    # Cadence open: P's prefill resumes.
+    scheduler.throttle_prefills = False
+    out = scheduler.schedule()
+    assert "P" in out.num_scheduled_tokens
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(

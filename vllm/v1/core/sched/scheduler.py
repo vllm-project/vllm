@@ -373,6 +373,11 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
+        # DP prefill balancing: on a throttled step defer all prefill compute.
+        defer_prefills = self.throttle_prefills and any(
+            not r.is_prefill_chunk for r in self.running
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -397,6 +402,12 @@ class Scheduler(SchedulerInterface):
             if self.current_step < request.next_decode_eligible_step:
                 # V2+PP+async: enforce `pp_size` steps between same-req decodes
                 # to match worker-side sampled-tokens broadcast slot ring cadence.
+                req_index += 1
+                continue
+
+            if defer_prefills and request.is_prefill_chunk:
+                # DP prefill balancing: defer this in-progress prefill chunk to a
+                # cadence-aligned step; decodes still run to fill this step.
                 req_index += 1
                 continue
 
@@ -562,9 +573,6 @@ class Scheduler(SchedulerInterface):
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
-            # DP prefill balancing: only throttle new prefills when this rank has
-            # running work to protect.
-            defer_prefills = self.throttle_prefills and bool(self.running)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
@@ -679,7 +687,7 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills:
+                elif defer_prefills and request.num_computed_tokens == 0:
                     # DP prefill balancing: async KV loads (the branch above) are
                     # allowed to start even on throttled steps, but committing new
                     # prefill compute is deferred to a cadence-aligned step.
