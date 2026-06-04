@@ -359,7 +359,7 @@ class RustFrontendProcessManager:
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
-        from vllm.entrypoints.utils import jsonify_non_default_args
+        from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
         args_json = json.dumps(
             jsonify_non_default_args(args, exclude={"api_server_count"}),
