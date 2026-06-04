@@ -623,7 +623,7 @@ def test_glm46v_dynamic_fps_thresholds(
         original_fps=original_fps,
         duration=duration,
     )
-    target = VideoTargetMetadata()
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
 
     indices = GLM46VVideoBackend.compute_frames_index_to_sample(
         source, target, temporal_patch_size=temporal_patch_size
@@ -648,11 +648,12 @@ def test_glm46v_dynamic_fps_thresholds(
 
 def test_glm46v_even_frame_count_enforcement():
     """Test that GLM-4.6V always returns an even number of frames."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
     # 5-second video at 30fps → 150 frames
     # extract_t = 5 * 3.0 * 2 = 30 (even, no padding needed)
     source_even = VideoSourceMetadata(total_frames_num=150, original_fps=30, duration=5)
     indices_even = GLM46VVideoBackend.compute_frames_index_to_sample(
-        source_even, VideoTargetMetadata()
+        source_even, target
     )
     assert len(indices_even) % 2 == 0
 
@@ -660,20 +661,21 @@ def test_glm46v_even_frame_count_enforcement():
     # extract_t = 3 * 3.0 * 2 = 18 (even, no padding needed)
     source_even2 = VideoSourceMetadata(total_frames_num=90, original_fps=30, duration=3)
     indices_even2 = GLM46VVideoBackend.compute_frames_index_to_sample(
-        source_even2, VideoTargetMetadata()
+        source_even2, target
     )
     assert len(indices_even2) % 2 == 0
 
 
 def test_glm46v_duration_estimation_from_fps():
     """Test GLM-4.6V handles missing duration by estimating from fps."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
     # duration=0 → estimated from total_frames / fps
     # (89 / 30) + 1 ≈ 4s → target_fps=3.0, extract_t = 4 * 3.0 * 2 = 24
     source_no_duration = VideoSourceMetadata(
         total_frames_num=90, original_fps=30, duration=0
     )
     indices = GLM46VVideoBackend.compute_frames_index_to_sample(
-        source_no_duration, VideoTargetMetadata()
+        source_no_duration, target
     )
 
     assert len(indices) > 0
