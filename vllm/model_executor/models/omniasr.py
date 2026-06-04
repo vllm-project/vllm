@@ -51,6 +51,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.omniasr import OmniASRConfig
+from vllm.transformers_utils.processors.omniasr import (
+    OmniASRFeatureExtractor,
+    OmniASRProcessor,
+)
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -501,6 +505,25 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(target_sr=self.get_hf_config().sampling_rate)
 
+    def get_hf_processor(self, **kwargs: object) -> OmniASRProcessor:
+        if not hasattr(self, "_cached_hf_processor"):
+            hf_config = self.get_hf_config()
+            sampling_rate = hf_config.sampling_rate
+            feature_extractor = OmniASRFeatureExtractor(
+                sampling_rate=sampling_rate,
+                padding_value=0.0,
+                feature_size=1,
+            )
+            self._cached_hf_processor = OmniASRProcessor(
+                feature_extractor, self.ctx.tokenizer
+            )
+        return self._cached_hf_processor
+
+    def get_feature_extractor(self, **kwargs: object) -> OmniASRFeatureExtractor:
+        feature_extractor = self.get_hf_processor(**kwargs).feature_extractor
+        assert isinstance(feature_extractor, OmniASRFeatureExtractor)
+        return feature_extractor
+
 
 class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo]):
     """
@@ -512,50 +535,39 @@ class OmniASRMultiModalProcessor(BaseMultiModalProcessor[OmniASRProcessingInfo])
 
     def _call_hf_processor(
         self,
-        prompt,
+        prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        data = {}
-        hf_config = self.info.get_hf_config()
-        if not mm_data.get("audios", []):
+        audios = mm_data.get("audios", [])
+        if not audios:
             prompt_ids = self.info.get_tokenizer().encode(
                 prompt, add_special_tokens=False
             )
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-        audios = mm_data.get("audios", [])
+            return BatchFeature(dict(input_ids=[prompt_ids]))
+        hf_config = self.info.get_hf_config()
+        mm_data = dict(mm_data)
+        mm_data["audio"] = mm_data.pop("audios")
         mm_kwargs = dict(
             **mm_kwargs,
             sampling_rate=hf_config.sampling_rate,
         )
-        language = mm_kwargs.get("language")
+        language = mm_kwargs.pop("language", None)
+        result = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
         lang_id = _resolve_lang_id(
             language,
             self.info.ctx.model_config.model,
             hf_config.n_special_tokens,
         )
-        data["language_id"] = torch.tensor([lang_id], dtype=torch.long)
-        features = []
-        for a in audios:
-            t = torch.tensor(a, dtype=torch.float32)
-            t = (t - t.mean()) / torch.sqrt(t.var() + NORMALIZATION_EPS)
-            features.append(t)
-
-        tokenizer = self.info.get_tokenizer()
-        if isinstance(prompt, str):
-            encoded = tokenizer(prompt, return_tensors="pt")
-            data["input_ids"] = encoded["input_ids"]
-        elif isinstance(prompt, (list, tuple)):
-            data["input_ids"] = torch.tensor([prompt], dtype=torch.long)
-        elif isinstance(prompt, torch.Tensor):
-            data["input_ids"] = prompt.unsqueeze(0) if prompt.dim() == 1 else prompt
-        else:
-            raise ValueError(f"Unexpected prompt type: {type(prompt)}")
-        data["input_features"] = features
-
-        return BatchFeature(data=data)
+        result["language_id"] = torch.tensor([lang_id], dtype=torch.long)
+        return result
 
     def _get_mm_fields_config(
         self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
