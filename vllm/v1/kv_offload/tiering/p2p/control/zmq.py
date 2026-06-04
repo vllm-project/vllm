@@ -73,7 +73,10 @@ class ZmqConnection(ControlConnection):
         return not self._closed
 
     def close(self) -> None:
+        if self._closed:
+            return
         self._closed = True
+        logger.info("ZmqConnection: closing connection to %s", self.peer_id)
         self._sockets.monitor.close()
         self._sockets.dealer.close()
 
@@ -108,7 +111,9 @@ class ZmqTransport(ControlTransport):
         self._zmq_ctx = zmq.Context()
         self._router: zmq.Socket = self._zmq_ctx.socket(zmq.ROUTER)
         _apply_heartbeat(self._router)
-        self._router.bind(_tcp_addr(host, port))
+        bind_addr = _tcp_addr(host, port)
+        self._router.bind(bind_addr)
+        logger.info("ZmqTransport %s: ROUTER bound on %s", self._local_id, bind_addr)
 
     # ------------------------------------------------------------------
     # ZmqConnection lifecycle
@@ -119,7 +124,12 @@ class ZmqTransport(ControlTransport):
         assert peer_id not in self._connections, (
             f"ZmqConnection to {peer_id} already exists"
         )
-        return self._open_connection(peer_id)
+        logger.info(
+            "ZmqTransport %s: opening OUTBOUND connection to %s",
+            self._local_id,
+            peer_id,
+        )
+        return self._open_connection(peer_id, direction="outbound")
 
     def poll(self) -> list[ControlConnection]:
         """Process all pending I/O. Returns newly accepted connections.
@@ -137,7 +147,12 @@ class ZmqTransport(ControlTransport):
         for sender_id, msg in self._pending_inbound:
             conn = self._connections.get(sender_id)
             if conn is None:
-                conn = self._open_connection(sender_id)
+                logger.info(
+                    "ZmqTransport %s: accepting INBOUND connection from %s",
+                    self._local_id,
+                    sender_id,
+                )
+                conn = self._open_connection(sender_id, direction="inbound")
                 new_connections.append(conn)
             conn.enqueue(msg)
         self._pending_inbound.clear()
@@ -165,9 +180,20 @@ class ZmqTransport(ControlTransport):
     # Internal
     # ------------------------------------------------------------------
 
-    def _open_connection(self, peer_id: str) -> ZmqConnection:
+    def _open_connection(
+        self, peer_id: str, direction: str = "outbound"
+    ) -> ZmqConnection:
         """Create a DEALER socket + monitor and register the connection."""
         host, port_str = peer_id.rsplit(":", 1)
+        dealer_addr = _tcp_addr(host, port_str)
+
+        logger.debug(
+            "ZmqTransport %s: creating DEALER for %s peer %s -> %s",
+            self._local_id,
+            direction,
+            peer_id,
+            dealer_addr,
+        )
 
         dealer = self._zmq_ctx.socket(zmq.DEALER)
         _apply_heartbeat(dealer)
@@ -180,11 +206,18 @@ class ZmqTransport(ControlTransport):
         monitor_sock = self._zmq_ctx.socket(zmq.PAIR)
         monitor_sock.connect(monitor_addr)
 
-        dealer.connect(_tcp_addr(host, port_str))
+        dealer.connect(dealer_addr)
 
         sockets = _Sockets(dealer=dealer, monitor=monitor_sock)
         conn = ZmqConnection(peer_id, sockets)
         self._connections[peer_id] = conn
+        logger.info(
+            "ZmqTransport %s: %s connection established to %s (active connections: %d)",
+            self._local_id,
+            direction,
+            peer_id,
+            len(self._connections),
+        )
         return conn
 
     def _recv_router(self) -> None:
@@ -208,6 +241,13 @@ class ZmqTransport(ControlTransport):
 
             identity, data = frames
             sender_id = identity.decode()
+
+            logger.info(
+                "ZmqTransport %s: ROUTER recv from %s (%d bytes)",
+                self._local_id,
+                sender_id,
+                len(data),
+            )
 
             try:
                 msg = msgspec.msgpack.decode(data)
