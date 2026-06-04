@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -62,22 +61,6 @@ def _prepare_dflash_inputs_to_capture(
 class DFlashCudaGraphManager(CudaGraphManager):
     """DFlash CudaGraphManager for the parallel-drafting query forward,
     building its own non-causal attention metadata from scratch."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-    ):
-        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
-
-        # Use a dedicated pool for DFlash to avoid memory overlap with the main
-        # model's cudagraph. The base class uses a shared global pool, but
-        # DFlash's internal allocations (e.g., gumbel_sample temporaries) can
-        # conflict with the main model's allocations when sharing the same pool.
-        if cudagraph_mode:
-            self.pool = torch.cuda.graph_pool_handle()
 
     def capture(
         self,
