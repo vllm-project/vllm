@@ -3,6 +3,8 @@
 import multiprocessing
 import os
 import pickle
+import tempfile
+import uuid
 import queue
 import signal
 import threading
@@ -46,10 +48,7 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_distributed_init_method,
     get_ip,
-    get_loopback_ip,
-    get_open_port,
 )
 from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
@@ -124,10 +123,15 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs()
 
-        # use the loopback address get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+        # Use a unique temp-file path per executor so that concurrent
+        # MultiprocExecutors (e.g. two DP engine cores) never collide.
+        # get_open_port() closes the probe socket before returning, leaving
+        # a TOCTOU window where two callers can both observe the same port
+        # as free and then both try to bind it → EADDRINUSE.  A UUID-keyed
+        # file:// rendezvous is guaranteed unique with no port binding at all.
+        self._init_file = os.path.join(tempfile.gettempdir(),
+                                       f"vllm_dist_{uuid.uuid4().hex}")
+        distributed_init_method = f"file://{self._init_file}"
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -467,6 +471,11 @@ class MultiprocExecutor(Executor):
             for mq in response_mqs:
                 mq.shutdown()
             self.response_mqs = []
+
+        with suppress(OSError):
+            if init_file := getattr(self, "_init_file", None):
+                os.remove(init_file)
+                self._init_file = None
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
