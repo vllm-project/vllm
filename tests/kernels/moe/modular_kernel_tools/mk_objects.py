@@ -36,8 +36,8 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
     has_flashinfer_nvlink_one_sided,
+    has_flashinfer_trtllm_fused_moe,
 )
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.import_utils import (
     has_aiter,
     has_deep_ep,
@@ -314,7 +314,6 @@ if has_flashinfer_trtllm_fused_moe() and current_platform.has_device_capability(
         standard_format,
         fp8_types,
         blocked_quantization_support=True,
-        supports_expert_map=True,
     )
 
 if has_aiter():

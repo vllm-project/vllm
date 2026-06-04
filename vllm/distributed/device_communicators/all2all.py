@@ -889,7 +889,8 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         use_fp8_dispatch: bool,
     ) -> dict:
         return dict(
-            group=self._device_group if self._device_group is not None
+            group=self._device_group
+            if self._device_group is not None
             else self.cpu_group,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             hidden=hidden,

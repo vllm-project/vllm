@@ -184,12 +184,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 offset = 0
                 for i, count in enumerate(recv_expert_num_tokens):
                     if count > 0:
-                        recv_topk_idx[offset:offset + count].fill_(
-                            i + self.rank_expert_offset)
+                        recv_topk_idx[offset : offset + count].fill_(
+                            i + self.rank_expert_offset
+                        )
                         offset += count
             else:
                 recv_topk_idx = torch.empty(
-                    0, dtype=torch.int64, device=expert_x.device,
+                    0,
+                    dtype=torch.int64,
+                    device=expert_x.device,
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
@@ -211,7 +214,8 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens, device=expert_x.device,
+            recv_expert_num_tokens,
+            device=expert_x.device,
         )
 
         if not quant_config.is_block_quantized and not defer_input_quant:

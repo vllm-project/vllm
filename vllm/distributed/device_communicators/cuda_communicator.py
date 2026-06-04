@@ -150,7 +150,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPV2All2AllManager
 
                 self.all2all_manager = DeepEPV2All2AllManager(
-                    self.cpu_group, tcp_store_group,
+                    self.cpu_group,
+                    tcp_store_group,
                     device_group=self.device_group,
                 )
             elif self.all2all_backend == "nixl_ep":

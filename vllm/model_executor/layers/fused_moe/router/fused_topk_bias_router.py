@@ -346,10 +346,8 @@ class FusedTopKBiasRouter(BaseRouter):
         if indices_type is not None:
             if input_ids is not None:
                 input_ids = input_ids.to(dtype=indices_type)
-            if (hash_table is not None
-                    and hash_table.dtype != indices_type):
-                self._hash_indices_table = hash_table.to(
-                    dtype=indices_type)
+            if hash_table is not None and hash_table.dtype != indices_type:
+                self._hash_indices_table = hash_table.to(dtype=indices_type)
                 hash_table = self._hash_indices_table
 
         topk_weights, topk_ids = fused_topk_bias(

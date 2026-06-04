@@ -712,8 +712,12 @@ def _maybe_convert_weights_for_experts(
     )
 
     return WeightTensors(
-        w1=w1, w2=w2, w1_scale=w1_scale, w2_scale=w2_scale,
-        w1_gs=rank_weights.w1_gs, w2_gs=rank_weights.w2_gs,
+        w1=w1,
+        w2=w2,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_gs=rank_weights.w1_gs,
+        w2_gs=rank_weights.w2_gs,
     )
 
 

@@ -417,6 +417,8 @@ def _deep_ep_v2_moe_cudagraph(
         e_end = e_start + num_local_experts
         w1_ep = qw.w13_weight[e_start:e_end]
         w2_ep = qw.w2_weight[e_start:e_end]
+        assert qw.w13_weight_scale is not None
+        assert qw.w2_weight_scale is not None
         w1_scale_ep = qw.w13_weight_scale[e_start:e_end]
         w2_scale_ep = qw.w2_weight_scale[e_start:e_end]
 
