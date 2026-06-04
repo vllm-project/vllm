@@ -13,8 +13,8 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionState,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
     CudaGraphManager,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
@@ -30,7 +30,7 @@ def _prepare_dflash_inputs_to_capture(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     skip_attn: bool,
-) -> CapturedAttentionState:
+) -> AttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
@@ -56,7 +56,7 @@ def _prepare_dflash_inputs_to_capture(
             for_cudagraph_capture=True,
             causal=False,
         )
-    return CapturedAttentionState(attn_metadata, slot_mappings_by_layer)
+    return AttentionState(attn_metadata, slot_mappings_by_layer)
 
 
 class DFlashCudaGraphManager(CudaGraphManager):
@@ -91,7 +91,8 @@ class DFlashCudaGraphManager(CudaGraphManager):
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
+            warmup: bool,
+        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
