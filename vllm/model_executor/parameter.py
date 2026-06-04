@@ -444,7 +444,9 @@ class SharedWeightParameter(BasevLLMParameter):
                 "currently support tensor parallelism"
             )
 
-    def add_partition(self, index: int, data_key: Hashable, *args, **kwargs):
+    def add_partition(
+        self, index: int, data_key: Hashable, *args: list, **kwargs: dict
+    ):
         """
         Add a partition to the weight parameter. Partitions whose `data_key`
         is the same will share tensor data
