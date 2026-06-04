@@ -278,7 +278,7 @@ class Parser:
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from a complete model-generated string.
@@ -302,7 +302,7 @@ class Parser:
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
         """
         Extract tool calls from a streaming delta message.
@@ -516,19 +516,10 @@ class DelegatingParser(Parser):
             and (request.tool_choice == "auto" or request.tool_choice is None)
         ):
             # Automatic Tool Call Parsing
-            tool_call_info = None
-            try:
-                tool_call_info = self._tool_parser.extract_tool_calls(
-                    content if content is not None else "",
-                    request=request,  # type: ignore
-                )
-            finally:
-                record_tool_parser_invocation(
-                    mode="non_streaming",
-                    tools_called=tool_call_info is not None
-                    and tool_call_info.tools_called,
-                    request=request,
-                )
+            tool_call_info = self.extract_tool_calls(
+                content if content is not None else "",
+                request=request,
+            )
             if tool_call_info is not None and tool_call_info.tools_called:
                 function_calls.extend(
                     FunctionCall(
@@ -617,19 +608,10 @@ class DelegatingParser(Parser):
         elif is_auto_tool_choice or use_mistral_tool_parser:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
-            tool_call_info = None
-            try:
-                tool_call_info = tool_parser.extract_tool_calls(
-                    content if content is not None else "",
-                    request=request,  # type: ignore
-                )
-            finally:
-                record_tool_parser_invocation(
-                    mode="non_streaming",
-                    tools_called=tool_call_info is not None
-                    and tool_call_info.tools_called,
-                    request=request,
-                )
+            tool_call_info = self.extract_tool_calls(
+                content if content is not None else "",
+                request=request,
+            )
             if tool_call_info is not None and tool_call_info.tools_called:
                 tool_calls.extend(
                     FunctionCall(
@@ -680,7 +662,7 @@ class DelegatingParser(Parser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
         if self._tool_parser is None:
             return ExtractedToolCallInformation(
@@ -688,7 +670,10 @@ class DelegatingParser(Parser):
             )
         result = None
         try:
-            result = self._tool_parser.extract_tool_calls(model_output, request)
+            result = self._tool_parser.extract_tool_calls(
+                model_output,
+                request=request,  # type: ignore[arg-type]
+            )
         finally:
             record_tool_parser_invocation(
                 mode="non_streaming",
@@ -705,7 +690,7 @@ class DelegatingParser(Parser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
     ) -> DeltaMessage | None:
         if self._tool_parser is None:
             return None
@@ -718,7 +703,7 @@ class DelegatingParser(Parser):
                 previous_token_ids,
                 current_token_ids,
                 delta_token_ids,
-                request,
+                request,  # type: ignore[arg-type]
             )
         finally:
             record_tool_parser_invocation(
@@ -782,7 +767,7 @@ class DelegatingParser(Parser):
             previous_token_ids,
             current_token_ids,
             delta_token_ids,
-            request,  # type: ignore[arg-type]
+            request,
         ), False
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
