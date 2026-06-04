@@ -110,6 +110,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     isaac="IsaacConfig",
     kimi_k2="DeepseekV3Config",  # Kimi K2 uses same architecture as DeepSeek V3
     kimi_linear="KimiLinearConfig",
+    rwkv7="RWKV7Config",
     kimi_vl="KimiVLConfig",
     kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)

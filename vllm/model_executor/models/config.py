@@ -394,6 +394,35 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
+class RWKV7ForCausalLMConfig(MambaModelConfig):
+    """RWKV-7 inherits the Mamba defaults but also constrains
+    ``mamba_block_size`` to one of the chunk sizes the DPLR chunk kernel is
+    tuned for (16, 64). The mixer uses the block size as ``chunk_size``
+    so each cache block lines up with exactly one chunk-end recurrent
+    state; mismatched values silently corrupt prefix-cache hits on long
+    prompts.
+    """
+
+    SUPPORTED_BLOCK_SIZES = (16, 64)
+
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        super().verify_and_update_config(vllm_config)
+        cache_config = vllm_config.cache_config
+        if not cache_config.enable_prefix_caching:
+            return
+        if cache_config.mamba_block_size not in cls.SUPPORTED_BLOCK_SIZES:
+            original = cache_config.mamba_block_size
+            cache_config.mamba_block_size = 64
+            logger.warning(
+                "RWKV-7 with prefix caching requires mamba_block_size in "
+                "%s (kernel-tuned chunk sizes); got %s. Falling back to "
+                "mamba_block_size=64.",
+                cls.SUPPORTED_BLOCK_SIZES,
+                original,
+            )
+
+
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
     DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
@@ -611,6 +640,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "RWKV7ForCausalLM": RWKV7ForCausalLMConfig,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,

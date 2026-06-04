@@ -476,6 +476,7 @@ th {
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `RWForCausalLM` | Falcon RW | `tiiuae/falcon-40b`, etc. | | ✅︎ |
+| `RWKV7ForCausalLM` | RWKV-7 "Goose" | `fla-hub/rwkv7-0.1B-g1`, `fla-hub/rwkv7-1.5B-g1`, `fla-hub/rwkv7-2.9B-g1`, `fla-hub/rwkv7-1.5B-world`, etc. | | |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |

@@ -124,6 +124,20 @@ class MambaStateDtypeCalculator:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, state_dtype, state_dtype, torch.float32)
 
+    @classmethod
+    def rwkv7_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, torch.dtype, torch.dtype]:
+        # RWKV-7 keeps its recurrent state in fp32 regardless of cache dtype:
+        # the chunk/recurrent kernels accumulate `S = exp(w) * S + b @ a^T` per
+        # token and lose accuracy quickly in lower precision. The two shift
+        # buffers (attn + FFN) hold one previous hidden state each and follow
+        # the model dtype.
+        shift_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        return (shift_state_dtype, shift_state_dtype, torch.float32)
+
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -232,6 +246,35 @@ class MambaStateShapeCalculator:
             head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def rwkv7_state_shape(
+        cls,
+        tp_world_size: int,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        head_v_dim: int,
+    ) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int, int]]:
+        # RWKV-7 has no causal conv1d. Each block does its own token_shift,
+        # so we keep two independent 1-token shift buffers per layer:
+        # one for the time-mix block, one for the channel-mix (FFN) block.
+        # The shift operates on the layer input, which is the full-hidden
+        # (replicated) tensor that feeds the column-parallel projections,
+        # so the shift state holds the full hidden dim on every rank --
+        # it is not sharded along ``tp_world_size``. The duplicated bytes
+        # are negligible (one token per layer per sequence).
+        attn_shift_shape = (1, hidden_size)
+        ffn_shift_shape = (1, hidden_size)
+        # Recurrent matrix-valued state per head: shape (H/tp, K, V).
+        # For the dense Goose family K == V == head_dim, but we keep them
+        # independent to support `value_dim` overrides in future configs.
+        recurrent_state_shape = (
+            divide(num_heads, tp_world_size),
+            head_dim,
+            head_v_dim,
+        )
+        return attn_shift_shape, ffn_shift_shape, recurrent_state_shape
 
     @classmethod
     def kda_state_shape(
@@ -371,3 +414,11 @@ class MambaStateCopyFuncCalculator:
             get_conv_copy_spec,
             get_temporal_copy_spec,
         )
+
+    @classmethod
+    def rwkv7_state_copy_func(cls):
+        # Two shift caches (attn time-mix, FFN channel-mix) + recurrent state.
+        # Only invoked by mamba prefix-cache machinery in 'align' mode, which
+        # RWKV-7 does not enter on this branch (we use 'all' mode), so this
+        # is registered for parity with other recurrent models.
+        return (get_conv_copy_spec, get_conv_copy_spec, get_temporal_copy_spec)
