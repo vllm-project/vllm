@@ -677,11 +677,23 @@ class EplbState:
         self._update_layer_should_record(log_stats=log_stats)
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
-        # TODO (Sage): Previously we only needed to record stats for the logging
-        # interval. Now that prometheus metrics are hooked up, we need to
-        # unconditionally collect stats for each step when EPLB is enabled. This whole
-        # code path should be reworked/removed.
-        return True
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            return True
+
+        steps_remaining = (
+            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+        )
+        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
+
+        if not log_stats:
+            return should_record_for_rearrange
+
+        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
+        steps_until_next_log = (
+            log_interval - (self.expert_rearrangement_step % log_interval)
+        ) % log_interval
+        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
+        return should_record_for_rearrange or should_record_for_log
 
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
         """Update the shared ``should_record_tensor`` for all layers."""
