@@ -9,7 +9,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.utils import StatelessProcessGroup
+from vllm.distributed.utils import (
+    StatelessProcessGroup,
+    stateless_destroy_torch_distributed_process_group,
+    stateless_init_torch_distributed_process_group,
+)
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -43,6 +47,31 @@ def test_cuda_device_count_stateless():
     assert ray.get(actor.get_count.remote()) == 1
     ray.get(actor.set_cuda_visible_devices.remote(""))
     assert ray.get(actor.get_count.remote()) == 0
+
+
+def test_stateless_init_with_elastic_agent_store_env(monkeypatch):
+    """A stateless group owns a private ``host:port``.
+
+    ``torchrun`` exports ``TORCHELASTIC_USE_AGENT_STORE`` into every worker,
+    which makes ``torch.distributed.rendezvous`` hand back a client-only
+    ``TCPStore`` on every rank -- nobody would serve the group's own port and
+    every rank would block until the store timeout (30 minutes for gloo).
+    """
+    monkeypatch.setenv("TORCHELASTIC_USE_AGENT_STORE", "True")
+    pg = stateless_init_torch_distributed_process_group(
+        host="127.0.0.1",
+        port=get_open_port(),
+        rank=0,
+        world_size=1,
+        backend="gloo",
+        group_name="test_elastic_agent_store",
+    )
+    try:
+        tensor = torch.ones(1)
+        pg.allreduce([tensor]).wait()
+        assert tensor.item() == 1
+    finally:
+        stateless_destroy_torch_distributed_process_group(pg)
 
 
 def cpu_worker(rank, WORLD_SIZE, port1, port2):

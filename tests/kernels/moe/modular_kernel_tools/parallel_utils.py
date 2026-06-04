@@ -88,8 +88,14 @@ def _worker_parallel_launch(
     rank = node_rank * world_local_size + local_rank
     device = torch.device("cuda", local_rank)
     torch.accelerator.set_device_index(device)
+    # Mirror vLLM's own world init: with VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1
+    # (the default) ``init_distributed_environment`` (called below via
+    # ``_set_vllm_config``) forces every GroupCoordinator onto the parent's
+    # "nccl2" cuda backend, and split_group matches backend names exactly, so
+    # a "cuda:nccl" parent here fails with "Backend mismatch for device 'cuda'".
+    device_backend = "nccl2" if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP else "nccl"
     torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:gloo,cuda:{device_backend}",
         init_method=init_method,
         rank=rank,
         world_size=world_size,

@@ -399,8 +399,10 @@ def qr_variable_input(rank, world_size):
     for i in range(world_size):
         ranks.append(i)
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        # Must match vLLM's own split_group world init (cpu:gloo,cuda:nccl2);
+        # split_group compares backend names verbatim against the parent PG.
         dist.init_process_group(
-            backend="cpu:gloo,cuda:nccl",
+            backend="cpu:gloo,cuda:nccl2",
             init_method="tcp://127.0.0.1:29500",
             rank=rank,
             world_size=world_size,
@@ -414,9 +416,8 @@ def qr_variable_input(rank, world_size):
             world_size=world_size,
         )
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
-        cpu_group = torch.distributed.split_group(
-            split_ranks=[ranks], backend="cpu:gloo,cuda:nccl"
-        )
+        # ``backend`` left unset: inherit the parent PG's per-device backends.
+        cpu_group = torch.distributed.split_group(split_ranks=[ranks])
     else:
         cpu_group = torch.distributed.new_group(ranks, backend="nccl")
 

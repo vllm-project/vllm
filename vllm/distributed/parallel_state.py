@@ -244,12 +244,51 @@ def _platform_device_type() -> str:
         return "cpu"
 
 
+# Name of the accelerator-side backend used by the ``split_group`` code path.
+# ``split_group`` matches backend names *exactly* against the parent process
+# group, so the world PG and every subgroup carved off it must spell the
+# backend the same way. Keep this the single source of truth.
+_SPLIT_GROUP_DEVICE_BACKEND = "nccl2"
+
+# Point-to-point backend for the pipeline-parallel device group: a lazily
+# initialized per-peer communicator so send/recv to different stages overlap.
+_PP_DEVICE_BACKEND = "nccl-lazy"
+
+
+def _split_group_backend_for_device(device_type: str, backend: str) -> str:
+    """Backend name to use for ``device_type`` on the ``split_group`` path.
+
+    Only CUDA/ROCm has an ``nccl2`` implementation; every other accelerator
+    keeps whatever backend the platform asked for (e.g. ``xccl`` on XPU).
+    """
+    if device_type == "cuda":
+        return _SPLIT_GROUP_DEVICE_BACKEND
+    return backend
+
+
+def _use_split_group() -> bool:
+    """Whether subgroups are carved off the default PG with ``split_group``.
+
+    Requires the opt-in *and* a device-bound default PG: ``split_group``
+    refuses to split a PG without a ``bound_device_id``, which is exactly what
+    a gloo world is (CPU-only platform, or a device backend torch does not have
+    registered -- see ``_init_process_group_for_split_group``). Those setups
+    keep the legacy ``new_group`` path.
+    """
+    if not envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        return False
+    if not torch.distributed.is_initialized():
+        return False
+    default_pg = torch.distributed.distributed_c10d._get_default_group()
+    return default_pg.bound_device_id is not None
+
+
 def _device_backend_str(torch_distributed_backend: str | Backend) -> str:
     """Normalize ``torch_distributed_backend`` to the ``"<device>:<backend>"``
     format required by ``split_group``'s ``backend`` argument.
 
-    Accepts either a bare backend name (e.g. ``"nccl"``) or an already-prefixed
-    string (e.g. ``"cuda:nccl"``).
+    Accepts either a bare backend name (e.g. ``"nccl2"``) or an already-prefixed
+    string (e.g. ``"cuda:nccl2"``).
     """
     backend_str = str(torch_distributed_backend)
     if ":" in backend_str:
@@ -285,6 +324,47 @@ def _create_subgroups_split_group(
         group_desc=f"{group_name}:cpu",
         backend=f"cpu:gloo,{device_backend_str}",
     )
+    return self_device_group, self_cpu_group
+
+
+def _create_subgroups_pp_lazy(
+    group_ranks: list[list[int]],
+    group_name: str,
+    rank: int,
+    local_rank: int,
+    torch_distributed_backend: str | Backend,
+) -> tuple[ProcessGroup | None, ProcessGroup]:
+    """Create the pipeline-parallel device + CPU subgroups.
+
+    The device subgroup uses the ``nccl-lazy`` backend so each pipeline-stage
+    peer gets a dedicated lazily-initialized P2P comm/stream, letting send/recv
+    to different stages overlap (unlike split_group's single shared comm). It is
+    created members-only (``use_local_synchronization=True``) over the
+    device_id-bound nccl2 parent, which does not implement the eager new_group
+    split path; every rank belongs to exactly one pipeline group, so it makes a
+    single members-only call.
+
+    The CPU subgroup is created via ``split_group`` (collective over the parent),
+    exactly like TP/DP in ``_create_subgroups_split_group``.
+    """
+    device_backend_str = _device_backend_str(torch_distributed_backend)
+    self_cpu_group = torch.distributed.split_group(
+        split_ranks=group_ranks,
+        group_desc=f"{group_name}:cpu",
+        backend=f"cpu:gloo,{device_backend_str}",
+    )
+    self_device_group = None
+    device_id = torch.device(f"cuda:{local_rank}")
+    for ranks in group_ranks:
+        if rank not in ranks:
+            continue
+        self_device_group = torch.distributed.new_group(
+            ranks,
+            backend=_PP_DEVICE_BACKEND,
+            use_local_synchronization=True,
+            device_id=device_id,
+        )
+        break
     return self_device_group, self_cpu_group
 
 
@@ -396,12 +476,31 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
-        # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the new ``split_group``
-        # codepath. Default (False) preserves the legacy ``new_group`` path.
-        if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
-            self_device_group, self_cpu_group = _create_subgroups_split_group(
-                group_ranks, group_name, torch_distributed_backend
-            )
+        # VLLM_DISTRIBUTED_USE_SPLIT_GROUP gates the ``split_group`` codepath.
+        # Default (True) uses split_group over the eagerly-initialized,
+        # device_id-bound world PG; set it to 0 for the legacy ``new_group``
+        # path. A gloo world is not device-bound and cannot be split, so it
+        # also takes the legacy path.
+        if _use_split_group():
+            # ``nccl-lazy`` only exists for CUDA/ROCm; on other accelerators the
+            # pipeline group falls back to split_group like every other group.
+            # The predicate depends only on the platform and the group name, so
+            # every rank takes the same branch (both helpers are collective).
+            if group_name == "pp" and _platform_device_type() == "cuda":
+                # The pipeline-parallel device group uses per-peer lazy P2P
+                # comms (nccl-lazy) so send/recv to different stages overlap;
+                # every other group, and every cpu group, stays on split_group.
+                self_device_group, self_cpu_group = _create_subgroups_pp_lazy(
+                    group_ranks,
+                    group_name,
+                    self.rank,
+                    local_rank,
+                    torch_distributed_backend,
+                )
+            else:
+                self_device_group, self_cpu_group = _create_subgroups_split_group(
+                    group_ranks, group_name, torch_distributed_backend
+                )
             for ranks in group_ranks:
                 if self.rank in ranks:
                     self.ranks = ranks
@@ -486,16 +585,31 @@ class GroupCoordinator:
     def make_sibling_device_group(self, group_desc: str | None = None) -> ProcessGroup:
         """Create a new device-side ProcessGroup with the same per-rank membership
         as this coordinator's `device_group`, but backed by a distinct communicator.
-        This is a collective call: every world rank must invoke it. Used where we
-        want to issue ops that can run concurrently with ops on `device_group`.
+        This is the pipeline-parallel sibling, so on the split_group path it uses
+        the ``nccl-lazy`` backend (per-peer lazy P2P comms); the legacy path keeps
+        this coordinator's own backend so it stays a faithful stock baseline.
+        Every rank creates only its own group members-only
+        (``use_local_synchronization=True``): the nccl2 parent does not implement
+        the eager new_group split path, and members-only groups use hashed names
+        so ``_world.group_count`` cannot diverge between ranks. Used where we want
+        to issue ops that can run concurrently with ops on `device_group`.
         """
         sibling: ProcessGroup | None = None
+        device_id = torch.device(f"cuda:{self.local_rank}")
+        if _use_split_group() and _platform_device_type() == "cuda":
+            backend = _PP_DEVICE_BACKEND
+        else:
+            backend = str(self.torch_distributed_backend)
         for ranks in self.group_ranks:
-            pg = torch.distributed.new_group(
-                ranks, backend=self.torch_distributed_backend, group_desc=group_desc
+            if self.rank not in ranks:
+                continue
+            sibling = torch.distributed.new_group(
+                ranks,
+                backend=backend,
+                group_desc=group_desc,
+                use_local_synchronization=True,
+                device_id=device_id,
             )
-            if self.rank in ranks:
-                sibling = pg
         assert sibling is not None
         return sibling
 
@@ -1431,14 +1545,16 @@ def _init_process_group_for_split_group(
     local_rank: int,
     timeout: timedelta | None,
 ) -> None:
-    """Initialize the default PG with both CPU (gloo) and device (e.g. nccl)
+    """Initialize the default PG with both CPU (gloo) and device (e.g. nccl2)
     backends and an eager ``device_id`` binding so that subgroups can be
     created via ``split_group`` (which requires the parent communicator to
     be eagerly initialized). Falls back to ``gloo`` on CPU-only systems.
     """
     if torch.accelerator.is_available() and backend != "gloo":
-        init_backend = "cpu:gloo,cuda:nccl"
-        device_id: torch.device | None = torch.device(f"cuda:{local_rank}")
+        device_type = _platform_device_type()
+        device_backend = _split_group_backend_for_device(device_type, backend)
+        init_backend = f"cpu:gloo,{device_type}:{device_backend}"
+        device_id: torch.device | None = torch.device(f"{device_type}:{local_rank}")
     else:
         init_backend = "gloo"
         device_id = None
@@ -1455,7 +1571,7 @@ def _init_process_group_for_split_group(
 def _validate_default_pg_for_split_group() -> None:
     """When an external launcher (e.g. ``torchrun``) initialized the default
     PG, ``GroupCoordinator`` cannot patch in additional backends or change
-    the eager-init behavior — ``split_group`` only selects subsets of an
+    the eager-init behavior -- ``split_group`` only selects subsets of an
     existing parent. Validate that the parent has both ``device_id`` and a
     CPU (gloo) backend, and emit a descriptive error pointing at the exact
     init call to update otherwise.
@@ -1473,7 +1589,7 @@ def _validate_default_pg_for_split_group() -> None:
         raise RuntimeError(
             "External launcher initialized the default process group "
             "without a CPU (gloo) backend. vLLM requires both CPU and "
-            "device backends. Pass backend='cpu:gloo,cuda:nccl' to "
+            "device backends. Pass backend='cpu:gloo,cuda:nccl2' to "
             "torch.distributed.init_process_group()."
         ) from e
 
@@ -1518,7 +1634,7 @@ def init_distributed_environment(
     rank: int = -1,
     distributed_init_method: str = "env://",
     local_rank: int = -1,
-    backend: str = "nccl",
+    backend: str = "nccl2",
     timeout: timedelta | None = None,
 ):
     logger.debug(
@@ -1625,8 +1741,27 @@ def init_distributed_environment(
                     "Elastic EP is not yet supported with multi-node TP/PP"
                 )
 
-    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP and torch.accelerator.is_available():
+    # ``backend == "gloo"`` means there is no device backend to split on: either
+    # the platform is CPU-only or the requested device backend is not available
+    # (see the fallback above). ``_init_process_group_for_split_group`` opts out
+    # of the device-bound world in that case, so a device-bound parent must not
+    # be required of it either -- the accelerator torch reports is unused.
+    if (
+        envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP
+        and torch.accelerator.is_available()
+        and backend != "gloo"
+    ):
         _validate_default_pg_for_split_group()
+        # The split-group parent PG is device-bound with the "nccl2" backend
+        # (selected in _init_process_group_for_split_group, and required of any
+        # external-launcher parent by the validation above). split_group filters
+        # subgroups by the parent's per-device backend name and requires an
+        # *exact* match, so the GroupCoordinators (world/TP/PP/DP) must request
+        # "nccl2" -- not the platform's plain dist_backend (e.g. "nccl"), which
+        # would raise a "Backend mismatch" error. Only the split-group path is
+        # affected; the legacy new_group path below keeps using the
+        # caller-provided backend unchanged.
+        backend = _split_group_backend_for_device(_platform_device_type(), backend)
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
@@ -1719,7 +1854,21 @@ def initialize_model_parallel(
         # Use stateless world group for global information
         world_size = get_world_group().world_size
         rank = get_world_group().rank
-        backend = backend or "nccl"
+        # The elastic-EP world is a StatelessGroupCoordinator, which is not
+        # registered in torch's pg_map, so ``get_backend()`` cannot be used to
+        # recover the backend the way the non-elastic branch below does. Fall
+        # back to the same name ``init_distributed_environment`` picked: under
+        # the split_group path the TP/PP/PCP/DCP GroupCoordinators are carved
+        # off the "cuda:nccl2" default PG and split_group matches backend names
+        # exactly, so requesting plain "nccl" here raises "Backend mismatch".
+        if backend is None:
+            from vllm.platforms import current_platform
+
+            backend = current_platform.dist_backend
+            if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+                backend = _split_group_backend_for_device(
+                    _platform_device_type(), backend
+                )
         tp_pp_pcp_size = (
             tensor_model_parallel_size
             * pipeline_model_parallel_size

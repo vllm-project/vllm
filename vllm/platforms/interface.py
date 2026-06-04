@@ -35,6 +35,70 @@ def in_wsl() -> bool:
     return "microsoft" in " ".join(platform.uname()).lower()
 
 
+def init_nccl_family_stateless_pg(
+    backend: str,
+    prefix_store: "PrefixStore",
+    group_rank: int,
+    group_size: int,
+    timeout: timedelta,
+) -> "ProcessGroup":
+    """Build a stateless (globally unregistered) CUDA ProcessGroup for one of
+    the NCCL-family c10d backends.
+
+    ``backend`` is honored, not assumed: callers select ``"nccl2"`` (the in-tree
+    native port) or ``"nccl-lazy"`` (per-peer lazy P2P comms) as well as the
+    stock ``"nccl"``. Silently building a stock ``ProcessGroupNCCL`` for a
+    requested ``nccl2`` group would put the stateless DP/EP groups on a
+    different backend than the rest of the job.
+
+    A device-qualified spec (``"cuda:nccl2"``) is accepted for convenience.
+    """
+    from torch.distributed import ProcessGroup
+    from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+    name = str(backend)
+    if ":" in name:
+        name = name.rsplit(":", 1)[1]
+
+    if name in ("nccl2", "nccl-lazy"):
+        from torch.distributed.distributed_c10d import (
+            ProcessGroupNCCL2,
+            ProcessGroupNCCLLazy,
+        )
+
+        backend_options = ProcessGroupNCCL2.Options()
+        backend_options._timeout = timeout
+        # A stateless group is its own world: it is not a subset of any parent,
+        # so there are no global ranks to record.
+        backend_options.global_ranks_in_group = []
+        backend_cls = ProcessGroupNCCL2 if name == "nccl2" else ProcessGroupNCCLLazy
+        backend_class = backend_cls(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        # nccl2 / nccl-lazy register with c10d as CUSTOM backend types
+        # (see Backend.register_backend in torch.distributed.distributed_c10d),
+        # so the ProcessGroup must advertise the same type or lookups by
+        # BackendType miss.
+        backend_type = ProcessGroup.BackendType.CUSTOM
+    elif name in ("nccl", "nccl-legacy"):
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+        backend_class = ProcessGroupNCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.NCCL
+    else:
+        raise ValueError(
+            f"Unsupported device backend {backend!r} for a stateless CUDA "
+            "process group; expected one of 'nccl', 'nccl2', 'nccl-lazy'."
+        )
+
+    pg: ProcessGroup = ProcessGroup(prefix_store, group_rank, group_size)
+    pg._set_default_backend(backend_type)
+    pg._register_backend(torch.device("cuda"), backend_type, backend_class)
+    return pg
+
+
 class PlatformEnum(enum.Enum):
     """Enumeration of supported hardware platforms."""
 

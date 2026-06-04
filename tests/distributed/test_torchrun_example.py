@@ -13,14 +13,16 @@ from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_world_group
 
 # By default, let PyTorch choose the WORLD backend for the current device
-# type (legacy lazy-init path). When VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1,
-# use the explicit eager-init pattern required by `split_group` (mixed
-# cpu:gloo,cuda:nccl backend + device_id binding).
+# type (legacy lazy-init path). When VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1, use
+# the explicit eager-init pattern required by ``split_group`` (mixed
+# cpu:gloo,cuda:nccl2 backend + device_id binding). The device backend must
+# match vLLM's own world init exactly -- split_group compares backend names
+# verbatim against the parent PG.
 if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend="cpu:gloo,cuda:nccl2",
         device_id=torch.device(f"cuda:{local_rank}"),
     )
 else:

@@ -15,6 +15,7 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
+import vllm.envs as envs
 from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.network_utils import get_open_port
 
@@ -54,8 +55,13 @@ def _worker_parallel_launch(
     rank = node_rank * world_local_size + local_rank
     torch.accelerator.set_device_index(local_rank)
     device = torch.device("cuda", local_rank)
+    # Mirror vLLM's own world init: with VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1
+    # (the default) every group is carved off a device_id-bound
+    # ``cpu:gloo,cuda:nccl2`` parent, and split_group matches backend names
+    # exactly. Workers launched from here call split_group directly.
+    device_backend = "nccl2" if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP else "nccl"
     torch.distributed.init_process_group(
-        backend="cpu:gloo,cuda:nccl",
+        backend=f"cpu:gloo,cuda:{device_backend}",
         init_method=init_method,
         rank=rank,
         world_size=world_size,

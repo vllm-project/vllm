@@ -382,7 +382,7 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     torch.accelerator.set_device_index(local_rank)
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
         dist.init_process_group(
-            backend="cpu:gloo,cuda:nccl",
+            backend="cpu:gloo,cuda:nccl2",
             device_id=torch.device(f"cuda:{local_rank}"),
         )
     else:

@@ -26,7 +26,12 @@ from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import (
+    DeviceCapability,
+    Platform,
+    PlatformEnum,
+    init_nccl_family_stateless_pg,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -475,26 +480,9 @@ class CudaPlatformBase(Platform):
         timeout: timedelta,
     ) -> ProcessGroup:
         assert is_nccl_available()
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
+        return init_nccl_family_stateless_pg(
+            backend, prefix_store, group_rank, group_size, timeout
         )
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(
-            prefix_store, group_rank, group_size, backend_options
-        )
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-        pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
 
     @classmethod
     def device_count(cls) -> int:

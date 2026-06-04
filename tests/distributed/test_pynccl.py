@@ -85,10 +85,12 @@ def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
         # Eager-init path: parent PG has bound_device_id + a CPU backend,
-        # so split_group is supported.
-        group = torch.distributed.split_group(
-            split_ranks=[[0, 1], [2, 3]], backend="cpu:gloo,cuda:nccl"
-        )
+        # so split_group is supported. Leave ``backend`` unset so the child
+        # inherits the parent's per-device backends verbatim -- naming them
+        # explicitly ("cuda:nccl") breaks as soon as the world is built with a
+        # different device backend (e.g. nccl2), since split_group requires an
+        # exact name match.
+        group = torch.distributed.split_group(split_ranks=[[0, 1], [2, 3]])
     else:
         groups = [
             torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
@@ -348,9 +350,9 @@ def test_pynccl_send_recv():
 def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
-        group = torch.distributed.split_group(
-            split_ranks=[[0, 2], [1, 3]], backend="cpu:gloo,cuda:nccl"
-        )
+        # ``backend`` left unset: inherit the parent PG's per-device backends
+        # (see multiple_allreduce_worker_fn).
+        group = torch.distributed.split_group(split_ranks=[[0, 2], [1, 3]])
     else:
         groups = [
             torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
