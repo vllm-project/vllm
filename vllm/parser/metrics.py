@@ -83,7 +83,6 @@ def record_tool_parser_invocation(
             request_type = RequestType.RESPONSES
         case _:
             request_type = RequestType.OTHER
-            return
 
     match is_tool_called:
         case bool():
