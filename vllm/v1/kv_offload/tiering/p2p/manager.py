@@ -9,6 +9,7 @@ Owns transports, sessions, and the SecondaryTierManager interface.
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -70,14 +71,19 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._finished_jobs: list[JobResult] = []
         self._failed_req_ids: set[str] = set()
 
-        # Concurrency: a single re-entrant lock serialises the poller thread
-        # against the scheduler thread. The scheduler thread acquires the
-        # lock lazily on its first API call of a step (via _ensure_locked)
-        # and releases it in on_schedule_end. RLock allows safe re-entry
-        # when _poll_once is invoked from the scheduler thread (e.g. when
-        # the background poller is disabled in tests).
+        # Concurrency: a re-entrant lock serialises the poller thread
+        # against the scheduler thread. Each public API method acquires the
+        # lock around its body and releases it on return. RLock allows safe
+        # re-entry when one method calls another (e.g. when get_finished_jobs
+        # drives _poll_once synchronously in test mode).
         self._lock = threading.RLock()
-        self._cycle_lock_held: bool = False
+
+        # Poller stats for diagnostics (poller-thread-only fields).
+        self._poll_acquire_count: int = 0
+        self._poll_wait_warned_at: float = 0.0
+        self._poll_max_wait_s: float = 0.0
+        self._poll_max_held_s: float = 0.0
+
         self._stop_event = threading.Event()
         self._poller_thread: threading.Thread | None = None
         if self._poller_enabled:
@@ -94,19 +100,19 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        self._ensure_locked()
-        kv_params = req_context.kv_transfer_params
-        if (
-            not kv_params
-            or not kv_params.get("do_remote_prefill")
-            or not kv_params.get("remote_host")
-            or not kv_params.get("remote_port")
-            or not kv_params.get("kv_request_id")
-        ):
-            return False
+        with self._lock:
+            kv_params = req_context.kv_transfer_params
+            if (
+                not kv_params
+                or not kv_params.get("do_remote_prefill")
+                or not kv_params.get("remote_host")
+                or not kv_params.get("remote_port")
+                or not kv_params.get("kv_request_id")
+            ):
+                return False
 
-        kv_request_id = kv_params["kv_request_id"]
-        return kv_request_id not in self._failed_req_ids
+            kv_request_id = kv_params["kv_request_id"]
+            return kv_request_id not in self._failed_req_ids
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -117,133 +123,181 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         decoder's address, used by submit_store to look up the server session
         — we must not connect to it as a client.
         """
-        self._ensure_locked()
-        kv_params = req_context.kv_transfer_params
-        if kv_params and kv_params.get("do_remote_prefill"):
-            peer_id = self._remote_id_from_params(kv_params)
-            if peer_id and peer_id not in self._client_sessions:
-                conn = self._control.connect(peer_id)
-                self._client_sessions[peer_id] = P2PClientSession(
-                    peer_id,
-                    conn,
-                    local_id=self._local_id,
-                    transport=self._data,
-                )
-        return RequestOffloadingContext()
+        with self._lock:
+            kv_params = req_context.kv_transfer_params
+            if kv_params and kv_params.get("do_remote_prefill"):
+                peer_id = self._remote_id_from_params(kv_params)
+                if peer_id and peer_id not in self._client_sessions:
+                    conn = self._control.connect(peer_id)
+                    self._client_sessions[peer_id] = P2PClientSession(
+                        peer_id,
+                        conn,
+                        local_id=self._local_id,
+                        transport=self._data,
+                    )
+            return RequestOffloadingContext()
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes state."""
-        self._ensure_locked()
-        kv_params = req_context.kv_transfer_params
-        if not kv_params:
-            return
-        kv_request_id = kv_params.get("kv_request_id")
-        if not kv_request_id:
-            return
-        self._failed_req_ids.discard(kv_request_id)
-        peer_id = self._remote_id_from_params(kv_params)
-        if peer_id:
-            session = self._client_sessions.get(peer_id)
-            if session is not None:
-                session.cancel_request(kv_request_id)
+        with self._lock:
+            kv_params = req_context.kv_transfer_params
+            if not kv_params:
+                return
+            kv_request_id = kv_params.get("kv_request_id")
+            if not kv_request_id:
+                return
+            self._failed_req_ids.discard(kv_request_id)
+            peer_id = self._remote_id_from_params(kv_params)
+            if peer_id:
+                session = self._client_sessions.get(peer_id)
+                if session is not None:
+                    session.cancel_request(kv_request_id)
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        self._ensure_locked()
-        job_id = job_metadata.job_id
-        keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        with self._lock:
+            job_id = job_metadata.job_id
+            keys = list(job_metadata.keys)
+            block_ids = job_metadata.block_ids
 
-        assert len(keys) == len(block_ids)
+            assert len(keys) == len(block_ids)
 
-        kv_params = job_metadata.req_context.kv_transfer_params
-        if not kv_params or not kv_params.get("do_remote_decode"):
-            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
-            return
-
-        kv_request_id = kv_params.get("kv_request_id")
-        peer_id = self._remote_id_from_params(kv_params)
-        if not kv_request_id or not peer_id:
-            logger.warning(
-                "P2P %s: submit_store missing kv_request_id or peer", self._local_id
-            )
-            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            return
-
-        # Lazy session creation: prefiller-first mode finishes prefill (and
-        # submit_store) before the decoder connects. Create a pending
-        # session here so blocks can be buffered; _accept_new_peers will
-        # attach the connection once it arrives.
-        session = self._server_sessions.get(peer_id)
-        if session is None:
-            session = P2PServerSession(
-                peer_id=peer_id,
-                local_id=self._local_id,
-                transport=self._data,
-                local_block_len=self._data.block_len,
-            )
-            self._server_sessions[peer_id] = session
-            logger.info(
-                "P2P %s: created pending server session for peer %s "
-                "(kv_request_id=%s, %d blocks)",
+            kv_params = job_metadata.req_context.kv_transfer_params
+            logger.debug(
+                "P2P %s: submit_store ENTRY job_id=%d blocks=%d "
+                "do_remote_decode=%s kv_request_id=%s peer=%s",
                 self._local_id,
-                peer_id,
-                kv_request_id,
+                job_id,
                 len(block_ids),
+                bool(kv_params and kv_params.get("do_remote_decode")),
+                (kv_params or {}).get("kv_request_id"),
+                self._remote_id_from_params(kv_params or {}),
             )
-        session.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+            if not kv_params or not kv_params.get("do_remote_decode"):
+                self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+                return
+
+            kv_request_id = kv_params.get("kv_request_id")
+            peer_id = self._remote_id_from_params(kv_params)
+            if not kv_request_id or not peer_id:
+                logger.warning(
+                    "P2P %s: submit_store missing kv_request_id or peer",
+                    self._local_id,
+                )
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                return
+
+            # Lazy session creation: prefiller-first mode finishes prefill
+            # (and submit_store) before the decoder connects. Create a pending
+            # session here so blocks can be buffered; _accept_new_peers will
+            # attach the connection once it arrives.
+            session = self._server_sessions.get(peer_id)
+            if session is None:
+                session = P2PServerSession(
+                    peer_id=peer_id,
+                    local_id=self._local_id,
+                    transport=self._data,
+                    local_block_len=self._data.block_len,
+                )
+                self._server_sessions[peer_id] = session
+                logger.info(
+                    "P2P %s: created pending server session for peer %s "
+                    "(kv_request_id=%s, %d blocks)",
+                    self._local_id,
+                    peer_id,
+                    kv_request_id,
+                    len(block_ids),
+                )
+            session.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        self._ensure_locked()
-        job_id = job_metadata.job_id
-        keys = list(job_metadata.keys)
-        block_ids = job_metadata.block_ids
+        with self._lock:
+            job_id = job_metadata.job_id
+            keys = list(job_metadata.keys)
+            block_ids = job_metadata.block_ids
 
-        kv_params = job_metadata.req_context.kv_transfer_params
-        if (
-            not kv_params
-            or not kv_params.get("remote_host")
-            or not kv_params.get("remote_port")
-            or not kv_params.get("kv_request_id")
-        ):
-            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            return
+            kv_params = job_metadata.req_context.kv_transfer_params
+            logger.debug(
+                "P2P %s: submit_load ENTRY job_id=%d blocks=%d "
+                "kv_request_id=%s peer=%s",
+                self._local_id,
+                job_id,
+                len(block_ids),
+                (kv_params or {}).get("kv_request_id"),
+                self._remote_id_from_params(kv_params or {}),
+            )
+            if (
+                not kv_params
+                or not kv_params.get("remote_host")
+                or not kv_params.get("remote_port")
+                or not kv_params.get("kv_request_id")
+            ):
+                logger.debug(
+                    "P2P %s: submit_load job_id=%d FAILED missing kv_params",
+                    self._local_id,
+                    job_id,
+                )
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                return
 
-        kv_request_id = kv_params["kv_request_id"]
-        peer_id = self._remote_id_from_params(kv_params)
-        assert peer_id is not None  # guaranteed by kv_params checks above
+            kv_request_id = kv_params["kv_request_id"]
+            peer_id = self._remote_id_from_params(kv_params)
+            assert peer_id is not None  # guaranteed by kv_params checks above
 
-        if not keys:
-            self._finished_jobs.append(JobResult(job_id=job_id, success=True))
-            return
+            if not keys:
+                logger.debug(
+                    "P2P %s: submit_load job_id=%d short-circuit success (no keys)",
+                    self._local_id,
+                    job_id,
+                )
+                self._finished_jobs.append(JobResult(job_id=job_id, success=True))
+                return
 
-        session = self._client_sessions.get(peer_id)
-        if session is None:
-            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
-            self._failed_req_ids.add(kv_request_id)
-            return
-        session.request_blocks(job_id, kv_request_id, keys, block_ids)
+            session = self._client_sessions.get(peer_id)
+            if session is None:
+                logger.warning(
+                    "P2P %s: submit_load job_id=%d NO CLIENT SESSION for peer=%s",
+                    self._local_id,
+                    job_id,
+                    peer_id,
+                )
+                self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+                self._failed_req_ids.add(kv_request_id)
+                return
+            logger.debug(
+                "P2P %s: submit_load job_id=%d -> request_blocks peer=%s "
+                "kv_request_id=%s blocks=%d session_ready=%s",
+                self._local_id,
+                job_id,
+                peer_id,
+                kv_request_id,
+                len(block_ids),
+                session.ready,
+            )
+            session.request_blocks(job_id, kv_request_id, keys, block_ids)
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        self._ensure_locked()
-        # When the background poller is disabled (tests), drive a single
-        # poll iteration synchronously so callers see the same behaviour
-        # as before this change.
-        if not self._poller_enabled:
-            self._poll_once()
-        result = self._finished_jobs
-        self._finished_jobs = []
-        return result
+        with self._lock:
+            # When the background poller is disabled (tests), drive a single
+            # poll iteration synchronously so callers see the same behaviour
+            # as before this change. RLock allows recursive entry from the
+            # same thread.
+            if not self._poller_enabled:
+                self._poll_once()
+            result = self._finished_jobs
+            self._finished_jobs = []
+            return result
 
     @override
     def on_schedule_end(self) -> None:
-        """Release the per-cycle lock taken lazily by API entry points."""
-        if self._cycle_lock_held:
-            self._cycle_lock_held = False
-            self._lock.release()
+        """No-op. Each API method now manages its own lock acquire/release.
+
+        Kept for SecondaryTierManager interface compatibility.
+        """
+        return
 
     # ------------------------------------------------------------------
     # Internal
@@ -338,29 +392,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             logger.warning("P2P %s: client peer %s down", self._local_id, pid)
 
     # ------------------------------------------------------------------
-    # Locking + polling
+    # Polling
     # ------------------------------------------------------------------
-
-    def _ensure_locked(self) -> None:
-        """Lazily acquire the cycle lock on the scheduler thread.
-
-        Called at the entry of every scheduler-facing API method. The
-        lock is released by ``on_schedule_end`` at the end of the step.
-        Only the scheduler thread reads/writes ``_cycle_lock_held``, so
-        no extra synchronisation is needed for the flag itself.
-        """
-        if not self._cycle_lock_held:
-            self._lock.acquire()
-            self._cycle_lock_held = True
 
     def _poll_once(self) -> None:
         """One sweep of the polling work.
 
         Drains the control transport, polls every server and client
         session, accumulates their results into ``_finished_jobs``, and
-        reaps any dead sessions. Holds ``self._lock`` for the full
-        duration; the scheduler thread is blocked from interleaving API
-        calls until this returns.
+        reaps any dead sessions. Holds ``self._lock`` for the duration of
+        the per-session polling; the scheduler thread cannot interleave
+        API calls until this returns.
         """
         new_connections = self._control.poll()
         if new_connections:
@@ -370,7 +412,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 len(new_connections),
                 [c.peer_id for c in new_connections],
             )
+        wait_t0 = time.monotonic()
         with self._lock:
+            wait_s = time.monotonic() - wait_t0
+            held_t0 = time.monotonic()
+            self._poll_acquire_count += 1
+            if wait_s > self._poll_max_wait_s:
+                self._poll_max_wait_s = wait_s
+            if wait_s > 0.05:
+                logger.debug(
+                    "P2P %s: POLLER waited %.3fs for lock",
+                    self._local_id,
+                    wait_s,
+                )
+
             self._accept_new_peers(new_connections)
 
             for srv in self._server_sessions.values():
@@ -390,6 +445,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._reap_dead_servers()
             self._reap_dead_clients()
 
+            held_s = time.monotonic() - held_t0
+            if held_s > self._poll_max_held_s:
+                self._poll_max_held_s = held_s
+            if held_s > 0.1:
+                logger.debug(
+                    "P2P %s: _poll_once held lock %.3fs (sessions server:%d client:%d)",
+                    self._local_id,
+                    held_s,
+                    len(self._server_sessions),
+                    len(self._client_sessions),
+                )
+
     def _poll_loop(self) -> None:
         """Background thread target: drive _poll_once on an interval.
 
@@ -405,12 +472,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 logger.exception("P2P %s: poller iteration failed", self._local_id)
             ticks += 1
             if ticks % 5000 == 0:
-                logger.info(
-                    "P2P %s: poller tick=%d sessions=server:%d client:%d",
+                logger.debug(
+                    "P2P %s: poller tick=%d sessions=server:%d client:%d "
+                    "[poll_acq=%d max_wait=%.3fs max_held=%.3fs]",
                     self._local_id,
                     ticks,
                     len(self._server_sessions),
                     len(self._client_sessions),
+                    self._poll_acquire_count,
+                    self._poll_max_wait_s,
+                    self._poll_max_held_s,
                 )
             self._stop_event.wait(self._poll_interval)
 
@@ -420,9 +491,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def shutdown(self) -> None:
-        # Defensively release any cycle-held lock so the poller can
-        # finish its current iteration and exit.
-        self.on_schedule_end()
         self._stop_event.set()
         if self._poller_thread is not None:
             self._poller_thread.join(timeout=5.0)

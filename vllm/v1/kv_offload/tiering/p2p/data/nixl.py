@@ -119,7 +119,20 @@ class NixlTransport(DataTransport):
         """
         remote_dlist = self._remote_dlists.get(peer_id)
         if remote_dlist is None:
+            logger.warning(
+                "NixlTransport %s: write_blocks NO REMOTE DLIST for peer=%s "
+                "(known peers=%s)",
+                self._local_id,
+                peer_id,
+                list(self._remote_dlists.keys()),
+            )
             return None
+        logger.debug(
+            "NixlTransport %s: write_blocks NIXL.transfer peer=%s blocks=%d",
+            self._local_id,
+            peer_id,
+            len(local_idxs),
+        )
         handle = self._agent.make_prepped_xfer(
             "WRITE",
             self._local_dlist,

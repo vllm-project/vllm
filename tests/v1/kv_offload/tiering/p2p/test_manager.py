@@ -25,11 +25,14 @@ def _init_threading_state(mgr: P2PSecondaryTierManager) -> None:
     synchronous _poll_once() in that mode.
     """
     mgr._lock = threading.RLock()
-    mgr._cycle_lock_held = False
     mgr._stop_event = threading.Event()
     mgr._poller_enabled = False
     mgr._poll_interval = 0.001
     mgr._poller_thread = None
+    mgr._poll_acquire_count = 0
+    mgr._poll_wait_warned_at = 0.0
+    mgr._poll_max_wait_s = 0.0
+    mgr._poll_max_held_s = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +380,7 @@ class _CountingClientSession:
 
     def __init__(self) -> None:
         self.alive = True
+        self.ready = True
         self.requests: list[tuple[int, str]] = []
         self.cancels: list[str] = []
 
@@ -406,10 +410,13 @@ class TestPollerThread:
         mgr._server_sessions = {}
         mgr._client_sessions = {}
         mgr._lock = threading.RLock()
-        mgr._cycle_lock_held = False
         mgr._stop_event = threading.Event()
         mgr._poller_enabled = True
         mgr._poll_interval = poll_interval
+        mgr._poll_acquire_count = 0
+        mgr._poll_wait_warned_at = 0.0
+        mgr._poll_max_wait_s = 0.0
+        mgr._poll_max_held_s = 0.0
         control = _CountingControl()
         mgr._control = control  # type: ignore[assignment]
         mgr._data = None  # type: ignore[assignment]
@@ -450,17 +457,12 @@ class TestPollerThread:
         assert mgr._stop_event.is_set()
 
     def test_scheduler_thread_concurrent_with_poller(self):
-        """submit_load + on_schedule_end runs cleanly while poller spins."""
+        """submit_load runs cleanly while poller spins concurrently."""
         mgr, control = self._make_manager_with_thread(poll_interval=0.0005)
         try:
             session = _CountingClientSession()
-            # Lookup acquires the cycle lock; install the fake session
-            # under the lock so the poller can't observe a partial state.
-            mgr._ensure_locked()
-            try:
+            with mgr._lock:
                 mgr._client_sessions["10.0.0.1:8000"] = session  # type: ignore[assignment]
-            finally:
-                mgr.on_schedule_end()
 
             for i in range(50):
                 job = _job_metadata(
@@ -468,13 +470,10 @@ class TestPollerThread:
                 )
                 mgr.submit_load(job)
                 results = list(mgr.get_finished_jobs())
-                mgr.on_schedule_end()
                 # All submits must be either dispatched to the session
                 # (succeeds) or recorded as completed; no exceptions.
                 assert all(isinstance(r, JobResult) for r in results)
             assert len(session.requests) == 50
-            # Cycle lock must be released after each on_schedule_end.
-            assert not mgr._cycle_lock_held
             # Poller thread is still alive and made progress.
             assert mgr._poller_thread is not None
             assert mgr._poller_thread.is_alive()
@@ -485,8 +484,11 @@ class TestPollerThread:
             mgr._poller_thread.join(timeout=2.0)
 
 
-class TestEnsureLockedAndScheduleEnd:
-    """Exercise the lazy lock acquire/release contract."""
+class TestPerCallLocking:
+    """Each API method acquires/releases the lock around its body.
+
+    on_schedule_end is a no-op kept only for interface compatibility.
+    """
 
     def _make_manager(self) -> P2PSecondaryTierManager:
         mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
@@ -498,35 +500,30 @@ class TestEnsureLockedAndScheduleEnd:
         _init_threading_state(mgr)
         return mgr
 
-    def test_first_api_call_acquires_lock(self):
-        mgr = self._make_manager()
-        assert not mgr._cycle_lock_held
-        mgr.lookup(b"key", _req_context(kv_params=None))
-        assert mgr._cycle_lock_held
-
-    def test_on_schedule_end_releases_lock(self):
+    def test_api_call_does_not_hold_lock_after_return(self):
         mgr = self._make_manager()
         mgr.lookup(b"key", _req_context(kv_params=None))
-        assert mgr._cycle_lock_held
-        mgr.on_schedule_end()
-        assert not mgr._cycle_lock_held
+        # The lock must be free after the call returns; another thread
+        # (or the poller) must be able to acquire it without blocking.
+        assert mgr._lock.acquire(timeout=0.1)
+        mgr._lock.release()
 
-    def test_on_schedule_end_is_idempotent(self):
+    def test_on_schedule_end_is_no_op(self):
         mgr = self._make_manager()
-        # No prior API call; on_schedule_end is a no-op.
+        mgr.on_schedule_end()  # no-op when nothing is held
+        assert mgr._lock.acquire(timeout=0.1)
+        mgr._lock.release()
+        # Calling it after an API method is also a no-op.
+        mgr.lookup(b"key", _req_context(kv_params=None))
         mgr.on_schedule_end()
-        assert not mgr._cycle_lock_held
-        # Second call is also fine.
-        mgr.on_schedule_end()
-        assert not mgr._cycle_lock_held
+        assert mgr._lock.acquire(timeout=0.1)
+        mgr._lock.release()
 
-    def test_multiple_api_calls_acquire_once(self):
+    def test_multiple_api_calls_each_release_lock(self):
         mgr = self._make_manager()
         ctx = _req_context(kv_params=None)
         mgr.lookup(b"key", ctx)
-        # _ensure_locked is a no-op on the second call within the same
-        # cycle: the lock stays held but is not re-acquired.
         mgr.on_request_finished(ctx)
-        assert mgr._cycle_lock_held
-        mgr.on_schedule_end()
-        assert not mgr._cycle_lock_held
+        # Both calls should have released; lock is free.
+        assert mgr._lock.acquire(timeout=0.1)
+        mgr._lock.release()
