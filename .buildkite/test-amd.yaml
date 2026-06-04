@@ -816,7 +816,7 @@ steps:
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/v1/worker/kv_connector_model_runner_mixin.py
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
@@ -843,7 +843,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2340,7 +2340,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2376,7 +2376,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2390,7 +2390,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -2404,7 +2404,7 @@ steps:
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -3352,7 +3352,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/v1/worker/kv_connector_model_runner_mixin.py
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
@@ -3368,7 +3368,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
@@ -3383,7 +3383,7 @@ steps:
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - tests/v1/kv_connector/nixl_integration/
   - vllm/platforms/rocm.py
   commands:
