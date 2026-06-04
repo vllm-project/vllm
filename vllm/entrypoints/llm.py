@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.utils import log_non_default_args
+from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -873,14 +873,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Start a new weight update.
-
-        Args:
-            is_checkpoint_format: Whether incoming weights are in checkpoint
-                format (need layerwise processing) or kernel format (direct
-                copy).
-        """
+        """Start a new weight update."""
         self.llm_engine.collective_rpc(
             "start_weight_update",
             kwargs={"is_checkpoint_format": is_checkpoint_format},
@@ -902,9 +895,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         )
 
     def finish_weight_update(self) -> None:
-        """
-        Finish the current weight update.
-        """
+        """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
 
     def __repr__(self) -> str:
