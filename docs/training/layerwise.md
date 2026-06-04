@@ -28,7 +28,7 @@ For more information on implementation, see [Low Level `layerwise` API](#low-lev
 Online quantization refers to when a user provides full precision weights and those weights are quantized on-the-fly as they are loaded into the model. The layerwise reloading system handles this by treating online quantization as a **processing** step, which is then handled in an online way both during first-time load and during reload. A typical online quantization method implementation should look like this:
 
 ```python
-class Fp8OnlineLinearMethod(Fp8LinearMethod):
+class Fp8PerTensorOnlineLinearMethod(Fp8LinearMethod):
     """Online version of Fp8LinearMethod which loads a full precision checkpoint
     and quantizes weights during loading."""
 
