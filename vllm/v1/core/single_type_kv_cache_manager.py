@@ -377,6 +377,7 @@ class SingleTypeKVCacheManager(ABC):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         """
@@ -386,6 +387,8 @@ class SingleTypeKVCacheManager(ABC):
             request: The request.
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
+            alignment_tokens: The prefix-cache hit alignment in tokens.
+                ``None`` uses this manager's scheduler block size.
             retention_interval: Sparse local-checkpoint granularity. ``None``
                 keeps dense checkpointing; ``0`` keeps only the latest replay
                 boundary; a positive multiple of ``scheduler_block_size`` keeps
@@ -397,10 +400,13 @@ class SingleTypeKVCacheManager(ABC):
         if num_cached_blocks >= num_full_blocks:
             return
 
+        if alignment_tokens is None:
+            alignment_tokens = self.scheduler_block_size
+
         block_mask = self.reachable_block_mask(
             start_block=num_cached_blocks,
             end_block=num_full_blocks,
-            alignment_tokens=self.scheduler_block_size,
+            alignment_tokens=alignment_tokens,
             kv_cache_spec=self.kv_cache_spec,
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
@@ -684,8 +690,14 @@ class MLAAttentionManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
     ) -> None:
-        super().cache_blocks(request, num_tokens, alignment_tokens=alignment_tokens)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
         if not self._should_protect_prompt_blocks() or request.num_prompt_tokens <= 1:
             return
 
@@ -956,8 +968,14 @@ class SlidingWindowMLAManager(SlidingWindowManager):
         request: Request,
         num_tokens: int,
         alignment_tokens: int | None = None,
+        retention_interval: int | None = None,
     ) -> None:
-        super().cache_blocks(request, num_tokens, alignment_tokens=alignment_tokens)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
         if not self.enable_caching or request.num_prompt_tokens <= 1:
             return
 
@@ -1392,10 +1410,16 @@ class MambaManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens, retention_interval=retention_interval)
+        super().cache_blocks(
+            request,
+            num_tokens,
+            alignment_tokens=alignment_tokens,
+            retention_interval=retention_interval,
+        )
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if num_cached_blocks_after > num_cached_blocks_before:
             for block in self.req_to_blocks[request.request_id][
@@ -1428,6 +1452,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         self,
         request: Request,
         num_tokens: int,
+        alignment_tokens: int | None = None,
         retention_interval: int | None = None,
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
