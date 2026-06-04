@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sharded Ray Direct Transport (RDT) weight transfer engine.
 
-Unlike the unsharded RDT engine, this backend pulls only the *slice* that
-each vLLM worker actually consumes, not the full HF-format tensor.
+This backend pulls only the *slice* that each vLLM worker actually consumes
+(under tensor/expert parallelism), not the full HF-format tensor.
 
 It works in two phases, keyed per ``update_weights`` name set:
 
@@ -395,15 +395,15 @@ class LazyRDTTensor(torch.Tensor):
                     "Supported ops are: "
                     f"{sorted(_SUPPORTED_OPS.values())}, plus copy_. "
                     "Loaders that need .to(), .float(), .item(), arithmetic, "
-                    "bool-mask indexing, or .data access are not compatible "
-                    "with the sharded RDT backend; use backend='rdt' instead."
+                    "bool-mask indexing, or .data access are not supported by "
+                    "the sharded RDT backend."
                 )
         for v in kwargs.values():
             if isinstance(v, cls) and v._materialized is None:
                 raise _UnsupportedLazyOp(
                     f"LazyRDTTensor: unsupported op {func} reached "
-                    f"__torch_dispatch__ on lazy {v._name!r} (chain={v._ops}). "
-                    "Use backend='rdt' for loaders that require materialization."
+                    f"__torch_dispatch__ on lazy {v._name!r} (chain={v._ops}); "
+                    "this loader is not supported by the sharded RDT backend."
                 )
         return func(*args, **kwargs)
 
@@ -480,14 +480,13 @@ class ShardedRDTWeightTransferEngine(
         of slice tensors. The chain is replayed on the trainer's live
         parameter via ``getattr(tensor, op_name)(*args, **kwargs)``.
       - ``nixl`` is installed in the env shared by trainer and workers.
-      - ``is_checkpoint_format=True`` (layerwise reload). ``_bake_all_groups``
-        raises at init if no layerwise infos are active.
+      - ``is_checkpoint_format=True`` (layerwise reload).
       - Weight loaders that only use the supported op set (narrow, view,
         reshape, transpose, t, permute, __getitem__ with int/slice/tuple,
         unsqueeze, squeeze, flatten, contiguous, chunk, copy_). Loaders
         that need .to(), .float(), .item(), .data, bool-mask indexing, or
-        arithmetic on the loaded weight will land in ``__torch_dispatch__``
-        during the bake (raising) and should fall back to backend='rdt'.
+        arithmetic on the loaded weight land in ``__torch_dispatch__`` during
+        the bake and raise (not supported by this backend).
 
     The plan is baked once at ``init_transfer_engine`` (a meta dry run over
     ``init_info.names``) into one ``_BakedGroup`` per fully-loaded leaf module,
@@ -544,8 +543,7 @@ class ShardedRDTWeightTransferEngine(
         # ray.get_actor lose the actor-level _ray_enable_tensor_transport
         # flag, so the NIXL dispatch guard at ray/actor.py rejects the
         # method call even when the trainer was created with
-        # enable_tensor_transport=True. Force it back on. See rdt_engine.py
-        # for the matching workaround on the unsharded engine.
+        # enable_tensor_transport=True. Force it back on.
         self._trainer_actor._ray_enable_tensor_transport = True
 
         self._produce_method = getattr(
