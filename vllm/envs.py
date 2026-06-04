@@ -95,7 +95,6 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_PLUGINS: list[str] | None = None
@@ -279,6 +278,9 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_GPU_NIC_PCIE_MAPPING: str = ""
+    VLLM_NIC_SELECTION_VARS: str = ""
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
 
 
 def get_default_cache_root():
@@ -1014,9 +1016,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
-    # Time in ms for the zmq client to wait for a response from the backend
-    # server for simple data operations
-    "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
@@ -1034,6 +1033,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
+    ),
+    # Retain local sliding-window KV checkpoints for prefix caching.
+    # Unset (default) preserves the dense local checkpointing behavior. `0`
+    # retains only the latest completed prompt boundary. Positive values retain
+    # checkpoints at the specified interval boundaries (rounded up to the
+    # prefix-cache alignment).
+    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
+    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+        else None
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
@@ -1977,6 +1987,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
+    # Must be set together with VLLM_NIC_SELECTION_VARS.
+    "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),
+    # Comma-separated list of env vars to set from the GPU-NIC mapping.
+    # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
+    # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
+    "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
 }
 
 

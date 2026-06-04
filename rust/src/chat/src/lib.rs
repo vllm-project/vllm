@@ -93,7 +93,7 @@ pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,
     /// Effective model dtype reported by the engine.
-    model_dtype: Option<ModelDtype>,
+    model_dtype: ModelDtype,
     /// Tool-call parser selection.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -135,7 +135,7 @@ impl ChatLlm {
     }
 
     /// Override the effective model dtype used for multimodal tensor encoding.
-    pub fn with_model_dtype(mut self, model_dtype: Option<ModelDtype>) -> Self {
+    pub fn with_model_dtype(mut self, model_dtype: ModelDtype) -> Self {
         self.model_dtype = model_dtype;
         self
     }
@@ -189,6 +189,7 @@ impl ChatLlm {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            lora_request: request.lora_request,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
@@ -233,7 +234,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
