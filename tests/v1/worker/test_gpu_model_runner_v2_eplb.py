@@ -193,3 +193,79 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+def test_v2_save_serving_state_round_trips_block_table_state():
+    class FakeStagedWriteTensor:
+        def __init__(self, values: torch.Tensor):
+            self.gpu = values.clone()
+            self.clear_calls = 0
+
+        def clear_staged_writes(self) -> None:
+            self.clear_calls += 1
+
+    class FakeNumBlocks:
+        def __init__(self, values: torch.Tensor):
+            self.cpu = values.clone()
+            self.gpu = values.clone()
+            self.copy_to_uva_calls = 0
+
+        def copy_to_uva(self) -> torch.Tensor:
+            self.copy_to_uva_calls += 1
+            self.gpu = self.cpu.clone()
+            return self.gpu
+
+    block_tables = SimpleNamespace(
+        block_tables=[
+            FakeStagedWriteTensor(
+                torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+            ),
+            FakeStagedWriteTensor(torch.tensor([[7, 8], [9, 10]], dtype=torch.int32)),
+        ],
+        input_block_tables=[
+            torch.tensor([[11, 12, 13], [14, 15, 16]], dtype=torch.int32),
+            torch.tensor([[17, 18], [19, 20]], dtype=torch.int32),
+        ],
+        num_blocks=FakeNumBlocks(torch.tensor([[3, 2], [1, 2]], dtype=torch.int32)),
+    )
+    runner = _make_runner(block_tables=block_tables)
+
+    original_rows = [bt.gpu.clone() for bt in block_tables.block_tables]
+    original_inputs = [bt.clone() for bt in block_tables.input_block_tables]
+    original_num_blocks = block_tables.num_blocks.cpu.clone()
+
+    saved_state = mrv2.GPUModelRunner.save_serving_state(runner)
+
+    # test states saved correctly
+    assert [bt.clear_calls for bt in block_tables.block_tables] == [1, 1]
+    assert all(torch.count_nonzero(bt.gpu) == 0 for bt in block_tables.block_tables)
+    assert all(
+        torch.count_nonzero(input_bt) == 0
+        for input_bt in block_tables.input_block_tables
+    )
+    assert torch.count_nonzero(block_tables.num_blocks.cpu) == 0
+    assert torch.equal(saved_state.block_table_rows[0], original_rows[0])
+    assert torch.equal(saved_state.block_table_rows[1], original_rows[1])
+    assert torch.equal(saved_state.input_block_tables[0], original_inputs[0])
+    assert torch.equal(saved_state.input_block_tables[1], original_inputs[1])
+    assert torch.equal(saved_state.num_blocks, original_num_blocks)
+    assert block_tables.num_blocks.copy_to_uva_calls == 1
+
+    # fill with new values
+    block_tables.block_tables[0].gpu.fill_(99)
+    block_tables.block_tables[1].gpu.fill_(98)
+    block_tables.input_block_tables[0].fill_(97)
+    block_tables.input_block_tables[1].fill_(96)
+    block_tables.num_blocks.cpu.fill_(95)
+
+    mrv2.GPUModelRunner.restore_serving_state(runner, saved_state)
+
+    # test states restored correctly
+    assert [bt.clear_calls for bt in block_tables.block_tables] == [2, 2]
+    assert torch.equal(block_tables.block_tables[0].gpu, original_rows[0])
+    assert torch.equal(block_tables.block_tables[1].gpu, original_rows[1])
+    assert torch.equal(block_tables.input_block_tables[0], original_inputs[0])
+    assert torch.equal(block_tables.input_block_tables[1], original_inputs[1])
+    assert torch.equal(block_tables.num_blocks.cpu, original_num_blocks)
+    assert torch.equal(block_tables.num_blocks.gpu, original_num_blocks)
+    assert block_tables.num_blocks.copy_to_uva_calls == 2
