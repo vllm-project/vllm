@@ -419,6 +419,10 @@ _MULTIMODAL_MODELS = {
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
     ),
+    "GraniteSpeechPlusForConditionalGeneration": (
+        "granite_speech_plus",
+        "GraniteSpeechPlusForConditionalGeneration",
+    ),
     "Granite4VisionForConditionalGeneration": (
         "granite4_vision",
         "Granite4VisionForConditionalGeneration",
