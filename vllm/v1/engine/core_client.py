@@ -20,11 +20,9 @@ import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import VllmConfig
-from vllm.envs import (
-    VLLM_ENGINE_READY_TIMEOUT_S,
-    VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS,
-)
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -396,7 +394,9 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown(VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS)
+            self.engine_manager.shutdown(
+                timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            )
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
