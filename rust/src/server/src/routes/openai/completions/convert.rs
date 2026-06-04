@@ -111,6 +111,7 @@ pub(crate) fn prepare_completion_request(
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
+        trace_headers: ctx.trace_headers,
     };
 
     Ok(PreparedRequest {
@@ -136,7 +137,7 @@ mod tests {
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
-        resolve_request_context(headers, request_id)
+        resolve_request_context(headers, request_id, false)
     }
 
     fn served(names: &[&str]) -> LoraModelResolution {

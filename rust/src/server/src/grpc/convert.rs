@@ -92,6 +92,10 @@ pub fn to_text_request(
         add_special_tokens: true,
         data_parallel_rank: None,
         lora_request: None,
+        // TODO: forward distributed-tracing context from gRPC request metadata
+        // once the gRPC path supports tracing (HTTP routes forward W3C trace
+        // headers via `resolve_request_context`).
+        trace_headers: None,
     })
 }
 

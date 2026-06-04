@@ -41,7 +41,11 @@ pub async fn generate(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
-    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let request_context = resolve_request_context(
+        &headers,
+        body.request_id.as_deref(),
+        state.engine_core_client().tracing_enabled(),
+    );
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
     let prepared = match prepare_generate_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,

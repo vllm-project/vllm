@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
@@ -170,6 +170,10 @@ pub struct TextRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// W3C trace-context headers to forward to the engine for distributed
+    /// tracing. `Some` (possibly empty) when the engine has tracing enabled.
+    #[serde(default)]
+    pub trace_headers: Option<BTreeMap<String, String>>,
 }
 
 impl TextRequest {
@@ -187,6 +191,7 @@ impl TextRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             lora_request: None,
+            trace_headers: None,
         }
     }
 

@@ -59,6 +59,7 @@ pub fn prepare_generate_request(
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
+        trace_headers: ctx.trace_headers,
     };
 
     Ok(PreparedRequest {
