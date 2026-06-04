@@ -461,6 +461,33 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
     BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]
 ):
+    def _get_mm_cache_coupled_groups(
+        self,
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Sequence[Sequence[tuple[str, int]]]:
+        """With ``use_audio_in_video=True`` the audio track is interleaved into
+        the video by the HF processor, so each video and its paired audio form
+        one indivisible processing unit. Couple ``video[i]`` with ``audio[i]``
+        so the processor cache reuses the pair only when *both* match and
+        reprocesses them together otherwise; this fixes both the
+        ``StopIteration`` (video re-run without its cached audio) and the stale
+        interleaved layout (video served from the cache for a different audio).
+        See https://github.com/vllm-project/vllm/issues/44538.
+
+        Inherited by ``Qwen3OmniMoeThinkerMultiModalProcessor``.
+        """
+        if not hf_processor_mm_kwargs.get("use_audio_in_video", False):
+            return ()
+
+        num_videos = mm_data_items.get_count("video", strict=False)
+        num_audios = mm_data_items.get_count("audio", strict=False)
+        # use_audio_in_video pairs each video with exactly one audio item
+        # (extracted from that video); guard with min() in case the counts
+        # ever disagree.
+        num_pairs = min(num_videos, num_audios)
+        return [[("video", i), ("audio", i)] for i in range(num_pairs)]
+
     def _call_hf_processor(
         self,
         prompt: str,
