@@ -354,7 +354,7 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.10.2
+huggingface-hub==1.13.0 # cohere
     # via
     #   accelerate
     #   datasets

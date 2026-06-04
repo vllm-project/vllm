@@ -182,8 +182,7 @@ encodec==0.1.1
     # via vocos
 et-xmlfile==2.0.0
     # via openpyxl
-evaluate==0.4.6
-    # cohere
+evaluate==0.4.6 # cohere
     # via lm-eval
 fastapi==0.128.0
     # via
@@ -289,7 +288,7 @@ httpx==0.27.2
     #   huggingface-hub
     #   perceptron
     #   schemathesis
-huggingface-hub==1.10.2
+huggingface-hub==1.13.0 # cohere
     # via
     #   accelerate
     #   datasets
