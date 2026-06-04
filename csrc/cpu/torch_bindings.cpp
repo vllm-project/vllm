@@ -329,8 +329,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
-#if defined(__AVX512F__) || defined(__AVX2__) || \
-    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__)
+#if defined(__AVX512F__) || defined(__AVX2__) ||                               \
+    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
+    defined(__riscv_v)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
