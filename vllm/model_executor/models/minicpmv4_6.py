@@ -262,10 +262,9 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         _, h, w = frame.shape
                 elif isinstance(frame, torch.Tensor):
                     if frame.ndim == 3 and frame.shape[-1] in (1, 3, 4):
-                        h, w = frame.shape[0].item(), frame.shape[1].item()
+                        h, w = frame.shape[0], frame.shape[1]
                     else:
-                        _, h_d, w_d = frame.shape
-                        h, w = h_d.item(), w_d.item()
+                        _, h, w = frame.shape
                 else:
                     raise TypeError(f"Unsupported frame type: {type(frame)}")
                 frame_sizes.append(torch.tensor([w, h], dtype=torch.long, device="cpu"))
