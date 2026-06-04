@@ -27,6 +27,50 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _is_attention_backend(backend, name: str) -> bool:
+    try:
+        return backend.get_name() == name
+    except NotImplementedError:
+        return False
+
+
+def _uses_triton_attention(runner: "GPUModelRunner") -> bool:
+    return any(
+        _is_attention_backend(group.backend, "TRITON_ATTN")
+        for groups in runner.attn_groups
+        for group in groups
+    )
+
+
+def _warmup_triton_nvfp4_attention(runner: "GPUModelRunner") -> None:
+    if (
+        runner.is_pooling_model
+        or runner.cache_config.cache_dtype != "nvfp4"
+        or not runner.attn_groups
+        or not _uses_triton_attention(runner)
+    ):
+        return
+
+    num_tokens = runner.uniform_decode_query_len
+    if num_tokens <= 0 or num_tokens > runner.max_num_tokens:
+        return
+
+    # Warm up a decode-shaped NVFP4 Triton attention variant before the JIT
+    # monitor is activated.  A small batch is enough for Triton specialization:
+    # the long context length is a runtime value, but keeping seq_lens > 1
+    # exercises the decode cache-read path rather than pure self-attention.
+    profile_seq_lens = min(runner.max_model_len, max(num_tokens + 1, 1024))
+    logger.info("Warming up Triton NVFP4 attention.")
+    runner._dummy_run(
+        num_tokens=num_tokens,
+        skip_eplb=True,
+        is_profile=True,
+        force_attention=True,
+        uniform_decode=True,
+        profile_seq_lens=profile_seq_lens,
+    )
+
+
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     factors = aot_compile_hash_factors(runner.vllm_config)
     return hashlib.sha256(str(factors).encode()).hexdigest()
@@ -73,15 +117,11 @@ def kernel_warmup(worker: "Worker"):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
+    _warmup_triton_nvfp4_attention(worker.model_runner)
+
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model
-    def _is_flashinfer_backend(backend):
-        try:
-            return backend.get_name() == "FLASHINFER"
-        except NotImplementedError:
-            return False
-
     if (
         not worker.model_runner.is_pooling_model
         and worker.model_runner.attn_groups
@@ -89,7 +129,7 @@ def kernel_warmup(worker: "Worker"):
         # backends don't support this dummy run. Once we remove
         # `build_for_cudagraph_capture`, we can change it to `any`.
         and all(
-            _is_flashinfer_backend(group.backend)
+            _is_attention_backend(group.backend, "FLASHINFER")
             for groups in worker.model_runner.attn_groups
             for group in groups
         )
