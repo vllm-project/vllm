@@ -11,7 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use educe::Educe;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -180,32 +180,6 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
-    /// When `--max-logprobs` is specified, represents single tokens as
-    /// strings of the form `token_id:{token_id}` so tokens that are not
-    /// JSON-encodable can be identified.
-    #[arg(
-        long,
-        action = ArgAction::Set,
-        default_value_t = false,
-        default_missing_value = "true",
-        num_args = 0..=1,
-        value_parser = clap::value_parser!(bool)
-    )]
-    #[serde(default)]
-    pub return_tokens_as_token_ids: bool,
-
-    /// If set to true, include usage on every streaming request.
-    #[arg(
-        long,
-        action = ArgAction::Set,
-        default_value_t = false,
-        default_missing_value = "true",
-        num_args = 0..=1,
-        value_parser = clap::value_parser!(bool)
-    )]
-    #[serde(default)]
-    pub enable_force_include_usage: bool,
-
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -275,8 +249,6 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
-            return_tokens_as_token_ids: self.return_tokens_as_token_ids,
-            enable_force_include_usage: self.enable_force_include_usage,
             grpc_port: self.grpc_port,
             shutdown_timeout,
         }
@@ -318,8 +290,6 @@ impl SharedRuntimeArgs {
             enable_log_requests: self.enable_log_requests,
             enable_request_id_headers: self.enable_request_id_headers,
             disable_log_stats: self.disable_log_stats,
-            return_tokens_as_token_ids: self.return_tokens_as_token_ids,
-            enable_force_include_usage: self.enable_force_include_usage,
             grpc_port: self.grpc_port,
             shutdown_timeout,
         }

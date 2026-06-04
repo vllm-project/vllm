@@ -91,11 +91,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_log_requests(config.enable_log_requests)
             .with_request_id_headers(config.enable_request_id_headers)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_openai_defaults(
-                config.return_tokens_as_token_ids,
-                config.enable_force_include_usage,
-            ),
+            .with_server_info(ServerInfoSnapshot::from_config(config)),
     ))
 }
 

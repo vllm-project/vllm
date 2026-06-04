@@ -49,21 +49,12 @@ pub async fn chat_completions(
 ) -> Response {
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let request_return_tokens_as_token_ids = body.return_tokens_as_token_ids;
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    let mut prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
+    let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
-    if request_return_tokens_as_token_ids.is_none() {
-        prepared.return_tokens_as_token_ids = state.return_tokens_as_token_ids;
-    }
-    if state.enable_force_include_usage {
-        prepared.include_usage = true;
-        prepared.include_continuous_usage = true;
-    }
-
     let request_span = tracing::info_span!(
         "chat_completions",
         request_id = %prepared.request_id,
@@ -249,12 +240,13 @@ async fn chat_completion_chunk_stream(
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
-    let mut prompt_token_count = 0_usize;
-    let mut output_token_count = 0_usize;
+    let mut usage = ContinuousUsage::new(include_continuous_usage);
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until
     // we receive the separate `LogprobsDelta` event, so that we can emit one
     // combined chunk with both the semantic delta and its per-update metadata.
+    // Continuous usage also buffers so the token count from `LogprobsDelta` can
+    // be attached to the matching semantic chunk.
     let mut pending_chunk = (requested_logprobs || return_token_ids || include_continuous_usage)
         .then(PendingChatChunk::default);
 
@@ -263,49 +255,36 @@ async fn chat_completion_chunk_stream(
             Ok(ChatEvent::Start {
                 prompt_token_ids, ..
             }) => {
-                prompt_token_count = prompt_token_ids.len();
+                usage.set_prompt_tokens(prompt_token_ids.len());
                 let mut chunk = start_chunk(&request_id, &response_model, created);
                 if return_token_ids {
                     chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
                 }
-                maybe_attach_usage(
-                    &mut chunk,
-                    include_continuous_usage,
-                    prompt_token_count,
-                    output_token_count,
-                );
-                y.yield_ok(chunk).await;
+                y.yield_ok(usage.attach_chat(chunk)).await;
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
-                    let mut chunk = block_delta_chunk(
+                    y.yield_ok(usage.attach_chat(block_delta_chunk(
                         &request_id,
                         &response_model,
                         created,
                         AssistantBlockKind::Text,
                         echo_text.clone(),
-                    );
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    )))
+                    .await;
                 }
             }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_block_delta(kind, delta);
                 } else {
-                    let mut chunk =
-                        block_delta_chunk(&request_id, &response_model, created, kind, delta);
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    y.yield_ok(usage.attach_chat(block_delta_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        kind,
+                        delta,
+                    )))
+                    .await;
                 }
             }
             Ok(ChatEvent::LogprobsDelta {
@@ -319,32 +298,23 @@ async fn chat_completion_chunk_stream(
                 let delta_token_count = token_ids.len();
                 let openai_token_ids =
                     return_token_ids.then_some(token_ids).filter(|t| !t.is_empty());
-                output_token_count = output_token_count.saturating_add(delta_token_count);
+                usage.add_output_tokens(delta_token_count);
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
                     if let Some(chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                     {
-                        let mut chunk = chunk;
-                        maybe_attach_usage(
-                            &mut chunk,
-                            include_continuous_usage,
-                            prompt_token_count,
-                            output_token_count,
-                        );
-                        y.yield_ok(chunk).await;
+                        y.yield_ok(usage.attach_chat(chunk)).await;
                     }
                 } else if let Some(logprobs) = openai_logprobs {
-                    let mut chunk =
-                        logprobs_only_chunk(&request_id, &response_model, created, logprobs);
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    y.yield_ok(usage.attach_chat(logprobs_only_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        logprobs,
+                    )))
+                    .await;
                 }
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
@@ -364,21 +334,15 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_start(tool_index, id, name);
                 } else {
-                    let mut chunk = tool_call_start_chunk(
+                    y.yield_ok(usage.attach_chat(tool_call_start_chunk(
                         &request_id,
                         &response_model,
                         created,
                         tool_index,
                         id,
                         name,
-                    );
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    )))
+                    .await;
                 }
             }
             Ok(ChatEvent::ToolCallArgumentsDelta { index, delta }) => {
@@ -386,33 +350,25 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_arguments(tool_index, delta);
                 } else {
-                    let mut chunk = tool_call_arguments_chunk(
+                    y.yield_ok(usage.attach_chat(tool_call_arguments_chunk(
                         &request_id,
                         &response_model,
                         created,
                         tool_index,
                         delta,
-                    );
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    )))
+                    .await;
                 }
             }
             Ok(ChatEvent::ToolCallEnd { .. }) => {
                 debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
-                prompt_token_count: final_prompt_token_count,
+                prompt_token_count,
                 finish_reason,
-                output_token_count: final_output_token_count,
+                output_token_count,
                 ..
             }) => {
-                prompt_token_count = final_prompt_token_count;
-                output_token_count = final_output_token_count;
                 if log_request {
                     info!(
                         stream = true,
@@ -424,18 +380,13 @@ async fn chat_completion_chunk_stream(
                     );
                 }
 
+                usage.set_final_counts(prompt_token_count, output_token_count);
+
                 if let Some(pending_chunk) = pending_chunk.as_mut()
                     && let Some(chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
                 {
-                    let mut chunk = chunk;
-                    maybe_attach_usage(
-                        &mut chunk,
-                        include_continuous_usage,
-                        prompt_token_count,
-                        output_token_count,
-                    );
-                    y.yield_ok(chunk).await;
+                    y.yield_ok(usage.attach_chat(chunk)).await;
                 }
 
                 match final_chunk(
@@ -445,15 +396,7 @@ async fn chat_completion_chunk_stream(
                     finish_reason,
                     saw_tool_calls,
                 ) {
-                    Ok(mut chunk) => {
-                        maybe_attach_usage(
-                            &mut chunk,
-                            include_continuous_usage,
-                            prompt_token_count,
-                            output_token_count,
-                        );
-                        y.yield_ok(chunk).await;
-                    }
+                    Ok(chunk) => y.yield_ok(usage.attach_chat(chunk)).await,
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
@@ -468,7 +411,7 @@ async fn chat_completion_chunk_stream(
                         &request_id,
                         &response_model,
                         created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
+                        usage.counts(),
                     ))
                     .await;
                 }
@@ -498,17 +441,44 @@ fn usage_chunk(
     chunk
 }
 
-fn maybe_attach_usage(
-    chunk: &mut ChatCompletionStreamResponse,
-    include_continuous_usage: bool,
-    prompt_token_count: usize,
-    output_token_count: usize,
-) {
-    if include_continuous_usage {
-        chunk.usage = Some(Usage::from_counts(
-            prompt_token_count as u32,
-            output_token_count as u32,
-        ));
+#[derive(Debug, Clone)]
+struct ContinuousUsage {
+    enabled: bool,
+    prompt_tokens: u32,
+    output_tokens: u32,
+}
+
+impl ContinuousUsage {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            prompt_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+
+    fn set_prompt_tokens(&mut self, prompt_tokens: usize) {
+        self.prompt_tokens = prompt_tokens as u32;
+    }
+
+    fn add_output_tokens(&mut self, output_tokens: usize) {
+        self.output_tokens = self.output_tokens.saturating_add(output_tokens as u32);
+    }
+
+    fn set_final_counts(&mut self, prompt_tokens: usize, output_tokens: usize) {
+        self.prompt_tokens = prompt_tokens as u32;
+        self.output_tokens = output_tokens as u32;
+    }
+
+    fn attach_chat(&self, mut chunk: ChatCompletionStreamResponse) -> ChatCompletionStreamResponse {
+        if self.enabled {
+            chunk.usage = Some(self.counts());
+        }
+        chunk
+    }
+
+    fn counts(&self) -> Usage {
+        Usage::from_counts(self.prompt_tokens, self.output_tokens)
     }
 }
 

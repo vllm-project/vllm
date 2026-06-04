@@ -75,6 +75,12 @@ pub(crate) fn prepare_chat_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let requested_logprobs = request.logprobs;
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
@@ -146,7 +152,7 @@ pub(crate) fn prepare_chat_request(
         request_id,
         response_model,
         include_usage,
-        include_continuous_usage: false,
+        include_continuous_usage,
         requested_logprobs,
         include_prompt_logprobs,
         chat_request,
@@ -367,8 +373,8 @@ mod tests {
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
     use crate::routes::openai::utils::types::{
-        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent, Tool,
-        ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
+        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
     };
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
 
@@ -446,6 +452,46 @@ mod tests {
         );
         assert!(prepared.chat_request.tools.is_empty());
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_stream_usage_and_token_format_options() {
+        let mut request = base_request();
+        request.return_tokens_as_token_ids = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.include_usage);
+        assert!(prepared.include_continuous_usage);
+        assert!(prepared.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_chat_request_gates_continuous_usage_on_include_usage() {
+        let mut request = base_request();
+        request.stream_options = Some(StreamOptions {
+            include_usage: None,
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.include_usage);
+        assert!(!prepared.include_continuous_usage);
     }
 
     #[test]

@@ -70,8 +70,6 @@ async fn main() -> Result<()> {
         enable_log_requests: false,
         enable_request_id_headers: false,
         disable_log_stats: false,
-        return_tokens_as_token_ids: false,
-        enable_force_include_usage: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
     };

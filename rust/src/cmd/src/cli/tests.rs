@@ -45,8 +45,6 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
-                        return_tokens_as_token_ids: false,
-                        enable_force_include_usage: false,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -274,8 +272,6 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
-                        return_tokens_as_token_ids: false,
-                        enable_force_include_usage: false,
                         served_model_name: [],
                     },
                 },
@@ -311,8 +307,6 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
-    assert!(!args.runtime.return_tokens_as_token_ids);
-    assert!(!args.runtime.enable_force_include_usage);
 }
 
 #[test]
@@ -327,7 +321,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192,"shutdown_timeout":3,"return_tokens_as_token_ids":true,"enable_force_include_usage":true}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -346,30 +340,6 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(args.runtime.max_model_len, Some(8192));
     assert_eq!(args.runtime.shutdown_timeout, 3);
-    assert!(args.runtime.return_tokens_as_token_ids);
-    assert!(args.runtime.enable_force_include_usage);
-}
-
-#[test]
-fn serve_args_accept_server_default_flags() {
-    let cli = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--return-tokens-as-token-ids",
-        "--enable-force-include-usage",
-    ])
-    .unwrap();
-
-    let Command::Serve(args) = cli.command else {
-        panic!("expected serve args");
-    };
-    assert!(args.runtime.return_tokens_as_token_ids);
-    assert!(args.runtime.enable_force_include_usage);
-
-    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
-    assert!(config.return_tokens_as_token_ids);
-    assert!(config.enable_force_include_usage);
 }
 
 #[test]
@@ -701,8 +671,6 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_request_id_headers: false,
                         disable_log_stats: false,
-                        return_tokens_as_token_ids: false,
-                        enable_force_include_usage: false,
                         served_model_name: [],
                     },
                     managed_engine: ManagedEngineArgs {
@@ -821,8 +789,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
-            return_tokens_as_token_ids: false,
-            enable_force_include_usage: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -886,8 +852,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
-            return_tokens_as_token_ids: false,
-            enable_force_include_usage: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
@@ -966,8 +930,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             enable_log_requests: false,
             enable_request_id_headers: false,
             disable_log_stats: false,
-            return_tokens_as_token_ids: false,
-            enable_force_include_usage: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
         }
