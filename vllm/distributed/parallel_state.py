@@ -46,6 +46,7 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
+from vllm.distributed.layer_parallel_config import init_layer_parallel_resolver
 from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
@@ -1262,6 +1263,20 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_TPA_GQA_MODE: bool = False
+
+
+def is_tpa_gqa_mode() -> bool:
+    """Return True iff TPA<TP is active (attention TP smaller than full TP).
+
+    Attention backends consult this to skip the pre-attention DCP
+    Q-all-gather: under TPA<TP the queries are already sized for the
+    attention TP group, and ``dcp_combine`` reduce-scatters heads from
+    H/TPA → H/TP for ``o_proj``.
+    """
+    return _TPA_GQA_MODE
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1748,6 +1763,38 @@ def initialize_model_parallel(
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
+    # Per-layer parallel config resolver.
+    # DCP groups are consecutive chunks of the TP axis (see the reshape
+    # above), so this rank's attention TP rank is which DCP group it
+    # belongs to: tp_rank // dcp_size_for_attn.
+    full_tp_size = tensor_model_parallel_size
+    full_tp_rank = _TP.rank_in_group
+    attn_tp_size = (
+        getattr(parallel_config, "tensor_parallel_size_attention", 0) or full_tp_size
+    )
+    if attn_tp_size > full_tp_size:
+        raise ValueError(
+            f"tensor_parallel_size_attention ({attn_tp_size}) cannot exceed "
+            f"tensor_model_parallel_size ({full_tp_size})"
+        )
+    if full_tp_size % attn_tp_size != 0:
+        raise ValueError(
+            f"tensor_model_parallel_size ({full_tp_size}) must be divisible "
+            f"by tensor_parallel_size_attention ({attn_tp_size})"
+        )
+    dcp_size_for_attn = full_tp_size // attn_tp_size
+    attn_tp_rank = full_tp_rank // dcp_size_for_attn
+
+    global _TPA_GQA_MODE
+    _TPA_GQA_MODE = attn_tp_size > 1 and attn_tp_size < full_tp_size
+
+    init_layer_parallel_resolver(
+        full_tp_size=full_tp_size,
+        full_tp_rank=full_tp_rank,
+        attn_tp_size=attn_tp_size,
+        attn_tp_rank=attn_tp_rank,
+    )
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
@@ -1890,6 +1937,12 @@ def destroy_model_parallel():
     if _EPLB:
         _EPLB.destroy()
     _EPLB = None
+
+    global _TPA_GQA_MODE
+    _TPA_GQA_MODE = False
+    from vllm.distributed.layer_parallel_config import clear_layer_parallel_resolver
+
+    clear_layer_parallel_resolver()
 
 
 def destroy_distributed_environment():

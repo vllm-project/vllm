@@ -1957,6 +1957,7 @@ class VllmConfig:
             f"download_dir={self.load_config.download_dir!r}, "
             f"load_format={self.load_config.load_format}, "
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size}, "  # noqa
+            f"tensor_parallel_size_attention={self.parallel_config.tensor_parallel_size_attention}, "  # noqa
             f"pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
             f"data_parallel_size={self.parallel_config.data_parallel_size}, "  # noqa
             f"decode_context_parallel_size={self.parallel_config.decode_context_parallel_size}, "  # noqa

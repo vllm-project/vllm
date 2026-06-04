@@ -474,14 +474,29 @@ class Attention(nn.Module, AttentionLayerBase):
             # Handle both 2D [num_tokens, hidden] and
             # 3D [num_tokens, heads, head_dim] query
             num_tokens = query.shape[0]
-            output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
+            # Under TPA-GQA the post-attention DCP combine reduce-scatters
+            # heads, so the output buffer holds num_heads / dcp_size heads.
+            from vllm.distributed.parallel_state import (
+                get_dcp_group,
+                is_tpa_gqa_mode,
+            )
+
+            if is_tpa_gqa_mode():
+                out_num_heads = self.num_heads // get_dcp_group().world_size
+            else:
+                out_num_heads = self.num_heads
+            output_shape = torch.Size((num_tokens, out_num_heads * self.head_size_v))
         output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
         hidden_size = output_shape[-1]
         # Reshape the query, key, and value tensors.
         # NOTE(woosuk): We do this outside the custom op to minimize the
         # CPU overheads from the non-CUDA-graph regions.
         query = query.view(-1, self.num_heads, self.head_size)
-        output = output.view(-1, self.num_heads, self.head_size_v)
+        if is_tpa_gqa_mode():
+            out_view_heads = self.num_heads // get_dcp_group().world_size
+        else:
+            out_view_heads = self.num_heads
+        output = output.view(-1, out_view_heads, self.head_size_v)
         if key is not None:
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:

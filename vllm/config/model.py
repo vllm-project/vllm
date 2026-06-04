@@ -1185,12 +1185,12 @@ class ModelConfig:
         parallel_config: ParallelConfig,
     ) -> None:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
-        tensor_parallel_size = parallel_config.tensor_parallel_size
-        if total_num_attention_heads % tensor_parallel_size != 0:
+        attention_tp_size = parallel_config.tpa_size
+        if total_num_attention_heads % attention_tp_size != 0:
             raise ValueError(
                 f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size})."
+                " must be divisible by attention tensor parallel size "
+                f"({attention_tp_size})."
             )
 
         if parallel_config.enable_expert_parallel:
@@ -1206,7 +1206,13 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and parallel_config.tensor_parallel_size_attention is None
+        ):
+            # TPA validates its own TP/DCP relationship in ParallelConfig.
+            tensor_parallel_size = parallel_config.tensor_parallel_size
             total_num_kv_heads = self.get_total_num_kv_heads()
             assert tensor_parallel_size > total_num_kv_heads, (
                 f"tensor parallel size {tensor_parallel_size} must be greater "
@@ -1287,15 +1293,16 @@ class ModelConfig:
             return 1
 
         total_num_kv_heads = self.get_total_num_kv_heads()
+        tensor_parallel_size = parallel_config.tpa_size
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
-        return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
+        return max(1, total_num_kv_heads // tensor_parallel_size)
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = self.model_arch_config.total_num_attention_heads
-        return num_heads // parallel_config.tensor_parallel_size
+        return num_heads // parallel_config.tpa_size
 
     def get_num_experts(self) -> int:
         return self.model_arch_config.num_experts
