@@ -266,7 +266,7 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
-    if args.tool_call_parser is not None and envs.VLLM_ENABLE_PARSER_METRICS:
+    if args.tool_call_parser is not None:
         from vllm.parser.metrics import init_parser_metrics
 
         init_parser_metrics()
