@@ -573,9 +573,13 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        for eplb_model_state in self.model_states.values():
-            eplb_model_state.metrics_state.accumulate(eplb_model_state.expert_load_pass)
-            eplb_model_state.metrics_state.step()
+        # Metrics collection is on by default
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            for eplb_model_state in self.model_states.values():
+                eplb_model_state.metrics_state.accumulate(
+                    eplb_model_state.expert_load_pass
+                )
+                eplb_model_state.metrics_state.step()
 
         if (
             log_stats
@@ -677,6 +681,15 @@ class EplbState:
         self._update_layer_should_record(log_stats=log_stats)
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
+        """Return whether expert-load recording should be enabled this step.
+
+        Recording is enabled when we are close to either:
+        1) The next rearrangement step, so the sliding window is ready.
+        2) The next balancedness logging step, when log_stats is enabled.
+        """
+
+        # If eplb metrics are being collected, which is the default behavior,
+        # _should_record_current_step returns True
         if not self.parallel_config.eplb_config.disable_metrics_collection:
             return True
 
