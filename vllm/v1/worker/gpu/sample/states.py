@@ -24,6 +24,9 @@ class SamplingStates:
         self.top_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.min_p = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.seeds = UvaBackedTensor(max_num_reqs, dtype=torch.int64)
+        # Tracks whether `seed` was set explicitly by the user, so callers
+        # can fall back from RNG paths that don't honor per-request seeds.
+        self.seeds_set = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize top_k and top_p manually because 0 is an invalid value for them.
         self.top_k.np.fill(self.vocab_size)
@@ -45,6 +48,7 @@ class SamplingStates:
         self.min_p.np[req_idx] = sampling_params.min_p
 
         seed = sampling_params.seed
+        self.seeds_set[req_idx] = seed is not None
         if seed is None:
             seed = np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX)
         self.seeds.np[req_idx] = seed
@@ -85,20 +89,31 @@ class SamplingStates:
             return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
+    def get_top_k_top_p(
+        self, expanded_idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
+        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
+        top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
+        top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
+        return top_k, top_p
+
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
-        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
-        if not (do_top_k or do_top_p):
+        top_k, top_p = self.get_top_k_top_p(expanded_idx_mapping, idx_mapping_np)
+        if top_k is None and top_p is None:
             return logits
-
-        top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
-        top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
         return apply_top_k_top_p(logits, top_k, top_p)
+
+    def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))
+
+    def any_explicit_seed(self, idx_mapping_np: np.ndarray) -> bool:
+        return bool(np.any(self.seeds_set[idx_mapping_np]))
 
     def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:
         return int(np.max(self.num_logprobs[idx_mapping_np]))

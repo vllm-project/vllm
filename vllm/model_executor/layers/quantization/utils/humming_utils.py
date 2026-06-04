@@ -8,11 +8,11 @@ from humming.layer import HummingInputSchema, HummingMethod
 from humming.schema import BaseWeightSchema
 
 from vllm import envs
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
@@ -82,7 +82,7 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     HummingMethod.transform_humming_layer(layer)
 
 
-def prepare_humming_moe_layer(layer: FusedMoE, quant_config: dict):
+def prepare_humming_moe_layer(layer: RoutedExperts, quant_config: dict):
     weight_schema = BaseWeightSchema.from_config(quant_config)
     input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
     if humming_is_layer_skipped(input_quant_config, layer.layer_name):
@@ -164,7 +164,12 @@ def prepare_humming_moe_layer(layer: FusedMoE, quant_config: dict):
         layer.register_buffer("locks", locks)
 
 
-def get_humming_moe_quant_config(layer: FusedMoE):
+def get_humming_moe_quant_config(
+    layer: RoutedExperts,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+):
     input_schema = layer.input_schemas["w13"]
     weight_schema = layer.weight_schemas["w13"]
 
@@ -211,4 +216,7 @@ def get_humming_moe_quant_config(layer: FusedMoE):
         _a2=a_quant_desc,
         _w1=w1_quant_desc,
         _w2=w2_quant_desc,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )

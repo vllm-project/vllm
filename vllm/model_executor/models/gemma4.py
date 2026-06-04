@@ -326,8 +326,9 @@ class Gemma4MoE(nn.Module):
         # Gemma4 routing: softmax over ALL experts → top-k → renormalize.
         # FusedMoE's built-in fused_topk scopes softmax differently, so
         # a custom routing function is needed for numerical correctness.
-        per_expert_scale = self.per_expert_scale
-
+        # NOTE: self.per_expert_scale is read at call time (not captured into
+        # a local) so that torch.func.functional_call parameter substitution
+        # reaches the routing function correctly.
         def routing_function(
             hidden_states: torch.Tensor,
             gating_output: torch.Tensor,
@@ -336,10 +337,12 @@ class Gemma4MoE(nn.Module):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             if current_platform.is_cuda_alike() or current_platform.is_xpu():
                 return gemma4_fused_routing_kernel_triton(
-                    gating_output, topk, per_expert_scale
+                    gating_output, topk, self.per_expert_scale
                 )
 
-            return gemma4_routing_function_torch(gating_output, topk, per_expert_scale)
+            return gemma4_routing_function_torch(
+                gating_output, topk, self.per_expert_scale
+            )
 
         # FusedMoE experts with custom Gemma4 routing
         self.experts = FusedMoE(
@@ -1048,11 +1051,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Final norm: output = norm(x) * weight
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Embedding scale = sqrt(hidden_size)
-        # Downcast to model dtype (bfloat16 etc.) for numerical parity
+        # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
         self.register_buffer(
             "normalizer",
-            torch.tensor(config.hidden_size**0.5),
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
             persistent=False,
         )
 
