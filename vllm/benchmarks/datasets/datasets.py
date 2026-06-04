@@ -3972,19 +3972,22 @@ class ASRDataset(HuggingFaceDataset):
     Dataset class for processing a ASR dataset for transcription.
     Tested on the following set:
 
-    +----------------+----------------------------------------+--------------------------+-----------------------------+
-    | Dataset        | Domain                                 | Speaking Style           | hf-subset                   |
-    +----------------+----------------------------------------+--------------------------+-----------------------------+
-    | TED-LIUM       | TED talks                              | Oratory                  | release1, release2, release3|
-    |                |                                        |                          | release3-speaker-adaptation |
-    | VoxPopuli      | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
-    | LibriSpeech    | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
-    | GigaSpeech     | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
-    | SPGISpeech     | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
-    | AMI            | Meetings                               | Spontaneous              | ihm, sdm                    |
-    +----------------+----------------------------------------+--------------------------+-----------------------------+
+    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset               | Domain                                 | Speaking Style           | hf-subset                   |
+    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM              | TED talks                              | Oratory                  | release1, release2, release3|
+    |                       |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli             | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech           | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech            | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech            | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | Earnings22-Cleaned-AA | Earnings calls                         | Prepared remarks, Q&A    | test                        |
+    | AMI                   | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
 
     """  # noqa: E501
+
+    EARNINGS22_CLEANED_DATASET = "ArtificialAnalysis/Earnings22-Cleaned-AA"
 
     SUPPORTED_DATASET_PATHS = {
         "openslr/librispeech_asr",
@@ -3993,10 +3996,41 @@ class ASRDataset(HuggingFaceDataset):
         "edinburghcstr/ami",
         "speechcolab/gigaspeech",
         "kensho/spgispeech",
+        EARNINGS22_CLEANED_DATASET,
     }
 
     DEFAULT_OUTPUT_LEN = 1024
     IS_MULTIMODAL = True
+
+    def load_data(self) -> None:
+        if self.hf_name == self.EARNINGS22_CLEANED_DATASET:
+            # This subset stores repo-local MP3 paths instead of a HF `Audio`
+            # column, so eagerly materialize it back into the common schema.
+            self.data = load_dataset(
+                self.dataset_path,
+                name=self.dataset_subset,
+                split=self.dataset_split,
+                streaming=False,
+                trust_remote_code=self.trust_remote_code,
+            )
+            if not getattr(self, "disable_shuffle", False):
+                self.data = self.data.shuffle(seed=self.random_seed)
+            self._materialize_local_audio_column()
+            return
+
+        super().load_data()
+
+    def _materialize_local_audio_column(self) -> None:
+        local_path_root = Path(
+            hf_api().snapshot_download(self.hf_name, repo_type="dataset")
+        )
+        self.data = self.data.map(
+            lambda item: {
+                "audio": str(local_path_root / item["url"]),
+                "text": item["transcript"],
+            }
+        )
+        self.data = self.data.cast_column("audio", Audio())
 
     def sample(
         self,
