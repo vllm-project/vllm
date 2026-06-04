@@ -10,6 +10,7 @@ change `vllm/entrypoints/openai/api_server.py` instead.
 
 import asyncio
 import json
+import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -21,7 +22,6 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.serve.utils import ssl
 from vllm.entrypoints.serve.utils.api_utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams

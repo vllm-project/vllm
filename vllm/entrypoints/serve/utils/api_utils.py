@@ -18,6 +18,7 @@ from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
@@ -273,7 +274,7 @@ def log_non_default_args(args: Namespace | EngineArgs):
 
 
 def should_include_usage(
-    stream_options: "StreamOptions | None", enable_force_include_usage: bool
+    stream_options: StreamOptions | None, enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
     if enable_force_include_usage:
         return True, True

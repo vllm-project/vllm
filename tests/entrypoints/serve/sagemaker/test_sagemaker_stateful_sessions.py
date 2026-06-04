@@ -7,6 +7,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     HEADER_SAGEMAKER_CLOSED_SESSION_ID,
     HEADER_SAGEMAKER_NEW_SESSION_ID,

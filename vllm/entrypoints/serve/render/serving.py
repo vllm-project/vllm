@@ -30,10 +30,8 @@ from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.serve.utils.api_utils import (
-    create_error_response,
-    get_max_tokens,
-)
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.logger import RequestLogger
 from vllm.inputs import (
     EngineInput,

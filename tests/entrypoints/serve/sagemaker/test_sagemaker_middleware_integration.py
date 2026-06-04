@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     MODEL_NAME_SMOLLM,
 )
