@@ -394,7 +394,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
         isa = _get_attn_isa(key.dtype, key_cache.shape[2], self.head_size)
         ops.cpu_attn_reshape_and_cache(
             key,
