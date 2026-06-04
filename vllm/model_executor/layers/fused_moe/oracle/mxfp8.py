@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -75,6 +76,29 @@ def _select_kernel_cls(
     )
 
 
+def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
+    """ROCm fallback when vendor MXFP8 backends are unavailable."""
+
+    if current_platform.supports_mx():
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+
+        logger.info_once(
+            "Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend."
+        )
+        return Fp8MoeBackend.NATIVE_MXFP8, Mxfp8NativeTritonExperts
+
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+        Mxfp8EmulationTritonExperts,
+    )
+
+    logger.info_once(
+        "No native MXFP8 MoE backend available; using BF16 dequant emulation."
+    )
+    return Fp8MoeBackend.EMULATION, Mxfp8EmulationTritonExperts
+
+
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
@@ -107,5 +131,9 @@ def select_mxfp8_moe_backend(
             continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
         return backend, experts_cls
+
+    # simplify the logic for rocm, refactor later when more backends are supported
+    if current_platform.is_rocm():
+        return _select_rocm_mxfp8_backend()
 
     raise ValueError("No MXFP8 MoE backends available.")

@@ -53,6 +53,13 @@ class Fp8MoeBackend(Enum):
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
     CPU = "CPU"
+    # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
+    # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
+    EMULATION = "EMULATION"
+    # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
+    # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
+    # format conversion); the FP8 values + E8M0 scales are consumed directly.
+    NATIVE_MXFP8 = "NATIVE_MXFP8"
 
 
 def _get_priority_backends(
@@ -499,6 +506,10 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
+            # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
+            # the MXFP8 weights as-is — neither needs a load-time layout change.
+            Fp8MoeBackend.EMULATION,
+            Fp8MoeBackend.NATIVE_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
