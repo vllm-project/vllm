@@ -4,7 +4,6 @@
 
 import torch
 import torch.nn as nn
-from packaging import version
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -19,17 +18,16 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-_FLASHINFER_MIN_VERSION = "0.2.3"
-
-
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
     is 0, when the platform isn't CUDA, when the GPU's compute capability is
-    unsupported, or when the installed flashinfer is missing or too old. Raises
-    ``RuntimeError`` if the user explicitly opted in via the env var but
-    FlashInfer is unavailable.
+    unsupported. Raises ``RuntimeError`` if the user explicitly opted in
+    via the env var but FlashInfer is unavailable.
+
+    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
+    otherwise importing the FlashInfer backend below raises ``ImportError``.
 
     Note: callers must additionally ensure ``logprobs_mode`` doesn't require
     post-top-k/top-p logits/logprobs for any request whose logprobs will be
@@ -52,19 +50,6 @@ def flashinfer_sampler_supported() -> bool:
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
-    else:
-        try:
-            import flashinfer
-
-            if version.parse(flashinfer.__version__) < version.parse(
-                _FLASHINFER_MIN_VERSION
-            ):
-                unsupported_reason = (
-                    f"flashinfer {flashinfer.__version__} is too old "
-                    f"(>={_FLASHINFER_MIN_VERSION} required)"
-                )
-        except ImportError:
-            unsupported_reason = "flashinfer is not installed"
 
     if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
