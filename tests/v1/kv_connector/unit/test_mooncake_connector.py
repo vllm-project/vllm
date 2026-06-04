@@ -369,10 +369,7 @@ async def test_kv_producer(monkeypatch):
         with patch.object(
             prefill_worker, "_send_blocks", return_value=0
         ) as mock_send_blocks:
-            # Under the standardized blocks-first layout K and V are packed
-            # into a single contiguous region per block. Adjacent blocks are
-            # coalesced into a single larger transfer; all cases below pass
-            # a single contiguous run.
+
             def expected_transfers(src_base, dst_base, src_blocks, dst_blocks):
                 n = len(src_blocks)
                 return (
@@ -801,9 +798,6 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                 flat_remote = [b for g in remote_block_ids for b in g]
                 num_blocks = len(flat_local)
 
-                # Under the standardized blocks-first layout K and V are
-                # already packed into a single contiguous region per block,
-                # so _expand_transfer_regions emits one region per layer.
                 assert len(src_ptrs) == num_blocks
                 assert len(dst_ptrs) == num_blocks
                 assert len(lengths) == num_blocks
