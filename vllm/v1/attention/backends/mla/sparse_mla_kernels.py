@@ -1996,9 +1996,9 @@ def accumulate_indexed_d512_split_sparse_mla_attention(
     max_score: torch.Tensor,
     denom: torch.Tensor,
     acc: torch.Tensor,
-    head_block_size: int = 16,
+    head_block_size: int = 32,
     candidate_block_size: int = 64,
-    value_block_size: int = 64,
+    value_block_size: int = 128,
 ) -> None:
     if q.dim() == 4:
         assert q.shape[1] == 1
