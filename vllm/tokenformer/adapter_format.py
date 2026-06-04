@@ -94,9 +94,9 @@ def normalize_lora_key(key: str) -> str:
         # vLLM has `.language_model.model.layers`.
         key = "language_model.model." + key[len("model.language_model."):]
     elif key.startswith("model.layers."):
-        # Decoder-only models (e.g. Qwen3.5): vLLM keeps the `model.`
-        # prefix — e.g. `model.layers.0.self_attn.q_proj`. Do not strip.
-        pass
+        # Qwen3.5: trainer saves under `model.layers.*` but this vLLM
+        # build wraps the decoder under `language_model.model.layers.*`.
+        key = "language_model.model." + key[len("model."):]
     elif key.startswith("model."):
         # Gemma4 multimodal sub-modules (vision_tower, embed_vision, …):
         # vLLM exposes these without the top-level `model.` wrapper.
