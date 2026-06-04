@@ -1726,20 +1726,15 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_list:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
-            for _, cache_or_caches in self.device_kv_caches.items():
-                # K and V are packed into one tensor: a single region per layer.
-                cache_list = [cache_or_caches]
-                for cache in cache_list:
-                    if self.enable_permute_local_kv and block_size_ratio > 1:
-                        kv_postprocess_blksize_and_layout_on_receive(
-                            cache, indices, block_size_ratio
-                        )
-                    elif self.enable_permute_local_kv:
-                        kv_postprocess_layout_on_receive(cache, indices)
-                    else:
-                        kv_postprocess_blksize_on_receive(
-                            cache, indices, block_size_ratio
-                        )
+            for cache in self.device_kv_caches.values():
+                if self.enable_permute_local_kv and block_size_ratio > 1:
+                    kv_postprocess_blksize_and_layout_on_receive(
+                        cache, indices, block_size_ratio
+                    )
+                elif self.enable_permute_local_kv:
+                    kv_postprocess_layout_on_receive(cache, indices)
+                else:
+                    kv_postprocess_blksize_on_receive(cache, indices, block_size_ratio)
 
     def post_process_device_kv_on_receive_heterogeneous_attn(
         self, block_ids: list[int]
