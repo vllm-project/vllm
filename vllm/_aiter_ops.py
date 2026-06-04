@@ -2518,7 +2518,7 @@ class rocm_aiter_ops:
             cos_sin_cache: Concatenated [cos, sin] table from rotary_emb.
             k_scale: Per-tensor KV quantization scale.
             is_neox: Whether NeoX-style RoPE interleaving is used.
-            q_out: Output buffer for post-RoPE q, shape [B, QH, qk_head_dim].
+            q_out: Output buffer for post-RoPE q, shape [B, QH, qk_nope_head_dim + qk_rope_head_dim].
             k_pe_out: Output buffer for post-RoPE k_pe, shape [B, 1, qk_rope_head_dim].
             num_decode_toks_for_zeros: Number of decode tokens for zeros padding.
         """
