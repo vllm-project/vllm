@@ -148,15 +148,31 @@ def add_duration(sample):
     return sample
 
 
-def load_hf_dataset(dataset_repo: str, split="validation", **hf_kwargs):
-    ## Load and filter the dataset
-    dataset = load_dataset(dataset_repo, split=split, **hf_kwargs)
+def load_asr_dataset_rows(dataset_repo: str, split="validation", **hf_kwargs):
+    if dataset_repo in ASRDataset.SUPPORTED_DATASET_PATHS:
+        asr_dataset_kwargs = {
+            "dataset_path": dataset_repo,
+            "dataset_split": split,
+            "disable_shuffle": True,
+            "no_stream": True,
+        }
+        for key in ("dataset_subset", "hf_name", "trust_remote_code"):
+            if key in hf_kwargs:
+                asr_dataset_kwargs[key] = hf_kwargs[key]
+        return ASRDataset(**asr_dataset_kwargs).data
+
+    return load_dataset(dataset_repo, split=split, **hf_kwargs)
+
+
+def load_shortform_eval_dataset(dataset_repo: str, split="validation", **hf_kwargs):
+    ## Load and filter the dataset.
+    dataset = load_asr_dataset_rows(dataset_repo, split=split, **hf_kwargs)
     dataset = dataset.cast_column("audio", Audio(decode=False))
     if "duration_ms" not in dataset.column_names:
-        # compute duration to filter
+        # Compute duration to filter.
         dataset = dataset.map(add_duration)
 
-    # Whisper max supported duration
+    # Whisper max supported duration.
     dataset = dataset.filter(lambda example: example["duration_ms"] < 30000)
     return dataset
 
@@ -198,14 +214,12 @@ LONGFORM_NUM_SAMPLES = 6
 
 
 def load_longform_dataset():
-    dataset = ASRDataset(
-        dataset_path=LONGFORM_DATASET_REPO,
-        dataset_split=LONGFORM_DATASET_SPLIT,
-        disable_shuffle=True,
-        no_stream=True,
+    dataset = load_asr_dataset_rows(
+        LONGFORM_DATASET_REPO,
+        split=LONGFORM_DATASET_SPLIT,
     )
-    assert len(dataset.data) >= LONGFORM_NUM_SAMPLES
-    return dataset.data.select(range(LONGFORM_NUM_SAMPLES))
+    assert len(dataset) >= LONGFORM_NUM_SAMPLES
+    return dataset.select(range(LONGFORM_NUM_SAMPLES))
 
 
 async def transcribe_audio_path(client, tokenizer, audio_path: str, extra_body=None):
@@ -314,7 +328,6 @@ def test_wer_correctness(
 ):
     model_name, expected_wer = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
-    # TODO refactor to use `ASRDataset`
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
@@ -327,7 +340,7 @@ def test_wer_correctness(
         model_name,
         server_args,
     ) as remote_server:
-        dataset = load_hf_dataset(dataset_repo)
+        dataset = load_shortform_eval_dataset(dataset_repo)
 
         if not max_concurrent_request:
             # No max concurrency

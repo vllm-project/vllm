@@ -3988,6 +3988,9 @@ class ASRDataset(HuggingFaceDataset):
     """  # noqa: E501
 
     EARNINGS22_CLEANED_DATASET = "ArtificialAnalysis/Earnings22-Cleaned-AA"
+    EARNINGS22_TINY_FILTERED_DATASET = (
+        "D4nt3/esb-datasets-earnings22-validation-tiny-filtered"
+    )
 
     SUPPORTED_DATASET_PATHS = {
         "openslr/librispeech_asr",
@@ -3997,6 +4000,7 @@ class ASRDataset(HuggingFaceDataset):
         "speechcolab/gigaspeech",
         "kensho/spgispeech",
         EARNINGS22_CLEANED_DATASET,
+        EARNINGS22_TINY_FILTERED_DATASET,
     }
 
     DEFAULT_OUTPUT_LEN = 1024
@@ -4017,12 +4021,19 @@ class ASRDataset(HuggingFaceDataset):
                 self.data = self.data.shuffle(seed=self.random_seed)
             self._materialize_local_audio_column()
             return
+        if self.hf_name == self.EARNINGS22_TINY_FILTERED_DATASET:
+            super().load_data()
+            self._disable_audio_decode()
+            return
 
         super().load_data()
 
-    def _materialize_local_audio_column(self) -> None:
+    def _disable_audio_decode(self) -> None:
         from datasets import Audio
 
+        self.data = self.data.cast_column("audio", Audio(decode=False))
+
+    def _materialize_local_audio_column(self) -> None:
         local_path_root = Path(
             hf_api().snapshot_download(self.hf_name, repo_type="dataset")
         )
@@ -4032,7 +4043,7 @@ class ASRDataset(HuggingFaceDataset):
                 "text": item["transcript"],
             }
         )
-        self.data = self.data.cast_column("audio", Audio(decode=False))
+        self._disable_audio_decode()
 
     def sample(
         self,
@@ -4073,10 +4084,15 @@ class ASRDataset(HuggingFaceDataset):
             elif isinstance(audio, dict) and audio.get("path"):
                 duration_s = sf.info(audio["path"]).duration
                 mm_content = {"audio_path": audio["path"]}
+            elif isinstance(audio, dict) and audio.get("bytes") is not None:
+                with BytesIO(audio["bytes"]) as audio_buffer:
+                    y, sr = sf.read(audio_buffer, dtype="float32")
+                duration_s = get_audio_duration(y=y, sr=sr)
+                mm_content = {"audio": (y, sr)}
             else:
                 raise ValueError(
-                    "ASR samples must provide either decoded audio arrays "
-                    "or a local audio path."
+                    "ASR samples must provide decoded audio arrays, "
+                    "embedded audio bytes, or a local audio path."
                 )
             if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1

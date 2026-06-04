@@ -113,6 +113,37 @@ def test_asr_dataset_sample_handles_local_audio_paths(tmp_path: Path) -> None:
     )
 
 
+def test_asr_dataset_sample_handles_embedded_audio_bytes(tmp_path: Path) -> None:
+    audio_path = tmp_path / "earnings.wav"
+    _write_wav(audio_path, duration_s=0.1)
+
+    dataset = object.__new__(datasets_module.ASRDataset)
+    dataset.data = [
+        {
+            "audio": {
+                "path": None,
+                "bytes": audio_path.read_bytes(),
+            },
+            "text": "quarterly earnings call",
+        }
+    ]
+
+    samples = dataset.sample(
+        tokenizer=_Tokenizer(),
+        num_requests=1,
+        output_len=32,
+        asr_min_audio_len_sec=0.0,
+        asr_max_audio_len_sec=1.0,
+    )
+
+    assert len(samples) == 1
+    assert isinstance(samples[0].multi_modal_data, dict)
+    audio, sample_rate = samples[0].multi_modal_data["audio"]
+    assert sample_rate == 16_000
+    assert isinstance(audio, np.ndarray)
+    assert audio.size > 0
+
+
 def test_async_request_openai_audio_handles_local_audio_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
