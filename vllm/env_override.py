@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E402
-import importlib.metadata
 import importlib.util
 import os
 from collections.abc import Callable
@@ -10,12 +9,7 @@ from functools import cache
 from packaging import version
 
 
-def _get_torch_cuda_version():
-    """Peripheral function to _maybe_set_cuda_compatibility_path().
-    PyTorch version must not be determined by importing directly
-    because it will trigger the CUDA initialization, losing the
-    chance to set the LD_LIBRARY_PATH beforehand.
-    """
+def _get_torch_version_attr(name: str):
     try:
         spec = importlib.util.find_spec("torch")
         if not spec:
@@ -36,9 +30,18 @@ def _get_torch_cuda_version():
         module = importlib.util.module_from_spec(ver_spec)
         # Avoid registering in sys.modules to not confuse future imports
         ver_spec.loader.exec_module(module)
-        return getattr(module, "cuda", None)
+        return getattr(module, name, None)
     except Exception:
         return None
+
+
+def _get_torch_cuda_version():
+    """Peripheral function to _maybe_set_cuda_compatibility_path().
+    PyTorch version must not be determined by importing directly
+    because it will trigger the CUDA initialization, losing the
+    chance to set the LD_LIBRARY_PATH beforehand.
+    """
+    return _get_torch_version_attr("cuda")
 
 
 def _maybe_set_cuda_compatibility_path():
@@ -125,7 +128,10 @@ os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 @cache
 def _installed_torch_version() -> version.Version:
-    return version.parse(importlib.metadata.version("torch"))
+    torch_version = _get_torch_version_attr("__version__")
+    if torch_version is None:
+        return version.parse("0")
+    return version.parse(torch_version)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:

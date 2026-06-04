@@ -23,8 +23,6 @@ from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.transformers_utils.runai_utils import is_runai_obj_uri
-from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
@@ -522,6 +520,8 @@ class VllmConfig:
 
         if not self._is_default_v2_model_runner_model():
             return False
+
+        from vllm.triton_utils import HAS_TRITON
 
         if not HAS_TRITON:
             logger.warning_once(
@@ -1916,6 +1916,8 @@ class VllmConfig:
 
             SequenceClassificationConfig.verify_and_update_config(self)
 
+        from vllm.transformers_utils.runai_utils import is_runai_obj_uri
+
         if hasattr(self.model_config, "model_weights") and is_runai_obj_uri(
             self.model_config.model_weights
         ):
@@ -2069,6 +2071,8 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
+        from vllm.triton_utils import HAS_TRITON
+
         if not HAS_TRITON:
             raise ValueError("Model Runner V2 requires Triton.")
 

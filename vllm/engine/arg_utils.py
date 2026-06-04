@@ -97,7 +97,6 @@ from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
     FlexibleArgumentParser,
@@ -762,6 +761,8 @@ class EngineArgs:
             # HF repo IDs and will be resolved later by
             # ModelConfig.maybe_pull_model_tokenizer_for_runai().
             if not is_cloud_storage(self.model):
+                from vllm.transformers_utils.repo_utils import get_model_path
+
                 model_id = self.model
                 self.model = get_model_path(self.model, self.revision)
                 if model_id is not self.model:
@@ -772,6 +773,8 @@ class EngineArgs:
                         self.model,
                     )
             if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
+                from vllm.transformers_utils.repo_utils import get_model_path
+
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:

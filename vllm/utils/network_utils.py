@@ -10,21 +10,21 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
-
-import psutil
-import zmq
-import zmq.asyncio
-from urllib3.util import parse_url
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 
+if TYPE_CHECKING:
+    import psutil
+    import zmq
+    import zmq.asyncio
+
 logger = init_logger(__name__)
 
 
-def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
+def close_sockets(sockets: Sequence["zmq.Socket | zmq.asyncio.Socket"]):
     for sock in sockets:
         if sock is not None:
             sock.close(linger=0)
@@ -221,7 +221,9 @@ def _get_open_port(
             return s.getsockname()[1]
 
 
-def find_process_using_port(port: int) -> psutil.Process | None:
+def find_process_using_port(port: int) -> "psutil.Process | None":
+    import psutil
+
     # TODO: We can not check for running processes with network
     # port on macOS. Therefore, we can not have a full graceful shutdown
     # of vLLM. For now, let's not look for processes in this case.
@@ -241,6 +243,8 @@ def find_process_using_port(port: int) -> psutil.Process | None:
 
 def split_zmq_path(path: str) -> tuple[str, str, str]:
     """Split a zmq path into its parts."""
+    from urllib3.util import parse_url
+
     parsed = parse_url(path)
     if not parsed.scheme:
         raise ValueError(f"Invalid zmq path: {path}")
@@ -282,15 +286,17 @@ def make_zmq_path(scheme: str, host: str, port: int | None = None) -> str:
 
 # Adapted from: https://github.com/sgl-project/sglang/blob/v0.4.1/python/sglang/srt/utils.py#L783 # noqa: E501
 def make_zmq_socket(
-    ctx: zmq.asyncio.Context | zmq.Context,  # type: ignore[name-defined]
+    ctx: "zmq.asyncio.Context | zmq.Context",
     path: str,
     socket_type: Any,
     bind: bool | None = None,
     identity: bytes | None = None,
     linger: int | None = None,
     router_handover: bool = False,
-) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
+) -> "zmq.Socket | zmq.asyncio.Socket":
     """Make a ZMQ socket with the proper bind/connect semantics."""
+    import psutil
+    import zmq
 
     mem = psutil.virtual_memory()
     socket = ctx.socket(socket_type)
@@ -350,8 +356,9 @@ def zmq_socket_ctx(
     linger: int = 0,
     identity: bytes | None = None,
     router_handover: bool = False,
-) -> Iterator[zmq.Socket]:
+) -> Iterator["zmq.Socket"]:
     """Context manager for a ZMQ socket"""
+    import zmq
 
     ctx = zmq.Context()  # type: ignore[attr-defined]
     try:
