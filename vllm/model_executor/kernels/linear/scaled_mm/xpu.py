@@ -94,14 +94,6 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "XPUFp8BlockScaledMM only support on XPU"
         return True, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module):
-        super().process_weights_after_loading(layer)
-        scale_attr = (
-            "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
-        )
-        scale = getattr(layer, scale_attr)
-        replace_parameter(layer, scale_attr, scale.data.t().contiguous())
-
     def apply_block_scaled_mm(
         self,
         A: torch.Tensor,
@@ -110,11 +102,15 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         Bs: torch.Tensor,
     ) -> torch.Tensor:
         # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
+        # fp8_gemm expects scale in [K//block, N//block] (transposed) layout,
+        # so we transpose Bs here rather than in process_weights_after_loading,
+        # which keeps the stored scale in standard [N//block, K//block] format
+        # for use by get_and_maybe_dequant_weights (e.g., MLA kv_b_proj).
         return torch.ops._xpu_C.fp8_gemm(
             A,
             B.t(),
             self.config.out_dtype,
             As,
-            Bs,
+            Bs.t().contiguous(),
             torch.Tensor(),
         )
