@@ -104,6 +104,14 @@ A `config.json` describing the run (block size, number of KV groups, etc.) is wr
 
 The directory must be writable by every rank. Because the per-rank suffix is added automatically, multiple ranks can safely share the same `root_dir` value.
 
+#### Cross-Process Sharing
+
+To enable KV cache sharing between multiple vLLM instances using the same `root_dir` (e.g., via a shared PVC), the `PYTHONHASHSEED` environment variable must be set to the same fixed value (e.g., `"0"`) on every instance. Without this, each process initializes `NONE_HASH` (the chain-hash seed for block content hashes) with random bytes, producing different block filenames for identical token content.
+
+```bash
+PYTHONHASHSEED=0 vllm serve ...
+```
+
 ## Tuning Tips
 
 - `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. Leave headroom for the rest of the host workload.
