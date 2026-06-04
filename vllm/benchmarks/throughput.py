@@ -104,7 +104,7 @@ def _run_vllm_requests(
 
     prompts: list[TextPrompt | TokensPrompt] = []
     sampling_params: list[SamplingParams] = []
-    lora_requests: list[LoRARequest] | None = [] if enable_lora else None
+    lora_requests: list[LoRARequest | None] | None = [] if enable_lora else None
     for request in requests:
         if isinstance(request.prompt, dict) and "prompt_token_ids" in request.prompt:
             prompt_token_ids = request.prompt["prompt_token_ids"]
@@ -128,7 +128,7 @@ def _run_vllm_requests(
                 detokenize=not disable_detokenize,
             )
         )
-        if lora_requests is not None and request.lora_request is not None:
+        if lora_requests is not None:
             lora_requests.append(request.lora_request)
 
     use_beam_search = False
