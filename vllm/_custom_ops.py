@@ -2759,7 +2759,9 @@ def swap_blocks_batch(
     Batch version of swap_blocks: submit all copies in a single driver call.
 
     Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
-    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    of sizes[i] bytes. All three tensors must be CPU tensors with the
+    platform-appropriate pointer dtype: int64 on CUDA/ROCm (required by
+    cache_kernels.cu) and uint64 on XPU (required by the XPU DMA engine).
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
 

@@ -11,8 +11,8 @@ from typing_extensions import override
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.triton_utils import HAS_TRITON, triton
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -93,7 +93,7 @@ def compute_sub_block_ptrs(
     Args:
         block_ids: array of block IDs at the tensor's native granularity.
         block_size_factor: number of sub-blocks per block.
-        output: pre-allocated int64 array to write pointers into.
+        output: pre-allocated pointer array to write pointers into.
         tensor: the source or destination tensor.
         skip_count: sub-blocks to skip in the first block.
     """
@@ -155,10 +155,12 @@ def _new_descriptor_buffers(
     num_copy_ops: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pin = is_pin_memory_available()
+    # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
+    ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
     return (
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
-        torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
+        torch.empty(num_copy_ops, dtype=ptr_dtype, pin_memory=pin),
     )
 
 
@@ -364,7 +366,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
-        stream = self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        stream = (
+            self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
+        )
         start_event = (
             self._event_pool.pop()
             if self._event_pool

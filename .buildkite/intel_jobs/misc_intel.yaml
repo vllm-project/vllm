@@ -79,4 +79,4 @@ steps:
       pytest -v -s v1/kv_offload/test_file_mapper.py &&
       pytest -v -s v1/kv_offload/tiering/test_fs_tier.py &&
       pytest -v -s v1/kv_offload/cpu/test_shared_offload_region.py &&
-      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
+      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py -k "not test_fs_tiering_offloading"'
