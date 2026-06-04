@@ -161,7 +161,12 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
+    async def sleep(
+        self,
+        level: int = 1,
+        mode: "PauseMode" = "abort",
+        tags: list[str] | None = None,
+    ) -> None:
         """Sleep the engine"""
         ...
 

@@ -61,7 +61,7 @@ llm.wake_up(tags=["kv_cache"])
 
 During RLHF training, vLLM allows you to selectively wake up only the model weights or the KV cache using the tags argument in wake_up(). This fine-grained control is especially useful when updating model weights: by waking up just the weights (e.g., llm.wake_up(tags=["weights"])), you avoid allocating memory for the KV cache until after the weight update is complete. This approach helps prevent GPU out-of-memory (OOM) errors, particularly with large models, by minimizing peak memory usage during weight synchronization and update operations.
 
-Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. **Note** that `is_sleeping` will report `true` until all components are awake.
+Use `tags=["weights"]` or `tags=["kv_cache"]` to control which resources are restored, useful for RLHF and weight updates. `is_sleeping` will report `true` until all sleeping memory tags are restored. It also reports `true` while scheduling is paused or any tag-based sleep has not been woken up.
 
 ```python
 # Put engine to deep sleep (level=2)
@@ -73,6 +73,18 @@ llm.wake_up(tags=["weights"])
 # wake up KV cache after weights are updated
 llm.wake_up(tags=["kv_cache"])
 ```
+
+If you need direct resource-level control, use `sleep(tags=...)` and `wake_up(tags=...)` with memory tags. Currently supported tags are `"kv_cache"` and `"weights"`. Sleeping `"weights"` discards weight memory; sleeping `"kv_cache"` discards KV cache contents. Sleeping memory is remapped empty on wake-up. Like level-based sleep, tag-based sleep accepts a `mode` argument to control in-flight requests. The default is `mode="abort"`, which aborts in-flight requests before memory is released.
+
+```python
+llm.sleep(tags=["kv_cache"])
+llm.wake_up(tags=["kv_cache"])
+
+llm.sleep(tags=["weights"])
+llm.wake_up(tags=["weights"])
+```
+
+`sleep(level=1/2)` remains the preset form, while `sleep(tags=...)` is the explicit memory-tag form. If `tags` are provided, they take precedence over the level preset. `sleep(level=0)` only pauses scheduling. Sleeping an already sleeping tag or waking up a tag that is not sleeping is a no-op.
 
 ### Online Serving
 
@@ -110,6 +122,7 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
+- `POST /sleep?tags=kv_cache&mode=abort` — Sleep the requested memory tags. Repeat `tags` to sleep multiple resources, for example `?tags=weights&tags=kv_cache`.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.

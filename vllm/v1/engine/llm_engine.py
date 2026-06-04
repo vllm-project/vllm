@@ -349,13 +349,22 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
-        if level >= 1:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        tags: list[str] | None = None,
+    ):
+        clear_mm_cache = (
+            tags is None and level >= 1 or (tags is not None and "weights" in tags)
+        )
+        if clear_mm_cache:
             self.renderer.clear_mm_cache()
-        self.engine_core.sleep(level, mode)
+        self.engine_core.sleep(level, mode, tags)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+            sleep_level = 0 if tags is not None else level
+            self.logger_manager.record_sleep_state(1, sleep_level)
 
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)

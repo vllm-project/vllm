@@ -53,6 +53,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -174,18 +175,26 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        tags: list[str] | tuple[str, ...] | None = None,
+        offload_tags: tuple[str, ...] | str | None = None,
+    ) -> None:
         """
-        Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be
-        offloaded to CPU memory, and others will be discarded.
+        Put matching allocator tags in sleep mode.
 
-        :param offload_tags: The tags of the memory allocation that will be
-            offloaded. The rest of the memory allocation will be discarded.
+        :param tags: Tags to release. If None, all allocations are released.
+        :param offload_tags: Tags that should be copied to CPU before release.
+            Released tags not listed here are discarded and remapped empty on
+            wake-up.
         """
+        if tags is None:
+            tags = tuple(data.tag for data in self.pointer_to_data.values())
+        if not tags:
+            logger.info("No memory tags to release.")
+            return
+
         if offload_tags is None:
-            # by default, allocated tensors are offloaded
-            # when the allocator sleeps
             offload_tags = (CuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
             offload_tags = (offload_tags,)
@@ -196,6 +205,10 @@ class CuMemAllocator:
         backup_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
+            if not data.is_mapped:
+                continue
+            if data.tag not in tags:
+                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
@@ -211,22 +224,22 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
         logger.info(
-            "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
-            "%.2f GiB is backed up in CPU and the rest %.2f GiB is discarded "
-            "directly.",
+            "CuMemAllocator: sleep(%s) freed %.2f GiB memory, "
+            "including %.2f GiB backed up in CPU.",
+            tags,
             total_bytes / 1024**3,
             backup_bytes / 1024**3,
-            (total_bytes - backup_bytes) / 1024**3,
         )
 
         gc.collect()
         torch.cuda.empty_cache()
 
-    def wake_up(self, tags: list[str] | None = None) -> None:
+    def wake_up(self, tags: list[str] | tuple[str, ...] | None = None) -> None:
         """
-        Wake up the allocator from sleep mode.
+        Wake up allocations matching the given tags.
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
 
@@ -234,10 +247,19 @@ class CuMemAllocator:
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
+        if tags is None:
+            tags = tuple(data.tag for data in self.pointer_to_data.values())
+        if not tags:
+            logger.info("No memory tags to resume.")
+            return
+
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
+            if data.tag in tags:
+                if data.is_mapped:
+                    continue
                 handle = data.handle
                 create_and_map(handle)
+                data.is_mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
