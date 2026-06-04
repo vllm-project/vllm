@@ -419,9 +419,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     # whose maximum is the max query length.
     decode_query_start_loc_cpu = decode_query_start_loc.cpu()
     total_num_decode_tokens = int(decode_query_start_loc_cpu[-1])
-    decode_max_query_len = int(
-        (decode_query_start_loc_cpu[1:] - decode_query_start_loc_cpu[:-1]).max()
-    )
+    # Guard against an empty batch: `.max()` on a 0-element tensor raises.
+    if num_reqs > 0:
+        decode_max_query_len = int(
+            (decode_query_start_loc_cpu[1:] - decode_query_start_loc_cpu[:-1]).max()
+        )
+    else:
+        decode_max_query_len = 0
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
