@@ -2740,44 +2740,47 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
 
 
 def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
-    """kv_role='kv_both' should emit a DeprecationWarning for NixlConnector."""
-    import warnings
+    """kv_role='kv_both' should emit a deprecation log warning."""
+    from unittest.mock import patch
+
+    from vllm.logger import _print_warning_once
+
+    _print_warning_once.cache_clear()
 
     vllm_config = create_vllm_config(kv_role="kv_both")
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+    ) as mock_logger:
+        mock_logger.warning_once = mock_logger.warning_once
         NixlConnector(
             vllm_config,
             KVConnectorRole.WORKER,
             make_kv_cache_config(block_size=16),
         )
 
-    deprecation_warnings = [
-        w for w in caught if issubclass(w.category, DeprecationWarning)
-    ]
-    assert len(deprecation_warnings) == 1
-    assert "kv_role='kv_both'" in str(deprecation_warnings[0].message)
-    assert "NixlConnector" in str(deprecation_warnings[0].message)
+    mock_logger.warning_once.assert_called_once()
+    msg = mock_logger.warning_once.call_args[0][0]
+    assert "kv_role='kv_both'" in msg
+    assert "deprecated" in msg
 
 
 def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
     """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
-    import warnings
+    from unittest.mock import patch
 
     for role in ("kv_consumer", "kv_producer"):
         vllm_config = create_vllm_config(kv_role=role)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+        ) as mock_logger:
             NixlConnector(
                 vllm_config,
                 KVConnectorRole.WORKER,
                 make_kv_cache_config(block_size=16),
             )
 
-        deprecation_warnings = [
-            w for w in caught if issubclass(w.category, DeprecationWarning)
-        ]
-        assert len(deprecation_warnings) == 0, (
-            f"kv_role={role!r} should not emit DeprecationWarning"
+        (
+            mock_logger.warning_once.assert_not_called(),
+            (f"kv_role={role!r} should not emit deprecation warning"),
         )
