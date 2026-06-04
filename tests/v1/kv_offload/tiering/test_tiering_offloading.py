@@ -490,6 +490,100 @@ class TestTieringOffloadingManager:
         # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
 
+    def test_reset_cache_clears_all_state(self, manager_setup):
+        """reset_cache wipes every kind of orchestrator state and resets
+        primary tier; pending submissions are dropped without being sent
+        to the secondary tier."""
+        # Cascade — populates primary blocks and leaves cascade jobs
+        # in _transfer_jobs (the synchronous example tier has already
+        # queued completions); reset_cache's drain loop will pick them up.
+        blocks = to_keys(range(3))
+        self.manager.prepare_store(blocks, _CTX)
+        self.manager.complete_store(blocks, _CTX, success=True)
+        assert self.manager._transfer_jobs
+
+        # Pending promotion submission (deferred — no on_schedule_end after
+        # the lookup that staged it).
+        promo_block = to_keys([99])[0]
+        self.secondary_tier1.blocks[promo_block] = True
+        assert self.manager.lookup(promo_block, ReqContext(req_id="pending")) is None
+        assert self.manager._pending_load_submissions
+
+        # Request-level tier registration.
+        self.secondary_tier1.on_new_request = (
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
+            )
+        )
+        self.manager.on_new_request(ReqContext(req_id="rl"))
+        assert self.manager._request_level_tiers
+
+        # Mark this step as already polled (reset_cache must clear it).
+        self.manager._processed_jobs_this_step = True
+
+        # Spy: pending submission must NOT reach the tier.
+        self.secondary_tier1.submit_load = MagicMock(
+            wraps=self.secondary_tier1.submit_load
+        )
+
+        self.manager.reset_cache()
+
+        # Orchestrator state cleared.
+        assert self.manager._transfer_jobs == {}
+        assert self.manager._pending_load_submissions == {}
+        assert self.manager._request_level_tiers == {}
+        assert self.manager._processed_jobs_this_step is False
+
+        # Primary tier reset to a fresh state.
+        assert self.primary_tier._num_allocated_blocks == 0
+        assert self.primary_tier._free_list == []
+        for block in blocks:
+            assert self.primary_tier.lookup(block, _CTX) is False
+
+        # Pending submission was dropped, not submitted.
+        self.secondary_tier1.submit_load.assert_not_called()
+
+    def test_reset_cache_polls_tier_until_drained(self, manager_setup):
+        """reset_cache must poll the tier in a loop until _transfer_jobs is
+        empty — not just clear it. Otherwise an in-flight tier worker
+        could write into, or read junk from, a primary slot that the
+        post-reset path has reallocated.
+        """
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        poll_count = 0
+        pending: list[int] = []
+
+        # Override submit_store on both tiers so the example tier no longer
+        # auto-completes; tier2's pending list shares the same buffer.
+        self.secondary_tier1.submit_store = lambda jm: pending.append(jm.job_id)
+        self.secondary_tier2.submit_store = lambda jm: pending.append(jm.job_id)
+
+        def slow_get_finished_jobs():
+            nonlocal poll_count
+            poll_count += 1
+            # Withhold completions for the first 2 polls to force the drain
+            # loop to iterate; report on the third.
+            if poll_count < 3:
+                return []
+            results = [JobResult(job_id=jid, success=True) for jid in pending]
+            pending.clear()
+            return results
+
+        self.secondary_tier1.get_finished_jobs = slow_get_finished_jobs
+        self.secondary_tier2.get_finished_jobs = lambda: []
+
+        # Drive a cascade so a job lands in _transfer_jobs.
+        blocks = to_keys(range(3))
+        self.manager.prepare_store(blocks, _CTX)
+        self.manager.complete_store(blocks, _CTX, success=True)
+        assert self.manager._transfer_jobs
+
+        self.manager.reset_cache()
+
+        assert poll_count >= 3
+        assert self.manager._transfer_jobs == {}
+
 
 class TestTieringOffloadingWithoutSecondaryTiers:
     """Test TieringOffloadingManager with no secondary tiers (backward compat)."""

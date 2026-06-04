@@ -20,6 +20,7 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
+import time
 from collections import defaultdict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -589,6 +590,50 @@ class TieringOffloadingManager(OffloadingManager):
             self.events.clear()
 
         yield from self.primary_tier.take_events()
+
+    @override
+    def reset_cache(self) -> None:
+        """Drop all tracked state in the orchestrator and primary tier.
+
+        Called by the engine during sleep, weight update, or resume. Blocks
+        until in-flight primary<->secondary transfers complete so that tier
+        worker threads stop reading from / writing to primary memory before
+        primary slots are released. A stuck tier will hang the engine
+        visibly; that is preferable to silent corruption from reusing
+        primary slots while a worker is mid-copy.
+
+        Secondary tiers are intentionally not reset: persistent stores (FS,
+        network) keep their data across resets.
+        """
+        # Hard drain: wait until no tier worker is still touching primary
+        # memory. No timeout — a hang here means a tier is broken and needs
+        # to be fixed at its source.
+        start = time.monotonic()
+        warned = False
+        while self._transfer_jobs:
+            self._process_finished_jobs()
+            if not self._transfer_jobs:
+                break
+            if not warned and time.monotonic() - start > 5.0:
+                logger.warning(
+                    "TieringOffloadingManager.reset_cache: drain still in "
+                    "progress after 5s (%d jobs in flight); a stuck tier "
+                    "will hang the engine.",
+                    len(self._transfer_jobs),
+                )
+                warned = True
+            # Yield the GIL so tier worker threads can make progress.
+            time.sleep(0.001)
+
+        # Deferred promotion submissions reserve primary slots that the
+        # reset below invalidates; their submit_load() has not yet been
+        # called so no tier worker is touching that memory.
+        self._pending_load_submissions.clear()
+
+        self.primary_tier.reset_cache()
+
+        self._request_level_tiers.clear()
+        self._processed_jobs_this_step = False
 
     @override
     def shutdown(self) -> None:
