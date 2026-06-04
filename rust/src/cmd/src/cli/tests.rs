@@ -88,6 +88,17 @@ fn serve_args_auto_forward_python_flags_without_separator() {
 }
 
 #[test]
+fn serve_args_auto_forward_enable_lora_to_python() {
+    let cli =
+        Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--enable-lora"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
+}
+
+#[test]
 fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "-tp", "2"]).unwrap();
 
