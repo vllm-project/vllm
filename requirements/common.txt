@@ -29,6 +29,7 @@ xgrammar >= 0.2.0, < 1.0.0; platform_machine == "x86_64" or platform_machine == 
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
+jsonschema >= 4.23.0 # required for MiniMax M3 tool schema validation
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.17.0
