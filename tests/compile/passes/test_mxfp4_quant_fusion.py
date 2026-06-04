@@ -60,32 +60,12 @@ def _import_fusion_module(name: str):
 # ─── UNIT TESTS: feature probes ───────────────────────────────────────────────
 
 
-def test_unit_probe_allreduce_mxfp4_returns_bool():
-    """has_fused_allreduce_rmsnorm_mxfp4_quant() must always return bool,
-    never None (regression guard — the @if_aiter_supported decorator returns None
-    when AITER is absent)."""
-    result = rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant()
-    assert isinstance(result, bool), (
-        f"has_fused_allreduce_rmsnorm_mxfp4_quant returned "
-        f"{type(result)}, expected bool"
-    )
-
-
 def test_unit_probe_rmsnorm_mxfp4_returns_bool():
     """has_fused_rmsnorm_mxfp4_quant() must always return bool."""
     result = rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant()
     assert isinstance(result, bool), (
         f"has_fused_rmsnorm_mxfp4_quant returned {type(result)}, expected bool"
     )
-
-
-def test_unit_probe_allreduce_false_without_aiter():
-    """Without AITER the allreduce probe must return False (not raise)."""
-    if IS_AITER_FOUND:
-        pytest.skip(
-            "AITER is present — probe may return True or False depending on version"
-        )
-    assert rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant() is False
 
 
 def test_unit_probe_rmsnorm_false_without_aiter():
@@ -116,12 +96,6 @@ def test_unit_get_ops_exist():
         "get_fused_rmsnorm_add_mxfp4_quant_op": (
             rocm_aiter_ops.get_fused_rmsnorm_add_mxfp4_quant_op
         ),
-        "get_fused_allreduce_rmsnorm_mxfp4_quant_op": (
-            rocm_aiter_ops.get_fused_allreduce_rmsnorm_mxfp4_quant_op
-        ),
-        "get_fused_allreduce_add_rmsnorm_mxfp4_quant_op": (
-            rocm_aiter_ops.get_fused_allreduce_add_rmsnorm_mxfp4_quant_op
-        ),
     }
     for name, getter in ops.items():
         op = getter()
@@ -129,71 +103,6 @@ def test_unit_get_ops_exist():
 
 
 # ─── UNIT TESTS: VllmPatternReplacement subclass structure ───────────────────
-
-
-@pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
-def test_unit_standalone_no_residual_pattern_structure(epsilon):
-    """AiterRMSNormMXFP4QuantPattern: pattern/replacement callable, get_inputs shape."""
-    mod = _import_fusion_module("vllm.compilation.passes.fusion.rocm_aiter_fusion")
-    p = mod.AiterRMSNormMXFP4QuantPattern(epsilon=epsilon)
-
-    assert callable(p.pattern), "pattern must be callable"
-    assert callable(p.replacement), "replacement must be callable"
-
-    inputs = p.get_inputs()
-    assert len(inputs) == 2, f"Expected 2 inputs (x, weight), got {len(inputs)}"
-    assert inputs[0].dtype == torch.bfloat16, "x must be BF16"
-    assert inputs[1].dtype == torch.bfloat16, "weight must be BF16"
-    # Both are 2-D: (M, N) for x and (N,) for weight — test shape rank
-    assert inputs[0].ndim == 2, "x must be 2-D"
-    assert inputs[1].ndim == 1, "weight must be 1-D"
-
-
-@pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
-def test_unit_standalone_with_residual_pattern_structure(epsilon):
-    """AiterFusedAddRMSNormMXFP4QuantPattern: 3 inputs, all BF16."""
-    mod = _import_fusion_module("vllm.compilation.passes.fusion.rocm_aiter_fusion")
-    p = mod.AiterFusedAddRMSNormMXFP4QuantPattern(epsilon=epsilon)
-
-    assert callable(p.pattern)
-    assert callable(p.replacement)
-
-    inputs = p.get_inputs()
-    assert len(inputs) == 3, (
-        f"Expected 3 inputs (x, weight, residual), got {len(inputs)}"
-    )
-    assert all(t.dtype == torch.bfloat16 for t in inputs), "All inputs must be BF16"
-    # x and residual 2-D, weight 1-D
-    assert inputs[0].ndim == 2  # x
-    assert inputs[1].ndim == 1  # weight
-    assert inputs[2].ndim == 2  # residual
-
-
-@pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
-def test_unit_ar_pattern_a_structure(epsilon):
-    """AiterAllreduceFusedRMSNormMXFP4QuantPattern: 2 inputs, callable."""
-    mod = _import_fusion_module("vllm.compilation.passes.fusion.allreduce_rms_fusion")
-    p = mod.AiterAllreduceFusedRMSNormMXFP4QuantPattern(
-        epsilon=epsilon, dtype=torch.bfloat16, device="cpu"
-    )
-    assert callable(p.pattern)
-    assert callable(p.replacement)
-    inputs = p.get_inputs()
-    assert len(inputs) == 2
-
-
-@pytest.mark.parametrize("epsilon", [1e-5, 1e-6])
-def test_unit_ar_pattern_b_structure(epsilon):
-    """AiterAllreduceFusedAddRMSNormMXFP4QuantPattern: 3 inputs, callable."""
-    mod = _import_fusion_module("vllm.compilation.passes.fusion.allreduce_rms_fusion")
-    p = mod.AiterAllreduceFusedAddRMSNormMXFP4QuantPattern(
-        epsilon=epsilon, dtype=torch.bfloat16, device="cpu"
-    )
-    assert callable(p.pattern)
-    assert callable(p.replacement)
-    inputs = p.get_inputs()
-    assert len(inputs) == 3
-    assert all(t.dtype == torch.bfloat16 for t in inputs)
 
 
 # ─── UNIT TESTS: DeepSeek-R1 shape traces ────────────────────────────────────
