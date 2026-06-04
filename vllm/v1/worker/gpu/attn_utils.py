@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -178,7 +178,6 @@ def _reshape_kv_cache(
     shared_kv_cache_layers: dict[str, str],
 ) -> dict[str, Any]:
     kv_caches: dict[str, Any] = {}
-    has_attn, has_mamba = False, False
 
     for group in attn_groups:
         if group.kv_cache_group_id >= len(kernel_block_sizes):
@@ -202,7 +201,6 @@ def _reshape_kv_cache(
             num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             if isinstance(kv_cache_spec, AttentionSpec):
-                has_attn = True
                 # Use storage_block_size: it equals block_size for uncompressed
                 # specs but is smaller for compressed ones (DeepSeek V4), which
                 # store block_size tokens in block_size // compress_ratio slots.
@@ -256,7 +254,6 @@ def _reshape_kv_cache(
                 kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
             elif isinstance(kv_cache_spec, MambaSpec):
-                has_mamba = True
                 state_tensors = []
                 storage_offset_bytes = 0
                 for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
@@ -280,68 +277,11 @@ def _reshape_kv_cache(
                     f"Unsupported KV cache spec type: {type(kv_cache_spec)}"
                 )
 
-    if has_attn and has_mamba:
-        _update_hybrid_attention_layout(
-            attn_groups=attn_groups,
-            kv_caches=kv_caches,
-            kernel_block_sizes=kernel_block_sizes,
-            cache_dtype=cache_dtype,
-        )
-
     # Map any sharing layers to their target layer's KV cache.
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
-
-
-def _update_hybrid_attention_layout(
-    attn_groups: Iterable[AttentionGroup],
-    kv_caches: dict[str, Any],
-    kernel_block_sizes: list[int],
-    cache_dtype: str,
-) -> None:
-    for group in attn_groups:
-        if group.kv_cache_group_id >= len(kernel_block_sizes):
-            continue
-
-        kv_cache_spec = group.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            continue
-        block_dim = group.backend.get_kv_cache_block_dim(
-            kernel_block_sizes[group.kv_cache_group_id],
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-        # if the first dim of the kvcache's layout is already num_blocks, continue
-        if block_dim == 0:
-            continue
-
-        assert block_dim == 1, (
-            "Expected the dim `num_blocks` at the second dim when updating"
-            " the kvcache's layout of full attention layer"
-        )
-
-        for layer_name in group.layer_names:
-            if layer_name not in kv_caches:
-                # Shared layer — will be aliased to its target after this pass.
-                continue
-
-            kv_cache = kv_caches[layer_name]
-            if kv_cache.shape[0] == 2:
-                assert kv_cache.shape[1] != 2, (
-                    f"Cannot determine layout for tensor of shape {kv_cache.shape}"
-                )
-                hidden_size = kv_cache.shape[2:].numel()
-                kv_cache.as_strided_(
-                    size=kv_cache.shape,
-                    stride=(
-                        hidden_size,
-                        2 * hidden_size,
-                        *kv_cache.stride()[2:],
-                    ),
-                )
 
 
 def init_kv_cache(
