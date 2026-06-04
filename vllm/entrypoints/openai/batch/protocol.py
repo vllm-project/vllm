@@ -3,7 +3,7 @@
 """Protocol definitions for the Online Batch API."""
 from typing import Any
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic_core.core_schema import ValidationInfo
 
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
@@ -14,19 +14,14 @@ class BatchRequestInput(OpenAIBaseModel):
     The per-line object of the batch input file.
     """
 
-    # A developer-provided per-request id that will be used to match outputs to
-    # inputs. Must be unique for each request in a batch.
-    custom_id: str
-
-    # The HTTP method to be used for the request. Currently only POST is
-    # supported.
-    method: str
-
-    # The OpenAI API relative URL to be used for the request.
-    url: str
-
-    # The parameters of the request.
-    body: Any
+    custom_id: str = Field(
+        description="A developer-provided per-request id used to match "
+        "outputs to inputs. Must be unique for each request in a batch.")
+    method: str = Field(
+        description="The HTTP method for the request. Only POST is supported.")
+    url: str = Field(
+        description="The OpenAI API relative URL for the request.")
+    body: Any = Field(description="The parameters of the request.")
 
     @field_validator('body', mode='plain')
     @classmethod
@@ -47,13 +42,8 @@ class BatchRequestInput(OpenAIBaseModel):
 
 
 class BatchResponseData(OpenAIBaseModel):
-    # HTTP status code of the response.
     status_code: int = 200
-
-    # An unique identifier for the API request.
     request_id: str
-
-    # The body of the response.
     body: Any | None = None
 
 
@@ -63,16 +53,13 @@ class BatchRequestOutput(OpenAIBaseModel):
     """
 
     id: str
-
-    # A developer-provided per-request id that will be used to match outputs to
-    # inputs.
-    custom_id: str
-
+    custom_id: str = Field(
+        description="A developer-provided per-request id used to match "
+        "outputs to inputs.")
     response: BatchResponseData | None
-
-    # For requests that failed with a non-HTTP error, this will contain more
-    # information on the cause of the failure.
-    error: Any | None
+    error: Any | None = Field(
+        description="For requests that failed with a non-HTTP error, more "
+        "information on the cause of the failure.")
 
 
 class FileObject(OpenAIBaseModel):
@@ -82,7 +69,8 @@ class FileObject(OpenAIBaseModel):
     bytes: int
     created_at: int
     filename: str
-    purpose: str  # "batch", "batch_output", "batch_error"
+    purpose: str = Field(
+        description='One of "batch", "batch_output", "batch_error".')
 
 
 class FileListResponse(OpenAIBaseModel):
