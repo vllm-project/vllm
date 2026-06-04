@@ -2181,6 +2181,191 @@ def test_null_parent_block_hash():
     assert blocks[num_full_blocks - 1].block_hash is not None
 
 
+def test_block_stored_event_splits_around_null_blocks():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_null_event_split",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = [pool.null_block, *pool.get_new_blocks(1)]
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[0]
+    )
+    assert event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    ]
+    assert event.extra_keys == [None]
+    assert event.token_ids == list(req.all_token_ids[block_size:])
+    assert event.skipped_parent_block_hash is None
+    assert event.skipped_token_ids == list(req.all_token_ids[:block_size])
+    assert event.skipped_extra_keys == [None]
+    assert pool.null_block.block_hash is None
+    assert blocks[1].block_hash is not None
+
+
+def test_block_stored_event_splits_around_masked_blocks():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_masked_event_split",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(2)
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+        block_mask=[False, True],
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[0]
+    )
+    assert event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    ]
+    assert event.extra_keys == [None]
+    assert event.token_ids == list(req.all_token_ids[block_size:])
+    assert event.skipped_parent_block_hash is None
+    assert event.skipped_token_ids == list(req.all_token_ids[:block_size])
+    assert event.skipped_extra_keys == [None]
+    assert blocks[0].block_hash is None
+    assert blocks[1].block_hash is not None
+
+
+def test_block_stored_event_emits_dense_runs_around_masked_block():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_contiguous_prefix_event",
+        prompt_token_ids=list(range(3 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(3)
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=3,
+        block_size=block_size,
+        kv_cache_group_id=0,
+        block_mask=[True, False, True],
+    )
+
+    events = pool.take_events()
+    assert len(events) == 2
+    first_event, second_event = events
+    assert isinstance(first_event, BlockStored)
+    assert first_event.parent_block_hash is None
+    assert first_event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[0])
+    ]
+    assert first_event.extra_keys == [None]
+    assert first_event.token_ids == list(req.all_token_ids[:block_size])
+    assert first_event.skipped_parent_block_hash is None
+    assert first_event.skipped_token_ids is None
+    assert first_event.skipped_extra_keys is None
+    assert isinstance(second_event, BlockStored)
+    expected_parent = kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    assert second_event.parent_block_hash == expected_parent
+    assert second_event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[2])
+    ]
+    assert second_event.extra_keys == [None]
+    assert second_event.token_ids == list(req.all_token_ids[2 * block_size :])
+    expected_skipped_parent = kv_cache_utils.maybe_convert_block_hash(
+        req.block_hashes[0]
+    )
+    assert second_event.skipped_parent_block_hash == expected_skipped_parent
+    assert second_event.skipped_token_ids == list(
+        req.all_token_ids[block_size : 2 * block_size]
+    )
+    assert second_event.skipped_extra_keys == [None]
+    assert all(block.block_hash is not None for block in blocks[::2])
+    assert blocks[1].block_hash is None
+
+
+def test_block_stored_event_skipped_context_includes_extra_keys():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_skipped_event_context_extra_keys",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+        cache_salt="salt",
+    )
+    blocks = pool.get_new_blocks(2)
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+        block_mask=[False, True],
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.extra_keys == [None]
+    assert event.skipped_parent_block_hash is None
+    assert event.skipped_token_ids == list(req.all_token_ids[:block_size])
+    assert event.skipped_extra_keys == [("salt",)]
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events_with_lora(blocks_to_cache: int):
     """Test BlockStored events contain correct lora_id when using LoRA requests."""
