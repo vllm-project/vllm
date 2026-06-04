@@ -326,27 +326,11 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
         )
 
 
-def _symmetric_zp_packed(quant_algo: CPUQuantAlgo) -> int:
-    """Return the packed int32 zero-point value for symmetric INT4.
-
-    Symmetric INT4 has true zero_point=8.  The GPTQ unpack kernel
-    (unpack_4bit_to_32bit_signed) adds +1 to stored zeros, so we
-    store 7 per nibble: 0x77777777 → +1 → 8.
-
-    Both GPTQ symmetric and compressed-tensors symmetric use this
-    synthesis path on CPU, since neither caller passes qzeros to
-    convert_to_wna16_moe_kernel_format.
-    """
-    assert quant_algo == CPUQuantAlgo.GPTQ
-    return 0x77777777  # each nibble=7, +1 in GPTQ unpack → 8
-
-
 def prepare_int4_moe_layer_for_cpu(
     w13_packed: torch.Tensor,
     w2_packed: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    group_size: int,
     quant_algo: CPUQuantAlgo = CPUQuantAlgo.GPTQ,
     w13_zeros: torch.Tensor | None = None,
     w2_zeros: torch.Tensor | None = None,
@@ -360,7 +344,6 @@ def prepare_int4_moe_layer_for_cpu(
         w2_packed: [E, I//8, K] int32 (packed int4)
         w13_scale: [E, num_groups, 2*I] float16/bf16
         w2_scale: [E, num_groups, K] float16/bf16
-        group_size: quantization group size
         quant_algo: CPUQuantAlgo.GPTQ or CPUQuantAlgo.AWQ
         w13_zeros: optional [E, num_groups, N//8] int32 packed zeros.
                    If None, synthetic zeros are created for symmetric quant.
@@ -373,10 +356,13 @@ def prepare_int4_moe_layer_for_cpu(
     """
     E = w13_packed.size(0)
 
+    # No qzeros are available in compressed-tensors symmetric checkpoints.
+    # The GPTQ unpack kernel (unpack_4bit_to_32bit_signed) adds +1 to stored zeros,
+    # so we store 7 per nibble: 0x77777777 → +1 → 8.
     if w13_zeros is None:
         num_groups_w13 = w13_scale.size(1)
         N_w13 = w13_scale.size(2)  # 2*I
-        _zp = _symmetric_zp_packed(quant_algo)
+        _zp = 0x77777777
         w13_zeros = torch.full(
             (E, num_groups_w13, N_w13 // 8),
             _zp,
@@ -386,7 +372,7 @@ def prepare_int4_moe_layer_for_cpu(
     if w2_zeros is None:
         num_groups_w2 = w2_scale.size(1)
         N_w2 = w2_scale.size(2)  # K
-        _zp = _symmetric_zp_packed(quant_algo)
+        _zp = 0x77777777
         w2_zeros = torch.full(
             (E, num_groups_w2, N_w2 // 8),
             _zp,
@@ -418,10 +404,6 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             moe_config,
             quant_config,
         )
-        self._w1_blocked_scale = quant_config.w1_scale
-        self._w2_blocked_scale = quant_config.w2_scale
-        self._w1_blocked_zero = quant_config.w1_zp
-        self._w2_blocked_zero = quant_config.w2_zp
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -529,10 +511,10 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             topk_ids,
             False,  # inplace
             CPUQuantMethod.INT4_W4A8,
-            self._w1_blocked_scale,
-            self._w2_blocked_scale,
-            self._w1_blocked_zero,
-            self._w2_blocked_zero,
+            self.w1_scale,
+            self.w2_scale,
+            self.w1_zp,
+            self.w2_zp,
             None,  # block_size
             None,  # w1_bias
             None,  # w2_bias

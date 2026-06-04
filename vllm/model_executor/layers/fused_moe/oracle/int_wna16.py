@@ -219,13 +219,15 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
     )
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUExpertsInt4,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
     # BatchedMarlinExperts, XPUExpertsWNA16, and CPUExpertsInt4
-    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsInt4
     assert experts_cls in (
         MarlinExperts,
         BatchedMarlinExperts,
@@ -874,6 +876,30 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_int4_moe_layer_for_cpu,
         )
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
+        from vllm.model_executor.layers.quantization.awq_marlin import (
+            AWQMarlinConfig,
+        )
+
+        # Detect AWQ vs GPTQ packing format.
+        # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
+        # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
+        # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
+        if isinstance(quant_config, AWQMarlinConfig):
+            # AWQ: K is stored unpacked in dim 1.
+            group_size = w13.size(1) // w13_scale.size(1)
+            cpu_quant_algo = ops.CPUQuantAlgo.AWQ
+        elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
+            # GPTQ / compressed-tensors: K//8 is stored packed in dim 1.
+            group_size = w13.size(1) * 8 // w13_scale.size(1)
+            cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+        else:
+            raise TypeError(
+                "CPU WNA16 MoE backend requires AWQMarlinConfig, AutoGPTQConfig "
+                f"or QuantizationArgs, got {type(quant_config).__name__}."
+            )
 
         # Determine zero points for repacking.
         w13_zeros: torch.Tensor | None = None
@@ -891,7 +917,6 @@ def convert_to_wna16_moe_kernel_format(
                 else w2_qzeros.data
             )
 
-        group_size = w13.size(1) * 8 // w13_scale.size(1)
         (
             blocked_w13,
             blocked_w2,
@@ -904,7 +929,7 @@ def convert_to_wna16_moe_kernel_format(
             w2,
             w13_scale,
             w2_scale,
-            group_size,
+            quant_algo=cpu_quant_algo,
             w13_zeros=w13_zeros,
             w2_zeros=w2_zeros,
         )
