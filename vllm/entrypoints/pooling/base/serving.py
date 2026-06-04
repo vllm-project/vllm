@@ -283,6 +283,7 @@ class PoolingServingBase(ABC):
         request = ctx.request
         if request.model in self.models.lora_requests:
             ctx.lora_request = self.models.lora_requests[request.model]
+            return None
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.
