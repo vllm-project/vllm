@@ -206,6 +206,56 @@ def test_schedule_partial_requests():
     assert requests[2].request_id not in output.num_scheduled_tokens
 
 
+@pytest.mark.parametrize("has_running", [True, False])
+def test_schedule_prefills_gating(has_running: bool):
+    """DP prefill-balancing gate: when `throttle_prefills` is True, a new
+    WAITING (prefill) request is deferred ONLY if this rank has running work to
+    protect. With no running requests, the prefill is admitted regardless (so a
+    throttled step is never wasted as a dummy), and running/decode requests are
+    unaffected. Once the cadence allows prefills again, the request is admitted.
+    """
+    scheduler = create_scheduler(max_num_seqs=16, max_num_batched_tokens=8192)
+
+    if has_running:
+        # Establish a running (decode) request via a prefill + output step.
+        (running_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["run0"])
+        scheduler.add_request(running_req)
+        output = scheduler.schedule()
+        assert len(output.scheduled_new_reqs) == 1
+        scheduler.update_from_output(
+            output,
+            ModelRunnerOutput(
+                req_ids=["run0"],
+                req_id_to_index={"run0": 0},
+                sampled_token_ids=[[0]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        assert len(scheduler.running) == 1
+
+    # Add a new WAITING (prefill) request, with prefills gated off.
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    scheduler.throttle_prefills = True
+    output = scheduler.schedule()
+
+    if has_running:
+        # There is running work to protect, so the new prefill is deferred...
+        assert "new0" not in output.num_scheduled_tokens
+        assert new_req.status == RequestStatus.WAITING
+        # ...while the running/decode request keeps being scheduled.
+        assert "run0" in output.num_scheduled_tokens
+        # When the cadence allows prefills again, the request is admitted.
+        scheduler.throttle_prefills = False
+        output = scheduler.schedule()
+
+    # No running work to protect (or cadence now open): the prefill is admitted.
+    assert "new0" in output.num_scheduled_tokens
+    assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
+
+
 def test_no_mm_input_chunking():
     # Disable multimodal input chunking.
     scheduler = create_scheduler(

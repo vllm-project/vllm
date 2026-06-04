@@ -143,6 +143,11 @@ class SchedulerConfig:
     checking the first chunk. Prevents over-admission and KV cache thrashing
     with chunked prefill."""
 
+    prefill_schedule_interval: int = Field(default=1, ge=1)
+    """For data-parallel deployments, only admit new prefill requests
+    once every N engine steps, aligned across DP ranks, to better balance
+    per-step forward-pass times."""
+
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.

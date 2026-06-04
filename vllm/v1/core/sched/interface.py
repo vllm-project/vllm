@@ -197,6 +197,11 @@ class SchedulerInterface(ABC):
     def set_pause_state(self, pause_state: PauseState) -> None:
         raise NotImplementedError
 
+    def set_throttle_prefills(self, throttle_prefills: bool) -> None:  # noqa: B027
+        """Set whether prefills are throttled (deferred) in subsequent steps.
+        Used to control a cadence to better balance aggregated DP workloads."""
+        pass
+
     @abstractmethod
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

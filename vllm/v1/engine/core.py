@@ -1691,6 +1691,9 @@ class DPEngineCoreProc(EngineCoreProc):
             "DPEngineCoreProc should only be used for MoE models"
         )
 
+        scheduler_config = vllm_config.scheduler_config
+        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
         self.step_counter = 0
@@ -1858,6 +1861,14 @@ class DPEngineCoreProc(EngineCoreProc):
                         raise SystemExit
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
+
+            # Throttle new prefills to cadence-aligned steps for DP balancing.
+            # step_counter is identical across DP ranks. On a fresh wave the
+            # counter is 0, so prefills are admitted immediately after idle.
+            if self.prefill_schedule_interval > 1:
+                self.scheduler.set_throttle_prefills(
+                    self.step_counter % self.prefill_schedule_interval != 0
+                )
 
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
