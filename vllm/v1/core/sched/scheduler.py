@@ -43,6 +43,9 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.prefill_chunk_alignment import (
+    create_prefill_chunk_alignment_policy,
+)
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -258,8 +261,11 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-        self.need_mamba_block_aligned_split = (
-            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        self.prefill_chunk_alignment_policy = create_prefill_chunk_alignment_policy(
+            has_mamba_layers=self.has_mamba_layers,
+            mamba_cache_mode=self.cache_config.mamba_cache_mode,
+            block_size=self.cache_config.block_size,
+            use_eagle=self.use_eagle,
         )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
@@ -285,56 +291,6 @@ class Scheduler(SchedulerInterface):
             self._re_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
-
-    def _mamba_block_aligned_split(
-        self,
-        request: Request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
-        num_computed_tokens = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
-        )
-        # Perform block-aligned splitting at prefill phase, including:
-        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
-        # * resumed requests: num_computed_tokens < (
-        #                       num_prompt_tokens + num_output_tokens
-        #                     )
-        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
-        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
-            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-            # must be a multiple of `block_size`.
-            # As an exception, if `num_new_tokens` is less than `block_size`, the
-            # state is simply not cached, requiring no special handling.
-            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-            # matching block. To prevent this from causing a Mamba cache miss, the
-            # last chunk must be not smaller than `block_size`.
-            block_size = self.cache_config.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            # eagle prune
-            if self.use_eagle:
-                last_cache_position = max(last_cache_position - block_size, 0)
-            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
-                # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
-            elif (
-                num_computed_tokens
-                < last_cache_position
-                < num_computed_tokens_after_sched
-            ):
-                # force to cache the last chunk
-                num_new_tokens = last_cache_position - num_computed_tokens
-            else:
-                # prefill the last few tokens
-                pass
-        return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         self.current_step += 1
@@ -432,10 +388,12 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
-            if self.need_mamba_block_aligned_split:
-                num_new_tokens = self._mamba_block_aligned_split(
-                    request, num_new_tokens
-                )
+            # Running-queue path: cached state is already reflected in
+            # `request.num_computed_tokens`, so policy kwargs default to 0.
+            num_new_tokens = self.prefill_chunk_alignment_policy.align_scheduled_tokens(
+                request,
+                num_new_tokens,
+            )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -447,8 +405,7 @@ class Scheduler(SchedulerInterface):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
-                # 4. Insufficient budget for a block-aligned chunk in hybrid
-                #    models with mamba cache mode \"align\".
+                # 4. Insufficient budget after applying the prefill alignment policy.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -632,6 +589,19 @@ class Scheduler(SchedulerInterface):
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
+
+                        chunk_align_policy = self.prefill_chunk_alignment_policy
+                        num_external_computed_tokens = (
+                            chunk_align_policy.align_external_cached_tokens(
+                                request,
+                                num_local_cached_tokens=num_new_local_computed_tokens,
+                                num_external_cached_tokens=num_external_computed_tokens,
+                            )
+                        )
+                        # Stats and async transfer state follow usable hits.
+                        load_kv_async = (
+                            load_kv_async and num_external_computed_tokens > 0
+                        )
                         connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
@@ -716,12 +686,13 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
-                    num_new_tokens = self._mamba_block_aligned_split(
-                        request,
-                        num_new_tokens,
-                        num_new_local_computed_tokens,
-                        num_external_computed_tokens,
+                    num_new_tokens = (
+                        self.prefill_chunk_alignment_policy.align_scheduled_tokens(
+                            request,
+                            num_new_tokens,
+                            num_local_cached_tokens=num_new_local_computed_tokens,
+                            num_external_cached_tokens=num_external_computed_tokens,
+                        )
                     )
                     if num_new_tokens == 0:
                         break
