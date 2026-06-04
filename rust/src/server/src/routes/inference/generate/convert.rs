@@ -3,6 +3,7 @@ use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
+use crate::lora::LoraModelResolution;
 use crate::utils::{ResolvedRequestContext, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
@@ -21,10 +22,10 @@ pub struct PreparedRequest {
 /// text-generation format.
 pub fn prepare_generate_request(
     request: GenerateRequest,
-    served_model_names: &[String],
+    lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, served_model_names)?;
+    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
     let stream = request.stream;
     let include_usage = request
@@ -57,6 +58,7 @@ pub fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        lora_request: lora_resolution.lora_request.clone(),
     };
 
     Ok(PreparedRequest {
@@ -76,8 +78,16 @@ mod tests {
     use vllm_text::Prompt;
 
     use super::prepare_generate_request;
+    use crate::lora::LoraModelResolution;
     use crate::routes::inference::generate::types::GenerateRequest;
     use crate::utils::ResolvedRequestContext;
+
+    fn served(names: &[&str]) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: names.iter().map(|s| s.to_string()).collect(),
+            lora_request: None,
+        }
+    }
 
     #[test]
     fn prepare_generate_request_maps_token_prompt_and_sampling_params() {
@@ -100,7 +110,7 @@ mod tests {
 
         let prepared = prepare_generate_request(
             request,
-            &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
@@ -143,7 +153,7 @@ mod tests {
 
         let prepared = prepare_generate_request(
             request,
-            &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
