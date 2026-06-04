@@ -63,6 +63,78 @@ logger = init_logger(__name__)
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
 
+def _mtp_block_is_quantized_on_disk(vllm_config: VllmConfig) -> bool:
+    """Detect whether the MTP block weights on disk carry quantization scales.
+
+    A DSV4 artifact whose calibration recipe excluded the MTP block (e.g. via
+    ``ignore=[r"re:.*mtp\\..*"]`` in the QuantizationModifier, which is the
+    current shipping pattern because of llm-compressor #2745's inference-mode
+    crash at MTP qparam writeback) ships MTP weights as BF16 — no companion
+    ``.weight_scale`` / ``.weight_scale_inv`` / ``.weight_packed`` keys for
+    ``mtp.*`` modules.
+
+    If we apply the main model's ``quant_config`` to the MTP draft model in
+    that case, the FusedMoE inside ``mtp_block.ffn`` allocates parameter slots
+    matching the main quant scheme (``w13_weight_packed`` for NVFP4,
+    ``weight_scale_inv`` for FP8_BLOCK, etc.). The loader then iterates the
+    on-disk ``w1.weight``/``w2.weight``/``w3.weight`` keys, the expert mapping
+    rewrites the suffix to the quantized name, and ``params_dict[name]`` fails
+    with ``KeyError``. The attention forward path independently fails with
+    ``AttributeError: ColumnParallelLinear has no attribute weight_scale`` /
+    ``weight_scale_inv`` because the unquantized ``wo_a`` has no scale tensors.
+
+    Read the safetensors index for the artifact, scan for any ``mtp.*`` key
+    whose suffix indicates quantization. Returns True if found, False otherwise.
+    Returns True on any error (conservative — match current upstream behavior).
+
+    Filed as vLLM issue #43304.
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        model_path = vllm_config.speculative_config.draft_model_config.model
+        if model_path is None:
+            return True
+        # Local artifact: model.safetensors.index.json is at the root.
+        # HF-cached artifact: same layout under ~/.cache/huggingface/hub/...
+        # Both go through the same Path() handling below.
+        idx_path = Path(model_path) / "model.safetensors.index.json"
+        if not idx_path.exists():
+            return True  # No sharded index; assume single-shard quant (current behavior)
+
+        with idx_path.open() as f:
+            idx = json.load(f)
+        weight_map = idx.get("weight_map", {})
+
+        # Scan only ``mtp.*`` keys for quantization-scale suffixes. This is
+        # the minimum information needed; we don't need to read tensor headers.
+        quant_suffixes = (
+            ".weight_scale",
+            ".weight_scale_inv",
+            ".weight_packed",
+            ".weight_global_scale",
+            ".input_global_scale",
+            ".weight_zero_point",
+        )
+        for key in weight_map:
+            if not key.startswith("mtp."):
+                continue
+            if any(key.endswith(suf) for suf in quant_suffixes):
+                return True
+
+        # No MTP quant scales found — MTP weights are unquantized (BF16).
+        return False
+    except Exception as e:
+        logger.warning(
+            "Could not detect MTP block quantization state from artifact "
+            "index, defaulting to quantized (current upstream behavior). "
+            "Error: %s",
+            e,
+        )
+        return True
+
+
 class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
@@ -76,7 +148,24 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
+
+        # MTP block construction: if the artifact's MTP weights are BF16 on
+        # disk (no quantization scales for any ``mtp.*`` key), bypass the
+        # main model's quant_config for the entire MTP draft tower. See
+        # ``_mtp_block_is_quantized_on_disk`` and vLLM issue #43304 for the
+        # rationale.
+        if _mtp_block_is_quantized_on_disk(vllm_config):
+            quant_config = vllm_config.quant_config
+        else:
+            quant_config = None
+            logger.info_once(
+                "MTP block weights are BF16 on disk (no quant scales for "
+                "mtp.* keys in the safetensors index). Constructing the MTP "
+                "draft tower without quantization to match the artifact "
+                "shape. This unblocks --speculative-config method=mtp for "
+                "artifacts that exclude the MTP block from calibration "
+                "(typically because of llm-compressor #2745)."
+            )
         self.rms_norm_eps = config.rms_norm_eps
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
