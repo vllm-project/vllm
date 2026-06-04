@@ -118,6 +118,26 @@ _RESERVED_PLACEHOLDER_IN_TEXT_ERROR: Final[str] = (
     "positions in the tokenized prompt."
 )
 
+_QWEN_SINGLE_LEADING_SYSTEM_MODEL_TYPES: Final = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+)
+
+_QWEN_SYSTEM_TEXT_ONLY_ERROR: Final[str] = (
+    "Qwen3.5/Qwen3.6 chat templates require system messages to contain "
+    "text only. Move image, audio, video, prompt_embeds, or other "
+    "non-text content to a user message."
+)
+
+_QWEN_SYSTEM_MERGE_TEXT_ONLY_ERROR: Final[str] = (
+    "Only text system message content can be merged for Qwen3.5/Qwen3.6 "
+    "chat templates. Move non-text system content to a user message."
+)
+
 
 class AudioURL(TypedDict, total=False):
     url: Required[str]
@@ -1409,6 +1429,107 @@ def _get_full_multimodal_text_prompt(
         return multimodal_content_part_separator.join(missing_placeholders)
 
 
+def _requires_single_leading_system_message(model_config: ModelConfig) -> bool:
+    model_types = {
+        getattr(getattr(model_config, "hf_config", None), "model_type", None),
+        getattr(getattr(model_config, "hf_text_config", None), "model_type", None),
+    }
+    return bool(model_types & _QWEN_SINGLE_LEADING_SYSTEM_MODEL_TYPES)
+
+
+def _validate_text_only_system_message(
+    role: str,
+    mm_placeholder_storage: dict[str, list],
+    model_config: ModelConfig,
+) -> None:
+    if (
+        role == "system"
+        and mm_placeholder_storage
+        and _requires_single_leading_system_message(model_config)
+    ):
+        raise VLLMValidationError(
+            _QWEN_SYSTEM_TEXT_ONLY_ERROR,
+            parameter="messages",
+            value="system",
+        )
+
+
+def _system_message_content_as_text(message: ConversationMessage) -> str:
+    content = message.get("content", "")
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                text = part.get("text")
+                if part.get("type", "text") == "text" and isinstance(text, str):
+                    parts.append(text)
+                else:
+                    raise VLLMValidationError(
+                        _QWEN_SYSTEM_MERGE_TEXT_ONLY_ERROR,
+                        parameter="messages",
+                        value=part.get("type"),
+                    )
+            else:
+                raise VLLMValidationError(
+                    _QWEN_SYSTEM_MERGE_TEXT_ONLY_ERROR,
+                    parameter="messages",
+                    value=type(part).__name__,
+                )
+        return "\n".join(parts)
+
+    raise VLLMValidationError(
+        _QWEN_SYSTEM_MERGE_TEXT_ONLY_ERROR,
+        parameter="messages",
+        value=type(content).__name__,
+    )
+
+
+def _normalize_system_messages_for_model(
+    conversation: list[ConversationMessage],
+    model_config: ModelConfig,
+    *,
+    content_format: ChatTemplateContentFormat,
+) -> list[ConversationMessage]:
+    if not _requires_single_leading_system_message(model_config):
+        return conversation
+
+    system_contents: list[str] = []
+    non_system: list[ConversationMessage] = []
+    needs_normalization = False
+
+    for index, message in enumerate(conversation):
+        if message["role"] == "system":
+            if index > 0 or system_contents:
+                needs_normalization = True
+            content = _system_message_content_as_text(message)
+            if content:
+                system_contents.append(content)
+        else:
+            non_system.append(message)
+
+    if not needs_normalization:
+        return conversation
+
+    merged_content = "\n\n".join(system_contents)
+    merged_value: str | list[dict[str, str]]
+    if content_format == "openai":
+        merged_value = [{"type": "text", "text": merged_content}]
+    else:
+        merged_value = merged_content
+
+    merged_message: ConversationMessage = {
+        "role": "system",
+        "content": merged_value,
+    }
+    return [merged_message, *non_system]
+
+
 # No need to validate using Pydantic again
 _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageEmbedsParser = partial(cast, ChatCompletionContentPartImageEmbedsParam)
@@ -1590,9 +1711,19 @@ def _parse_chat_message_content_parts(
 
     if wrap_dicts:
         # Parsing wraps images and texts as interleaved dictionaries
-        return [ConversationMessage(role=role, content=content)]  # type: ignore
+        conversation_message = ConversationMessage(role=role, content=content)  # type: ignore
+        if role == "system" and _requires_single_leading_system_message(
+            mm_tracker.model_config
+        ):
+            _system_message_content_as_text(conversation_message)
+        return [conversation_message]
     texts = cast(list[str], content)
     mm_placeholder_storage = mm_parser.mm_placeholder_storage()
+    _validate_text_only_system_message(
+        role,
+        mm_placeholder_storage,
+        mm_tracker.model_config,
+    )
     if mm_placeholder_storage:
         text_prompt = _get_full_multimodal_text_prompt(
             mm_placeholder_storage,
@@ -1893,6 +2024,11 @@ def parse_chat_messages(
         conversation.extend(sub_messages)
 
     _postprocess_messages(conversation)
+    conversation = _normalize_system_messages_for_model(
+        conversation,
+        model_config,
+        content_format=content_format,
+    )
 
     mm_data, mm_uuids = mm_tracker.resolve_items()
 
@@ -1932,6 +2068,11 @@ async def parse_chat_messages_async(
         conversation.extend(sub_messages)
 
     _postprocess_messages(conversation)
+    conversation = _normalize_system_messages_for_model(
+        conversation,
+        model_config,
+        content_format=content_format,
+    )
 
     mm_data, mm_uuids = await mm_tracker.resolve_items()
 

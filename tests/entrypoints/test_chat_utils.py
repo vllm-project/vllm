@@ -3,6 +3,7 @@
 
 import warnings
 from collections.abc import Mapping
+from types import SimpleNamespace
 from typing import Literal
 
 import pytest
@@ -14,10 +15,12 @@ from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ConversationMessage,
+    _normalize_system_messages_for_model,
     _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -31,6 +34,47 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+QWEN_SYSTEM_FIRST_TEMPLATE = (
+    "{% for message in messages %}"
+    "{% if message['role'] == 'system' %}"
+    "{% if not loop.first %}"
+    "{{ raise_exception('System message must be at the beginning.') }}"
+    "{% endif %}"
+    "{{'<|im_start|>system\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'user' %}"
+    "{{'<|im_start|>user\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% elif message['role'] == 'assistant' %}"
+    "{{'<|im_start|>assistant\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% endif %}"
+    "{% endfor %}"
+)
+
+
+def _qwen3_5_model_config():
+    return SimpleNamespace(
+        enable_prompt_embeds=False,
+        hf_config=SimpleNamespace(model_type="qwen3_5"),
+        hf_text_config=SimpleNamespace(model_type="qwen3_5_text"),
+        multimodal_config=None,
+    )
+
+
+def _generic_text_model_config():
+    return SimpleNamespace(
+        enable_prompt_embeds=False,
+        hf_config=SimpleNamespace(model_type="generic"),
+        hf_text_config=SimpleNamespace(model_type="generic"),
+        multimodal_config=None,
+    )
+
+
+def _render_qwen_system_first_template(conversation):
+    from transformers.utils import chat_template_utils as hf_chat_utils
+
+    return hf_chat_utils._compile_jinja_template(QWEN_SYSTEM_FIRST_TEMPLATE).render(
+        messages=conversation
+    )
 
 
 @pytest.fixture(scope="function")
@@ -703,6 +747,130 @@ def test_parse_chat_messages_empty_system(
         {"role": "system", "content": [{"type": "text", "text": ""}]},
         {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
     ]
+
+
+def test_parse_chat_messages_qwen_single_system_at_start_renders():
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "Be brief."},
+        ],
+        _qwen3_5_model_config(),
+        content_format="string",
+    )
+
+    assert conversation == [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+        {"role": "user", "content": "Be brief."},
+    ]
+    assert "You are helpful." in _render_qwen_system_first_template(conversation)
+
+
+def test_parse_chat_messages_qwen_merges_injected_system_message():
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "system", "content": "Primary instructions."},
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Injected instructions."},
+            {"role": "assistant", "content": "Hi"},
+            {"role": "user", "content": "Continue"},
+        ],
+        _qwen3_5_model_config(),
+        content_format="string",
+    )
+
+    assert conversation == [
+        {
+            "role": "system",
+            "content": "Primary instructions.\n\nInjected instructions.",
+        },
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+        {"role": "user", "content": "Continue"},
+    ]
+    rendered = _render_qwen_system_first_template(conversation)
+    assert "Primary instructions.\n\nInjected instructions." in rendered
+
+
+def test_parse_chat_messages_qwen_merges_system_messages_in_order_openai_format():
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "system", "content": "Primary instructions."},
+            {"role": "user", "content": "Hello"},
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "Injected instructions."}],
+            },
+        ],
+        _qwen3_5_model_config(),
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Primary instructions.\n\nInjected instructions.",
+                }
+            ],
+        },
+        {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+    ]
+
+
+def test_parse_chat_messages_qwen_zero_system_messages_unchanged():
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ],
+        _qwen3_5_model_config(),
+        content_format="string",
+    )
+
+    assert conversation == [
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hi"},
+    ]
+
+
+def test_parse_chat_messages_non_qwen_preserves_system_message_order():
+    conversation, _, _ = parse_chat_messages(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Late instructions."},
+        ],
+        _generic_text_model_config(),
+        content_format="string",
+    )
+
+    assert conversation == [
+        {"role": "user", "content": "Hello"},
+        {"role": "system", "content": "Late instructions."},
+    ]
+
+
+def test_normalize_qwen_system_messages_rejects_non_text_system_content():
+    conversation: list[ConversationMessage] = [
+        {"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+        {"role": "system", "content": [{"type": "image"}]},
+    ]
+
+    with pytest.raises(
+        VLLMValidationError,
+        match="Only text system message content can be merged",
+    ):
+        _normalize_system_messages_for_model(
+            conversation,
+            _qwen3_5_model_config(),
+            content_format="openai",
+        )
 
 
 @pytest.mark.asyncio
