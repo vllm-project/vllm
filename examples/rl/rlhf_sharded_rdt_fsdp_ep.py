@@ -341,7 +341,7 @@ class FSDPTrainWorker:
             sl = tensor.clone(memory_format=torch.contiguous_format)
             out.append(sl)
             nbytes += sl.element_size() * sl.nelement()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         slice_seconds = time.perf_counter() - _t_slice0
 
         with self._timing_lock:
@@ -504,19 +504,15 @@ async def main():
         print("-" * 60)
 
     # ---- Weight transfer ----
-    # Fetch the trainer's parameter metadata and partition it into layer-aligned
-    # groups *before* init: the sharded RDT engine bakes a replay plan for every
-    # group during init_weight_transfer_engine, so it needs the full group list
-    # up front. update_weights then refers to a group by index.
+    # Fetch the trainer's full parameter metadata *before* init: the sharded RDT
+    # engine bakes its replay plan over all of these during
+    # init_weight_transfer_engine. The driver also partitions the flat name list
+    # into layer-aligned groups for its own per-layer gather/free schedule;
+    # update_weights then passes each group's gathered names.
     names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
-    name_to_idx = {n: i for i, n in enumerate(names)}
     layer_groups = _layerwise_groups(names)
-    group_dtype_names = [
-        [dtype_names[name_to_idx[n]] for n in g] for g in layer_groups
-    ]
-    group_shapes = [[shapes[name_to_idx[n]] for n in g] for g in layer_groups]
     print(
-        f"[sync] {len(names)} params -> {len(layer_groups)} groups "
+        f"[sync] {len(names)} params -> {len(layer_groups)} gather groups "
         f"(max group size = {max(len(g) for g in layer_groups)} params)."
     )
 
@@ -531,9 +527,9 @@ async def main():
                 ShardedRDTWeightTransferInitInfo(
                     trainer_actor_name=TRAINER_ACTOR_NAME,
                     trainer_actor_namespace=RAY_NAMESPACE,
-                    group_names=layer_groups,
-                    group_dtype_names=group_dtype_names,
-                    group_shapes=group_shapes,
+                    names=names,
+                    dtype_names=dtype_names,
+                    shapes=shapes,
                     warmup_method_name="rdt_warmup" if WARMUP else None,
                 )
             )
@@ -573,10 +569,10 @@ async def main():
         _sync_t0 = time.perf_counter()
         prev_task: asyncio.Task | None = None
         prev_names: list[str] | None = None
-        for group_index, group_names in enumerate(layer_groups):
-            # The trainer side still gathers/frees by name; the inference side
-            # only needs the group index (its replay plan was baked at init).
-            group_info = ShardedRDTWeightTransferUpdateInfo(group_index=group_index)
+        for group_names in layer_groups:
+            # The trainer gathers/frees by name; the inference side replays the
+            # baked leaf modules these gathered names cover.
+            group_info = ShardedRDTWeightTransferUpdateInfo(names=group_names)
             gather_futs = [w.gather_layer.remote(group_names) for w in fsdp_workers]
             if prev_task is not None:
                 await prev_task
@@ -613,7 +609,9 @@ async def main():
         print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
         print(f"[profile] trainer produce calls       : {ptiming['calls']}")
         print(f"[profile] trainer specs (slices) total: {ptiming['specs']}")
-        print(f"[profile] trainer gather-cache wait    : {ptiming['wait_seconds']:.3f} s")
+        print(
+            f"[profile] trainer gather-cache wait    : {ptiming['wait_seconds']:.3f} s"
+        )
         print(f"[profile] trainer slice+clone (synced) : {slice_s:.3f} s")
         print(f"[profile] bytes produced (rank0)       : {gib:.3f} GiB")
         if slice_s > 0:

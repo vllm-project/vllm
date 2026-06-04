@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
@@ -38,8 +37,6 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
-    "deferred_layerwise_processing",
-    "run_deferred_layer_processing",
 ]
 
 
@@ -54,45 +51,6 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
 
 # Global set used to track loading for logging purposes only
 LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
-
-# When non-None, completed layers are queued here instead of being processed
-# inline by `online_process_loader`. Used by weight transfer engines (e.g. the
-# sharded RDT engine's payload-batch mode) to defer `_layerwise_process` until
-# after `load_weights` returns, so all slice fetches can be coalesced into a
-# single transfer. Managed via `deferred_layerwise_processing`.
-_DEFERRED_LAYER_PROCESSING: (
-    list[tuple[torch.nn.Module, "LayerReloadingInfo"]] | None
-) = None
-
-
-@contextmanager
-def deferred_layerwise_processing() -> Iterator[
-    list[tuple[torch.nn.Module, "LayerReloadingInfo"]]
-]:
-    """Defer per-layer processing while loading weights.
-
-    While this context is active, `online_process_loader` appends a completed
-    layer to the yielded queue instead of calling `_layerwise_process` inline.
-    The caller is responsible for running `run_deferred_layer_processing` on the
-    queue once loading is done. Re-entrant-safe: restores the prior value on
-    exit.
-    """
-    global _DEFERRED_LAYER_PROCESSING
-    prior = _DEFERRED_LAYER_PROCESSING
-    queue: list[tuple[torch.nn.Module, LayerReloadingInfo]] = []
-    _DEFERRED_LAYER_PROCESSING = queue
-    try:
-        yield queue
-    finally:
-        _DEFERRED_LAYER_PROCESSING = prior
-
-
-def run_deferred_layer_processing(
-    queue: list[tuple[torch.nn.Module, "LayerReloadingInfo"]],
-) -> None:
-    """Run `_layerwise_process` for every layer queued during deferred loading."""
-    for layer, info in queue:
-        _layerwise_process(layer, info)
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -245,14 +203,9 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
                     str(list(names)),
                 )
 
-        # Process and copy when all weights are loaded. When deferral is active
-        # (e.g. the sharded RDT payload-batch mode), queue the layer instead of
-        # processing it inline so the caller can coalesce all slice fetches.
+        # Process and copy when all weights are loaded.
         if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
-            if _DEFERRED_LAYER_PROCESSING is not None:
-                _DEFERRED_LAYER_PROCESSING.append((layer, info))
-            else:
-                _layerwise_process(layer, info)
+            _layerwise_process(layer, info)
             LOADING_LAYERS.discard(layer)
 
         return ret
