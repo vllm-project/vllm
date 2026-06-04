@@ -933,6 +933,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-4.1-2b-plus",
+        min_transformers_version="5.8.0",
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
