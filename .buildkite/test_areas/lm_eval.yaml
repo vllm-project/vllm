@@ -13,7 +13,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-# - label: LM Eval Large Models (4 GPUs)(A100)
+# - label: LM Eval Large Models (4xA100)
 #   device: a100
 #   optional: true
 #   num_devices: 4
@@ -25,7 +25,7 @@ steps:
 #   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
 #   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-- label: LM Eval Large Models (4 GPUs)(H100)
+- label: LM Eval Large Models (4xH100)
   key: lm-eval-large-models-4-gpus-h100
   device: h100
   optional: true
@@ -38,7 +38,7 @@ steps:
     - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
-- label: LM Eval Small Models (B200)
+- label: LM Eval Small Models (2xB200)
   key: lm-eval-small-models-b200
   timeout_in_minutes: 120
   device: b200-k8s
@@ -49,7 +49,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
-- label: LM Eval Large Models (B200, EP)
+- label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-b200-ep
   timeout_in_minutes: 120
   device: b200-k8s
@@ -61,7 +61,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
 
-- label: LM Eval Qwen3.5 Models (B200)
+- label: LM Eval Qwen3.5 Models (2xB200)
   key: lm-eval-qwen3-5-models-b200
   timeout_in_minutes: 120
   device: b200-k8s
@@ -78,7 +78,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
-- label: LM Eval Large Models (H200)
+- label: LM Eval Large Models (8xH200)
   key: lm-eval-large-models-h200
   timeout_in_minutes: 60
   device: h200
@@ -124,7 +124,7 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-turboquant.txt
 
-- label: GPQA Eval (GPT-OSS) (H100)
+- label: GPQA Eval (GPT-OSS) (2xH100)
   key: gpqa-eval-gpt-oss-h100
   timeout_in_minutes: 120
   device: h100
@@ -138,7 +138,7 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
 
-- label: GPQA Eval (GPT-OSS) (B200)
+- label: GPQA Eval (GPT-OSS) (2xB200)
   key: gpqa-eval-gpt-oss-b200
   timeout_in_minutes: 120
   device: b200-k8s
