@@ -6,7 +6,7 @@
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
 
 # Model name constants used across tests
 MODEL_NAME_SMOLLM = "HuggingFaceTB/SmolLM2-135M-Instruct"
