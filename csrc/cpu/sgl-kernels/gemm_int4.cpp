@@ -8,6 +8,12 @@
 #include "gemm.h"
 #include "vec.h"
 
+#if defined(__riscv_v_min_vlen) && \
+    (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+  #include "../cpu_types_riscv_defs.hpp"
+  #define SGL_W4A8_RVV_ENABLED 1
+#endif
+
 namespace {
 
 #define BLOCK_N block_size_n()
@@ -286,6 +292,135 @@ inline int32_t load_uint4_vnni(const uint8_t* __restrict__ B, int64_t k, int64_t
   return (n_group % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
 }
 
+#if defined(SGL_W4A8_RVV_ENABLED)
+// Prepare int16 weights for 8-column GEMM accumulation.
+template <int64_t N, int64_t ldb, int group>
+inline fixed_i16x8_t load_uint4_group_as_i16x8_rvv(
+    const uint8_t* __restrict__ B,
+    const int8_t* __restrict__ qzeros_b,
+    int64_t k) {
+  // RVV counterpart of load_uint4_as_int8<N, ldb>(B, k, n) for one
+  // 8-column group. The packed weight layout is [_block_k / 4, N / 2, 4].
+  constexpr int64_t n_group_size = 8;
+  constexpr int64_t vnni_size = 4;
+  static_assert(N == 32);
+  static_assert(ldb == N / 2);
+  static_assert(group >= 0 && group < N / n_group_size);
+
+  // Unpack: gather 8 packed int4 values from the VNNI4 layout.
+  // expand uint4 to int16
+  const int64_t ki = k % vnni_size;
+  const int64_t k_base = k - ki;
+  constexpr int64_t packed_group = group / 2;
+  const uint8_t* packed_ptr = B + k_base * ldb + packed_group * n_group_size * vnni_size + ki;
+
+  fixed_u8x8_t packed = RVVI(__riscv_vlse8_v_u8, LMUL_64)(packed_ptr, vnni_size, n_group_size);
+  if constexpr (group % 2 == 1) {
+    packed = RVVI(__riscv_vsrl_vx_u8, LMUL_64)(packed, 4, n_group_size);
+  }
+  fixed_u8x8_t nibbles = RVVI(__riscv_vand_vx_u8, LMUL_64)(packed, 0x0f, n_group_size);
+  fixed_u16x8_t nibbles_u16 = RVVI(__riscv_vzext_vf2_u16, LMUL_128)(nibbles, n_group_size);
+  fixed_i16x8_t weights =
+      RVVI4(__riscv_vreinterpret_v_u16, LMUL_128, _i16, LMUL_128)(nibbles_u16);
+
+  // Subtract: apply per-channel weight zero points after int4 expansion.
+  fixed_i8x8_t qzeros_i8 = RVVI(__riscv_vle8_v_i8, LMUL_64)(qzeros_b + group * n_group_size, n_group_size);
+  fixed_i16x8_t qzeros_i16 = RVVI(__riscv_vsext_vf2_i16, LMUL_128)(qzeros_i8, n_group_size);
+  return RVVI(__riscv_vsub_vv_i16, LMUL_128)(weights, qzeros_i16, n_group_size);
+}
+
+inline fixed_i32x8_t acc_u8_i16_to_i32x8_rvv(fixed_i32x8_t acc, uint8_t a, fixed_i16x8_t b) {
+  constexpr int64_t vl = 8;
+  // GEMM: widen uint8 activation and int16 weight to int32 accumulation.
+  return RVVI(__riscv_vwmacc_vx_i32, LMUL_256)(acc, static_cast<int16_t>(a), b, vl);
+}
+
+template <int64_t N, int64_t ldb, int group>
+inline fixed_i32x8_t accumulate_w4a8_group_rvv(
+    fixed_i32x8_t acc,
+    const uint8_t* __restrict__ B,
+    const int8_t* __restrict__ qzeros_b,
+    uint8_t a,
+    int64_t k) {
+  fixed_i16x8_t b = load_uint4_group_as_i16x8_rvv<N, ldb, group>(B, qzeros_b, k);
+  return acc_u8_i16_to_i32x8_rvv(acc, a, b);
+}
+
+template <int group>
+inline void dequant_store_acc_rvv(
+    float* __restrict__ C,
+    fixed_i32x8_t acc,
+    const float* __restrict__ scales_a,
+    const int32_t* __restrict__ qzeros_a,
+    const float* __restrict__ scales_b,
+    const int32_t* __restrict__ compensation,
+    int64_t m,
+    int64_t ldc) {
+  constexpr int64_t n_group_size = 8;
+  constexpr int64_t n = group * n_group_size;
+  constexpr int64_t vl = n_group_size;
+
+  // Dequant compensation: remove activation zero-point contribution.
+  fixed_i32x8_t comp = RVVI(__riscv_vle32_v_i32, LMUL_256)(compensation + n, vl);
+  fixed_i32x8_t zp_comp = RVVI(__riscv_vmul_vx_i32, LMUL_256)(comp, qzeros_a[m], vl);
+  acc = RVVI(__riscv_vsub_vv_i32, LMUL_256)(acc, zp_comp, vl);
+
+  // Scale: convert int32 accumulators to fp32 and apply activation/weight scales.
+  fixed_fp32x8_t acc_f = RVVI(__riscv_vfcvt_f_x_v_f32, LMUL_256)(acc, vl);
+  acc_f = RVVI(__riscv_vfmul_vf_f32, LMUL_256)(acc_f, scales_a[m], vl);
+  fixed_fp32x8_t scale_b = RVVI(__riscv_vle32_v_f32, LMUL_256)(scales_b + n, vl);
+  acc_f = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(acc_f, scale_b, vl);
+
+  // Store: accumulate into the float scratch buffer that already holds bias/zero.
+  float* c_ptr = C + m * ldc + n;
+  fixed_fp32x8_t c_old = RVVI(__riscv_vle32_v_f32, LMUL_256)(c_ptr, vl);
+  fixed_fp32x8_t c_new = RVVI(__riscv_vfadd_vv_f32, LMUL_256)(c_old, acc_f, vl);
+  RVVI(__riscv_vse32_v_f32, LMUL_256)(c_ptr, c_new, vl);
+}
+
+template <int64_t N, int64_t ldb>
+void _dequant_gemm_accum_rvv(
+    float* __restrict__ C,
+    const uint8_t* __restrict__ A,
+    const float* __restrict__ scales_a,
+    const int32_t* __restrict__ qzeros_a,
+    const uint8_t* __restrict__ B,
+    const float* __restrict__ scales_b,
+    const int8_t* __restrict__ qzeros_b,
+    const int32_t* __restrict__ compensation,
+    int64_t M,
+    int64_t K,
+    int64_t lda,
+    int64_t ldc) {
+  static_assert(N == 32);
+  static_assert(ldb == N / 2);
+  constexpr int64_t vl = 8;
+
+  // Accumulate one C row over the 32-column block.
+  for (int64_t m = 0; m < M; ++m) {
+    fixed_i32x8_t acc0 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc1 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc2 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc3 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    // A[m][k] @ B[k][0:32] -> acc[m][0:32]
+    for (int64_t k = 0; k < K; ++k) {
+      // GEMM K step: one scalar activation updates four 8-column RVV tiles.
+      const uint8_t a = A[m * lda + k];
+      acc0 = accumulate_w4a8_group_rvv<N, ldb, 0>(acc0, B, qzeros_b, a, k);
+      acc1 = accumulate_w4a8_group_rvv<N, ldb, 1>(acc1, B, qzeros_b, a, k);
+      acc2 = accumulate_w4a8_group_rvv<N, ldb, 2>(acc2, B, qzeros_b, a, k);
+      acc3 = accumulate_w4a8_group_rvv<N, ldb, 3>(acc3, B, qzeros_b, a, k);
+    }
+
+    // Dequant/scale/store each 8-column group back into C.
+    dequant_store_acc_rvv<0>(C, acc0, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    dequant_store_acc_rvv<1>(C, acc1, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    dequant_store_acc_rvv<2>(C, acc2, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    dequant_store_acc_rvv<3>(C, acc3, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+  }
+}
+#endif
+
 template <int64_t N, int64_t ldb, bool sym_quant_act>
 void _dequant_gemm_accum(
     float* C,
@@ -339,6 +474,12 @@ void _dequant_gemm_accum(
   } else
 #endif
   {
+#if defined(SGL_W4A8_RVV_ENABLED)
+    if constexpr (!sym_quant_act && N == BLOCK_N && ldb == BLOCK_N / 2) {
+      _dequant_gemm_accum_rvv<N, ldb>(C, A, scales_a, qzeros_a, B, scales_b, qzeros_b, compensation, M, K, lda, ldc);
+      return;
+    }
+#endif
     for (int64_t m = 0; m < M; ++m) {
       for (int64_t n = 0; n < N; ++n) {
         int32_t acc = 0;
