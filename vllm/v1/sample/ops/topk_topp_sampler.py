@@ -4,7 +4,6 @@
 
 import torch
 import torch.nn as nn
-from packaging import version
 
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -19,6 +18,55 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def flashinfer_sampler_supported() -> bool:
+    """Decide whether FlashInfer's top-p/top-k sampler can be used.
+
+    Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
+    is 0, when the platform isn't CUDA, when the GPU's compute capability is
+    unsupported. Raises ``RuntimeError`` if the user explicitly opted in
+    via the env var but FlashInfer is unavailable.
+
+    Assumes flashinfer is installed, as guaranteed by ``requirements/cuda.txt``;
+    otherwise importing the FlashInfer backend below raises ``ImportError``.
+
+    Note: callers must additionally ensure ``logprobs_mode`` doesn't require
+    post-top-k/top-p logits/logprobs for any request whose logprobs will be
+    returned in this step, since FlashInfer doesn't expose those.
+    """
+    if not current_platform.is_cuda():
+        return False
+    if not envs.VLLM_USE_FLASHINFER_SAMPLER:
+        logger.info_once(
+            "FlashInfer top-p/top-k sampling disabled via "
+            "VLLM_USE_FLASHINFER_SAMPLER=0."
+        )
+        return False
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    capability = current_platform.get_device_capability()
+    assert capability is not None
+    unsupported_reason: str | None = None
+    if not FlashInferBackend.supports_compute_capability(capability):
+        unsupported_reason = (
+            f"unsupported compute capability {capability.as_version_str()}"
+        )
+
+    if unsupported_reason is None:
+        logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
+        return True
+    if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
+        raise RuntimeError(
+            f"FlashInfer top-p/top-k sampling unavailable: {unsupported_reason}. "
+            "Unset VLLM_USE_FLASHINFER_SAMPLER=1."
+        )
+    logger.warning_once(
+        "FlashInfer top-p/top-k sampling unavailable: %s; falling back. "
+        "Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
+        unsupported_reason,
+    )
+    return False
+
+
 class TopKTopPSampler(nn.Module):
     """
     Module that performs optional top-k and top-p filtering followed by
@@ -30,49 +78,16 @@ class TopKTopPSampler(nn.Module):
     def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
-        # flashinfer optimization does not apply if intermediate
-        # logprobs/logits after top_k/top_p need to be returned
-        if (
-            logprobs_mode not in ("processed_logits", "processed_logprobs")
-            and current_platform.is_cuda()
-        ):
-            if envs.VLLM_USE_FLASHINFER_SAMPLER:
-                from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-                capability = current_platform.get_device_capability()
-                assert capability is not None
-                if FlashInferBackend.supports_compute_capability(capability):
-                    logger.info_once(
-                        "Using FlashInfer for top-p & top-k sampling.",
-                        scope="global",
-                    )
-                    self.forward = self.forward_cuda
-                elif envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
-                    # User explicitly opted in but the GPU can't run FlashInfer.
-                    capability_str = capability.as_version_str()
-                    raise RuntimeError(
-                        "FlashInfer does not support compute capability "
-                        f"{capability_str}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
-                    )
-                else:
-                    # Default-on path; hardware can't run FlashInfer →
-                    # quietly fall back to the PyTorch-native sampler
-                    # instead of failing server startup.
-                    logger.warning_once(
-                        "FlashInfer top-p/top-k sampling not supported on "
-                        "compute capability %s; falling back to PyTorch-native "
-                        "sampler. Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
-                        capability.as_version_str(),
-                    )
-                    self.forward = self.forward_native
-            else:
-                # User explicitly set VLLM_USE_FLASHINFER_SAMPLER=0.
-                logger.info_once(
-                    "FlashInfer top-p/top-k sampling disabled via "
-                    "VLLM_USE_FLASHINFER_SAMPLER=0; using PyTorch-native sampler."
-                )
-                self.forward = self.forward_native
-
+        if current_platform.is_cuda():
+            # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
+            # so it can't be used when the configured mode requires them.
+            can_use_flashinfer = (
+                logprobs_mode not in ("processed_logits", "processed_logprobs")
+                and flashinfer_sampler_supported()
+            )
+            self.forward = (
+                self.forward_cuda if can_use_flashinfer else self.forward_native
+            )
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()
             # Fall back to native implementation for POWERPC and RISCV.
@@ -168,7 +183,7 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
+        logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":
             logits_to_return = logits
@@ -193,8 +208,6 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
-        DISABLE_AITER_SAMPLER = True
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
         if (k is None and p is None) or generators:
             if generators:
@@ -207,8 +220,6 @@ class TopKTopPSampler(nn.Module):
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
-        if DISABLE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(
@@ -291,7 +302,8 @@ class TopKTopPSampler(nn.Module):
         )
         # The custom XPU sampler kernel consumes RNG values internally, so advance
         # the default generator's offset to keep future draws deterministic.
-        offset += logits.numel()
+        # pytorch: offset must be multiple of 4
+        offset = (offset + logits.numel() + 3) // 4 * 4
         state.view(torch.int64)[1] = offset
         generator.set_state(state)
         return random_sampled, logits_to_return
@@ -313,8 +325,9 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    # Keep CPU logits on the PyTorch path to avoid invoking Triton kernels.
     if current_platform.is_cpu():
+        if HAS_TRITON:
+            return apply_top_k_top_p_triton(logits, k, p)
         return apply_top_k_top_p_pytorch(logits, k, p, allow_cpu_sync=True)
 
     if HAS_TRITON and logits.shape[0] >= 8:
@@ -419,7 +432,7 @@ def flashinfer_sample(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-    generators: dict[int, torch.Generator],
+    generators: dict[int, torch.Generator] = {},  # noqa
 ) -> torch.Tensor:
     """Sample from the logits using FlashInfer.
 
@@ -432,11 +445,6 @@ def flashinfer_sample(
     statistically equivalent.
     """
     import flashinfer
-
-    if version.parse(flashinfer.__version__) < version.parse("0.2.3"):
-        raise ImportError(
-            "FlashInfer version >= 0.2.3 required for top-k and top-p sampling. "
-        )
 
     assert not (k is None and p is None)
     if k is None:

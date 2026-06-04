@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
 
@@ -8,7 +9,6 @@ import msgpack
 import torch
 import zmq
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -16,7 +16,7 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from mori.io import BackendType
 
 from queue import Empty, Queue
 
@@ -44,11 +44,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 try:
     from mori.io import (
+        BackendType,
         EngineDesc,
         IOEngine,
         MemoryDesc,
         PollCqMode,
         RdmaBackendConfig,
+        XgmiBackendConfig,
     )
 
     logger.info("MoRIIO is available")
@@ -75,6 +77,7 @@ class MoRIIOWriter:
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
+        self._defer_timeout = worker.moriio_config.defer_timeout
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -136,22 +139,54 @@ class MoRIIOWriter:
                 continue
 
             # Execute the task
-
-            self._execute_write_task(task)
+            try:
+                self._execute_write_task(task)
+            except Exception:
+                logger.exception(
+                    "Write task failed for request %s, marking done",
+                    task.request_id,
+                )
+                self._mark_request_done(task.transfer_id)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
         if not self._deferred_tasks:
             return
 
+        defer_timeout = self._defer_timeout
+        now = time.perf_counter()
         still_deferred: list[WriteTask] = []
+
         for task in self._deferred_tasks:
+            if now - task.enqueue_time > defer_timeout:
+                logger.error(
+                    "Deferred write task for request %s expired after %.1fs "
+                    "(remote blocks never arrived), marking done",
+                    task.request_id,
+                    now - task.enqueue_time,
+                )
+                self._mark_request_done(task.transfer_id)
+                continue
             if self._is_remote_ready(task):
-                self._execute_write_task(task)
+                try:
+                    self._execute_write_task(task)
+                except Exception:
+                    logger.exception(
+                        "Deferred write task failed for request %s, marking done",
+                        task.request_id,
+                    )
+                    self._mark_request_done(task.transfer_id)
             else:
                 still_deferred.append(task)
 
         self._deferred_tasks = still_deferred
+
+    def _mark_request_done(self, transfer_id: str) -> None:
+        """Mark a request done so its blocks are freed, even on transfer failure."""
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            wrapper.done_req_ids.append(transfer_id)
+        wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
         """Check if remote blocks are allocated for this task.
@@ -322,7 +357,7 @@ class MoRIIOWriter:
             )
             # mark request as done, then we can free the blocks
             with self.worker.moriio_wrapper.lock:
-                self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
+                self.worker.moriio_wrapper.done_req_ids.append(task.transfer_id)
             del self.worker.moriio_wrapper.done_remote_allocate_req_dict[
                 task.transfer_id
             ]
@@ -350,6 +385,7 @@ class MoRIIOWrapper:
         moriio_engine: "IOEngine | None" = None,
         tp_rank: int = 0,
         dp_rank: int = 0,
+        transfer_timeout: float = MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT,
     ):
         self.tp_rank = tp_rank
         self.dp_rank = dp_rank
@@ -364,6 +400,7 @@ class MoRIIOWrapper:
         self.done_req_ids: list[str] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
+        self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
         self.paths: dict[str, zmq.Socket] = {}
@@ -374,19 +411,40 @@ class MoRIIOWrapper:
         )
         self.moriio_engine = moriio_engine
 
-    def set_backend_type(self, backend_type):
+    def set_backend_type(
+        self,
+        backend_type: "BackendType",
+        qp_per_transfer: int = 1,
+        post_batch_size: int = -1,
+        num_workers: int = 1,
+    ) -> None:
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
-        post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
-        num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
-        poll_mode = PollCqMode.POLLING
-        rdma_cfg = RdmaBackendConfig(
-            qp_per_transfer,
-            post_batch_size,
-            num_worker_threads,
-            poll_mode,
-        )
-        self.moriio_engine.create_backend(backend_type, rdma_cfg)
+        if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
+            self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        else:
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+            )
+            rdma_cfg = RdmaBackendConfig(
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+                PollCqMode.POLLING,
+                # vLLM uses ZMQ for completion signaling
+                # and never calls PopInboundTransferStatus.
+                # With notifications enabled, ibv_post_send
+                # ENOMEM at high concurrency permanently
+                # poisons TransferStatus before the data WR
+                # completes, hanging requests in
+                # WAITING_FOR_REMOTE_KVS indefinitely.
+                enable_notification=False,
+            )
+            self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
     def get_agent_metadata(self):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
@@ -469,22 +527,43 @@ class MoRIIOWrapper:
         if not self.transfer_status:
             return
 
-        transfers_to_wait = []
         with self.lock:
             transfers_to_wait = self.transfer_status[:]
             self.transfer_status.clear()
 
-        for status in transfers_to_wait:
-            try:
-                status.Wait()
-                if not status.Succeeded():
-                    logger.error(
-                        "Transfer failed: %s, Code: %s", status.Message(), status.Code()
+        timeout = self._transfer_timeout
+        deadline = time.monotonic() + timeout
+        remaining = list(transfers_to_wait)
+        errors: list[str] = []
+
+        while remaining:
+            timed_out = time.monotonic() > deadline
+            still_waiting = []
+            for status in remaining:
+                if status.Succeeded():
+                    continue
+                if status.Failed():
+                    errors.append(
+                        f"RDMA transfer failed: {status.Message()} "
+                        f"(code={status.Code()})"
                     )
-                    raise TransferError("MoRIIO transfer failed!")
-            except Exception as e:
-                logger.error("Transfer %s failed: %s", status, e)
-                raise
+                    continue
+                if timed_out:
+                    errors.append(
+                        f"RDMA transfer timed out after {timeout:.0f}s. "
+                        f"Check NIC queue depth or reduce concurrency; "
+                        f"adjust with kv_connector_extra_config.transfer_timeout."
+                    )
+                else:
+                    still_waiting.append(status)
+            remaining = still_waiting
+            if remaining:
+                time.sleep(0.001)
+        if errors:
+            raise TransferError(
+                f"{len(errors)}/{len(transfers_to_wait)} transfers failed:\n"
+                + "\n".join(errors)
+            )
 
     def async_wait_reqid(self):
         assert self.notify_port is not None, "Notify port cannot be None"
