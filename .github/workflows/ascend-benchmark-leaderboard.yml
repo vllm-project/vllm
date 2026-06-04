@@ -82,6 +82,9 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
@@ -734,12 +737,6 @@ jobs:
         shell: bash
         run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
 
-      - name: Performance gate - store main baseline
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-        shell: bash
-        run: |
-          echo "Perfgate baseline push uses target repo origin: $(git remote get-url origin)"
-          bash .github/workflows/scripts/perfgate_store_baseline.sh
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
         if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
@@ -958,3 +955,30 @@ jobs:
               });
               core.info('Created benchmark PR comment');
             }
+
+  store-main-perfgate-baseline:
+    name: Store main perfgate baseline
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: ascend-benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ascend-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .benchmarks/ci
+
+      - name: Store perfgate baseline
+        shell: bash
+        env:
+          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+        run: bash .github/workflows/scripts/perfgate_store_baseline.sh
