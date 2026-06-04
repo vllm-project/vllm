@@ -49,7 +49,7 @@ elif current_platform.is_rocm():
 
 def _allocate_and_reshape_kv_caches(
     kv_cache_config: KVCacheConfig,
-    attn_groups: list[list],
+    attn_groups: list,
     device: torch.device,
 ):
     """
@@ -227,32 +227,30 @@ def test_register_kv_caches(backend):
     ]
 
     attn_groups = [
-        [
-            AttentionGroup(
-                backend=backend_cls,
-                layer_names=attn_layer_names,
-                kv_cache_spec=attn_spec,
-                kv_cache_group_id=0,
-            ),
-            AttentionGroup(
-                backend=DeepseekV32IndexerBackend,
-                layer_names=mla_layer_names,
-                kv_cache_spec=mla_spec,
-                kv_cache_group_id=1,
-            ),
-            AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
-                layer_names=unaligned_mamba_layer_names,
-                kv_cache_spec=unaligned_mamba_spec,
-                kv_cache_group_id=2,
-            ),
-            AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
-                layer_names=aligned_mamba_layer_names,
-                kv_cache_spec=aligned_mamba_spec,
-                kv_cache_group_id=3,
-            ),
-        ]
+        AttentionGroup(
+            backend=backend_cls,
+            layer_names=attn_layer_names,
+            kv_cache_spec=attn_spec,
+            kv_cache_group_ids=[0],
+        ),
+        AttentionGroup(
+            backend=DeepseekV32IndexerBackend,
+            layer_names=mla_layer_names,
+            kv_cache_spec=mla_spec,
+            kv_cache_group_ids=[1],
+        ),
+        AttentionGroup(
+            backend=DeepseekV32IndexerBackend,  # unused for mamba
+            layer_names=unaligned_mamba_layer_names,
+            kv_cache_spec=unaligned_mamba_spec,
+            kv_cache_group_ids=[2],
+        ),
+        AttentionGroup(
+            backend=DeepseekV32IndexerBackend,  # unused for mamba
+            layer_names=aligned_mamba_layer_names,
+            kv_cache_spec=aligned_mamba_spec,
+            kv_cache_group_ids=[3],
+        ),
     ]
 
     kv_cache_config = KVCacheConfig(
@@ -388,20 +386,18 @@ def test_register_kv_caches_uniform_type(backend):
     )
 
     attn_groups = [
-        [
-            AttentionGroup(
-                backend=backend_cls,
-                layer_names=[layer_a],
-                kv_cache_spec=spec_a,
-                kv_cache_group_id=0,
-            ),
-            AttentionGroup(
-                backend=backend_cls,
-                layer_names=[layer_b],
-                kv_cache_spec=spec_b,
-                kv_cache_group_id=0,
-            ),
-        ]
+        AttentionGroup(
+            backend=backend_cls,
+            layer_names=[layer_a],
+            kv_cache_spec=spec_a,
+            kv_cache_group_ids=[0],
+        ),
+        AttentionGroup(
+            backend=backend_cls,
+            layer_names=[layer_b],
+            kv_cache_spec=spec_b,
+            kv_cache_group_ids=[0],
+        ),
     ]
 
     kv_caches = _allocate_and_reshape_kv_caches(

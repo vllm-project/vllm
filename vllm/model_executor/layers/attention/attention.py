@@ -33,8 +33,10 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionImpl,
     AttentionMetadata,
     AttentionType,
+    LayerConfig,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import get_attn_backend
@@ -369,20 +371,50 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **extra_impl_args,
+        # A unified backend (RFC #42449) is its own per-group instance
+        # (get_builder_cls() returns the backend itself) and owns no per-layer
+        # impl here: impl is installed at bind time as the
+        # UnifiedToLegacyBackendAdapter impl. Legacy backends build their impl now.
+        self.impl: AttentionImpl | None
+        if self.attn_backend.get_builder_cls() is self.attn_backend:
+            self.impl = None
+            self.supports_quant_query_input = (
+                self.attn_backend.supports_quant_query_input()
+            )
+        else:
+            impl_cls = self.attn_backend.get_impl_cls()
+            self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+            )
+            self.supports_quant_query_input = self.impl.supports_quant_query_input
+        self.layer_config = LayerConfig(
+            layer_name=prefix,
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            extra=dict(extra_impl_args),
         )
+        # Per-group backend handle the custom op runs through (RFC #42449):
+        # the unified backend itself, or a LegacyToUnifiedBackendAdapter for a
+        # legacy backend. Installed at bind; None until then (the profiling run).
+        self.backend_instance: AttentionBackend | None = None
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -417,7 +449,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
-            self.impl.supports_quant_query_input
+            self.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
             )
@@ -467,7 +499,7 @@ class Attention(nn.Module, AttentionLayerBase):
             assert self.kv_cache_dtype in {"fp8", "fp8_e4m3", "nvfp4"}
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input:
+            if self.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:
@@ -539,15 +571,16 @@ class Attention(nn.Module, AttentionLayerBase):
         self.calculate_kv_scales = False
 
     def extra_repr(self) -> str:
-        s = f"head_size={self.impl.head_size}"  # type: ignore
-        s += f", num_heads={self.impl.num_heads}"  # type: ignore
-        s += f", num_kv_heads={self.impl.num_kv_heads}"  # type: ignore
-        s += f", scale={self.impl.scale}"  # type: ignore
-        s += f", backend={self.impl.__class__.__name__}"
+        s = f"head_size={self.head_size}"
+        s += f", num_heads={self.num_heads}"
+        s += f", num_kv_heads={self.num_kv_heads}"
+        s += f", scale={self.layer_config.scale}"
+        s += f", backend={self.attn_backend.__name__}"
         return s
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+        if self.impl is not None:
+            self.impl.process_weights_after_loading(act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -699,16 +732,9 @@ def unified_kv_cache_update(
     """
     layer_name = _resolve_layer_name(layer_name)
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
-    if layer_slot_mapping is not None:
-        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
-            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
-        )
-        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            attn_layer,
-            key,
-            value,
-            kv_cache,
-            layer_slot_mapping,
+    if layer_slot_mapping is not None and attn_layer.backend_instance is not None:
+        attn_layer.backend_instance.do_kv_cache_update(
+            attn_layer, key, value, kv_cache, layer_slot_mapping
         )
 
     return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
@@ -748,17 +774,19 @@ def unified_attention_with_output(
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
 
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    if self.backend_instance is not None and attn_metadata is not None:
+        self.backend_instance.forward(
+            self,
+            query,
+            key,
+            value,
+            kv_cache,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+    else:
+        output.fill_(0)
 
 
 def unified_attention_with_output_fake(

@@ -63,7 +63,7 @@ class DecodeEagleCudaGraphManager(CudaGraphManager):
         model_state: ModelState,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_groups: list[list[AttentionGroup]],
+        attn_groups: list[AttentionGroup],
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:

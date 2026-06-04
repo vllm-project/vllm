@@ -3,7 +3,6 @@
 
 import functools
 import gc
-import itertools
 import threading
 import time
 from collections import defaultdict
@@ -219,6 +218,7 @@ from .utils import (
     AttentionGroup,
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
+    bind_backend_instances,
     bind_kv_cache,
     prepare_kernel_block_sizes,
     sanity_check_mm_encoder_outputs,
@@ -521,8 +521,7 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        # indexes: [kv_cache_group_id][attn_group]
-        self.attn_groups: list[list[AttentionGroup]] = []
+        self.attn_groups: list[AttentionGroup] = []
         # self.kv_cache_config: KVCacheConfig
 
         # mm_hash ->  encoder_output
@@ -2196,7 +2195,7 @@ class GPUModelRunner(
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
-        cascade_attn_prefix_lens: list[list[int]] | None = None,
+        cascade_attn_prefix_lens: list[int] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
@@ -2330,23 +2329,13 @@ class GPUModelRunner(
         ] = {}
 
         def _build_attn_group_metadata(
-            kv_cache_gid: int,
-            attn_gid: int,
+            attn_group: AttentionGroup,
             common_attn_metadata: CommonAttentionMetadata,
+            cascade_attn_prefix_len: int,
             ubid: int | None = None,
         ) -> None:
-            attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
-            kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
-            cache_key = (kv_cache_spec, type(builder))
-
-            cascade_attn_prefix_len = (
-                cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
-                if cascade_attn_prefix_lens
-                else 0
-            )
+            cache_key = (attn_group.kv_cache_spec, type(builder))
 
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
@@ -2402,11 +2391,10 @@ class GPUModelRunner(
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         spec_decode_common_attn_metadata = None
+        cm_by_gid: dict[int, CommonAttentionMetadata] = {}
         for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
             cm = copy(cm_base)  # shallow copy
 
-            # Basically only the encoder seq_lens, block_table and slot_mapping change
-            # for each kv_cache_group.
             cm.encoder_seq_lens, cm.encoder_seq_lens_cpu = self._get_encoder_seq_lens(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
@@ -2416,6 +2404,7 @@ class GPUModelRunner(
             if kv_cache_gid > 0:
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
+            cm_by_gid[kv_cache_gid] = cm
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
@@ -2441,13 +2430,18 @@ class GPUModelRunner(
                     kv_cache_gid, cm.block_table_tensor
                 )
 
-            for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                if ubatch_slices is not None:
-                    for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
-                        _build_attn_group_metadata(kv_cache_gid, attn_gid, _cm, ubid)
-
-                else:
-                    _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
+        for group_idx, attn_group in enumerate(self.attn_groups):
+            cm = cm_by_gid[attn_group.kv_cache_group_id]
+            cascade_attn_prefix_len = (
+                cascade_attn_prefix_lens[group_idx] if cascade_attn_prefix_lens else 0
+            )
+            if ubatch_slices is not None:
+                for ubid, _cm in enumerate(split_attn_metadata(ubatch_slices, cm)):
+                    _build_attn_group_metadata(
+                        attn_group, _cm, cascade_attn_prefix_len, ubid
+                    )
+            else:
+                _build_attn_group_metadata(attn_group, cm, cascade_attn_prefix_len)
 
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
@@ -2494,34 +2488,30 @@ class GPUModelRunner(
         num_scheduled_tokens: np.ndarray,
         num_computed_tokens: np.ndarray,
         num_common_prefix_blocks: list[int],
-    ) -> list[list[int]] | None:
+    ) -> list[int] | None:
         """
         :return: Optional[cascade_attn_prefix_lens]
-            cascade_attn_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
-            None if we should not use cascade attention
+            cascade_attn_prefix_lens is a flat list aligned 1:1 with
+            ``self.attn_groups``; None if we should not use cascade attention
         """
 
         use_cascade_attn = False
-        num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        cascade_attn_prefix_lens: list[list[int]] = [
-            [] for _ in range(num_kv_cache_groups)
-        ]
+        cascade_attn_prefix_lens: list[int] = []
 
-        for kv_cache_gid in range(num_kv_cache_groups):
-            for attn_group in self.attn_groups[kv_cache_gid]:
-                if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                    cascade_attn_prefix_len = 0
-                else:
-                    # 0 if cascade attention should not be used
-                    cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
-                        num_scheduled_tokens,
-                        num_computed_tokens,
-                        num_common_prefix_blocks[kv_cache_gid],
-                        attn_group.kv_cache_spec,
-                        attn_group.get_metadata_builder(),
-                    )
-                cascade_attn_prefix_lens[kv_cache_gid].append(cascade_attn_prefix_len)
-                use_cascade_attn |= cascade_attn_prefix_len > 0
+        for attn_group in self.attn_groups:
+            if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                cascade_attn_prefix_len = 0
+            else:
+                # 0 if cascade attention should not be used
+                cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
+                    num_scheduled_tokens,
+                    num_computed_tokens,
+                    num_common_prefix_blocks[attn_group.kv_cache_group_id],
+                    attn_group.kv_cache_spec,
+                    attn_group.get_metadata_builder(),
+                )
+            cascade_attn_prefix_lens.append(cascade_attn_prefix_len)
+            use_cascade_attn |= cascade_attn_prefix_len > 0
 
         return cascade_attn_prefix_lens if use_cascade_attn else None
 
@@ -4142,13 +4132,15 @@ class GPUModelRunner(
             # True if any attention backend handles KV cache update separately
             # from forward() (i.e., forward_includes_kv_cache_update=False). When true,
             # slot_mappings must use padded dimensions to match the key/value tensors.
+            encoder_only_gids = {
+                gid
+                for gid, spec in enumerate(self.kv_cache_config.kv_cache_groups)
+                if isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+            }
             has_separate_kv_update = not all(
-                all(
-                    g.backend.forward_includes_kv_cache_update
-                    for g in self.attn_groups[id]
-                )
-                for id, spec in enumerate(self.kv_cache_config.kv_cache_groups)
-                if not isinstance(spec.kv_cache_spec, EncoderOnlyAttentionSpec)
+                g.backend.forward_includes_kv_cache_update
+                for g in self.attn_groups
+                if g.kv_cache_group_id not in encoder_only_gids
             )
             pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
@@ -6731,7 +6723,7 @@ class GPUModelRunner(
                     key.attn_backend,
                     layer_names,
                     key.kv_cache_spec,
-                    kv_cache_group_id,
+                    [kv_cache_group_id],
                 )
 
                 attn_groups.append(attn_group)
@@ -6755,7 +6747,7 @@ class GPUModelRunner(
         check_attention_cp_compatibility(self.vllm_config)
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
-            self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+            self.attn_groups.extend(create_attn_groups(attn_backend_map, i))
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
@@ -6763,22 +6755,27 @@ class GPUModelRunner(
         """
         Create the metadata builders for all KV cache groups and attn groups.
         """
-        for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                attn_group.create_metadata_builders(
-                    self.vllm_config,
-                    self.device,
-                    kernel_block_sizes[kv_cache_group_id]
-                    if kv_cache_group_id < len(kernel_block_sizes)
-                    else None,
-                    num_metadata_builders=1
-                    if not self.parallel_config.use_ubatching
-                    else self.parallel_config.num_ubatches,
-                )
+        for attn_group in self.attn_groups:
+            kv_cache_group_id = attn_group.kv_cache_group_id
+            attn_group.create_metadata_builders(
+                self.vllm_config,
+                self.device,
+                kernel_block_sizes[kv_cache_group_id]
+                if kv_cache_group_id < len(kernel_block_sizes)
+                else None,
+                num_metadata_builders=1
+                if not self.parallel_config.use_ubatching
+                else self.parallel_config.num_ubatches,
+            )
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
+
+        bind_backend_instances(
+            self.attn_groups,
+            self.compilation_config.static_forward_context,
+        )
 
         # Initialize drafter attention backend
         if self.speculative_config and (
@@ -6973,13 +6970,12 @@ class GPUModelRunner(
         )
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
-        return itertools.chain.from_iterable(self.attn_groups)
+        return iter(self.attn_groups)
 
     def _kv_cache_spec_attn_group_iterator(self) -> Iterator[AttentionGroup]:
         if not self.kv_cache_config.kv_cache_groups:
             return
-        for attn_groups in self.attn_groups:
-            yield from attn_groups
+        yield from self.attn_groups
 
     def _allocate_and_reshape_kv_cache(
         self,

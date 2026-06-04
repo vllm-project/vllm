@@ -785,11 +785,13 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
                 impl_class_name = stmt.value.id
                 break
 
-    supports_dcp = False
-    if impl_class_name:
-        supports_dcp = parse_impl_bool_attr(
-            tree, impl_class_name, "can_return_lse_for_decode", False, file_path
-        )
+    # DCP support comes from can_return_lse_for_decode. Legacy backends carry it
+    # on their per-layer impl; unified backends (RFC #42449, get_impl_cls has no
+    # impl to return) carry it on the backend class itself.
+    dcp_class_name = impl_class_name or class_node.name
+    supports_dcp = parse_impl_bool_attr(
+        tree, dcp_class_name, "can_return_lse_for_decode", False, file_path
+    )
 
     kv_cache_dtypes = parse_kv_cache_dtypes(class_node)
     if backend_name in BACKEND_KV_DTYPE_EXCLUDES:

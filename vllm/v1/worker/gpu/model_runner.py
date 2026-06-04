@@ -104,7 +104,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import KVBlockZeroer
+from vllm.v1.worker.utils import KVBlockZeroer, bind_backend_instances
 
 logger = init_logger(__name__)
 
@@ -402,6 +402,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        bind_backend_instances(
+            self.attn_groups,
+            self.compilation_config.static_forward_context,
+        )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
             max_num_reqs=self.max_num_reqs,
@@ -457,7 +461,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_block_zeroer = KVBlockZeroer(
             self.device,
             is_pin_memory_available(),
-            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            attn_groups_iter=iter(self.attn_groups),
             kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             static_forward_context=self.compilation_config.static_forward_context,

@@ -124,7 +124,7 @@ class WhisperModelState(ModelState):
         cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
-        attn_groups: list[list[AttentionGroup]],
+        attn_groups: list[AttentionGroup],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:
@@ -167,7 +167,7 @@ class WhisperModelState(ModelState):
     def _get_encoder_seq_lens(
         self,
         req_ids: list[str],
-        attn_groups: list[list[AttentionGroup]],
+        attn_groups: list[AttentionGroup],
         for_capture: bool,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
         num_reqs = len(req_ids)
@@ -191,13 +191,9 @@ class WhisperModelState(ModelState):
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 
         seq_lens_by_group: dict[int, tuple[torch.Tensor, np.ndarray]] = {}
-        for kv_cache_group_idx, groups in enumerate(attn_groups):
-            has_cross_attn = any(
-                isinstance(attn_group.kv_cache_spec, CrossAttentionSpec)
-                for attn_group in groups
-            )
-            if has_cross_attn:
-                seq_lens_by_group[kv_cache_group_idx] = (
+        for attn_group in attn_groups:
+            if isinstance(attn_group.kv_cache_spec, CrossAttentionSpec):
+                seq_lens_by_group[attn_group.kv_cache_group_id] = (
                     encoder_seq_lens_gpu,
                     encoder_seq_lens_np,
                 )

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
+    from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, KVQuantMode
 
 from vllm.v1.kv_cache_interface import get_kv_quant_mode
 
@@ -49,6 +49,24 @@ class MultipleOf:
 
     def __init__(self, base: int):
         self.base = base
+
+
+@dataclass(frozen=True)
+class LayerConfig:
+    layer_name: str
+    num_heads: int
+    head_size: int
+    scale: float
+    num_kv_heads: int | None = None
+    alibi_slopes: list[float] | None = None
+    sliding_window: int | None = None
+    kv_cache_dtype: str = "auto"
+    logits_soft_cap: float | None = None
+    attn_type: str = AttentionType.DECODER
+    kv_sharing_target_layer_name: str | None = None
+    # Backend-specific leftovers
+    # (sinks, use_alibi_sqrt, chunk_lookback, block_m/n, ...).
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class AttentionBackend(ABC):
@@ -281,6 +299,124 @@ class AttentionBackend(ABC):
     def is_ssm(cls) -> bool:
         return False
 
+    @classmethod
+    def supports_quant_query_input(cls) -> bool:
+        return False
+
+    # Per-group backend instance interface (RFC #42449): a ported (unified)
+    # backend is instantiated once per attention group and owns prep_forward
+    # (build the per-step state) and forward (run the kernel). Capability methods
+    # above stay class-level. Unported backends run under V2 behind
+    # LegacyToUnifiedBackendAdapter; ported backends run under V1 behind
+    # UnifiedToLegacyBackendAdapter.
+
+    supports_update_block_table: bool = False
+    reorder_batch_threshold: int | None = None
+
+    def __init__(
+        self,
+        kv_cache_spec: "KVCacheSpec | None" = None,
+        layer_names: list[str] | None = None,
+        vllm_config: "VllmConfig | None" = None,
+        device: torch.device | None = None,
+        *,
+        cache_spec: "KVCacheSpec | None" = None,
+        kv_cache_group_ids: list[int] | None = None,
+        num_ubatches: int = 1,
+    ) -> None:
+        """Construct a per-group backend instance. Unified backends override this
+        for their own (builder-side) setup; they must still call init_instance."""
+        self.kv_cache_spec = kv_cache_spec
+        self.layer_names = layer_names
+        self.vllm_config = vllm_config
+        self.device = device
+        self.init_instance(
+            cache_spec=cache_spec if cache_spec is not None else kv_cache_spec,
+            kv_cache_group_ids=kv_cache_group_ids or [0],
+        )
+
+    def init_instance(
+        self,
+        *,
+        cache_spec: "KVCacheSpec | None",
+        kv_cache_group_ids: list[int],
+    ) -> None:
+        """Initialize per-group instance state; called from __init__."""
+        self._cache_spec = cache_spec
+        self.kv_cache_group_ids = kv_cache_group_ids
+        self.attn_metadata: Any = None
+
+    def get_builder(self, ubatch_id: int = 0) -> "AttentionBackend":
+        return self
+
+    def bind_layer(self, layer_config: "LayerConfig") -> None:  # noqa: B027
+        """Optional per-layer setup at bind time (validating / caching
+        layer-specific config). Default no-op; subclasses override."""
+
+    def prep_forward(
+        self,
+        common_attn_metadata: "CommonAttentionMetadata",
+        *,
+        block_tables: dict[int, torch.Tensor] | None = None,
+        slot_mappings: dict[int, torch.Tensor] | None = None,
+        common_prefix_len: int = 0,
+        for_cudagraph_capture: bool = False,
+        ubatch_id: int | None = None,
+        extra_metadata_args: dict[str, Any] | None = None,
+        metadata_cache: dict | None = None,
+    ) -> None:
+        """Build this group's per-step state for one microbatch.
+
+        Unified backends store the per-step state on the instance, indexed by
+        ``ubatch_id``, and set ``self.attn_metadata`` to the object the runner
+        routes into the per-layer dict (the backend itself). ``block_tables``/
+        ``slot_mappings`` (keyed by kv_cache_group_id) are authoritative for the
+        per-group block table.
+        """
+        raise NotImplementedError
+
+    def forward(
+        self,
+        layer: Any,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> None:
+        """Run attention for one layer. Per-step state is read off ``self`` (set
+        by ``prep_forward``); per-layer config off ``layer.layer_config``."""
+        raise NotImplementedError
+
+    def build_for_drafting(
+        self, common_attn_metadata: "CommonAttentionMetadata", draft_index: int
+    ) -> Any:
+        """Build per-step state for a spec-decode draft and return the object the
+        drafter routes into its per-layer dict (the backend itself, for a
+        unified backend)."""
+        raise NotImplementedError
+
+    def get_cudagraph_support(
+        self, vllm_config: "VllmConfig", kv_cache_spec: "AttentionSpec"
+    ) -> "AttentionCGSupport":
+        return AttentionCGSupport.NEVER
+
+    def use_cascade_attention(self, *args, **kwargs) -> bool:
+        return False
+
+    def do_kv_cache_update(
+        self,
+        layer: Any,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError
+
 
 class AttentionMetadata:
     pass
@@ -381,7 +517,7 @@ class CommonAttentionMetadata:
     @deprecated(
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
-    async scheduling. If a CPU copy is needed, it can be derived from 
+    async scheduling. If a CPU copy is needed, it can be derived from
     query_start_loc_cpu and seq_lens.
     Will be removed in a future release, please migrate as soon as possible.
     """
@@ -601,6 +737,232 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         dcp_world_size: int,
     ) -> bool:
         return False
+
+
+class LegacyToUnifiedBackendAdapter:
+    """Runs a legacy 4-class backend under the unified ``prep_forward()`` driver."""
+
+    def __init__(
+        self,
+        backend_cls: type[AttentionBackend],
+        kv_cache_spec: "KVCacheSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        *,
+        kv_cache_group_ids: list[int] | None = None,
+        num_ubatches: int = 1,
+        kernel_block_size: int | None = None,
+    ):
+        self._backend_cls = backend_cls
+        self.layer_names = layer_names
+        self.kv_cache_group_ids = (
+            kv_cache_group_ids if kv_cache_group_ids is not None else [0]
+        )
+        # Cross-group cache key keys on the resolved spec, NOT the
+        # block-size-adjusted builder spec (matches the V1 runner's key).
+        self._cache_spec = kv_cache_spec
+        builder_spec = (
+            kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else kv_cache_spec
+        )
+        builder_cls = backend_cls.get_builder_cls()
+        self._builders: list[AttentionMetadataBuilder] = [
+            builder_cls(builder_spec, layer_names, vllm_config, device)
+            for _ in range(num_ubatches)
+        ]
+        self.attn_metadata: Any = None
+
+    def get_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
+        return self._builders[ubatch_id]
+
+    def bind_layer(self, layer_config: "LayerConfig") -> None:
+        # Legacy backends forward through the module's own impl; nothing to bind.
+        pass
+
+    def prep_forward(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        *,
+        block_tables: dict[int, torch.Tensor] | None = None,
+        slot_mappings: dict[int, torch.Tensor] | None = None,
+        common_prefix_len: int = 0,
+        for_cudagraph_capture: bool = False,
+        ubatch_id: int | None = None,
+        extra_metadata_args: dict[str, Any] | None = None,
+        metadata_cache: dict | None = None,
+    ) -> None:
+        builder = self._builders[ubatch_id or 0]
+        common_attn_metadata = _stamp_block_table(
+            common_attn_metadata, block_tables, slot_mappings, self.kv_cache_group_ids
+        )
+        self.attn_metadata = _build_with_cache(
+            builder,
+            (self._cache_spec, type(builder)),
+            common_attn_metadata,
+            common_prefix_len=common_prefix_len,
+            for_cudagraph_capture=for_cudagraph_capture,
+            extra_metadata_args=extra_metadata_args,
+            metadata_cache=metadata_cache,
+        )
+
+    def forward(
+        self,
+        layer: Any,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+        *,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> None:
+        """Run a legacy backend through the unified ``forward`` interface.
+
+        The op calls this without threading the metadata (unified backends read
+        their own per-step state), so re-resolve this layer's built metadata from
+        the forward context — the same lookup the op uses — and hand it to the
+        module's legacy per-layer impl.
+        """
+        from vllm.forward_context import get_forward_context
+
+        ctx_md = get_forward_context().attn_metadata
+        if isinstance(ctx_md, dict):
+            attn_metadata = ctx_md[layer.layer_name]
+        elif isinstance(ctx_md, list):
+            # Spec decode: [0] is the base-model (non-speculative) dict.
+            attn_metadata = ctx_md[0][layer.layer_name]
+        else:
+            attn_metadata = ctx_md
+        layer.impl.forward(
+            layer,
+            query,
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+
+    def do_kv_cache_update(
+        self,
+        layer: Any,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        layer.impl.do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
+
+
+class _UnifiedToLegacyBuilder:
+    """Legacy ``AttentionMetadataBuilder`` surface over a unified backend."""
+
+    def __init__(self, backend: "AttentionBackend"):
+        self._backend = backend
+        # Read by the runner's reorder / cudagraph / cross-group-cache logic.
+        self.reorder_batch_threshold = backend.reorder_batch_threshold
+        self.supports_update_block_table = backend.supports_update_block_table
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        **extra: Any,
+    ) -> "AttentionBackend":
+        self._backend.prep_forward(
+            common_attn_metadata, common_prefix_len=common_prefix_len
+        )
+        return self._backend
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> "AttentionBackend":
+        self._backend.prep_forward(common_attn_metadata, for_cudagraph_capture=True)
+        return self._backend
+
+    def build_for_drafting(
+        self, common_attn_metadata: CommonAttentionMetadata, draft_index: int
+    ) -> Any:
+        return self._backend.build_for_drafting(common_attn_metadata, draft_index)
+
+    def update_block_table(self, *args, **kwargs) -> Any:
+        # Never reached: supports_update_block_table is False for unified
+        # backends, so the runner never takes the cache-reuse branch.
+        raise NotImplementedError
+
+    def get_cudagraph_support(
+        self, vllm_config: "VllmConfig", kv_cache_spec: "AttentionSpec"
+    ) -> "AttentionCGSupport":
+        return self._backend.get_cudagraph_support(vllm_config, kv_cache_spec)
+
+
+class UnifiedToLegacyBackendAdapter:
+    """Presents a unified backend's *builder* through the legacy 4-class surface"""
+
+    def __init__(self, backend: "AttentionBackend"):
+        self._backend = backend
+        self._builder = _UnifiedToLegacyBuilder(backend)
+
+    def get_builder(self, ubatch_id: int = 0) -> _UnifiedToLegacyBuilder:
+        return self._builder
+
+
+def _stamp_block_table(
+    common_attn_metadata: CommonAttentionMetadata,
+    block_tables: dict[int, torch.Tensor] | None,
+    slot_mappings: dict[int, torch.Tensor] | None,
+    kv_cache_group_ids: list[int],
+) -> CommonAttentionMetadata:
+    """Source the per-group block table / slot mapping from the authoritative
+    dicts (keyed by kv_cache_group_id) rather than whatever the runner left on
+    common_attn_metadata. Pass-through when no dicts are given (ubatch path)."""
+    if block_tables is None:
+        return common_attn_metadata
+    gid = kv_cache_group_ids[0]
+    return common_attn_metadata.replace(
+        block_table_tensor=block_tables[gid],
+        slot_mapping=slot_mappings[gid]
+        if slot_mappings is not None
+        else common_attn_metadata.slot_mapping,
+    )
+
+
+def _build_with_cache(
+    builder: Any,
+    cache_key: tuple,
+    common_attn_metadata: CommonAttentionMetadata,
+    *,
+    common_prefix_len: int,
+    for_cudagraph_capture: bool,
+    extra_metadata_args: dict[str, Any] | None,
+    metadata_cache: dict | None,
+) -> Any:
+    if for_cudagraph_capture:
+        return builder.build_for_cudagraph_capture(common_attn_metadata)
+    if (
+        metadata_cache is not None
+        and cache_key in metadata_cache
+        and builder.supports_update_block_table
+    ):
+        return builder.update_block_table(
+            metadata_cache[cache_key],
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.slot_mapping,
+        )
+    md = builder.build(
+        common_prefix_len=common_prefix_len,
+        common_attn_metadata=common_attn_metadata,
+        **(extra_metadata_args or {}),
+    )
+    if metadata_cache is not None and builder.supports_update_block_table:
+        metadata_cache[cache_key] = md
+    return md
 
 
 class AttentionLayer(Protocol):

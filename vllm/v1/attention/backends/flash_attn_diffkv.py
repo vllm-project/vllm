@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Attention layer with FlashAttention."""
+"""Attention layer with FlashAttention, differential K/V head sizes."""
 
 import torch
 
@@ -10,7 +10,7 @@ from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
 )
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionType, LayerConfig
 from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
@@ -23,8 +23,7 @@ if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from .flash_attn import (
     FlashAttentionBackend,
-    FlashAttentionImpl,
-    FlashAttentionMetadata,
+    _fa_sliding_window,
     cascade_attention,
 )
 
@@ -43,24 +42,15 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def get_name() -> str:
         return "FLASH_ATTN_DIFFKV"
 
-    @staticmethod
-    def get_impl_cls() -> type["FlashAttentionImpl"]:
-        return FlashAttentionDiffKVImpl
-
-
-class FlashAttentionDiffKVImpl(FlashAttentionImpl):
-    vllm_flash_attn_version: int | None
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Re-derive the FA version with diff-kv context so that
-        # get_flash_attn_version can apply the FA3 -> FA4 upgrade rule
-        # for sinks + hdim != hdim_v.
-        self.vllm_flash_attn_version = get_flash_attn_version(
-            requires_alibi=self.alibi_slopes is not None,
-            head_size=self.head_size,
-            head_size_v=FlashAttentionDiffKVBackend.head_size_v,
-            has_sinks=self.sinks is not None,
+    def bind_layer(self, layer_config: LayerConfig) -> None:
+        super().bind_layer(layer_config)
+        # Re-derive the FA version with diff-kv context so get_flash_attn_version
+        # can apply the FA3 -> FA4 upgrade rule for sinks + hdim != hdim_v.
+        self._vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=layer_config.alibi_slopes is not None,
+            head_size=layer_config.head_size,
+            head_size_v=type(self).head_size_v,
+            has_sinks=layer_config.extra.get("sinks") is not None,
         )
 
     def do_kv_cache_update(
@@ -71,9 +61,12 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> None:
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # For encoder attention,
-            # we use direct Q, K, V tensors without caching
+        layer_config = layer.layer_config
+        if layer_config.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        ):
+            # For encoder attention, Q/K/V are used directly without caching.
             return
 
         # DiffKV packs K and V into a single tensor along the last dim:
@@ -85,7 +78,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             value,
             kv_cache.transpose(1, 2),
             slot_mapping,
-            self.kv_cache_dtype,
+            layer_config.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
         )
@@ -97,12 +90,15 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
         output: torch.Tensor,
+        *,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Forward pass with FlashAttention.
+        """Forward pass with FlashAttention (differential K/V head sizes).
+
+        Per-step state is read off the microbatch's slot in ``self._step`` (set
+        by ``prep_forward``); per-layer config off ``layer.layer_config``.
 
         Args:
             query: shape = [num_tokens, num_heads, head_size]
@@ -110,59 +106,48 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             value: shape = [num_tokens, num_kv_heads, head_size_v]
             kv_cache: shape =
                 [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
-            attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size_v]
-        NOTE: FP8 quantization, flash-attn expect the size of
-              {q,k,v}_descale to be (num_sequences, num_kv_heads).
-              We use torch's .expand() to avoid duplicating values
         """
-        assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
-        )
+        layer_config = layer.layer_config
+        head_size = layer_config.head_size
+        scale = layer_config.scale
+        num_kv_heads = layer_config.num_kv_heads
+        attn_type = layer_config.attn_type
+        kv_cache_dtype = layer_config.kv_cache_dtype
+        logits_soft_cap = layer_config.logits_soft_cap or 0
+        sliding_window = _fa_sliding_window(layer_config.sliding_window, attn_type)
+        sinks = layer_config.extra.get("sinks")
+        alibi_slopes = self._alibi_slopes
+        fa_version = self._vllm_flash_attn_version
+        assert fa_version is not None, "FlashAttention version not detected."
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for FlashAttentionImpl"
+                "fused output quantization is not yet supported for FlashAttention"
             )
 
-        if attn_metadata is None:
-            # Profiling run.
-            return output.fill_(0)
-
-        attn_type = self.attn_type
-
-        # IMPORTANT!
-        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
-        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
-        # in this method. For example, `view` and `slice` (or `[:n]`) operations
-        # are surprisingly slow even in the case they do not invoke any GPU ops.
-        # Minimize the PyTorch ops in this method as much as possible.
-        # Whenever making a change in this method, please benchmark the
-        # performance to make sure it does not introduce any overhead.
-
-        num_actual_tokens = attn_metadata.num_actual_tokens
+        md = self._step[self._current_ubatch_id()]
+        assert md is not None, "forward() called before prep_forward()/_build_step()"
+        num_actual_tokens = md.num_actual_tokens
 
         # Handle encoder attention differently - no KV cache needed
         if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
-            # For encoder attention,
-            # we use direct Q, K, V tensors without caching
             return self._forward_encoder_attention(
+                layer,
                 query[:num_actual_tokens],
                 key[:num_actual_tokens],
                 value[:num_actual_tokens],
                 output[:num_actual_tokens],
-                attn_metadata,
-                layer,
+                md,
             )
 
-        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
+        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility. K and V are
+        # packed along the content dim and split by head_size (not interleaved).
         kv_cache = kv_cache.transpose(1, 2)
-        key_cache = kv_cache[..., : self.head_size]
-        value_cache = kv_cache[..., self.head_size :]
+        key_cache = kv_cache[..., :head_size]
+        value_cache = kv_cache[..., head_size:]
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
-        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
-        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
         fixed_k = canonicalize_singleton_dim_strides(key_cache)
         fixed_v = canonicalize_singleton_dim_strides(value_cache)
         if fixed_k is not key_cache or fixed_v is not value_cache:
@@ -178,30 +163,31 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             )
         key_cache, value_cache = fixed_k, fixed_v
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if is_quantized_kv_cache(kv_cache_dtype):
             # queries are quantized in the attention layer
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
 
-        if not attn_metadata.use_cascade:
-            cu_seqlens_q = attn_metadata.query_start_loc
-            seqused_k = attn_metadata.seq_lens
-            max_seqlen_q = attn_metadata.max_query_len
-            max_seqlen_k = attn_metadata.max_seq_len
-            block_table = attn_metadata.block_table
-            scheduler_metadata = attn_metadata.scheduler_metadata
+        if not md.use_cascade:
+            cu_seqlens_q = md.query_start_loc
+            seqused_k = md.seq_lens
+            max_seqlen_q = md.max_query_len
+            max_seqlen_k = md.max_seq_len
+            block_table = md.block_table
+            scheduler_metadata = md.scheduler_metadata
 
-            descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+            descale_shape = (cu_seqlens_q.shape[0] - 1, num_kv_heads)
 
             if self.dcp_world_size > 1:
                 self._forward_with_dcp(
+                    layer,
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
                     value[:num_actual_tokens],
                     key_cache,
                     value_cache,
                     output[:num_actual_tokens],
-                    attn_metadata,
+                    md,
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
@@ -209,9 +195,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 return output
             else:
                 sliding_window_size = (
-                    list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None
+                    list(sliding_window) if sliding_window is not None else None
                 )
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -222,19 +206,19 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                     max_seqlen_q=max_seqlen_q,
                     seqused_k=seqused_k,
                     max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,
+                    softmax_scale=scale,
+                    causal=md.causal,
+                    alibi_slopes=alibi_slopes,
                     window_size=sliding_window_size,
                     block_table=block_table,
-                    softcap=self.logits_soft_cap,
+                    softcap=logits_soft_cap,
                     scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
+                    fa_version=fa_version,
                     q_descale=layer._q_scale.expand(descale_shape),
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
-                    num_splits=attn_metadata.max_num_splits,
-                    s_aux=self.sinks,
+                    num_splits=md.max_num_splits,
+                    s_aux=sinks,
                 )
                 return output
 
@@ -244,25 +228,25 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             query[:num_actual_tokens],
             key_cache,
             value_cache,
-            cu_query_lens=attn_metadata.query_start_loc,
-            max_query_len=attn_metadata.max_query_len,
-            cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
-            prefix_kv_lens=attn_metadata.prefix_kv_lens,
-            suffix_kv_lens=attn_metadata.suffix_kv_lens,
-            max_kv_len=attn_metadata.max_seq_len,
-            softmax_scale=self.scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window,
-            logits_soft_cap=self.logits_soft_cap,
-            block_table=attn_metadata.block_table,
-            common_prefix_len=attn_metadata.common_prefix_len,
-            max_num_splits=attn_metadata.max_num_splits,
-            fa_version=self.vllm_flash_attn_version,
-            prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
-            suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
+            cu_query_lens=md.query_start_loc,
+            max_query_len=md.max_query_len,
+            cu_prefix_query_lens=md.cu_prefix_query_lens,
+            prefix_kv_lens=md.prefix_kv_lens,
+            suffix_kv_lens=md.suffix_kv_lens,
+            max_kv_len=md.max_seq_len,
+            softmax_scale=scale,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            logits_soft_cap=logits_soft_cap,
+            block_table=md.block_table,
+            common_prefix_len=md.common_prefix_len,
+            max_num_splits=md.max_num_splits,
+            fa_version=fa_version,
+            prefix_scheduler_metadata=md.prefix_scheduler_metadata,
+            suffix_scheduler_metadata=md.scheduler_metadata,
             q_descale=layer._q_scale,
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
-            s_aux=self.sinks,
+            s_aux=sinks,
         )
         return output

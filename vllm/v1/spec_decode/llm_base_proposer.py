@@ -1584,7 +1584,7 @@ class SpecDecodeBaseProposer:
                         backend=attn_backend,
                         layer_names=[layer_name],
                         kv_cache_spec=layer_kv_cache_spec,
-                        kv_cache_group_id=self.kv_cache_gid,
+                        kv_cache_group_ids=[self.kv_cache_gid],
                     )
                     attn_group.create_metadata_builders(
                         self.vllm_config,

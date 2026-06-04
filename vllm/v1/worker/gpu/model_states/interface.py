@@ -89,7 +89,7 @@ class ModelState(ABC):
         cudagraph_mode: CUDAGraphMode,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
-        attn_groups: list[list[AttentionGroup]],
+        attn_groups: list[AttentionGroup],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:

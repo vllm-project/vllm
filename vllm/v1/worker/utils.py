@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -21,7 +21,9 @@ from vllm.utils.mem_utils import MemorySnapshot, format_gib
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
+    LegacyToUnifiedBackendAdapter,
     MultipleOf,
+    UnifiedToLegacyBackendAdapter,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -220,13 +222,29 @@ class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
-    kv_cache_group_id: int
+    kv_cache_group_ids: list[int]
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
     )
+    backend_instance: "LegacyToUnifiedBackendAdapter | AttentionBackend | None" = None
+    legacy_adapter: "UnifiedToLegacyBackendAdapter | None" = None
+
+    @property
+    def kv_cache_group_id(self) -> int:
+        """The single KV-cache group this attention group draws from.
+
+        Convenience for the (current) common case of one group per attention
+        group; asserts the single-group invariant. Multi-group call sites must
+        use ``kv_cache_group_ids`` directly.
+        """
+        assert len(self.kv_cache_group_ids) == 1, (
+            "kv_cache_group_id is only valid for single-group attention groups; "
+            f"this group spans {self.kv_cache_group_ids}"
+        )
+        return self.kv_cache_group_ids[0]
 
     def create_metadata_builders(
         self,
@@ -235,24 +253,72 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
-        )
-        self.metadata_builders = [
-            self.backend.get_builder_cls()(
-                kv_cache_spec_builder,
+        builder_cls = self.backend.get_builder_cls()
+        if builder_cls is self.backend:
+            builder_spec = (
+                self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+                if kernel_block_size is not None
+                else self.kv_cache_spec
+            )
+            self.backend_instance = self.backend(
+                builder_spec,
                 self.layer_names,
                 vllm_config,
                 device,
+                cache_spec=self.kv_cache_spec,
+                kv_cache_group_ids=self.kv_cache_group_ids,
+                num_ubatches=num_metadata_builders,
             )
-            for _ in range(num_metadata_builders)
-        ]
+            self.legacy_adapter = UnifiedToLegacyBackendAdapter(self.backend_instance)
+            # The legacy builder shim is what get_metadata_builder() exposes for
+            # both runners (V1 calls .build(); V2 only reads capability off it).
+            self.metadata_builders = cast(
+                "list[AttentionMetadataBuilder]",
+                [self.legacy_adapter.get_builder()] * num_metadata_builders,
+            )
+        else:
+            self.backend_instance = LegacyToUnifiedBackendAdapter(
+                self.backend,
+                self.kv_cache_spec,
+                self.layer_names,
+                vllm_config,
+                device,
+                kv_cache_group_ids=self.kv_cache_group_ids,
+                num_ubatches=num_metadata_builders,
+                kernel_block_size=kernel_block_size,
+            )
+            # Alias the adapter's builders so existing consumers see them.
+            self.metadata_builders = self.backend_instance._builders
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+
+def bind_backend_instances(
+    attn_groups: list[AttentionGroup],
+    static_forward_context: dict[str, Any],
+) -> None:
+    """Install each group's backend instance on its Attention modules (RFC #42449).
+
+    The shared attention custom op runs through ``module.backend_instance`` via
+    the unified interface: a unified backend directly, or a
+    ``LegacyToUnifiedBackendAdapter`` (which delegates to the module's legacy
+    impl) for an unported backend. Also lets a unified backend cache
+    group-uniform per-layer config via ``bind_layer``. Modules without a
+    ``layer_config`` (e.g. MLA, not yet ported) are skipped.
+    """
+    for group in attn_groups:
+        instance = group.backend_instance
+        if instance is None:
+            continue
+        for layer_name in group.layer_names:
+            module = static_forward_context.get(layer_name)
+            layer_config = getattr(module, "layer_config", None)
+            if module is None or layer_config is None:
+                continue
+            instance.bind_layer(layer_config)
+            module.backend_instance = instance
 
 
 def select_common_block_size(
@@ -325,7 +391,7 @@ def select_common_block_size(
 
 
 def prepare_kernel_block_sizes(
-    kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+    kv_cache_config: KVCacheConfig, attn_groups: list[AttentionGroup]
 ) -> list[int]:
     """
     Generate kernel_block_sizes that matches each block_size.
@@ -353,7 +419,9 @@ def prepare_kernel_block_sizes(
         if isinstance(kv_cache_spec, AttentionSpec):
             # This is an attention backend that supports virtual block splitting.
             kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-            group_backends = [g.backend for g in attn_groups[kv_cache_gid]]
+            group_backends = [
+                g.backend for g in attn_groups if kv_cache_gid in g.kv_cache_group_ids
+            ]
             selected_kernel_size = select_common_block_size(
                 kv_manager_block_size, group_backends
             )

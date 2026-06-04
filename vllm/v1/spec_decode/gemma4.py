@@ -246,7 +246,7 @@ class Gemma4Proposer(SpecDecodeBaseProposer):
                     backend=attn_backend,
                     layer_names=[layer_name],
                     kv_cache_spec=spec,
-                    kv_cache_group_id=gid,
+                    kv_cache_group_ids=[gid],
                 )
                 attn_group.create_metadata_builders(
                     self.vllm_config,

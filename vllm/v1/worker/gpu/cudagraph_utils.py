@@ -333,7 +333,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         input_buffers: InputBuffers,
         intermediate_tensors: IntermediateTensors | None,
         block_tables: BlockTables,
-        attn_groups: list[list[AttentionGroup]],
+        attn_groups: list[AttentionGroup],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
@@ -462,7 +462,7 @@ def prepare_inputs_to_capture(
     model_state: ModelState,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    attn_groups: list[list[AttentionGroup]],
+    attn_groups: list[AttentionGroup],
     kv_cache_config: KVCacheConfig,
     skip_attn: bool = False,
 ) -> CapturedAttentionState:

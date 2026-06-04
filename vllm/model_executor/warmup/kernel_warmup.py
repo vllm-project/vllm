@@ -90,8 +90,7 @@ def kernel_warmup(worker: "Worker"):
         # `build_for_cudagraph_capture`, we can change it to `any`.
         and all(
             _is_flashinfer_backend(group.backend)
-            for groups in worker.model_runner.attn_groups
-            for group in groups
+            for group in worker.model_runner.attn_groups
         )
     ):
         logger.info("Warming up FlashInfer attention.")
