@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    get_fp8_min_max,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
@@ -84,11 +85,11 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
-if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
-if current_platform.is_cuda():
+if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -327,9 +328,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 dtype=self.quant_matcher.quant_key.dtype,
             )
             assert scale is not None
-            finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
-            fp8_min = finfo.min
-            fp8_max = finfo.max
+            fp8_min, fp8_max = get_fp8_min_max()
 
             _, result, scale = auto_functionalized(
                 self.quant_matcher.QUANT_OP,
@@ -430,9 +429,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
                 dtype=self.quant_matcher.quant_key.dtype,
             )
             assert scale is not None
-            finfo = torch.finfo(self.quant_matcher.quant_key.dtype)
-            fp8_min = finfo.min
-            fp8_max = finfo.max
+            fp8_min, fp8_max = get_fp8_min_max()
 
             _, result, scale = auto_functionalized(
                 self.quant_matcher.QUANT_OP,
@@ -645,31 +642,30 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-            # Only register group quant patterns on CUDA where the C++ op exists
-            if current_platform.is_cuda():
-                for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                    for has_col_major_scales in [True, False]:
-                        for is_e8m0 in [True, False]:
-                            for is_tma_aligned in [False, True]:
-                                # Fuse fused_add_rms_norm + fp8 group quant
-                                FusedAddRMSNormGroupQuantPattern(
-                                    epsilon,
-                                    FP8_DTYPE,
-                                    group_shape=group_shape,
-                                    is_e8m0=is_e8m0,
-                                    has_col_major_scales=has_col_major_scales,
-                                    is_tma_aligned=is_tma_aligned,
-                                ).register(self.patterns)
+            # Only register group quant patterns on CUDA/ROCm where the C++ op exists
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                for has_col_major_scales in [True, False]:
+                    for is_e8m0 in [True, False]:
+                        for is_tma_aligned in [False, True]:
+                            # Fuse fused_add_rms_norm + fp8 group quant
+                            FusedAddRMSNormGroupQuantPattern(
+                                epsilon,
+                                FP8_DTYPE,
+                                group_shape=group_shape,
+                                is_e8m0=is_e8m0,
+                                has_col_major_scales=has_col_major_scales,
+                                is_tma_aligned=is_tma_aligned,
+                            ).register(self.patterns)
 
-                                # Fuse rms_norm + fp8 group quant
-                                RMSNormGroupQuantPattern(
-                                    epsilon,
-                                    FP8_DTYPE,
-                                    group_shape=group_shape,
-                                    is_e8m0=is_e8m0,
-                                    has_col_major_scales=has_col_major_scales,
-                                    is_tma_aligned=is_tma_aligned,
-                                ).register(self.patterns)
+                            # Fuse rms_norm + fp8 group quant
+                            RMSNormGroupQuantPattern(
+                                epsilon,
+                                FP8_DTYPE,
+                                group_shape=group_shape,
+                                is_e8m0=is_e8m0,
+                                has_col_major_scales=has_col_major_scales,
+                                is_tma_aligned=is_tma_aligned,
+                            ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

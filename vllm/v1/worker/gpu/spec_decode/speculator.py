@@ -16,8 +16,8 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionStatePair,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -31,7 +31,7 @@ class BaseSpeculator(ABC):
     @abstractmethod
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
         pass
 

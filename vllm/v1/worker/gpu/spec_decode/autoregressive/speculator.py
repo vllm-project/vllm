@@ -12,8 +12,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionStatePair,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
     get_uniform_token_count,
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
@@ -96,7 +96,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def capture(
         self,
-        attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
     ) -> None:
         logger.info("Capturing model for speculator...")
         # Reset indices to zeros to prevent stale values from prior
