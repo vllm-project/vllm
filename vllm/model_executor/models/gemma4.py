@@ -1057,7 +1057,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             "normalizer",
             torch.tensor(
                 config.hidden_size**0.5,
-                dtype=self.embed_tokens.weight.dtype,
+                dtype=vllm_config.model_config.dtype,
             ),
             persistent=False,
         )
@@ -1111,7 +1111,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             )
             self.hidden_states = torch.zeros(
                 (max_num_tokens, config.hidden_size),
-                dtype=self.embed_tokens.weight.dtype,
+                dtype=vllm_config.model_config.dtype,
                 device=device,
             )
             if (
@@ -1124,7 +1124,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         config.num_hidden_layers,
                         self.hidden_size_per_layer_input,
                     ),
-                    dtype=self.embed_tokens.weight.dtype,
+                    dtype=vllm_config.model_config.dtype,
                     device=device,
                 )
             else:
