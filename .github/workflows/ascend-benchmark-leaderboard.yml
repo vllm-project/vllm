@@ -981,4 +981,5 @@ jobs:
         env:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          PYTHON_BIN: python3
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh
