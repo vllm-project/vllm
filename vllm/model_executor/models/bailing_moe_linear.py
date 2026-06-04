@@ -432,6 +432,88 @@ class BailingGroupRMSNormGate(RMSNormGated):
         param.data.copy_(loaded_weight[shard].contiguous())
 
 
+# --- Universal Translator: cross-rank grouped RMS-norm ---
+# Active only when tp_size > group_norm_size (i.e., each rank holds less than
+# a full norm group). Computes the per-token sum-of-squares locally,
+# all-reduces within the rank-subgroup that shares the group, then applies
+# normalization, weight, and sigmoid gate in PyTorch. Drop-in replacement for
+# BailingGroupRMSNormGate when the constraint is violated; the constraint-
+# satisfied path keeps the existing fused fast path.
+
+_cross_rank_norm_subgroup_cache: dict = {}
+
+
+def _get_or_create_cross_rank_subgroup(tp_device_group, ranks: tuple):
+    """Memoizing factory for sub-NCCL groups within the TP group.
+
+    PyTorch's `dist.new_group` is a collective: every rank in the parent
+    group must call it with the same `ranks` list, even non-members. The
+    cache key is the ranks tuple, so layers that need the same sub-group
+    share a single ProcessGroup object.
+    """
+    if ranks not in _cross_rank_norm_subgroup_cache:
+        import torch.distributed as dist
+
+        _cross_rank_norm_subgroup_cache[ranks] = dist.new_group(
+            ranks=list(ranks),
+            backend=dist.get_backend(tp_device_group),
+        )
+    return _cross_rank_norm_subgroup_cache[ranks]
+
+
+class _CrossRankGroupedNormGate(nn.Module):
+    """Cross-rank-aware version of BailingGroupRMSNormGate.
+
+    Used when tp_size > group_norm_size (e.g. group_norm_size=4 at TP=8).
+    Each rank holds hidden_per_rank features that sit inside one norm group
+    of group_size_full features. ranks_per_group ranks must cooperate to
+    compute the group's sum-of-squares.
+
+    Per-token comm: one fp32 scalar per group, reduced across
+    ranks_per_group ranks. Tiny payload, latency-bound.
+    """
+
+    def __init__(
+        self,
+        hidden_per_rank: int,
+        group_size_full: int,
+        ranks_per_group: int,
+        subgroup,
+        eps: float = 1e-5,
+    ):
+        super().__init__()
+        # Invariant: hidden_per_rank * ranks_per_group == group_size_full.
+        # Holds when tp_size % group_norm_size == 0.
+        assert hidden_per_rank * ranks_per_group == group_size_full, (
+            f"_CrossRankGroupedNormGate invariant broken: "
+            f"hidden_per_rank={hidden_per_rank} * "
+            f"ranks_per_group={ranks_per_group} != "
+            f"group_size_full={group_size_full}"
+        )
+        self.hidden_per_rank = hidden_per_rank
+        self.group_size = group_size_full
+        self.ranks_per_group = ranks_per_group
+        self.subgroup = subgroup
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_per_rank))
+        self.weight.weight_loader = BailingGroupRMSNormGate._weight_loader
+
+    def forward(self, hidden: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        # hidden, gate: [num_tokens, hidden_per_rank]
+        orig_dtype = hidden.dtype
+        h32 = hidden.float()
+        local_sumsq = (h32 * h32).sum(dim=-1, keepdim=True)
+        global_sumsq = local_sumsq.contiguous()
+        torch.distributed.all_reduce(
+            global_sumsq,
+            op=torch.distributed.ReduceOp.SUM,
+            group=self.subgroup,
+        )
+        inv_norm = torch.rsqrt(global_sumsq / self.group_size + self.eps)
+        normed = h32 * inv_norm * self.weight.float()
+        return (torch.sigmoid(gate.float()) * normed).to(orig_dtype)
+
+
 # --8<-- [start:bailing_moe_linear_attention]
 @PluggableLayer.register("bailing_moe_linear_attention")
 class BailingMoELinearAttention(PluggableLayer, MambaBase):
@@ -555,23 +637,82 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
 
         self.group_norm_size = getattr(config, "group_norm_size", 1)
         self.rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-5))
-        assert self.tp_size <= self.group_norm_size, (
-            "tp_size must be <= group_norm_size for local rms norm"
+
+        # Universal Translator: when tp_size > group_norm_size, install a
+        # cross-rank-reduce wrapper around the grouped RMS norm instead of
+        # asserting. See _CrossRankGroupedNormGate above.
+        self._use_cross_rank_norm = (
+            self.group_norm_size > 1 and self.tp_size > self.group_norm_size
         )
-        assert self.group_norm_size % self.tp_size == 0, (
-            "group_norm_size must be divisible by tp_size"
-        )
+        if self._use_cross_rank_norm:
+            assert self.tp_size % self.group_norm_size == 0, (
+                f"tp_size ({self.tp_size}) must be a multiple of "
+                f"group_norm_size ({self.group_norm_size}) for the cross-rank "
+                "RMS-norm path."
+            )
+        else:
+            assert self.tp_size <= self.group_norm_size, (
+                "tp_size must be <= group_norm_size for local rms norm"
+            )
+            assert self.group_norm_size % self.tp_size == 0, (
+                "group_norm_size must be divisible by tp_size"
+            )
 
         # When group_norm_size == 1, group_size equals hidden_size // tp_size
-        self.g_norm = BailingGroupRMSNormGate(
-            hidden_size=self.hidden_inner_size // self.tp_size,
-            eps=self.rms_norm_eps,
-            group_size=(
-                self.hidden_inner_size // self.group_norm_size
-                if self.group_norm_size > 1
-                else self.hidden_inner_size // self.tp_size
-            ),
+        group_size_full = (
+            self.hidden_inner_size // self.group_norm_size
+            if self.group_norm_size > 1
+            else self.hidden_inner_size // self.tp_size
         )
+        hidden_per_rank = self.hidden_inner_size // self.tp_size
+
+        if self._use_cross_rank_norm:
+            ranks_per_group = self.tp_size // self.group_norm_size
+            my_subgroup_id = self.tp_rank // ranks_per_group
+            from vllm.distributed import get_tp_group
+
+            tp_group = get_tp_group()
+            tp_device_group = tp_group.device_group
+            # `dist.new_group` expects GLOBAL ranks; map local TP indices
+            # via tp_group.ranks. Without this mapping the code only works
+            # when the TP group starts at global rank 0 (single-node
+            # TP-only); in multi-node TPxPP or TPxDP setups the TP group
+            # may start at a non-zero global rank and local==global no
+            # longer holds. Thanks to gemini-code-assist for catching this
+            # in PR review (vllm-project/vllm#41509).
+            #
+            # PyTorch's dist.new_group is a collective: every rank in the
+            # parent group must call it with the same `ranks` list, even
+            # if the rank is not a member. We iterate over ALL subgroups
+            # in deterministic order on every rank; the cache ensures
+            # new_group is invoked exactly once per unique rank-tuple.
+            tp_global_ranks = tp_group.ranks
+            subgroup = None
+            for sgid in range(self.group_norm_size):
+                sg_ranks = tuple(
+                    tp_global_ranks[i]
+                    for i in range(
+                        sgid * ranks_per_group,
+                        (sgid + 1) * ranks_per_group,
+                    )
+                )
+                sg = _get_or_create_cross_rank_subgroup(tp_device_group, sg_ranks)
+                if sgid == my_subgroup_id:
+                    subgroup = sg
+            assert subgroup is not None
+            self.g_norm = _CrossRankGroupedNormGate(
+                hidden_per_rank=hidden_per_rank,
+                group_size_full=group_size_full,
+                ranks_per_group=ranks_per_group,
+                subgroup=subgroup,
+                eps=self.rms_norm_eps,
+            )
+        else:
+            self.g_norm = BailingGroupRMSNormGate(
+                hidden_size=hidden_per_rank,
+                eps=self.rms_norm_eps,
+                group_size=group_size_full,
+            )
 
         # use fp32 rotary embedding
         rope_parameters = _build_rope_parameters(config)
