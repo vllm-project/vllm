@@ -56,6 +56,8 @@ def flashinfer_sampler_supported() -> bool:
     # Default-disable on these archs; users can still explicitly opt in
     # with VLLM_USE_FLASHINFER_SAMPLER=1.
     # See https://github.com/vllm-project/vllm/issues/43885
+    # TODO: remove this workaround after FlashInfer fix
+    # https://github.com/flashinfer-ai/flashinfer/issues/361
     if unsupported_reason is None and capability[0] == 12:
         unsupported_reason = (
             "FlashInfer sampler default-disabled on Blackwell consumer GPUs "
