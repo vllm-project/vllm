@@ -24,13 +24,13 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
-from vllm.distributed.utils import is_weak_contiguous
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_pp_group,
     is_local_first_rank,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
