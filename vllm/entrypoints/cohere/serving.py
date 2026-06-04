@@ -638,7 +638,8 @@ class CohereServingChatV2(OpenAIServingChat):
 
                 # The final OpenAI chunk has no choices and only carries usage.
                 if not chunk.choices:
-                    yield from self._close_open_blocks(state)
+                    for ev in self._close_open_blocks(state):
+                        yield ev
                     yield _sse(
                         self._build_message_end_event(
                             chunk_id=chunk.id,
