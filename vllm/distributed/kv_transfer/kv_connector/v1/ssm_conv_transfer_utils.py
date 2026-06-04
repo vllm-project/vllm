@@ -9,8 +9,8 @@ Supported model types:
   - Mamba2: conv = [x, B, C], temporal = (num_heads, head_dim)
   - GDN (Gated Delta Net): conv = [Q, K, V] (dim(Q)==dim(K)),
     temporal = (num_v_heads, v_dim, k_dim)
-  - KDA (Kimi Delta Attention): same layout as GDN — conv = [Q, K, V],
-    temporal = recurrent.  Uses the same MambaSpec (2-shape) format.
+  - KDA (Kimi Delta Attention): 4 separate states (conv_q, conv_k, conv_v,
+    recurrent) mapped into MambaConvSplitInfo via 4-shape dispatch.
 """
 
 import math
@@ -33,18 +33,14 @@ class MambaConvSplitInfo:
     DS memory layout within one page (contiguous):
       Mamba2: |-- x --|- B -|- C -|  (B == C)
       GDN:    |- Q -|- K -|-- V --|  (dim(Q)==dim(K), V may differ)
-      KDA:    |- Q -|- K -|-- V --|  (same layout, Q/K/V are independent conv
-               states, followed by SSM temporal = recurrent state)
+      KDA:    |- Q -|- K -|-- V --|  (3 separate conv states, contiguous
+               in memory, followed by SSM temporal = recurrent state)
     """
 
     conv_rows: int  # conv_kernel - 1 (typically 3)
     local_proj_dims: tuple[int, int, int]  # per-rank column counts per sub-proj
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
     ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
-
-    @property
-    def state_sizes(self) -> tuple[int, ...]:
-        return self.ssm_sizes
 
     @property
     def local_conv_dim(self) -> int:
@@ -111,12 +107,20 @@ def derive_mamba_conv_split(
     mamba_spec: MambaSpec,
     local_tp: int,
 ) -> MambaConvSplitInfo:
-    """Derive per-rank byte sizes from a MambaSpec.
+    """Derive per-rank sub-projection byte sizes from a MambaSpec.
 
-    Called once at init on both P and D.  Dispatches by mamba_type:
+    Called once at init on both P and D.  Decomposes the conv dimension
+    into its sub-projection parts based on the model type.
 
-    - GDN_ATTN: standard GDN / KDA (conv_state, ssm_state).
-    - MAMBA2: conv_state with sub-projection decomposition.
+    Args:
+        mamba_spec: MambaSpec whose shapes are:
+            shapes[0] = conv state: (conv_dim_local, conv_rows) in DS layout.
+            shapes[1] = temporal state (model-specific shape).
+        local_tp: this engine's tensor-parallel size.
+
+    Returns:
+        MambaConvSplitInfo with per-rank sub-projection dims, conv_rows,
+        conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
     """
     _supported = (
         MambaAttentionBackendEnum.MAMBA2,
@@ -130,7 +134,47 @@ def derive_mamba_conv_split(
 
     assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
 
-    # --- Standard 2-shape path (Mamba2 / GDN / KDA) ---
+    # KDA variant of GDN: 4 separate states (conv_q, conv_k, conv_v, recurrent)
+    # mapped to MambaConvSplitInfo (first 3 → conv sub-projections, 4th → SSM).
+    if (
+        mamba_spec.mamba_type == MambaAttentionBackendEnum.GDN_ATTN
+        and len(mamba_spec.shapes) == 4
+    ):
+        conv_rows = mamba_spec.shapes[0][1]
+        assert all(s[1] == conv_rows for s in mamba_spec.shapes[:3]), (
+            "KDA conv states must all have the same conv_rows"
+        )
+        assert all(d == mamba_spec.dtypes[0] for d in mamba_spec.dtypes[:3]), (
+            "KDA conv states must all have the same dtype"
+        )
+        local_proj_dims = (
+            mamba_spec.shapes[0][0],  # q_dim_local
+            mamba_spec.shapes[1][0],  # k_dim_local
+            mamba_spec.shapes[2][0],  # v_dim_local
+        )
+        conv_dtype_size = torch.tensor(
+            [],
+            dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
+        ).element_size()
+        conv_state_bytes = sum(
+            torch.Size(s).numel() * torch.tensor([], dtype=d).element_size()  # type: ignore[misc]
+            for s, d in zip(mamba_spec.shapes[:3], mamba_spec.dtypes[:3])
+        )
+        ssm_state_bytes = (
+            torch.Size(mamba_spec.shapes[3]).numel()
+            * torch.tensor(
+                [],
+                dtype=mamba_spec.dtypes[3],  # type: ignore[misc]
+            ).element_size()
+        )
+        return MambaConvSplitInfo(
+            conv_rows=conv_rows,
+            local_proj_dims=local_proj_dims,
+            conv_dtype_size=conv_dtype_size,
+            ssm_sizes=(conv_state_bytes, ssm_state_bytes),
+        )
+
+    # --- Standard 2-shape path (Mamba2 / GDN) ---
     conv_shape = mamba_spec.shapes[0]
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
@@ -208,5 +252,9 @@ def compute_physical_blocks_per_logical(
 
     The remote engine's ratio is not sent directly in the handshake, so we
     reconstruct it: total mamba state per logical block / block_len.
+
+    Args:
+        ssm_sizes: (conv_state_bytes, ssm_state_bytes) from NixlAgentMetadata.
+        block_len: the engine's block_len in bytes (from block_lens[0]).
     """
-    return math.ceil(sum(ssm_sizes) / block_len)
+    return math.ceil((ssm_sizes[0] + ssm_sizes[1]) / block_len)
