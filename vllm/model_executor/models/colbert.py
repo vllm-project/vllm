@@ -6,6 +6,12 @@ ColBERT late interaction model for retrieval and reranking.
 ColBERT uses per-token embeddings and late interaction (MaxSim) scoring
 instead of single-vector representations or cross-encoder concatenation.
 
+ColBERT correctness for ``embedding_mode`` (query vs document markers, lengths,
+expansion padding) is enforced at **IO/tokenization** in
+``vllm.model_executor.models.colbert_encoding`` and pooling IO processors.
+**Forward passes in this module are unchanged by design** for compatibility with
+vLLM BERT kernels and existing pooling paths.
+
 This module provides:
 
 - :class:`ColBERTMixin` — mixin that adds ColBERT late-interaction support
@@ -27,6 +33,11 @@ from vllm.model_executor.layers.pooler import Pooler
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 
 from .bert import BertEmbeddingModel, BertModel
+from .colbert_encoding import (
+    ColBERTEncoder,
+    ColBERTEncodingConfig,
+    is_colbert_pooling_model,
+)
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 from .lfm2 import Lfm2ForCausalLM, Lfm2Model
@@ -96,6 +107,24 @@ class ColBERTMixin(nn.Module, SupportsLateInteraction):
         )
 
     # ---------------------------------------------------------------- pooler
+
+    @classmethod
+    def get_colbert_encoding_config(
+        cls,
+        model_config,
+        tokenizer,
+    ) -> ColBERTEncodingConfig:
+        """Build ColBERT encoding settings for the given tokenizer."""
+        return ColBERTEncodingConfig.from_model_config(model_config, tokenizer)
+
+    @classmethod
+    def get_colbert_encoder(cls, model_config, tokenizer) -> ColBERTEncoder:
+        """Return a ColBERT text encoder (PyLate-compatible preprocessing)."""
+        return ColBERTEncoder.from_model_config(model_config, tokenizer)
+
+    @classmethod
+    def is_colbert_pooling_model(cls, model_config) -> bool:
+        return is_colbert_pooling_model(model_config)
 
     def _build_colbert_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         """Build pooler for ColBERT token embeddings.
