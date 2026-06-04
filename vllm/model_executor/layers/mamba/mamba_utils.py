@@ -124,6 +124,21 @@ class MambaStateDtypeCalculator:
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, state_dtype, state_dtype, torch.float32)
 
+    @classmethod
+    def simple_gla_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        """Simple GLA recurrent state dtype is always ``float32``.
+
+        The outer-product accumulator ``S_t = alpha * S_{t-1} + k_t^T v_t``
+        is updated at every token. Using a reduced precision (e.g. bfloat16)
+        causes visible quality degradation on long sequences; float32 is
+        required regardless of ``mamba_cache_dtype``.
+        """
+        return (torch.float32,)
+
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -266,6 +281,22 @@ class MambaStateShapeCalculator:
             recurrent_state_shape,
         )
 
+    @classmethod
+    def simple_gla_state_shape(
+        cls,
+        tp_world_size: int,
+        num_heads: int,
+        head_dim: int,
+    ) -> tuple[tuple[int, int, int], ...]:
+        """Recurrent state shape for Simple GLA (Lightning Attention).
+
+        Each head maintains an outer-product accumulator of shape
+        ``(head_dim, head_dim)``, giving a per-layer per-block state of
+        ``(num_heads // tp_world_size, head_dim, head_dim)``.
+        """
+        state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
+        return (state_shape,)
+
 
 @dataclass
 class MambaCopySpec:
@@ -371,3 +402,13 @@ class MambaStateCopyFuncCalculator:
             get_conv_copy_spec,
             get_temporal_copy_spec,
         )
+
+    @classmethod
+    def simple_gla_state_copy_func(cls) -> tuple[MambaStateCopyFunc, ...]:
+        """Copy function for Simple GLA prefix-cache alignment.
+
+        Simple GLA has one temporal recurrent state and no conv state, so
+        ``get_temporal_copy_spec`` is sufficient — identical to
+        ``linear_attention_state_copy_func``.
+        """
+        return (get_temporal_copy_spec,)
