@@ -29,6 +29,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 # ============================================================================
 # VllmConfig Creation
@@ -79,8 +80,8 @@ def create_minimal_vllm_config(
         index_topk: Optional topk value for sparse MLA backends. If provided,
                     the config will include index_topk for sparse attention.
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
-                        "cudnn", "trtllm"). Configures the attention config to
-                        force the specified prefill backend.
+                        "trtllm"). Configures the attention config to force
+                        the specified prefill backend.
 
     Returns:
         VllmConfig for benchmarking
@@ -179,27 +180,13 @@ def create_minimal_vllm_config(
 
     if prefill_backend is not None:
         prefill_cfg = get_prefill_backend_config(prefill_backend)
-        if prefill_cfg.get("mla_prefill_backend_enum") is not None:
-            # Registry-based backends bypass the deprecated boolean flags.
-            from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
-
-            vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum[
-                prefill_cfg["mla_prefill_backend_enum"]
+        vllm_config.attention_config.mla_prefill_backend = prefill_cfg[
+            "mla_prefill_backend"
+        ]
+        if prefill_cfg["flash_attn_version"] is not None:
+            vllm_config.attention_config.flash_attn_version = prefill_cfg[
+                "flash_attn_version"
             ]
-        else:
-            if prefill_cfg["flash_attn_version"] is not None:
-                vllm_config.attention_config.flash_attn_version = prefill_cfg[
-                    "flash_attn_version"
-                ]
-            vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
-                "disable_flashinfer_prefill"
-            ]
-            vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
-                "use_cudnn_prefill"
-            ]
-            vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = (
-                prefill_cfg["use_trtllm_ragged_deepseek_prefill"]
-            )
 
     return vllm_config
 
@@ -214,34 +201,27 @@ def create_minimal_vllm_config(
 _PREFILL_BACKEND_CONFIG: dict[str, dict] = {
     "fa2": {
         "flash_attn_version": 2,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa3": {
         "flash_attn_version": 3,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa4": {
         "flash_attn_version": 4,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "flashinfer": {
-        "mla_prefill_backend_enum": "FLASHINFER",
-    },
-    "cudnn": {
-        # cuDNN prefill backend was removed; AttentionConfig raises on use.
-        "mla_prefill_backend_enum": "FLASHINFER",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASHINFER,
     },
     "trtllm": {
-        "mla_prefill_backend_enum": "TRTLLM_RAGGED",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TRTLLM_RAGGED,
     },
     "tokenspeed": {
-        "mla_prefill_backend_enum": "TOKENSPEED_MLA",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TOKENSPEED_MLA,
     },
 }
 
@@ -1020,7 +1000,6 @@ def _run_mla_benchmark_batched(
                         f"version {fa_version}, got "
                         f"{actual_fa_version} on {actual_class}."
                     )
-
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)

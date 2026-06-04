@@ -128,6 +128,8 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
 
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -161,9 +163,6 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
-
-    def supports_expert_map(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -209,6 +208,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                     input=input,
                     output_q=output,
                     group_size=block_k,
+                    clamp_limit=self.gemm1_clamp_limit,
                 )
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
@@ -228,6 +228,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 input=input,
                 output=output,
                 use_ue8m0=use_ue8m0,
+                clamp_limit=self.gemm1_clamp_limit,
             )
 
         # 3. fallback path for non-SiLU activations in non‑UE8M0 cases.
@@ -384,9 +385,6 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
@@ -437,6 +435,7 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
                 input=input,
                 output=output,
                 use_ue8m0=use_ue8m0,
+                clamp_limit=self.gemm1_clamp_limit,
             )
 
         act_out = torch.empty(

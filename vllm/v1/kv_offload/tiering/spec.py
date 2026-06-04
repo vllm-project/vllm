@@ -25,15 +25,14 @@ Example configuration:
     "secondary_tiers": [
         {
             "type": "example",
-            # Tier-specific parameters (for ExampleSecondaryTier):
-            "max_blocks": 10000,
-            "simulate_async": False
+            "custom_param": 67
         }
     ]
 }
 """
 
 import torch
+from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -42,7 +41,7 @@ from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.factory import create_secondary_tier
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -64,6 +63,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     memory and must transfer data through the primary tier.
     """
 
+    BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
@@ -77,6 +78,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None
 
+    @override
     def get_manager(self) -> OffloadingManager:
         """
         Get the TieringOffloadingManager.
@@ -96,21 +98,16 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
             # Create scheduler-side SharedOffloadRegion (rank=None) so the
             # primary tier can eagerly create a memoryview over _base.
-            world_size = self.vllm_config.parallel_config.world_size
             scheduler_mmap = SharedOffloadRegion(
                 instance_id=self.vllm_config.instance_id,
-                total_size_bytes=self.cpu_page_size_per_worker
-                * world_size
-                * self.num_blocks,
                 num_blocks=self.num_blocks,
                 rank=None,
-                num_workers=world_size,
+                kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
             self._scheduler_mmap = scheduler_mmap
 
             # Create primary tier (CPU-based)
-            assert len(self.gpu_block_size) == 1
             primary_tier = CPUPrimaryTierOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
@@ -123,14 +120,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
-                    tier = create_secondary_tier(
-                        tier_config, primary_kv_view, self.vllm_config
+                    tier = SecondaryTierFactory.create_secondary_tier(
+                        tier_config, primary_kv_view, self
                     )
                     secondary_tiers.append(tier)
                     logger.info(
                         "Created secondary tier #%d (%s)",
                         i,
-                        tier.get_tier_type(),
+                        tier.tier_type,
                     )
                 except Exception as e:
                     logger.error(
@@ -164,19 +161,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
         return self._manager
 
-    def _create_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> CpuGpuOffloadingHandlers:
-        world_size = self.vllm_config.parallel_config.world_size
+    @override
+    def create_handlers(self, kv_caches: CanonicalKVCaches) -> CpuGpuOffloadingHandlers:
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
-            total_size_bytes=self.cpu_page_size_per_worker
-            * world_size
-            * self.num_blocks,
             num_blocks=self.num_blocks,
             rank=rank,
-            num_workers=world_size,
+            kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
         return CpuGpuOffloadingHandlers(

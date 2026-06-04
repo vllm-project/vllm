@@ -45,7 +45,8 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
       ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
     - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
-      tensor-wide scale.
+      tensor-wide scale, unless Q is also FP8 and the caller folds the scales
+      into the attention score and output accumulator.
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
@@ -191,6 +192,7 @@ def kernel_unified_attention(
     qq_bias_ptr,
     # Scalars
     scale,
+    q_scale,
     k_scale,
     v_scale,
     out_scale,
@@ -268,8 +270,10 @@ def kernel_unified_attention(
     # (see ``unified_attention`` wrapper for the gating rules).
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
+    Q_IS_FP8: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
+    USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
 
     if USE_TD:
         tl.static_assert(
@@ -355,6 +359,11 @@ def kernel_unified_attention(
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
+    score_scale = scale
+    value_scale = 1.0
+    if USE_FP8_Q_DESCALE:
+        score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
+        value_scale = tl.load(v_scale)
 
     context_len = seq_len - cur_batch_query_len
 
@@ -497,9 +506,9 @@ def kernel_unified_attention(
         if USE_PER_TOKEN_HEAD_SCALES:
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
+            S += tl.dot(Q, K) * (score_scale * k_token_head_scales[None, :])
         else:
-            S += scale * tl.dot(Q, K)
+            S += score_scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -537,6 +546,8 @@ def kernel_unified_attention(
 
     # ---- Epilogue ---------------------------------------------------------
     if IS_3D:
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
         if USE_TD_QO:
             # 3D target: segm_output[token, head, segm_idx, :].  Advance
@@ -592,6 +603,8 @@ def kernel_unified_attention(
         )
     else:
         acc = acc / L[:, None]
+        if USE_FP8_Q_DESCALE:
+            acc *= value_scale
         if USE_FP8:
             acc = acc * tl.load(out_scale)
             acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
@@ -790,8 +803,6 @@ def unified_attention(
     use_td: bool = False,
 ):
     assert causal, "Only causal attention is supported"
-    assert q_descale is None, "Q scales not supported"
-
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
@@ -938,7 +949,6 @@ def unified_attention(
         # Pass the K cache as a stand-in pointer; never dereferenced.
         k_scale_ptr = k
         v_scale_ptr = v
-
     # 3D needs real segm tensors; 2D never touches them but Triton wants
     # a non-null pointer.  Reuse ``out`` as the placeholder.
     segm_output_ptr = softmax_segm_output if use_3d else out
@@ -970,6 +980,7 @@ def unified_attention(
         k_scale_cache_ptr=k_scale_ptr,
         v_scale_cache_ptr=v_scale_ptr,
         scale=softmax_scale,
+        q_scale=q_descale,
         k_scale=k_descale,
         v_scale=v_descale,
         out_scale=1 / output_scale if output_scale is not None else 1.0,
@@ -1017,6 +1028,7 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,

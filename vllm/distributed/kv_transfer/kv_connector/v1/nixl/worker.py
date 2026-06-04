@@ -943,7 +943,7 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -1057,8 +1057,8 @@ class NixlConnectorWorker:
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (x, B, C, ssm) per layer for
-        the 3-read transfer.  For hetero-TP, each D rank reads only its
+        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
+        for the 3-read transfer.  For hetero-TP, each D rank reads only its
         sub-projection slice from the P rank."""
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
@@ -1067,20 +1067,10 @@ class NixlConnectorWorker:
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
+        conv_offsets = self._conv_decomp.remote_conv_offsets(local_offset, tp_ratio)
         if tp_ratio >= 1:
-            # D_TP >= P_TP: P page is larger, D reads its slice.
-            conv_offsets = self._conv_decomp.remote_conv_offsets(
-                local_offset, effective_ratio
-            )
             ssm_read_size = self._mamba_ssm_size[1]
         else:
-            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
-            # are smaller than D's. self._conv_decomp has D-sized dimensions,
-            # but we need P-sized offsets. Scale down by |tp_ratio|.
-            abs_ratio = -tp_ratio
-            xb_p = self._conv_decomp.x_bytes // abs_ratio
-            bb_p = self._conv_decomp.b_bytes // abs_ratio
-            conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
@@ -1128,7 +1118,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset
                 result.append((addr, kv_block_len, self.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1177,7 +1167,7 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if self.transfer_topo.virtually_split_kv_in_blocks:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
@@ -2426,7 +2416,7 @@ class NixlConnectorWorker:
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
         assert self.transfer_topo is not None
-        if self.transfer_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.virtually_split_kv_in_blocks:
             if mamba_view:
                 block_len = self._mamba_ssm_size[not first_split]
             else:
