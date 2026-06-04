@@ -1596,7 +1596,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # empty_cache(), or an OOM retry. On systems with unified CPU/GPU
         # memory, that reserved cache can put pressure on host memory while
         # loading large MoE models, so this opt-in hook releases it eagerly.
-        if self.nvfp4_backend == NvFp4MoeBackend.MARLIN:
+        model_config = get_current_vllm_config().model_config
+        empty_cache_after_replacement = (
+            model_config.nvfp4_moe_marlin_empty_cache_after_parameter_replacement
+        )
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.MARLIN
+            and empty_cache_after_replacement
+        ):
             maybe_empty_cache_after_nvfp4_moe_marlin_parameter_replacement(w13.device)
 
         # Setup modular kernel.
