@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -23,7 +24,7 @@ pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TransportMode {
     /// The Rust process owns the startup handshake and allocates or binds the
     /// frontend transport addresses itself before replying to engine
