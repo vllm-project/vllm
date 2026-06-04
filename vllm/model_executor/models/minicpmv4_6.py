@@ -25,7 +25,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -268,9 +267,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
                         h, w = h_d.item(), w_d.item()
                 else:
                     raise TypeError(f"Unsupported frame type: {type(frame)}")
-                frame_sizes.append(
-                    torch.tensor([w, h], dtype=torch.long, device="cpu")
-                )
+                frame_sizes.append(torch.tensor([w, h], dtype=torch.long, device="cpu"))
 
                 ip_out = image_processor([frame], **video_mm_kwargs)
                 pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
