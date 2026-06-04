@@ -517,12 +517,12 @@ class DeepseekOCRForCausalLM(
         return self._assemble_patch_grid(features, crop_shape)
 
     def _assemble_patch_grid(
-        self, patches: torch.Tensor, crop_shape: torch.Tensor
+        self, features: torch.Tensor, crop_shape: torch.Tensor
     ) -> torch.Tensor:
         """Assemble projected patches into a 2-D tile grid with newline columns.
 
         Args:
-            patches: Projected patch features ``[num_patches, hw, dim]``
+            features: Projected patch features ``[num_patches, hw, dim]``
                 where ``hw = patch_side * patch_side`` (typically 100).
             crop_shape: ``[width_tiles, height_tiles]`` tile layout for
                 this image.
@@ -531,13 +531,13 @@ class DeepseekOCRForCausalLM(
             Flattened tile grid with one newline column per grid row:
             ``[(Ht * ps) * (Wt * ps + 1), dim]``.
         """
-        _, hw, dim = patches.shape
+        _, hw, dim = features.shape
         patch_side = int(hw**0.5)
         width_tiles = int(crop_shape[0].item())
         height_tiles = int(crop_shape[1].item())
 
         features = (
-            patches.view(height_tiles, width_tiles, patch_side, patch_side, dim)
+            features.view(height_tiles, width_tiles, patch_side, patch_side, dim)
             .permute(0, 2, 1, 3, 4)
             .reshape(height_tiles * patch_side, width_tiles * patch_side, dim)
         )
@@ -545,7 +545,7 @@ class DeepseekOCRForCausalLM(
             height_tiles * patch_side, 1, dim
         )
         features = torch.cat([features, newline], dim=1)
-        return features.reshape(-1, dim)
+        return features.view(-1, dim)
 
     def _pixel_values_to_embedding(
         self,
