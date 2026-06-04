@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from argparse import Namespace
 
 from fastapi import APIRouter, FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
+from starlette.datastructures import State
 
 from vllm.entrypoints.openai.batch.protocol import (
     BatchListResponse,
@@ -17,12 +18,6 @@ from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.openai.serving_batches import OpenAIServingBatches
 from vllm.entrypoints.openai.serving_files import OpenAIServingFiles
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from argparse import Namespace
-
-    from starlette.datastructures import State
-
 
 logger = init_logger(__name__)
 
@@ -55,9 +50,11 @@ async def upload_file(file: UploadFile, raw_request: Request,
     handler = serving_files(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     content = await file.read()
     result = await handler.upload_file(content, file.filename or "upload.jsonl",
                                        purpose)
+
     return JSONResponse(content=result.model_dump())
 
 
@@ -66,8 +63,10 @@ async def list_files(raw_request: Request, purpose: str | None = None):
     handler = serving_files(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     files = await handler.list_files(purpose)
     resp = FileListResponse(object="list", data=files)
+
     return JSONResponse(content=resp.model_dump())
 
 
@@ -76,9 +75,11 @@ async def get_file(file_id: str, raw_request: Request):
     handler = serving_files(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     result = await handler.get_file(file_id)
     if result is None:
         return _error_response("File not found", 404)
+
     return JSONResponse(content=result.model_dump())
 
 
@@ -87,9 +88,11 @@ async def get_file_content(file_id: str, raw_request: Request):
     handler = serving_files(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     content = await handler.get_file_content(file_id)
     if content is None:
         return _error_response("File not found", 404)
+
     return Response(content=content, media_type="application/octet-stream")
 
 
@@ -98,12 +101,15 @@ async def delete_file(file_id: str, raw_request: Request):
     handler = serving_files(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     batch_handler = serving_batches(raw_request)
     result = await handler.delete_file(file_id, batch_handler)
+
     if result is None:
         return _error_response("File not found", 404)
     if isinstance(result, dict) and "error" in result:
         return JSONResponse(status_code=409, content=result)
+
     return JSONResponse(content=result.model_dump())
 
 
@@ -114,26 +120,31 @@ async def create_batch(raw_request: Request):
     handler = serving_batches(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     try:
         body = await raw_request.json()
     except (json.JSONDecodeError, ValueError):
         return _error_response("Request body must be valid JSON", 400)
+
     if not isinstance(body, dict):
         return _error_response("Request body must be a JSON object", 400)
     for required in ("input_file_id", "endpoint"):
         if required not in body:
             return _error_response(
                 f"Missing required field: {required}", 400)
+
     result = await handler.create_batch(
         input_file_id=body["input_file_id"],
         endpoint=body["endpoint"],
         completion_window=body.get("completion_window", "24h"),
         metadata=body.get("metadata"),
     )
+
     if isinstance(result, ErrorResponse):
         err = result.error
         return JSONResponse(status_code=err.code,
                             content=result.model_dump())
+
     return JSONResponse(content=result.model_dump())
 
 
@@ -143,6 +154,7 @@ async def list_batches(raw_request: Request, limit: int = 20,
     handler = serving_batches(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     batches, has_more = await handler.list_batches(limit=limit, after=after)
     resp = BatchListResponse(
         object="list",
@@ -151,6 +163,7 @@ async def list_batches(raw_request: Request, limit: int = 20,
         first_id=batches[0].id if batches else None,
         last_id=batches[-1].id if batches else None,
     )
+
     return JSONResponse(content=resp.model_dump())
 
 
@@ -159,9 +172,11 @@ async def get_batch(batch_id: str, raw_request: Request):
     handler = serving_batches(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     result = await handler.get_batch(batch_id)
     if result is None:
         return _error_response("Batch not found", 404)
+
     return JSONResponse(content=result.model_dump())
 
 
@@ -170,6 +185,7 @@ async def cancel_batch(batch_id: str, raw_request: Request):
     handler = serving_batches(raw_request)
     if handler is None:
         return _error_response("Batch API is not enabled", 501)
+
     result = await handler.cancel_batch(batch_id)
     if result is None:
         return _error_response("Batch not found", 404)
@@ -177,6 +193,7 @@ async def cancel_batch(batch_id: str, raw_request: Request):
         err = result.error
         return JSONResponse(status_code=err.code,
                             content=result.model_dump())
+
     return JSONResponse(content=result.model_dump())
 
 
