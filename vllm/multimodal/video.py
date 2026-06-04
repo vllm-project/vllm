@@ -729,6 +729,8 @@ class GLM46VVideoBackend(VideoBackend):
         target: VideoTargetMetadata,
         **kwargs,
     ) -> list[int]:
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/glm46v/video_processing_glm46v.py#L97-L102
         total_frames_num = source.total_frames_num
         original_fps = source.original_fps
         duration = source.duration
