@@ -4059,14 +4059,30 @@ class ASRDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             audio = item["audio"]
-            y, sr = audio["array"], audio["sampling_rate"]
-            duration_s = get_audio_duration(y=y, sr=sr)
+            if (
+                isinstance(audio, dict)
+                and "array" in audio
+                and "sampling_rate" in audio
+            ):
+                y, sr = audio["array"], audio["sampling_rate"]
+                duration_s = get_audio_duration(y=y, sr=sr)
+                mm_content = {"audio": (y, sr)}
+            elif isinstance(audio, str):
+                duration_s = sf.info(audio).duration
+                mm_content = {"audio_path": audio}
+            elif isinstance(audio, dict) and audio.get("path"):
+                duration_s = sf.info(audio["path"]).duration
+                mm_content = {"audio_path": audio["path"]}
+            else:
+                raise ValueError(
+                    "ASR samples must provide either decoded audio arrays "
+                    "or a local audio path."
+                )
             if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1
                 continue
 
             durations.append(duration_s)
-            mm_content = {"audio": (y, sr)}
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
