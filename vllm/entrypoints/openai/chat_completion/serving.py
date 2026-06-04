@@ -14,6 +14,21 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.codec_agent import (
+    ToolWatcher,
+    detokenize_region,
+    make_call_id,
+    parse_tool_call,
+    resolve_marker_id,
+)
+from vllm.entrypoints.codec_dispatcher import (
+    CODEC_BOLT_ON_DISPATCH,
+    ToolRegistry,
+    dispatch_call,
+    dispatch_call_async,
+    reinject_ids_into_context,
+)
+from vllm.entrypoints.codec_frame import encode_frame
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -165,6 +180,15 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+
+        # v0.5 #87: lazy-cached Codec ToolRegistry. `ToolRegistry.from_env`
+        # performs blocking HTTP fetches against manifest URLs; doing that
+        # per-request blocks the event loop and adds startup latency to
+        # every tool-watcher stream. Resolve once per process on first use
+        # and reuse the registry thereafter. Sentinel = "not yet attempted";
+        # None after load = attempted but env not configured.
+        self._codec_dispatcher_registry: ToolRegistry | None = None
+        self._codec_dispatcher_registry_loaded: bool = False
 
     def warmup(self) -> None:
         self.renderer.warmup(
@@ -366,6 +390,17 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         if request.stream:
+            if request.stream_format != "json":
+                # Binary Codec path: emit raw token IDs only. No role headers,
+                # no tool-call parsing, no reasoning-content split. The client
+                # owns any chat-protocol decoding it wants to do over the
+                # decoded text. (When `tool_watcher` is set, the server runs
+                # an O(n) ID-compare state machine over the stream and
+                # surfaces structured tool_calls on the matching frame —
+                # mirrors sglang PR #24557.)
+                return self.chat_completion_binary_stream_generator(
+                    request, result_generator, tokenizer
+                )
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -932,6 +967,153 @@ class OpenAIServingChat(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
+
+    async def chat_completion_binary_stream_generator(
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        tokenizer: TokenizerLike | None = None,
+    ) -> AsyncIterator[bytes]:
+        """Stream raw token IDs as Codec binary frames for chat completions.
+
+        Symmetric with the completion endpoint's binary path: drop role
+        headers, finish_reason structures, tool-call parsing, and reasoning
+        splits — emit only `CodecFrame { ids, done, finish_reason? }` per
+        chunk. The client (e.g. @codecai/web) decodes the IDs and runs any
+        chat-protocol parsing it wants over the decoded text.
+
+        When `request.tool_watcher` is true and the marker strings resolve
+        to single-token IDs in the loaded vocab, this also runs a uint32-
+        compare state machine over the outbound stream — completed
+        `<start>..<end>` regions surface as structured `tool_calls` on the
+        matching frame, with the marker tokens themselves consumed (not
+        forwarded to the client). Mirrors sglang PR #24557 / the libcodec
+        ToolWatcher / @codecai/web's ToolWatcher bit-for-bit.
+
+        Validation in `ChatCompletionRequest.validate_stream_format` already
+        forced `stream=True` and rejected `n > 1`, so we expect exactly one
+        choice per chunk.
+        """
+        # ── ToolWatcher setup ────────────────────────────────────────────
+        watcher: ToolWatcher | None = None
+        if getattr(request, "tool_watcher", False) and tokenizer is not None:
+            start_marker = (
+                getattr(request, "tool_watcher_start", None) or "<tool_call>"
+            )
+            end_marker = (
+                getattr(request, "tool_watcher_end", None) or "</tool_call>"
+            )
+            start_id = resolve_marker_id(tokenizer, start_marker)
+            end_id = resolve_marker_id(tokenizer, end_marker)
+            if start_id is not None and end_id is not None:
+                watcher = ToolWatcher(start_id=start_id, end_id=end_id)
+            else:
+                logger.warning(
+                    "Codec ToolWatcher: markers %r/%r do not resolve to single "
+                    "tokens in this model's vocab. Falling back to plain Codec "
+                    "streaming.",
+                    start_marker,
+                    end_marker,
+                )
+
+        next_call_seq = 1
+
+        # v0.5 #87: bolt-on tool dispatcher. When the flag is set AND a
+        # ToolWatcher is active, load the tool registry once per stream
+        # and dispatch detected tool calls in-engine, reinjecting the
+        # tool's response_ids back into the stream.
+        dispatcher_registry: ToolRegistry | None = None
+        if CODEC_BOLT_ON_DISPATCH and watcher is not None:
+            # Cached on the serving instance — ToolRegistry.from_env makes
+            # blocking HTTP fetches against manifest URLs, so it must NEVER
+            # run inside the async request loop. First request after process
+            # start pays the fetch cost (off-loop via to_thread); subsequent
+            # requests reuse the cached registry.
+            if not self._codec_dispatcher_registry_loaded:
+                tokenizer_hash = getattr(self, "_codec_tokenizer_map_hash", "")
+                import asyncio as _asyncio
+                self._codec_dispatcher_registry = await _asyncio.to_thread(
+                    ToolRegistry.from_env, tokenizer_hash
+                )
+                self._codec_dispatcher_registry_loaded = True
+            dispatcher_registry = self._codec_dispatcher_registry
+
+        try:
+            async for res in result_generator:
+                if not res.outputs:
+                    continue
+                output = res.outputs[0]
+                ids = list(output.token_ids) if output.token_ids else []
+                finish_reason = output.finish_reason
+                done = finish_reason is not None
+
+                # Run the watcher if active. Otherwise pass through unchanged.
+                if watcher is not None and ids:
+                    passthrough_ids, completed_regions = watcher.feed(ids)
+                else:
+                    passthrough_ids, completed_regions = ids, []
+
+                tool_calls_wire: list[dict] | None = None
+                if completed_regions:
+                    wire: list[dict] = []
+                    for region in completed_regions:
+                        body_text = (
+                            detokenize_region(tokenizer, region)
+                            if tokenizer is not None
+                            else ""
+                        )
+                        ev = parse_tool_call(
+                            body_text, call_id=make_call_id(next_call_seq)
+                        )
+                        next_call_seq += 1
+                        wire.append(ev.to_wire_dict())
+
+                        # v0.5 #87: in-engine dispatch when registered.
+                        if dispatcher_registry is not None and ev.name:
+                            tool = dispatcher_registry.get(ev.name)
+                            if tool is not None and tool.mode == "dispatch":
+                                try:
+                                    # Use the async variant — sync `dispatch_call`
+                                    # does a blocking urllib POST that would
+                                    # freeze the event loop if called from this
+                                    # `async def`. `dispatch_call_async` wraps
+                                    # it in asyncio.to_thread so other
+                                    # concurrent requests on the worker keep
+                                    # flowing while the tool reply is in flight.
+                                    result = await dispatch_call_async(
+                                        tool,
+                                        arguments_json=ev.arguments_json,
+                                        call_id=ev.id or make_call_id(next_call_seq),
+                                    )
+                                    if not result.is_error and result.response_ids:
+                                        passthrough_ids = reinject_ids_into_context(
+                                            passthrough_ids, result.response_ids,
+                                        )
+                                except Exception as e:
+                                    logger.warning(
+                                        "codec_dispatcher: dispatch_call(%s) failed: %s",
+                                        ev.name, e,
+                                    )
+                    tool_calls_wire = wire
+
+                yield encode_frame(
+                    request.stream_format,
+                    passthrough_ids,
+                    done=done,
+                    finish_reason=finish_reason,
+                    tool_calls=tool_calls_wire,
+                )
+                if done:
+                    return
+        except GenerationError:
+            yield encode_frame(
+                request.stream_format, [], done=True, finish_reason="error"
+            )
+        except Exception:
+            logger.exception("Error in chat completion binary stream generator.")
+            yield encode_frame(
+                request.stream_format, [], done=True, finish_reason="error"
+            )
 
     async def chat_completion_full_generator(
         self,

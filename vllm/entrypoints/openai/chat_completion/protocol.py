@@ -205,6 +205,49 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    stream_format: Literal["json", "msgpack", "protobuf"] = Field(
+        default="json",
+        description=(
+            "Binary wire format for streaming token output (Codec protocol). "
+            "'json' (default) uses the standard SSE/JSON path with full chat "
+            "structure (assistant role, tool calls, finish_reason). "
+            "'msgpack' / 'protobuf' stream raw token IDs as Codec frames — "
+            "no role headers, no tool-call parsing, no detokenization. "
+            "Setting a binary format implies stream=True and rejects n > 1. "
+            "The client is responsible for any chat-protocol decoding it needs "
+            "(e.g. running its own tool-call parser over the decoded text). "
+            "See GET /codec/schema for the protobuf schema."
+        ),
+    )
+    tool_watcher: bool = Field(
+        default=False,
+        description=(
+            "Codec server-side ToolWatcher (PR #24557 equivalent). When true, "
+            "the server runs a uint32-compare state machine over the outbound "
+            "token stream and surfaces completed `<start>..<end>` regions as "
+            "structured `tool_calls` on the matching CodecFrame. The marker "
+            "tokens themselves are consumed and not forwarded to the client. "
+            "Requires a binary stream_format (msgpack/protobuf) — has no "
+            "effect on the JSON/SSE path. Falls back silently when the marker "
+            "strings don't resolve to single tokens in the loaded vocab."
+        ),
+    )
+    tool_watcher_start: str | None = Field(
+        default=None,
+        description=(
+            "Override for the watcher's start marker. Defaults to "
+            "'<tool_call>' (Qwen 2.5+). Use '<|python_tag|>' for Llama 3.1+, "
+            "'<|tool|>' for Phi-4, '[TOOL_CALLS]' for Mistral-Nemo, etc. "
+            "Must resolve to exactly one special token in the loaded vocab."
+        ),
+    )
+    tool_watcher_end: str | None = Field(
+        default=None,
+        description=(
+            "Override for the watcher's end marker. Defaults to "
+            "'</tool_call>' (Qwen 2.5+)."
+        ),
+    )
     temperature: float | None = None
     top_p: float | None = None
     tools: list[ChatCompletionToolsParam] | None = None
@@ -447,6 +490,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
             reasoning_content = msg.pop("reasoning_content", None)
             if reasoning_content is not None and msg.get("reasoning") is None:
                 msg["reasoning"] = reasoning_content
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_format(cls, data):
+        # Mirror CompletionRequest.validate_stream_format. See completion/protocol.py.
+        if not isinstance(data, dict):
+            return data
+        fmt = data.get("stream_format", "json")
+        if fmt != "json":
+            data["stream"] = True
+            n = data.get("n", 1)
+            if isinstance(n, int) and n > 1:
+                raise VLLMValidationError(
+                    f"stream_format='{fmt}' does not support n > 1. "
+                    "Binary CodecFrame has no choice index field; multiple "
+                    "completion sequences cannot be demultiplexed by the client. "
+                    "Use n=1 or stream_format='json'."
+                )
         return data
 
     @model_validator(mode="after")
