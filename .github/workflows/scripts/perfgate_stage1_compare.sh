@@ -14,7 +14,7 @@ set +e
   --baseline "$PERFGATE_BASELINE_FILE" \
   --fork-point "${FORK_POINT:-}" \
   --report-file "$REPORT_FILE" \
-  --mode "$MODE"
+  --mode enforce
 rc=$?
 set -e
 
@@ -30,7 +30,7 @@ fi
   echo "PERFGATE_REPORT_FILE=$REPORT_FILE"
 } >> "$GITHUB_ENV"
 
-if [[ "$MODE" == "report" ]]; then
-  exit 0
+if [[ "$rc" -ne 0 ]]; then
+  echo "Stage 1 performance gate result: $result (exit $rc); final perfgate comparison/report step will decide job status."
 fi
-exit "$rc"
+exit 0

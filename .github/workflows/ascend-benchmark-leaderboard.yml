@@ -737,9 +737,9 @@ jobs:
       - name: Performance gate - store main baseline
         if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash .github/workflows/scripts/perfgate_store_baseline.sh
+        run: |
+          echo "Perfgate baseline push uses target repo origin: $(git remote get-url origin)"
+          bash .github/workflows/scripts/perfgate_store_baseline.sh
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
         if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
@@ -756,7 +756,7 @@ jobs:
           bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
 
       - name: Performance gate - two-stage comparison
-        if: ${{ github.event_name == 'pull_request' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
+        if: ${{ github.event_name == 'pull_request' }}
         shell: bash
         run: bash .github/workflows/scripts/perfgate_compare.sh
 

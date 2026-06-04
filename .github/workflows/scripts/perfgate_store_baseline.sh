@@ -7,6 +7,7 @@ GITHUB_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
 BASELINE_BRANCH=${PERFGATE_BASELINE_BRANCH:-benchmark-baselines}
 BASELINE_FILE=${PERFGATE_BASELINE_SOURCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 WORKTREE_DIR=${PERFGATE_BASELINE_WORKTREE:-${RUNNER_TEMP:-/tmp}/perfgate-baselines-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
+PUSH_REMOTE_URL=${PERFGATE_BASELINE_PUSH_REMOTE_URL:-}
 
 if [[ ! -f "$BASELINE_FILE" ]]; then
   echo "Perfgate baseline source not found: $BASELINE_FILE" >&2
@@ -61,6 +62,9 @@ if spec_id != EXPECTED_SPEC_ID or not spec_hash:
 PY
 
 rm -rf "$WORKTREE_DIR"
+if [[ -n "$PUSH_REMOTE_URL" ]]; then
+  git remote set-url origin "$PUSH_REMOTE_URL"
+fi
 if git ls-remote --exit-code --heads origin "$BASELINE_BRANCH" >/dev/null 2>&1; then
   git fetch origin "$BASELINE_BRANCH:$BASELINE_BRANCH" || git fetch origin "$BASELINE_BRANCH"
   git worktree add "$WORKTREE_DIR" "origin/$BASELINE_BRANCH"

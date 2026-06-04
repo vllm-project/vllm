@@ -25,8 +25,10 @@ if [[ "${PERFGATE_STAGE2_REBASE_CONFLICT:-0}" == "1" ]]; then
   fi
 elif [[ "${PERFGATE_STAGE2_SKIPPED:-0}" == "1" ]]; then
   args+=(--stage2-skipped --stage2-skip-reason "${PERFGATE_STAGE2_SKIP_REASON:-fork-point is already latest main}")
-else
+elif [[ -n "${PERFGATE_STAGE2_B1PRIME_FILE:-}" && -n "${PERFGATE_STAGE2_M2_BASELINE_FILE:-}" ]]; then
   args+=(--stage2-current "$PERFGATE_STAGE2_B1PRIME_FILE" --stage2-baseline "$PERFGATE_STAGE2_M2_BASELINE_FILE")
+else
+  args+=(--stage2-not-run --stage2-not-run-reason "${PERFGATE_STAGE2_NOT_RUN_REASON:-Stage 1 did not pass; Stage 2 was not run}")
 fi
 
 set +e
