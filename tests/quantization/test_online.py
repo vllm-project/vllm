@@ -117,7 +117,7 @@ def test_online_quantization(
             if moe is not None:
                 assert isinstance(moe.quant_method, expected_moe_cls)
 
-            if current_platform.is_cuda():
+            if current_platform.is_cuda() or current_platform.is_xpu():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()
