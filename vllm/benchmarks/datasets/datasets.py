@@ -2121,6 +2121,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
+            skip_chat_template=args.skip_chat_template,
+            chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
         )
 
     elif args.dataset_name == "sonnet":
@@ -2317,6 +2319,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
+                skip_chat_template=args.skip_chat_template,
+                chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             ),
             "sharegpt": lambda: ShareGPTDataset(
                 random_seed=args.seed,
@@ -2867,6 +2871,7 @@ class CustomAudioDataset(CustomDataset):
         no_oversample: bool = False,
         skip_chat_template: bool = False,
         enable_multimodal_chat: bool = False,
+        chat_template_kwargs: dict | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         self.num_available_samples = len(self.data)
@@ -2916,6 +2921,7 @@ class CustomAudioDataset(CustomDataset):
                             [{"role": "user", "content": prompt}],
                             add_generation_prompt=True,
                             tokenize=False,
+                            **(chat_template_kwargs or {}),
                         )
                     # else: plain prompt for Whisper-style models
                 prompt_len = (
