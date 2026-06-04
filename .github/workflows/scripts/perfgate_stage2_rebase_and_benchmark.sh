@@ -12,7 +12,26 @@ CONFLICT_FILE=${PERFGATE_STAGE2_REBASE_CONFLICT_FILE:-$STAGE2_RESULT_ROOT/rebase
 TEMP_BRANCH=${PERFGATE_STAGE2_BRANCH:-perfgate-stage2-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
 
 write_env() {
-  echo "$1=$2" >> "$GITHUB_ENV"
+  local name=$1
+  local value=$2
+  local delimiter="EOF_${name}_$$_${RANDOM}"
+  {
+    echo "${name}<<${delimiter}"
+    printf '%s\n' "$value"
+    echo "$delimiter"
+  } >> "$GITHUB_ENV"
+}
+
+read_env_value() {
+  local name=$1
+  local env_file=$2
+  awk -v key="$name" '
+    index($0, key "=") == 1 {
+      print substr($0, length(key) + 2)
+      found = 1
+    }
+    END { exit found ? 0 : 1 }
+  ' "$env_file"
 }
 
 cleanup() {
@@ -22,11 +41,6 @@ cleanup() {
   fi
   git checkout --force "$ORIGINAL_REF" >/dev/null 2>&1 || true
   git branch -D "$TEMP_BRANCH" >/dev/null 2>&1 || true
-  if [[ -n "${PYTHON_BIN:-}" ]]; then
-    if ! "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps >/dev/null 2>&1; then
-      echo "Warning: failed to reinstall original checkout after Stage 2 cleanup" >&2
-    fi
-  fi
 }
 trap cleanup EXIT
 
@@ -96,17 +110,29 @@ if [[ ! -f "$b1prime_file" ]]; then
   exit 2
 fi
 
+stage2_env_file="$GITHUB_ENV.stage2"
+rm -f "$stage2_env_file"
 PERFGATE_BASELINE_OUTPUT_DIR="${RUNNER_TEMP:-/tmp}/perfgate-stage2-baseline" \
   PERFGATE_ALLOW_BASELINE_FALLBACK="${PERFGATE_ALLOW_STAGE2_BASELINE_FALLBACK:-0}" \
-  GITHUB_ENV="$GITHUB_ENV.stage2" \
+  GITHUB_ENV="$stage2_env_file" \
   bash .github/workflows/scripts/perfgate_fetch_baseline.sh "$M2_COMMIT"
-# shellcheck disable=SC1090
-source "$GITHUB_ENV.stage2"
+
+stage2_baseline_available=$(read_env_value PERFGATE_BASELINE_AVAILABLE "$stage2_env_file" || echo "1")
+if [[ "$stage2_baseline_available" != "1" ]]; then
+  stage2_unavailable_reason=$(read_env_value PERFGATE_BASELINE_UNAVAILABLE_REASON "$stage2_env_file" || echo "Stage 2 M2 baseline is unavailable")
+  write_env PERFGATE_STAGE2_NOT_RUN_REASON "Stage 2 M2 baseline is unavailable: $stage2_unavailable_reason"
+  echo "Stage 2 comparison not run: $stage2_unavailable_reason"
+  exit 0
+fi
+
+stage2_baseline_file=$(read_env_value PERFGATE_BASELINE_FILE "$stage2_env_file")
+stage2_baseline_commit=$(read_env_value PERFGATE_BASELINE_COMMIT "$stage2_env_file")
+stage2_baseline_source=$(read_env_value PERFGATE_BASELINE_SOURCE "$stage2_env_file")
 write_env PERFGATE_STAGE2_B1PRIME_FILE "$b1prime_file"
-write_env PERFGATE_STAGE2_M2_BASELINE_FILE "$PERFGATE_BASELINE_FILE"
-write_env PERFGATE_STAGE2_M2_BASELINE_COMMIT "$PERFGATE_BASELINE_COMMIT"
-write_env PERFGATE_STAGE2_M2_BASELINE_SOURCE "$PERFGATE_BASELINE_SOURCE"
+write_env PERFGATE_STAGE2_M2_BASELINE_FILE "$stage2_baseline_file"
+write_env PERFGATE_STAGE2_M2_BASELINE_COMMIT "$stage2_baseline_commit"
+write_env PERFGATE_STAGE2_M2_BASELINE_SOURCE "$stage2_baseline_source"
 write_env PERFGATE_STAGE2_REBASE_CONFLICT 0
 write_env PERFGATE_STAGE2_SKIPPED 0
 
-echo "Stage 2 benchmark ready: $b1prime_file vs $PERFGATE_BASELINE_FILE"
+echo "Stage 2 benchmark ready: $b1prime_file vs $stage2_baseline_file"

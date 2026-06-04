@@ -24,7 +24,7 @@ on:
         description: Model used for the benchmark run
         required: false
         type: string
-        default: Qwen/Qwen2.5-0.5B-Instruct
+        default: Qwen/Qwen2.5-3B-Instruct
       dataset_path:
         description: Dataset path on the trusted runner for formal workloads such as sharegpt-online
         required: false
@@ -99,11 +99,11 @@ jobs:
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
       HF_REPO_ID: intellistream/vllm-hust-benchmark-results
-      MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-0.5B-Instruct' }}
+      MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-3B-Instruct' }}
       BENCH_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online' }}
       BENCH_DATASET_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.dataset_path || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_DATASET_PATH) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_DATASET_PATH) || '' }}
       BENCH_CONSTRAINTS_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.constraints_file || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_CONSTRAINTS_FILE) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_CONSTRAINTS_FILE) || '' }}
-      MODEL_PARAMETERS: 0.5B
+      MODEL_PARAMETERS: 3B
       MODEL_PRECISION: BF16
       DTYPE: bfloat16
       MAX_MODEL_LEN: "256"
@@ -122,7 +122,7 @@ jobs:
       NODE_COUNT: "1"
       SAME_SPEC_BENCHMARK_ENABLED: ${{ vars.VLLM_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1' }}
       PERFGATE_MODE: ${{ vars.VLLM_HUST_PERFGATE_MODE || 'report' }}
-      PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-05b-910b3.json' }}
+      PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
       SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || '' }}
       SAME_SPEC_CONSTRAINTS_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_CONSTRAINTS_FILE || '' }}
       ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_HUST_BENCHMARK_USE_SUDO || '1' }}
@@ -266,7 +266,7 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git fetch --deepen=200 origin main || git fetch --unshallow origin main || true
+          git fetch --deepen=500 origin main || git fetch --unshallow origin main || true
           git fetch --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
           git checkout --force "$PR_HEAD_SHA"
           fork_point="$(git merge-base "$PR_HEAD_SHA" "$PR_BASE_SHA")"
@@ -735,6 +735,8 @@ jobs:
       - name: Performance gate - Stage 1 comparison
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
+        env:
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
 
 
@@ -755,6 +757,8 @@ jobs:
       - name: Performance gate - two-stage comparison
         if: ${{ github.event_name == 'pull_request' }}
         shell: bash
+        env:
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_compare.sh
 
       - name: Cleanup leftover Ascend CI processes
@@ -982,4 +986,5 @@ jobs:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           PYTHON_BIN: python3
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh

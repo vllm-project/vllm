@@ -8,6 +8,24 @@ MODE=${PERFGATE_MODE:-report}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 
+read_expected_spec_id() {
+  if [[ -n "${PERFGATE_EXPECTED_SPEC_ID:-}" ]]; then
+    printf '%s\n' "$PERFGATE_EXPECTED_SPEC_ID"
+    return 0
+  fi
+  if [[ -n "${SAME_SPEC_SPEC_FILE:-}" && -f "$SAME_SPEC_SPEC_FILE" ]]; then
+    "${PYTHON_BIN:-python}" - "$SAME_SPEC_SPEC_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(str(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("id") or ""))
+PY
+    return 0
+  fi
+  printf '\n'
+}
+
 if [[ "${PERFGATE_BASELINE_AVAILABLE:-1}" != "1" || -z "${PERFGATE_BASELINE_FILE:-}" ]]; then
   reason=${PERFGATE_BASELINE_UNAVAILABLE_REASON:-Stage 1 baseline is unavailable}
   mkdir -p "$(dirname "$REPORT_FILE")"
@@ -28,12 +46,20 @@ if [[ "${PERFGATE_BASELINE_AVAILABLE:-1}" != "1" || -z "${PERFGATE_BASELINE_FILE
 fi
 
 set +e
-"${PYTHON_BIN:-python}" -m vllm_hust_benchmark.perfgate compare \
-  --current "$STAGE1_CURRENT" \
-  --baseline "$PERFGATE_BASELINE_FILE" \
-  --fork-point "${FORK_POINT:-}" \
-  --report-file "$REPORT_FILE" \
+expected_spec_id=$(read_expected_spec_id)
+args=(
+  compare
+  --current "$STAGE1_CURRENT"
+  --baseline "$PERFGATE_BASELINE_FILE"
+  --fork-point "${FORK_POINT:-}"
+  --report-file "$REPORT_FILE"
   --mode enforce
+)
+if [[ -n "$expected_spec_id" ]]; then
+  args+=(--expected-spec-id "$expected_spec_id")
+fi
+"${PYTHON_BIN:-python}" -m vllm_hust_benchmark.perfgate compare \
+  "${args[@]:1}"
 rc=$?
 set -e
 

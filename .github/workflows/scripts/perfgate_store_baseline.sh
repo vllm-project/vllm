@@ -9,19 +9,39 @@ BASELINE_FILE=${PERFGATE_BASELINE_SOURCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/
 WORKTREE_DIR=${PERFGATE_BASELINE_WORKTREE:-${RUNNER_TEMP:-/tmp}/perfgate-baselines-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
 PUSH_REMOTE_URL=${PERFGATE_BASELINE_PUSH_REMOTE_URL:-}
 
+read_expected_spec_id() {
+  if [[ -n "${PERFGATE_EXPECTED_SPEC_ID:-}" ]]; then
+    printf '%s\n' "$PERFGATE_EXPECTED_SPEC_ID"
+    return 0
+  fi
+  if [[ -n "${SAME_SPEC_SPEC_FILE:-}" && -f "$SAME_SPEC_SPEC_FILE" ]]; then
+    "${PYTHON_BIN:-python}" - "$SAME_SPEC_SPEC_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+print(str(json.loads(Path(sys.argv[1]).read_text(encoding="utf-8")).get("id") or ""))
+PY
+    return 0
+  fi
+  printf '\n'
+}
+
 if [[ ! -f "$BASELINE_FILE" ]]; then
   echo "Perfgate baseline source not found: $BASELINE_FILE" >&2
   exit 2
 fi
 
-"${PYTHON_BIN:-python}" - "$BASELINE_FILE" <<'PY'
+EXPECTED_SPEC_ID=$(read_expected_spec_id)
+
+"${PYTHON_BIN:-python}" - "$BASELINE_FILE" "$EXPECTED_SPEC_ID" <<'PY'
 import json
 import math
 import sys
 from pathlib import Path
 
-EXPECTED_SPEC_ID = "perfgate-ascend-qwen25-05b-910b3"
 path = Path(sys.argv[1])
+expected_spec_id = sys.argv[2].strip()
 try:
     payload = json.loads(path.read_text(encoding="utf-8"))
 except Exception as exc:
@@ -53,9 +73,9 @@ if not isinstance(same_spec, dict):
     sys.exit(2)
 spec_id = str(same_spec.get("spec_id") or "").strip()
 spec_hash = str(same_spec.get("resolved_spec_hash") or "").strip()
-if spec_id != EXPECTED_SPEC_ID or not spec_hash:
+if not spec_hash or (expected_spec_id and spec_id != expected_spec_id):
     print(
-        f"Invalid perfgate baseline JSON: {path}: expected same_spec.spec_id={EXPECTED_SPEC_ID!r} and non-empty resolved_spec_hash",
+        f"Invalid perfgate baseline JSON: {path}: expected same_spec.spec_id={expected_spec_id!r} and non-empty resolved_spec_hash",
         file=sys.stderr,
     )
     sys.exit(2)
