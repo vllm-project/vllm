@@ -472,6 +472,7 @@ class LoRAModelManager:
             )
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
+                wrapped_by_id[id(new_module)] = new_module
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:

@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -103,7 +104,7 @@ class Scheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
-            if self.scheduler_config.max_num_scheduled_tokens
+            if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -1163,21 +1164,22 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
-        for i, mm_feature in enumerate(mm_features):
+
+        lo, hi = get_mm_features_in_window(
+            mm_features,
+            start=num_computed_tokens,
+            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
+        )
+        # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
+        if self.is_encoder_decoder:
+            lo = 0
+
+        for i in range(lo, hi):
+            mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
-
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
-            if (
-                start_pos
-                >= num_computed_tokens + num_new_tokens + shift_computed_tokens
-            ):
-                # The encoder input is not needed in this step.
-                break
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
                 assert start_pos == 0, (
@@ -1193,10 +1195,6 @@ class Scheduler(SchedulerInterface):
                 # inputs before running the decoder.  Once we've calculated some
                 # decoder tokens (num_computed_tokens > 0), then we know we
                 # already calculated encoder inputs and can skip here.
-                continue
-            elif start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
                 continue
 
             if not self.is_encoder_decoder:
