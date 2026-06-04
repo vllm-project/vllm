@@ -173,9 +173,9 @@ class EplbMetrics:
     Stores EPLB metrics.
 
     - `ep_rank`: The EP rank of the worker that produced this sample.
-    - `num_routed_tokens`: For each model, a per-layer increment for the
-      Prometheus counter — tokens routed since the last successful
-      ping-pong consume.
+    - `num_routed_tokens`: For each model, a list of per-layer token
+      counts. Each count is the number of tokens routed to this rank's
+      experts in that layer since the previous sample.
     """
 
     ep_rank: int = 0
