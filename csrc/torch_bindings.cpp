@@ -55,7 +55,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
-  // kernel launch. Registered in _C_stable_libtorch.
+  // kernel launch. Registered in _C_stable_libtorch (incl. the FlashInfer V4
+  // full-cache bf16/fp8 variants).
 
   // Quantization ops
 #ifndef USE_ROCM
