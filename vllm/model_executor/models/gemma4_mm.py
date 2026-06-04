@@ -1480,7 +1480,9 @@ class Gemma4ForConditionalGeneration(
             t_max = max(f.shape[-2] for f in feats)
             feat_dim = feats[0].shape[-1]
             input_features = feats[0].new_zeros((len(feats), t_max, feat_dim))
-            input_features_mask = masks[0].new_zeros((len(feats), t_max), dtype=torch.bool)
+            input_features_mask = masks[0].new_zeros(
+                (len(feats), t_max), dtype=torch.bool
+            )
             for i, (f, m) in enumerate(zip(feats, masks, strict=True)):
                 t = f.shape[-2]
                 input_features[i, :t] = f
