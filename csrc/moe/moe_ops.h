@@ -2,47 +2,6 @@
 
 #include <torch/all.h>
 
-void topk_softmax(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
-                  torch::Tensor& token_expert_indices,
-                  torch::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::Tensor> bias);
-
-void topk_sigmoid(torch::Tensor& topk_weights, torch::Tensor& topk_indices,
-                  torch::Tensor& token_expert_indices,
-                  torch::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::Tensor> bias);
-
-void topk_softplus_sqrt(torch::Tensor& topk_weights,
-                        torch::Tensor& topk_indices,
-                        torch::Tensor& token_expert_indices,
-                        torch::Tensor& gating_output, bool renormalize,
-                        double routed_scaling_factor,
-                        const c10::optional<torch::Tensor>& correction_bias,
-                        const c10::optional<torch::Tensor>& input_ids,
-                        const c10::optional<torch::Tensor>& tid2eid);
-
-void moe_sum(torch::Tensor& input, torch::Tensor& output);
-
-void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
-                          int64_t block_size, torch::Tensor sorted_token_ids,
-                          torch::Tensor experts_ids,
-                          torch::Tensor num_tokens_post_pad,
-                          std::optional<torch::Tensor> maybe_expert_map);
-
-void batched_moe_align_block_size(int64_t max_tokens_per_batch,
-                                  int64_t block_size,
-                                  torch::Tensor const& expert_num_tokens,
-                                  torch::Tensor sorted_ids,
-                                  torch::Tensor expert_ids,
-                                  torch::Tensor num_tokens_post_pad);
-
-void moe_lora_align_block_size(
-    torch::Tensor topk_ids, torch::Tensor token_lora_mapping,
-    int64_t num_experts, int64_t block_size, int64_t max_loras,
-    int64_t max_num_tokens_padded, int64_t max_num_m_blocks,
-    torch::Tensor sorted_token_ids, torch::Tensor expert_ids,
-    torch::Tensor num_tokens_post_pad, torch::Tensor adapter_enabled,
-    torch::Tensor lora_ids, std::optional<torch::Tensor> maybe_expert_map);
 #ifndef USE_ROCM
 torch::Tensor moe_wna16_gemm(torch::Tensor input, torch::Tensor output,
                              torch::Tensor b_qweight, torch::Tensor b_scales,
@@ -59,15 +18,6 @@ std::tuple<torch::Tensor, torch::Tensor> grouped_topk(
     int64_t topk, bool renormalize, double routed_scaling_factor,
     torch::Tensor const& bias, int64_t scoring_func);
 #endif
-
-bool moe_permute_unpermute_supported();
-
-int64_t moe_permute_sort_workspace_size(int64_t num_expanded_rows,
-                                        int64_t num_experts);
-
-void shuffle_rows(const torch::Tensor& input_tensor,
-                  const torch::Tensor& dst2src_map,
-                  torch::Tensor& output_tensor);
 
 #ifndef USE_ROCM
 // DeepSeek V3 optimized router GEMM kernel for SM90+

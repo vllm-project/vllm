@@ -493,13 +493,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
-    set(SRCS
+    set(VLLM_MOE_MXFP8_STABLE_SRCS
       "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
       "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
     set_gencode_flags_for_srcs(
-      SRCS "${SRCS}"
+      SRCS "${VLLM_MOE_MXFP8_STABLE_SRCS}"
       CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
-    list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
     message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
   else()
@@ -697,6 +696,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   else()
     message(STATUS "Not building fp32_router_gemm as no compatible archs found "
                    "(requires SM90+ and CUDA >= 12.0).")
+  endif()
+
+  # DSV3 router GEMM (SM90+, CUDA >= 12.0).
+  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
+    set(DSV3_ROUTER_GEMM_SRC
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_entry.cu"
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/libtorch_stable/moe/dsv3_router_gemm_bf16_out.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV3 router GEMM for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
   endif()
 
   # Only build AllSpark kernels if we are building for at least some compatible archs.
@@ -1112,6 +1125,51 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_link_libraries(_C_stable_libtorch PRIVATE ${_STABLE_TORCH_AMDHIP64})
     endif()
   endif()
+
+  # _moe_C_stable_libtorch extension (stable ABI; registers torch.ops._moe_C.*)
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    set(VLLM_MOE_STABLE_EXT_SRC
+      "csrc/libtorch_stable/moe/torch_bindings.cpp"
+      "csrc/libtorch_stable/moe/topk_softmax_kernels.cu"
+      "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels.cu"
+      "csrc/libtorch_stable/moe/grouped_topk_kernels.cu"
+      "csrc/libtorch_stable/moe/moe_align_sum_kernels.cu")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0)
+      list(APPEND VLLM_MOE_STABLE_EXT_SRC
+        "csrc/libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+        "csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu")
+    endif()
+    if(VLLM_MOE_MXFP8_STABLE_SRCS)
+      list(APPEND VLLM_MOE_STABLE_EXT_SRC ${VLLM_MOE_MXFP8_STABLE_SRCS})
+    endif()
+
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_MOE_STABLE_EXT_SRC}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+
+    message(STATUS "Enabling MoE C_stable extension.")
+    define_extension_target(
+      _moe_C_stable_libtorch
+      DESTINATION vllm
+      LANGUAGE ${VLLM_GPU_LANG}
+      SOURCES ${VLLM_MOE_STABLE_EXT_SRC}
+      COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+      ARCHITECTURES ${VLLM_GPU_ARCHES}
+      INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+      INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+      USE_SABI 3
+      WITH_SOABI)
+
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020A000000000000ULL)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_CUDA)
+    target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+      CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+    if(VLLM_MOE_MXFP8_STABLE_SRCS)
+      target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+        ENABLE_ES_MXFP8_GROUPED_MM_SM100=1)
+    endif()
+  endif()
 endif()
 
 #
@@ -1119,24 +1177,12 @@ endif()
 #
 
 set(VLLM_MOE_EXT_SRC
-  "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu"
-  "csrc/moe/topk_softplus_sqrt_kernels.cu")
+  "csrc/moe/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC
-    "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
+  list(APPEND VLLM_MOE_EXT_SRC "csrc/libtorch_stable/moe/moe_wna16.cu")
 endif()
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(MOE_PERMUTE_SRC
-      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-      "csrc/moe/moe_permute_unpermute_op.cu")
-
-  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
-endif()
 
 set_gencode_flags_for_srcs(
   SRCS "${VLLM_MOE_EXT_SRC}"
@@ -1144,7 +1190,7 @@ set_gencode_flags_for_srcs(
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(VLLM_MOE_WNA16_SRC
-    "csrc/moe/moe_wna16.cu")
+    "csrc/libtorch_stable/moe/moe_wna16.cu")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_MOE_WNA16_SRC}"
@@ -1261,24 +1307,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                    " in CUDA target architectures")
   endif()
 
-  # DeepSeek V3 router GEMM kernel requires SM90+ and CUDA >= 12.0.
-  # (fp32_router_gemm has been migrated to _C_stable_libtorch above.)
-  cuda_archs_sm90plus(SM90PLUS_ROUTER_GEMM_ARCHS "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND SM90PLUS_ROUTER_GEMM_ARCHS)
-    set(DSV3_ROUTER_GEMM_SRC
-      "csrc/moe/dsv3_router_gemm_entry.cu"
-      "csrc/moe/dsv3_router_gemm_float_out.cu"
-      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
-    set_gencode_flags_for_srcs(
-      SRCS "${DSV3_ROUTER_GEMM_SRC}"
-      CUDA_ARCHS "${SM90PLUS_ROUTER_GEMM_ARCHS}")
-    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
-
-    message(STATUS "Building DSV3 router GEMM kernels for archs: ${SM90PLUS_ROUTER_GEMM_ARCHS}")
-  else()
-    message(STATUS "Not building DSV3 router GEMM kernels as no compatible archs found"
-                   " (requires SM90+ and CUDA >= 12.0)")
-  endif()
+  # DSV3 router GEMM is built in _C_stable_libtorch (see VLLM_STABLE_EXT_SRC above).
 endif()
 
 message(STATUS "Enabling moe extension.")

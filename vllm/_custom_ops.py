@@ -2462,7 +2462,7 @@ def dsv3_router_gemm(
         device=hidden_states.device,
         dtype=output_dtype,
     )
-    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+    torch.ops._C.dsv3_router_gemm(output, hidden_states, router_weight)
     return output
 
 
