@@ -1232,6 +1232,7 @@ class SpecDecodeBaseProposer:
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4UnifiedForConditionalGeneration",
                 "Step3p7ForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
