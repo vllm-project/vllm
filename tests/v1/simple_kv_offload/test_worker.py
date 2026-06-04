@@ -10,6 +10,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 from __future__ import annotations
 
 import time
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -19,6 +20,12 @@ from vllm.platforms import current_platform
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheLayout,
+    reshape_kv_cache,
+)
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
@@ -181,3 +188,88 @@ def test_build_params_src_access_order():
         gpu, cpu, stream, src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
     )
     assert ordered.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_STREAM
+
+
+@pytest.mark.parametrize("layout", list(KVCacheLayout))
+def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = reshape_kv_cache(raw, spec, num_blocks, num_layers, layout)
+    cache_config = MagicMock(num_blocks=num_blocks)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=cache_config,
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    set_kv_cache_layout(layout.name)
+    try:
+        worker.register_kv_caches(
+            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    assert worker.gpu_kv_caches is not None
+    expected_regions = num_layers if layout.is_layer_compact else 1
+    assert len(worker.gpu_kv_caches) == expected_regions
+    expected_block_bytes = spec.page_size_bytes * (
+        1 if layout.is_layer_compact else num_layers
+    )
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, expected_block_bytes)
+    }
+
+
+@pytest.mark.parametrize("layout", [KVCacheLayout.BLHNC, KVCacheLayout.BHLNC])
+def test_register_separate_kv_head_groups(monkeypatch, layout: KVCacheLayout):
+    num_blocks = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float16,
+        separate_kv_head_groups=True,
+    )
+    raw = torch.zeros(
+        num_blocks * num_layers * spec.page_size_bytes,
+        dtype=torch.int8,
+        device="cuda",
+    )
+    caches = reshape_kv_cache(raw, spec, num_blocks, num_layers, layout)
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None,
+        kv_cache_config=MagicMock(num_blocks=num_blocks),
+        cpu_capacity_bytes=raw.nbytes,
+    )
+    worker._backend = MagicMock()
+    monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
+
+    set_kv_cache_layout(layout.name)
+    try:
+        worker.register_kv_caches(
+            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+    assert worker.gpu_kv_caches is not None
+    assert len(worker.gpu_kv_caches) == num_layers * spec.num_heads
+    per_head_block_bytes = spec.block_size * spec.head_size * spec.dtype.itemsize
+    assert {cache.shape for cache in worker.gpu_kv_caches.values()} == {
+        (num_blocks, per_head_block_bytes)
+    }

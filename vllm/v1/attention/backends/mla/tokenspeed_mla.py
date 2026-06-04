@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -143,10 +142,6 @@ class TokenspeedMLABackend(MLACommonBackend):
                     f"got ({qk_nope_head_dim}, {qk_rope_head_dim}, {v_head_dim})"
                 )
         return None
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):

@@ -513,7 +513,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.device,
             self.cache_config.cache_dtype,
             self.kernel_block_sizes,
-            self.vllm_config,
+            vllm_config=self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 

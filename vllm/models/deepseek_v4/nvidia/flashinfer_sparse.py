@@ -21,7 +21,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
-from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import MultipleOf
@@ -134,26 +133,6 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
                 )
             return None
         return "FLASHINFER_MLA_SPARSE_DSV4 requires SM10x or SM12x"
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        device_capability = current_platform.get_device_capability()
-        if device_capability is not None and device_capability.major == 12:
-            return DeepseekV4FlashMLABackend.get_kv_cache_shape(
-                num_blocks,
-                block_size,
-                num_kv_heads,
-                head_size,
-                cache_dtype_str,
-            )
-        assert num_kv_heads == 1
-        return (num_blocks, block_size, head_size)
 
 
 class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):

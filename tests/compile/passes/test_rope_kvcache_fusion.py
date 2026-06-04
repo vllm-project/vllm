@@ -37,6 +37,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+)
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
@@ -136,28 +140,21 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # Fetch the attention backend and kv cache shape and stride order
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks, self.block_size, self.num_kv_heads, self.head_size
+        kv_cache_shape = compute_layer_kv_cache_shape_bytes(
+            FullAttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_dtype,
+            ),
+            num_blocks,
         )
-        try:
-            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-
-        # Create dummy KV cache
-        raw_tensor = torch.zeros(
-            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
-            dtype=self.kv_cache_dtype,
+        kv_cache = torch.zeros(
+            kv_cache_shape,
+            dtype=torch.int8,
             device=self.device,
-        )
-        raw_tensor = raw_tensor.view(kv_cache_shape)
-        kv_cache = raw_tensor.permute(*inv_order)
+        ).view(self.kv_cache_dtype)
 
         self.attn.kv_cache = kv_cache
 

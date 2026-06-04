@@ -705,6 +705,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             head_size_v=self.head_dim,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            separate_kv_head_groups=self.use_aiter_sparse_pa,
         )
 
     def _ensure_aiter_sparse_pa_kv_cache(self) -> None:

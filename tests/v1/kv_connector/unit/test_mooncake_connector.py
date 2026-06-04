@@ -32,15 +32,23 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
+    reshape_kv_cache,
 )
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.fixture(autouse=True)
+def reset_kv_cache_layout():
+    yield
+    set_kv_cache_layout(None)
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -1093,13 +1101,23 @@ async def test_worker_get_finished_timeout(monkeypatch):
         assert "tx-active" in prefill_worker.reqs_need_send
 
 
-def test_register_kv_caches():
+@pytest.mark.parametrize(
+    ("layout", "separate_kv_head_groups"),
+    [
+        (KVCacheLayout.LBHNC, False),
+        (KVCacheLayout.BLHNC, False),
+        (KVCacheLayout.LBHNC, True),
+        (KVCacheLayout.BHLNC, True),
+    ],
+)
+def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool):
     """Tests the memory registration logic with the underlying Mooncake engine."""
 
     vllm_config = create_vllm_config(
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
 
+    set_kv_cache_layout(layout.name)
     with (
         set_current_vllm_config(vllm_config),
         patch_worker_dependencies(),
@@ -1118,15 +1136,22 @@ def test_register_kv_caches():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=64,
+            dtype=torch.float16,
+            separate_kv_head_groups=separate_kv_head_groups,
         )
-        tensor1 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        tensor2 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        kv_caches = {
-            "model.layers.0.self_attn": tensor1,
-            "model.layers.1.self_attn": tensor2,
-        }
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        for layer_name in layer_names:
+            worker._layer_specs[layer_name] = spec
+        raw = torch.zeros(2 * 2 * spec.page_size_bytes, dtype=torch.int8)
+        tensor1, tensor2 = reshape_kv_cache(raw, spec, 2, 2, layout)
+        kv_caches = dict(zip(layer_names, (tensor1, tensor2)))
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -1135,16 +1160,35 @@ def test_register_kv_caches():
 
             mock_batch_register.assert_called_once()
             registered_ptrs, registered_lens = mock_batch_register.call_args[0]
-            expected_ptrs = {tensor.data_ptr() for tensor in kv_caches.values()}
-            assert set(registered_ptrs) == expected_ptrs
-            assert set(registered_lens) == {tensor1.nbytes}
+            assert registered_ptrs == [raw.data_ptr()]
+            assert registered_lens == [raw.nbytes]
 
-            # Verify block_len_per_layer is set correctly.
-            assert len(worker.block_len_per_layer) == len(registered_ptrs)
-            for bl in worker.block_len_per_layer:
-                assert bl == tensor1.nbytes // tensor1.shape[0]
-            assert worker.registered_layer_names == list(kv_caches)
-            assert worker.registered_layer_indices == [0, 1]
+            if separate_kv_head_groups:
+                expected_addrs = [
+                    cache[:, head_idx].data_ptr()
+                    for cache in (tensor1, tensor2)
+                    for head_idx in range(cache.shape[1])
+                ]
+                head_block_bytes = tensor1.stride(0) * tensor1.element_size()
+                assert worker.kv_caches_base_addr == expected_addrs
+                assert worker.block_len_per_layer == [head_block_bytes] * len(
+                    expected_addrs
+                )
+                assert worker.kv_block_len_per_layer == [head_block_bytes] * len(
+                    expected_addrs
+                )
+                assert worker.registered_layer_names == [
+                    layer_name
+                    for layer_name in layer_names
+                    for _ in range(tensor1.shape[1])
+                ]
+            else:
+                assert len(worker.block_len_per_layer) == len(kv_caches)
+                for bl in worker.block_len_per_layer:
+                    assert bl == tensor1.stride(0) * tensor1.element_size()
+                assert worker.kv_block_len_per_layer == [spec.page_size_bytes] * 2
+                assert worker.registered_layer_names == list(kv_caches)
+                assert worker.registered_layer_indices == [0, 1]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
