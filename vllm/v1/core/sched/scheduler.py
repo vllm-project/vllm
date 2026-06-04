@@ -702,7 +702,9 @@ class Scheduler(SchedulerInterface):
                     # Skip the request gracefully rather than asserting.
                     # See https://github.com/vllm-project/vllm/issues/42760
                     if num_new_tokens <= 0:
-                        break
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
