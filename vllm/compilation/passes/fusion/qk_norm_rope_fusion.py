@@ -232,10 +232,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
-        # RMS norm variants are no longer iterated: after the vLLM IR migration (#33825)
-        # AITER rope variants are also not iterated: `MatcherRotaryEmbedding`
-        # auto-detects via `rocm_aiter_ops.is_triton_rotary_embed_enabled()`
-        # and selects the right rotary op.
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
                 if RotaryEmbedding.enabled():
