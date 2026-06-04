@@ -1077,17 +1077,10 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_handshake_mixed_fa_mla_hetero_tp(
-        self, default_vllm_config, dist_init
-    ):
-        """Mixed full-attn + MLA single KV group (e.g. a GQA main model paired
-        with an MLA Eagle-3 draft): full-attention (head-SPLIT) regions mixed
-        with an MLA (REPLICATE, key-only, num_kv_heads==1) region.
-
-        Heterogeneous TP (tp_ratio != 1) must NOT raise -- each region is
-        validated/transferred by its own class -- whereas it previously hit a
-        ``NotImplementedError`` for any mixed full-attn + MLA group. Also check
-        the per-region gate still rejects a genuinely wrong block_len.
+    def test_handshake_mixed_fa_mla_hetero_tp(self, default_vllm_config, dist_init):
+        """Mixed full-attn (SPLIT) + MLA (REPLICATE) single KV group under
+        heterogeneous TP must NOT raise (previously a NotImplementedError),
+        and the per-region gate must still reject a wrong block_len.
         """
         vllm_config = create_vllm_config()
         with patch(
@@ -1116,9 +1109,8 @@ class TestNixlHandshake:
             ]
             worker.num_descs = len(worker.src_blocks_data)
 
-            # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region: remote holds
-            # tp_ratio x local heads (block_len * tp_ratio). REPLICATE region:
-            # identical on every rank (block_len unchanged).
+            # D_TP=2, P_TP=1 -> tp_ratio=2. SPLIT region scales by tp_ratio;
+            # REPLICATE region is unchanged.
             tp_ratio = 2
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
@@ -1133,15 +1125,11 @@ class TestNixlHandshake:
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
             )
-            # Previously raised NotImplementedError for a mixed FA+MLA group at
-            # tp_ratio != 1; now validates/builds per region.
             worker.add_remote_agent(meta, remote_tp_size=1)
             assert (
-                FakeNixlConnectorWorker.REMOTE_ENGINE_ID
-                in worker.dst_xfer_side_handles
+                FakeNixlConnectorWorker.REMOTE_ENGINE_ID in worker.dst_xfer_side_handles
             )
-            # Per-region gate rejects a wrong REPLICATE block_len: a replicated
-            # region's block_len must match P==D, not scale with tp_ratio.
+            # Gate rejects an MLA region wrongly scaled by tp_ratio.
             worker2 = FakeNixlConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )

@@ -2,22 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-region transfer classes for the NIXL connector.
 
-Within a single KV-cache group the connector may transfer regions of two
-different kinds (e.g. a full-attention (GQA) main model paired with an MLA
-draft such as Eagle-3). Rather than scatter ``if is_replicate`` branches across
-the gate and the descriptor builders, each region is tagged with one
-``RegionTransferClass`` that owns the rules for that kind of region:
+Each region in a KV-cache group is tagged with one ``RegionTransferClass``,
+which owns the descriptor rules for that region kind:
 
-- ``SPLIT`` — full-attention (GQA), KV is head-sharded across TP. The remote
-  block holds ``tp_ratio`` times the local heads; a decode rank reads its head
-  slice at a per-rank offset, and (under the FlashInfer "virtually split" block
-  layout) K and V are two separate descriptor streams.
-- ``REPLICATE`` — MLA, ``num_kv_heads==1``. The cache is identical on every
-  rank, so the whole block is read from a single remote rank at offset 0; it is
-  key-only, so it has no V stream.
-
-This is purely a connector-internal descriptor concern; it does not change the
-scheduler's KV-cache grouping.
+- ``SPLIT`` — full-attention (GQA), head-sharded across TP. Remote block holds
+  ``tp_ratio`` x local heads; a rank reads its head slice at a per-rank offset,
+  and under the FlashInfer "virtually split" layout K/V are two streams.
+- ``REPLICATE`` — MLA (``num_kv_heads==1``), identical on every rank: whole
+  block read from one rank at offset 0, key-only (no V stream).
 """
 
 from __future__ import annotations
@@ -29,36 +21,23 @@ from dataclasses import dataclass
 class RegionTransferClass:
     """How one KV region is split (or not) when transferred over NIXL."""
 
-    name: str
     is_replicate: bool
 
     def num_streams(self, virtually_split: bool) -> int:
-        """Number of descriptor streams a region of this class emits.
-
-        Under the blocks-first ("virtually split") layout a SPLIT region is
-        indexed as two streams (K then V); a REPLICATE region is key-only, so
-        it is always a single stream. Without virtual splitting every region is
-        a single registered stream.
-        """
+        """Descriptor streams emitted: 2 (K, V) for a virtually-split SPLIT
+        region, else 1 (REPLICATE is key-only)."""
         if self.is_replicate or not virtually_split:
             return 1
         return 2
 
     def remote_num_reads(self, split_reads: int) -> int:
-        """How many remote ranks a region of this class is read from.
-
-        REPLICATE reads the whole block from one rank; SPLIT reads its head
-        slice, which may be gathered from ``split_reads`` remote ranks when
-        P_TP > D_TP.
-        """
+        """Remote ranks read from: 1 for REPLICATE; ``split_reads`` for SPLIT
+        (gathered head slice when P_TP > D_TP)."""
         return 1 if self.is_replicate else split_reads
 
     def remote_rank_offset(self, offset_factor: int, remote_kv_block_len: int) -> int:
-        """Byte offset into the remote block for this rank's head slice.
-
-        REPLICATE copies the whole block (offset 0); SPLIT hops to its head
-        slice.
-        """
+        """Byte offset into the remote block: 0 for REPLICATE (whole block),
+        else this rank's head slice."""
         return 0 if self.is_replicate else offset_factor * remote_kv_block_len
 
     def local_split_desc(
@@ -69,12 +48,9 @@ class RegionTransferClass:
         head_slot: int,
         num_splits: int,
     ) -> tuple[int, int, int]:
-        """Local destination descriptor for one source-rank read when gathering
-        from multiple remote ranks (P_TP > D_TP).
-
-        REPLICATE writes the whole block (every remote rank holds the same
-        data). SPLIT writes only this rank's head slice into its slot.
-        """
+        """Local dest descriptor for one source-rank read when gathering from
+        multiple remote ranks (P_TP > D_TP): REPLICATE writes the whole block,
+        SPLIT writes only this rank's head slice."""
         if self.is_replicate:
             return (addr, local_len, device)
         chunk = local_len // num_splits
@@ -106,8 +82,7 @@ class RegionTransferClass:
         else:
             # P_TP > D_TP: local holds |tp_ratio| x remote heads.
             assert block_size_ratio == 1, (
-                "Different local/remote block sizes are not supported"
-                " when P TP > D TP."
+                "Different local/remote block sizes are not supported when P TP > D TP."
             )
             assert remote_len == local_len // (-tp_ratio), (
                 f"SPLIT region {region_idx}: remote P KV block_len {remote_len} "
@@ -115,5 +90,5 @@ class RegionTransferClass:
             )
 
 
-SPLIT_CLASS = RegionTransferClass(name="split", is_replicate=False)
-REPLICATE_CLASS = RegionTransferClass(name="replicate", is_replicate=True)
+SPLIT_CLASS = RegionTransferClass(is_replicate=False)
+REPLICATE_CLASS = RegionTransferClass(is_replicate=True)

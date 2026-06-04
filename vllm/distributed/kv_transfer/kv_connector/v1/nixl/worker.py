@@ -184,10 +184,7 @@ class NixlConnectorWorker:
             else 0
         )
 
-        # Transfer class of each FA descriptor, in the region/stream order that
-        # _build_fa_local emits (region-major; K and, when virtually split and
-        # not key-only, V). Each class knows how to write its local slice:
-        # REPLICATE writes the whole block, SPLIT writes its head slot.
+        # Transfer class per FA descriptor, in _build_fa_local emission order.
         fa_desc_classes = self._fa_desc_classes(num_fa_descs)
 
         for p_idx, p_rank in enumerate(plan.all_source_ranks):
@@ -207,16 +204,14 @@ class NixlConnectorWorker:
             yield handle
 
     def _fa_desc_classes(self, num_fa_descs: int) -> list[RegionTransferClass]:
-        """Transfer class for each FA descriptor, in _build_fa_local emission
-        order (region-major; K then optional V per region). Length equals
-        ``num_fa_descs``. Used to apply the per-class local-split rule when
-        gathering from multiple remote ranks (P_TP > D_TP).
+        """Transfer class per FA descriptor, in _build_fa_local emission order
+        (region-major; K then optional V per region). Length ``num_fa_descs``.
         """
         assert self.transfer_topo is not None
         n_regions = len(self.block_len_per_layer)
         if n_regions == 0 or self.num_regions == 0:
             return [SPLIT_CLASS] * num_fa_descs
-        # Descriptors per stream (blocks). All streams share the same count.
+        # Descriptors (blocks) per stream; all streams share the same count.
         nblk = num_fa_descs // self.num_regions
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
         classes: list[RegionTransferClass] = []
@@ -228,27 +223,15 @@ class NixlConnectorWorker:
         )
         return classes
 
-    def _region_is_replicate(self, region_idx: int) -> bool:
-        """Whether region ``region_idx`` transfers as a whole replicated block
-        (MLA, ``num_kv_heads==1``, identical on every TP rank) rather than being
-        head-split across TP.
-
-        Falls back to False (head-split) when the per-region map is unset, so
-        callers/tests that populate ``block_len_per_layer`` without calling
-        ``register_kv_caches`` keep the prior head-split behavior.
-        """
-        return region_idx < len(self._region_is_mla) and self._region_is_mla[
-            region_idx
-        ]
-
     def _region_class(self, region_idx: int) -> RegionTransferClass:
-        """Transfer class for region ``region_idx`` (REPLICATE for MLA regions,
-        SPLIT for head-sharded full-attention).
-        Falls back to SPLIT when the per-region map is unset.
+        """REPLICATE for MLA regions (replicated whole block), SPLIT otherwise.
+        Defaults to SPLIT when the per-region map is unset (e.g. tests that set
+        block_len_per_layer without register_kv_caches).
         """
-        return (
-            REPLICATE_CLASS if self._region_is_replicate(region_idx) else SPLIT_CLASS
+        is_mla = (
+            region_idx < len(self._region_is_mla) and self._region_is_mla[region_idx]
         )
+        return REPLICATE_CLASS if is_mla else SPLIT_CLASS
 
     def __init__(
         self,
@@ -502,10 +485,10 @@ class NixlConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
-        # Per-region transfer class, populated by register_kv_caches (1:1 with
-        # block_len_per_layer). Empty until then -> _region_is_replicate falls
-        # back to head-SPLIT, preserving behavior for callers (and tests) that
-        # set block_len_per_layer without registering caches.
+        # Per-region MLA flag, 1:1 with block_len_per_layer. Populated by
+        # register_kv_caches; empty until then -> _region_class falls back to
+        # SPLIT for callers (and tests) that set block_len_per_layer without
+        # registering caches.
         self._region_is_mla = list[bool]()
 
         # Per-engine TP mappings. Generated during handshake.
@@ -908,13 +891,9 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
-        # Per-region transfer class, aligned 1:1 with `block_len_per_layer`.
-        # True  -> REPLICATE: MLA region (num_kv_heads==1, identical on every TP
-        #          rank, read whole block at offset 0).
-        # False -> SPLIT: full-attention region (GQA, head-sharded across TP).
-        # Mixed within a single KV group only for models that combine full-attn
-        # with MLA (e.g. a GQA main model + MLA Eagle-3 draft); homogeneous
-        # models are all-True/all-False.
+        # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
+        # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
+        # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
@@ -1203,8 +1182,7 @@ class NixlConnectorWorker:
             ):
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
-                # when split across TP ranks. REPLICATE (key-only) regions have
-                # no V half -> single desc stream, skip.
+                # when split across TP ranks. (Skipped for key-only REPLICATE.)
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
@@ -1226,10 +1204,8 @@ class NixlConnectorWorker:
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
-        # Head-SPLIT regions (full-attn) read their head slice from
-        # ``len(split_ranks)`` remote ranks at a per-rank head offset. REPLICATE
-        # regions (MLA) read the whole block once at offset 0, exactly like a
-        # pure-MLA transfer, and have no V half.
+        # SPLIT regions read their head slice from this many remote ranks at a
+        # per-rank offset; REPLICATE regions read the whole block once (see cls).
         split_reads = len(plan.source_ranks_per_group[fa_group_idx])
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
@@ -1264,7 +1240,6 @@ class NixlConnectorWorker:
             )
             if emits_v:
                 # With FlashInfer index V separately to allow head splitting.
-                # REPLICATE (key-only) regions have no V half -> skip.
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
@@ -1608,14 +1583,9 @@ class NixlConnectorWorker:
                 "Use HND layout on the prefill side."
             )
 
-        # Per-region block_len validation. Each region is either REPLICATE
-        # (MLA, num_kv_heads==1, identical on every rank -> only the number of
-        # blocks may differ between P and D) or SPLIT (full-attn, head-sharded
-        # -> remote block_len scales linearly with tp_ratio). Whole-model MLA
-        # and replicated-KV are treated as all-REPLICATE. Mixed REPLICATE+SPLIT
-        # within one group (e.g. a GQA main model + MLA Eagle-3 draft) is
-        # validated per region, which is what makes tp_ratio != 1 work for such
-        # models.
+        # Per-region block_len validation: each region's class enforces its own
+        # P/D invariant (REPLICATE: blocks-only; SPLIT: scales with tp_ratio).
+        # Whole-model MLA / replicated-KV is treated as all-REPLICATE.
         # Mamba uses the ssm_sizes counterpart, so skip block_len here.
         if not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
@@ -1625,8 +1595,6 @@ class NixlConnectorWorker:
                 remote_engine_id
             )
             for i, local_len in enumerate(self.block_len_per_layer):
-                # Whole-model MLA / replicated-KV validates every region as
-                # REPLICATE; otherwise each region uses its own class.
                 cls = REPLICATE_CLASS if model_replicated else self._region_class(i)
                 cls.validate_block_len(
                     i,
@@ -2499,10 +2467,8 @@ class NixlConnectorWorker:
         if virtually_split and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
-            # Per-stream block length. A region holding K+V as two equal
-            # streams (SPLIT under virtual splitting) contributes block_len//2
-            # per stream; a single-stream region (REPLICATE key-only, or any
-            # region without virtual splitting) is the whole block.
+            # Per-stream block length: block_len//2 for a 2-stream SPLIT
+            # region, else the whole block.
             streams = self._region_class(layer_idx).num_streams(virtually_split)
             block_len = self.block_len_per_layer[layer_idx] // streams
         return block_len
