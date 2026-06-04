@@ -371,7 +371,6 @@ class BackgroundResources:
     circular reference back to the client object."""
 
     ctx: zmq.Context
-    shutdown_timeout: int
     # If CoreEngineProcManager, it manages local engines;
     # if CoreEngineActorManager, it manages all engines.
     engine_manager: CoreEngineProcManager | CoreEngineActorManager | None = None
@@ -394,8 +393,7 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.shutdown_timeout = max(self.shutdown_timeout, 5)
-            self.engine_manager.shutdown(timeout=self.shutdown_timeout)
+            self.engine_manager.shutdown()
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
@@ -490,9 +488,7 @@ class MPClient(EngineCoreClient):
         # This will ensure resources created so far are closed
         # when the client is garbage collected, even if an
         # exception is raised mid-construction.
-        self.resources = BackgroundResources(
-            ctx=sync_ctx, shutdown_timeout=vllm_config.shutdown_timeout
-        )
+        self.resources = BackgroundResources(ctx=sync_ctx)
         self._finalizer = weakref.finalize(self, self.resources)
         success = False
         try:
