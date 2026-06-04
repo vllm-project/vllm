@@ -49,42 +49,6 @@ def is_aiter_found() -> bool:
 IS_AITER_FOUND = is_aiter_found()
 
 
-class AiterCustomAllreduceProto(Protocol):
-    max_size: int
-    world_size: int
-    fully_connected: bool
-
-    @contextmanager
-    def capture(self): ...
-    def close(self) -> None: ...
-    def fused_ar_rms(
-        self,
-        inp: torch.Tensor,
-        res_inp: torch.Tensor,
-        *,
-        w: torch.Tensor,
-        eps: float,
-        registered: bool = False,
-        use_1stage: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
-    def fused_ar_rms_per_group_quant(
-        self,
-        inp: torch.Tensor,
-        res_inp: torch.Tensor,
-        *,
-        w: torch.Tensor,
-        eps: float,
-        group_size: int = 128,
-        registered: bool = False,
-        use_1stage: bool = False,
-        emit_bf16: bool = False,
-    ) -> (
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-    ): ...
-    def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
-
-
 def is_aiter_found_and_supported() -> bool:
     """Check if AITER library is available and platform supports it.
 
@@ -877,6 +841,8 @@ def _rocm_aiter_rmsnorm_mxfp4_quant_impl(
     """
     from aiter.ops.triton.fused_mxfp4_quant import fused_rms_mxfp4_quant
 
+    # fused_rms_mxfp4_quant returns: (fp4, scale), mean, variance, residual_out
+    # mean, variance, and residual_out are unused in the no-residual path.
     (fp4_out, scale), _, _, _ = fused_rms_mxfp4_quant(x, weight, epsilon)
     return fp4_out, scale
 
@@ -910,6 +876,8 @@ def _rocm_aiter_rmsnorm_add_mxfp4_quant_impl(
     """
     from aiter.ops.triton.fused_mxfp4_quant import fused_rms_mxfp4_quant
 
+    # fused_rms_mxfp4_quant returns: (fp4, scale), mean, variance, residual_out
+    # mean and variance are unused; residual_out carries the updated residual.
     (fp4_out, scale), _, _, residual_out = fused_rms_mxfp4_quant(
         x, weight, epsilon, res1=residual
     )
@@ -931,220 +899,6 @@ def _rocm_aiter_rmsnorm_add_mxfp4_quant_fake(
     )
     residual_out = torch.empty_like(x)
     return fp4_packed, block_scale, residual_out
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant_impl(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + RMSNorm + MXFP4 quant (no residual).
-
-    Requires AITER to export ``fused_allreduce_rmsnorm_mxfp4_quant`` at the
-    module level.  Only reachable when the feature probe
-    ``rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant()`` returns True
-    and the corresponding pattern has been registered.
-    """
-    import aiter
-
-    return aiter.fused_allreduce_rmsnorm_mxfp4_quant(input_, weight, epsilon)
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant_fake(
-    input_: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    import math
-
-    M, N = input_.shape[0], input_.shape[-1]
-    fp4_packed = torch.empty((M, N // 2), dtype=torch.uint8, device=input_.device)
-    block_scale = torch.empty(
-        (M, math.ceil(N / 32)), dtype=torch.uint8, device=input_.device
-    )
-    return fp4_packed, block_scale
-
-
-def _rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant_impl(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + fused_add_RMSNorm + MXFP4 quant (with residual).
-
-    Requires AITER to export ``fused_allreduce_add_rmsnorm_mxfp4_quant`` at
-    the module level.  Only reachable when
-    ``rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant()`` returns True.
-    """
-    import aiter
-
-    return aiter.fused_allreduce_add_rmsnorm_mxfp4_quant(
-        input_, residual, weight, epsilon
-    )
-
-
-def _rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant_fake(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    import math
-
-    M, N = input_.shape[0], input_.shape[-1]
-    fp4_packed = torch.empty((M, N // 2), dtype=torch.uint8, device=input_.device)
-    block_scale = torch.empty(
-        (M, math.ceil(N / 32)), dtype=torch.uint8, device=input_.device
-    )
-    residual_out = torch.empty_like(input_)
-    return fp4_packed, block_scale, residual_out
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + RMSNorm + per-group FP8 quant.
-
-    Mirrors the eligibility logic of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``
-    for the 1-stage vs 2-stage AITER kernel dispatch (both variants run inside
-    AITER, the only choice we make here is the launcher to call into).
-    """
-    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-    assert aiter_ar is not None, "aiter allreduce must be initialized"
-
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = aiter_ar.world_size
-    full_nvlink = aiter_ar.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
-
-    result = aiter_ar.fused_ar_rms_per_group_quant(
-        input_,
-        residual,
-        w=weight,
-        eps=epsilon,
-        group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
-        use_1stage=use_1stage,
-    )
-    assert result is not None
-    return result[0], result[1], result[2]
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    hidden_dim = input_.shape[-1]
-    num_groups = hidden_dim // group_size
-    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
-    residual_out = torch.empty_like(residual)
-    scale_out = torch.empty(
-        input_.shape[:-1] + (num_groups,),
-        dtype=torch.float32,
-        device=input_.device,
-    )
-    return quant_out, residual_out, scale_out
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Fused AllReduce + add-RMSNorm + per-group FP8 quant + bf16 normed act.
-
-    Wraps the same AITER launcher as ``_rocm_aiter_fused_allreduce_rmsnorm_
-    quant_per_group_impl`` with ``emit_bf16=True``, emitting the pre-quant
-    bf16/fp16 normed activation for a parallel consumer (DeepSeek V3.2 sparse
-    indexer ``wk_weights_proj``).
-    """
-    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-    assert aiter_ar is not None, "aiter allreduce must be initialized"
-
-    total_bytes = input_.numel() * input_.element_size()
-    hidden_dim = input_.shape[-1]
-    token_num = input_.shape[0]
-    if input_.dtype in (torch.bfloat16, torch.float16):
-        pack_size = 16 // input_.element_size()
-        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
-    else:
-        hidden_ok = False
-    token_ok = token_num <= 80
-    world_size = aiter_ar.world_size
-    full_nvlink = aiter_ar.fully_connected
-
-    if world_size == 2:
-        size_ok = True
-    elif full_nvlink and world_size <= 4:
-        size_ok = total_bytes < 256 * 1024
-    elif full_nvlink and world_size <= 8:
-        size_ok = total_bytes < 128 * 1024
-    else:
-        size_ok = False
-
-    use_1stage = hidden_ok and token_ok and size_ok
-
-    result = aiter_ar.fused_ar_rms_per_group_quant(
-        input_,
-        residual,
-        w=weight,
-        eps=epsilon,
-        group_size=group_size,
-        registered=torch.cuda.is_current_stream_capturing(),
-        use_1stage=use_1stage,
-        emit_bf16=True,
-    )
-    assert result is not None
-    assert len(result) == 4, "emit_bf16=True must return four tensors from aiter"
-    return result[0], result[1], result[2], result[3]
-
-
-def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
-    input_: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    hidden_dim = input_.shape[-1]
-    num_groups = hidden_dim // group_size
-    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
-    residual_out = torch.empty_like(residual)
-    scale_out = torch.empty(
-        input_.shape[:-1] + (num_groups,),
-        dtype=torch.float32,
-        device=input_.device,
-    )
-    bf16_norm_out = torch.empty_like(input_)
-    return quant_out, residual_out, scale_out, bf16_norm_out
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -1175,7 +929,7 @@ def _rocm_aiter_per_token_quant_impl(
     assert quant_dtype in [torch.int8, FP8_DTYPE]
 
     out_shape = x.shape
-    out = torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device)
+    out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
     if scale is None:
         scale = torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device)
     dynamic_per_token_scaled_quant(
@@ -1195,7 +949,7 @@ def _rocm_aiter_per_token_quant_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     out_shape = x.shape
     return (
-        torch.empty(x.shape, dtype=FP8_DTYPE, device=x.device),
+        torch.empty(x.shape, dtype=quant_dtype, device=x.device),
         torch.empty((*out_shape[:-1], 1), dtype=torch.float32, device=x.device),
     )
 
@@ -1577,7 +1331,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
-    _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+    _LINEAR_HIPBMM_ENABLED = getattr(envs, 'VLLM_ROCM_USE_AITER_LINEAR_HIPBMM', False)
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
@@ -1585,8 +1339,6 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-    _FUSION_RMSNORM_FP4_QUANT = envs.VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT
-    _FUSION_ROPE_MLA_KV_CACHE = envs.VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE
 
     @classmethod
     def refresh_env_variables(cls):
@@ -1607,17 +1359,11 @@ class rocm_aiter_ops:
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
-        cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+        cls._LINEAR_HIPBMM_ENABLED = getattr(envs, 'VLLM_ROCM_USE_AITER_LINEAR_HIPBMM', False)
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
-        cls._FUSION_RMSNORM_FP4_QUANT = (
-            envs.VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT
-        )
-        cls._FUSION_ROPE_MLA_KV_CACHE = (
-            envs.VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE
-        )
 
     @staticmethod
     def get_aiter_activation_type(activation_str: str):
@@ -1714,26 +1460,17 @@ class rocm_aiter_ops:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
 
     @classmethod
-    def is_fusion_rmsnorm_fp4_quant_enabled(cls) -> bool:
-        """Return True when F2 (fused RMSNorm + MXFP4 quant) is enabled."""
-        return cls.is_enabled() and cls._FUSION_RMSNORM_FP4_QUANT
-
-    @classmethod
-    def is_fusion_rope_mla_kv_cache_enabled(cls) -> bool:
-        """Return True when F3 (fused RoPE + MLA KV-cache write) is enabled."""
-        return (
-            cls.is_enabled() and cls.is_mla_enabled() and cls._FUSION_ROPE_MLA_KV_CACHE
-        )
-
-    @classmethod
     def has_fused_rmsnorm_mxfp4_quant(cls) -> bool:
         """Check whether AITER exposes the fused RMSNorm+MXFP4-quant Triton kernel.
 
         Called during RocmAiterFusionPass.__init__ (not per-token).
-        Returns True when aiter.ops.triton.fused_mxfp4_quant is importable,
-        enabling the two MXFP4 RMSNorm fusion patterns to be registered.
-        Returns False on older AITER builds, falling back to unfused path.
+        Returns True when the platform is supported (ROCm gfx9) AND
+        aiter.ops.triton.fused_mxfp4_quant is importable, enabling the two
+        MXFP4 RMSNorm fusion patterns to be registered.
+        Returns False on unsupported platforms or older AITER builds.
         """
+        if not is_aiter_found_and_supported():
+            return False
         try:
             from aiter.ops.triton.fused_mxfp4_quant import (
                 fused_rms_mxfp4_quant,  # noqa: F401
@@ -1744,39 +1481,42 @@ class rocm_aiter_ops:
             return False
 
     @classmethod
-    def has_fused_allreduce_rmsnorm_mxfp4_quant(cls) -> bool:
-        """Check whether AITER exposes a fused AllReduce+RMSNorm+MXFP4 kernel.
+    def has_fused_rope_mla_kv_cache(cls) -> bool:
+        """Check whether AITER exposes the fused RoPE + MLA KV-cache kernel.
 
-        Called during RocmAiterAllReduceFusionPass.__init__ (not per-token).
-        Returns False on AITER builds that pre-date this kernel, causing the
-        MXFP4 AR patterns to not register and falling back to the existing
-        AR+RMSNorm-only fusion (same behaviour as before this feature).
+        Called in mla.py __init__ (not per-token) to decide whether to
+        use the fused dispatch path. Auto-enables F3 when the kernel is
+        present — no env var required. Follows the same pattern as
+        has_fused_rmsnorm_mxfp4_quant() for F2.
+        Returns False on unsupported platforms or when the kernel is absent.
         """
+        if not is_aiter_found_and_supported():
+            return False
         try:
-            import aiter  # noqa: F401
+            from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
 
-            return hasattr(aiter, "fused_allreduce_rmsnorm_mxfp4_quant")
+            return True
         except (ImportError, AttributeError):
             return False
 
     @classmethod
     def fused_rope_and_mla_kv_cache_write(
         cls,
-        q_nope,
-        q_pe,
-        kv_c,
-        k_pe,
-        kv_cache,
-        q_out,
-        slot_mapping,
-        k_scale,
-        q_scale,
-        positions,
-        cos_cache,
-        sin_cache,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
         is_neox: bool = True,
         is_nope_first: bool = False,
-    ):
+    ) -> None:
         """Dispatch to aiter.fused_qk_rope_concat_and_cache_mla.
 
         Applies RoPE to q_pe/k_pe and writes the MLA KV-cache in a single pass.
@@ -2067,24 +1807,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_rmsnorm",
-                op_func=_rocm_aiter_fused_allreduce_rmsnorm_impl,
-                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group",
-                op_func=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl),
-                fake_impl=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake),
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm",  # noqa: E501
-                op_func=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl,  # noqa: E501
-                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake,  # noqa: E501
-            )
-
-            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -2110,20 +1832,6 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_rmsnorm_add_mxfp4_quant_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm_add_mxfp4_quant_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant",
-                op_func=_rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant",
-                op_func=_rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant_fake,
             )
 
             _OPS_REGISTERED = True
@@ -2173,33 +1881,6 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
-    def get_fused_allreduce_rmsnorm_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
-
-    @staticmethod
-    def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group.default
-
-    @staticmethod
-    def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm.default  # noqa: E501
-
-    # TODO(frida-andersson): drop once vLLM pins AITER >= 0.1.14 (ROCm/aiter#2823).
-    @classmethod
-    def has_fused_allreduce_rmsnorm_quant_per_group(cls) -> bool:
-        """True if the running AITER build exposes the per-group AR+RMS+quant
-        kernel (added in ROCm/aiter PR #2823).
-
-        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
-        this so vLLM degrades to the AR+RMS-only fusion when run against an
-        older aiter that lacks the per-group launcher.
-        """
-        aiter_ar = cls.get_aiter_allreduce()
-        return aiter_ar is not None and hasattr(
-            aiter_ar, "fused_ar_rms_per_group_quant"
-        )
-
-    @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
 
@@ -2214,14 +1895,6 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_rmsnorm_add_mxfp4_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_add_mxfp4_quant.default
-
-    @staticmethod
-    def get_fused_allreduce_rmsnorm_mxfp4_quant_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant.default
-
-    @staticmethod
-    def get_fused_allreduce_add_rmsnorm_mxfp4_quant_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant.default
 
     @staticmethod
     def rms_norm(
