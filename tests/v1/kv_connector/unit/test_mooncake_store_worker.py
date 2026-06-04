@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import json
 import logging
 import math
@@ -1269,6 +1270,83 @@ def test_register_kv_caches_kv_first_two_segments():
     base = tensor.untyped_storage().data_ptr()
     assert db.kv_caches_base_addr == [base, base + seg_stride]
     assert db.block_len == [seg_stride // num_blocks] * 2
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+def test_dummy_client_staging_ring_copies_gpu_blocks_through_shm():
+    numel = 16
+    block_bytes = numel * torch.tensor([], dtype=torch.int32).element_size()
+    gpu_src = torch.arange(numel, dtype=torch.int32, device="cuda")
+    gpu_dst = torch.empty_like(gpu_src)
+    shm_slot = torch.empty(numel, dtype=torch.int32)
+
+    pool_store = MagicMock()
+    pool_store.alloc_from_mem_pool.return_value = shm_slot.data_ptr()
+    pool_store.register_buffer.return_value = 0
+    staging_pool = mooncake_store_worker._DummyStagingPool(
+        pool_store, shm_slot.untyped_storage().nbytes(), block_bytes
+    )
+    # This unit test uses a synthetic CPU tensor as the fake SHM slot. Force
+    # the sync path so the test validates real cudaMemcpy staging without
+    # depending on CUDA batch-copy support for the mocked allocation.
+    staging_pool.pinned = False
+
+    coord = _default_send_coord()
+    token_db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16
+    )
+    token_db.set_kv_caches_base_addr([gpu_src.data_ptr()])
+    token_db.set_block_len([block_bytes])
+
+    send_store = MagicMock()
+    send_store.batch_is_exist.return_value = [0]
+    send_store.batch_put_from_multi_buffers.return_value = [block_bytes]
+    send_thread = mooncake_store_worker.KVCacheStoreSendingThread(
+        store=send_store,
+        coord=coord,
+        token_databases=[token_db],
+        block_size=16,
+        tp_rank=0,
+        put_step=1,
+        kv_role="kv_producer",
+        ready_event=threading.Event(),
+        replicate_config=SimpleNamespace(),
+        staging_pool=staging_pool,
+    )
+    send_thread.request_queue.task_done = MagicMock()
+    send_thread.add_stored_request("req0")
+    send_thread._handle_request(_make_store_req("req0", [b"a" * 8]))
+
+    put_args = send_store.batch_put_from_multi_buffers.call_args.args
+    assert put_args[1] == [[shm_slot.data_ptr()]]
+    assert put_args[2] == [[block_bytes]]
+    assert torch.equal(shm_slot, gpu_src.cpu())
+
+    recv_store = MagicMock()
+
+    def write_to_staging(keys, addrs, sizes):
+        assert addrs == [[shm_slot.data_ptr()]]
+        assert sizes == [[block_bytes]]
+        expected = (gpu_src.cpu() + 1).contiguous()
+        ctypes.memmove(shm_slot.data_ptr(), expected.data_ptr(), block_bytes)
+        return [block_bytes]
+
+    recv_store.batch_get_into_multi_buffers.side_effect = write_to_staging
+    recv_thread = mooncake_store_worker.KVCacheStoreRecvingThread(
+        store=recv_store,
+        coord=coord,
+        token_databases=[token_db],
+        block_size=16,
+        tp_rank=0,
+        ready_event=threading.Event(),
+        staging_pool=staging_pool,
+    )
+
+    res = recv_thread._batch_get_into_multi_buffers(
+        ["key0"], [[gpu_dst.data_ptr()]], [[block_bytes]]
+    )
+    assert res == [block_bytes]
+    assert torch.equal(gpu_dst.cpu(), gpu_src.cpu() + 1)
 
 
 def test_register_kv_caches_cross_layer_single_segment():

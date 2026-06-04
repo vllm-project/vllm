@@ -95,9 +95,18 @@ def _resolve_batch_memcpy():
 
     from cuda.bindings import driver as drv
 
-    err, ptr, _ = drv.cuGetProcAddress(b"cuMemcpyBatchAsync", 12080, 0)
-    if err != drv.CUresult.CUDA_SUCCESS:
-        raise RuntimeError(f"cuGetProcAddress(cuMemcpyBatchAsync) failed: {err}")
+    err, ptr, query_result = drv.cuGetProcAddress(
+        b"cuMemcpyBatchAsync", 12080, 0
+    )
+    if (
+        err != drv.CUresult.CUDA_SUCCESS
+        or ptr == 0
+        or query_result != drv.CUdriverProcAddressQueryResult.CU_GET_PROC_ADDRESS_SUCCESS
+    ):
+        raise RuntimeError(
+            "cuGetProcAddress(cuMemcpyBatchAsync) failed: "
+            f"err={err}, ptr={ptr}, query_result={query_result}"
+        )
     return _BATCH_MEMCPY_FUNC_TYPE(ptr)
 
 

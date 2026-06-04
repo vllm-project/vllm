@@ -420,11 +420,16 @@ def has_deep_ep() -> bool:
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available.
 
-    Prefers an externally installed ``deep_gemm`` package (so users can
-    override with a newer version), then falls back to the vendored copy
-    bundled in the vLLM wheel.
+    Prefers an externally installed ``deep_gemm`` package. For the vendored
+    package, first require vLLM's optional native DeepGEMM extension to exist;
+    otherwise importing ``vllm.third_party.deep_gemm`` only emits a noisy
+    missing-``_C`` warning on architectures/builds where DeepGEMM is not built.
     """
-    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+    if _has_module("deep_gemm"):
+        return True
+    if importlib.util.find_spec("vllm._deep_gemm_C") is None:
+        return False
+    return _has_module("vllm.third_party.deep_gemm")
 
 
 def has_nixl_ep() -> bool:
