@@ -28,6 +28,9 @@ from vllm.lora.layers import LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.warmup.kernel_warmup import (
+    _warmup_triton_nvfp4_attention,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -298,6 +301,83 @@ def _make_mock_backend_for_kernel_block_size(
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
     return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
+
+
+class _NamedAttentionBackend:
+    def __init__(self, name: str):
+        self.name = name
+
+    def get_name(self):
+        return self.name
+
+
+def _make_warmup_runner(
+    *,
+    cache_dtype: str = "nvfp4",
+    backend_name: str = "TRITON_ATTN",
+    is_pooling_model: bool = False,
+):
+    calls = []
+    runner = SimpleNamespace(
+        is_pooling_model=is_pooling_model,
+        cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        attn_groups=[
+            [
+                SimpleNamespace(
+                    backend=_NamedAttentionBackend(backend_name),
+                )
+            ]
+        ],
+        uniform_decode_query_len=1,
+        max_num_tokens=4096,
+        max_model_len=32768,
+    )
+
+    def _dummy_run(**kwargs):
+        calls.append(kwargs)
+
+    runner._dummy_run = _dummy_run
+    return runner, calls
+
+
+def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
+    runner, calls = _make_warmup_runner()
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 1
+    assert calls[0] == {
+        "num_tokens": 1,
+        "skip_eplb": True,
+        "is_profile": True,
+        "force_attention": True,
+        "uniform_decode": True,
+        "profile_seq_lens": 1024,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "backend_name", "is_pooling_model"),
+    [
+        ("auto", "TRITON_ATTN", False),
+        ("nvfp4", "FLASHINFER", False),
+        ("nvfp4", "TRITON_ATTN", True),
+    ],
+)
+def test_triton_nvfp4_attention_warmup_skips_other_paths(
+    cache_dtype: str,
+    backend_name: str,
+    is_pooling_model: bool,
+):
+    runner, calls = _make_warmup_runner(
+        cache_dtype=cache_dtype,
+        backend_name=backend_name,
+        is_pooling_model=is_pooling_model,
+    )
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert calls == []
 
 
 def test_select_common_block_size_prefers_manager_block_size():
