@@ -8,11 +8,7 @@ const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: Some(","),
     name_key: "name",
-    // The Python parser reads `arguments` first and falls back to `parameters`
-    // (`raw_function_call["arguments"] if "arguments" in raw_function_call else
-    // raw_function_call["parameters"]`). The header parser permits exactly one
-    // args key per object, so this candidate order documents Python's
-    // preference but does not change single-key parsing.
+    // Accept both key variants emitted by Phi-4 Mini tool-call templates.
     arguments_key: &["arguments", "parameters"],
 };
 
@@ -29,50 +25,6 @@ const PHI4MINI_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
 /// arguments under `arguments` (preferred) or `parameters`. Arguments are
 /// already OpenAI-style JSON text, so they are streamed as raw argument deltas
 /// without schema conversion or JSON normalization.
-///
-/// # Divergences from the Python reference
-///
-/// This Rust port intentionally diverges from
-/// `vllm/tool_parsers/phi4mini_tool_parser.py` in these user-visible ways:
-///
-/// - **Streaming is supported.** Python's `extract_tool_calls_streaming`
-///   unconditionally returns `None`, so the Python parser never produces
-///   incremental tool-call deltas; this parser streams argument deltas through
-///   the shared JSON core like the other parsers in this crate.
-/// - **Preface text is preserved.** Python's non-streaming path sets
-///   `content=None` whenever a `functools[..]` block is found, discarding any
-///   text before the tool call; this parser emits that text as `normal_text`.
-/// - **Bracket-bearing arguments are not truncated.** Python extracts the block
-///   with the non-greedy regex `functools\[(.*?)\]`, which stops at the first
-///   `]` and corrupts any argument value containing `]` (e.g. `{"items":[1,2]}`),
-///   raising a `JSONDecodeError` and dropping the call; this parser scans
-///   matched braces so such arguments are forwarded intact.
-/// - **Truncated tool calls error rather than silently dropping.** Python's
-///   non-streaming path returns the raw output unchanged on `JSONDecodeError`;
-///   this parser returns an `incomplete Phi4Mini tool call` error from
-///   `finish()`, matching the other JSON parsers in this crate.
-///
-/// # Known unaddressed divergences (TODO)
-///
-/// These Python behaviors are NOT matched because they require non-local
-/// changes to the shared `JsonToolCallParser` core (which would also affect
-/// Hermes / InternLM2 / Llama / Mistral / Qwen):
-///
-/// - **Arguments value type.** The shared core requires the arguments value to
-///   be a JSON object. Python's `json.dumps(...)` round-trips arrays, strings,
-///   numbers, and `null`, so a model emitting `"arguments":null` hard-fails
-///   under Rust.
-/// - **Field order independence.** The header parser requires `name` before the
-///   arguments key; Python's `dict` access is order-independent, so an object
-///   emitting the arguments key first parses in Python but fails here.
-/// - **Both keys present.** When one object carries both `arguments` and
-///   `parameters`, Python prefers `arguments`; this parser accepts the first
-///   key encountered and rejects the trailing one as a syntax error.
-/// - **Empty array.** `functools[]` with no tool-call objects errors here,
-///   because the shared core requires an object after the start marker. Python
-///   instead reports `tools_called=true` with no calls — a case its own parity
-///   test (`tests/tool_parsers/test_phi4mini_tool_parser.py`) marks `xfail` as
-///   a known bug.
 pub struct Phi4MiniJsonToolParser {
     inner: JsonToolCallParser,
 }
@@ -200,11 +152,8 @@ mod tests {
         .assert_debug_eq(&result);
     }
 
-    /// Python's `functools\[(.*?)\]` regex stops at the FIRST `]`, so an
-    /// array-valued argument such as `{"items":[1,2]}` makes the Python parser
-    /// raise `JSONDecodeError` and emit no tool call. The shared JSON core
-    /// scans matched braces, so this port forwards array-valued arguments
-    /// intact.
+    /// The shared JSON core scans matched braces, so bracket-bearing argument
+    /// values are forwarded intact.
     #[test]
     fn phi4mini_array_valued_arguments_are_not_truncated() {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
@@ -217,10 +166,8 @@ mod tests {
         assert_eq!(result.calls[0].arguments, arguments);
     }
 
-    /// Divergence from Python: the Python parser sets `content=None` when a
-    /// tool call is found, discarding any preface text. This port preserves
-    /// preface text as normal_text, consistent with the other JSON parsers in
-    /// this crate.
+    /// Preface text before a tool call is preserved as normal_text, consistent
+    /// with the other JSON parsers in this crate.
     #[test]
     fn phi4mini_preserves_text_before_tool_call() {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
@@ -266,9 +213,7 @@ mod tests {
         assert_eq!(result.calls[0].arguments, r#"{"location": "Tokyo"}"#);
     }
 
-    /// Python returns `None` from `extract_tool_calls_streaming` (no streaming
-    /// support). This port streams argument deltas through the shared JSON
-    /// core — an intentional capability improvement over the Python reference.
+    /// Argument deltas are streamed through the shared JSON core.
     #[test]
     fn phi4mini_streaming_emits_argument_deltas() {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
@@ -332,10 +277,7 @@ mod tests {
         assert!(!parser.preserve_special_tokens());
     }
 
-    /// Python's regex parser `xfail`s nested arrays/objects in arguments
-    /// (`tests/tool_parsers/test_phi4mini_tool_parser.py` flags
-    /// `test_various_data_types` as a known nesting bug). The brace-scanning
-    /// core handles them, so this port parses what the Python parser cannot.
+    /// The brace-scanning core handles nested arrays and objects in arguments.
     #[test]
     fn phi4mini_parses_nested_arrays_and_objects() {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
@@ -370,10 +312,7 @@ mod tests {
         assert_eq!(result.calls[1].name.as_deref(), Some("add"));
     }
 
-    /// Divergence from Python: an empty `functools[]` array errors here (the
-    /// shared core requires an object after the start marker), whereas Python
-    /// reports `tools_called=true` with no calls — a case its own parity test
-    /// flags as a known bug. See the struct-level docs.
+    /// The shared core requires an object after the start marker.
     #[test]
     fn phi4mini_empty_array_errors() {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
