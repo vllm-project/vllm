@@ -161,7 +161,10 @@ async fn collect_chat_completion(
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let saw_tool_calls = message.tool_calls().next().is_some();
     let reasoning = message.reasoning();
-    let suppress_output_metadata = !include_reasoning && reasoning.is_some();
+    // Output logprobs and token IDs cover the complete generated token stream.
+    // When reasoning is hidden, omit them rather than leaking hidden reasoning
+    // tokens through per-token metadata.
+    let include_output_metadata = include_reasoning || reasoning.is_none();
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?.to_string();
     let tool_calls = message
         .tool_calls()
@@ -174,7 +177,7 @@ async fn collect_chat_completion(
             },
         })
         .collect::<Vec<_>>();
-    let logprobs = if requested_logprobs && !suppress_output_metadata {
+    let logprobs = if requested_logprobs && include_output_metadata {
         Some(decoded_logprobs_to_openai_chat(
             logprobs.as_ref().ok_or_else(|| {
                 server_error!("chat response requested logprobs but generation returned none")
@@ -217,7 +220,7 @@ async fn collect_chat_completion(
             logprobs,
             finish_reason: Some(finish_reason),
             stop_reason,
-            token_ids: (return_token_ids && !suppress_output_metadata).then_some(token_ids),
+            token_ids: (return_token_ids && include_output_metadata).then_some(token_ids),
         }],
         usage: Some(usage),
         system_fingerprint: None,
@@ -244,6 +247,11 @@ async fn chat_completion_chunk_stream(
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
+    // `LogprobsDelta` is emitted after all chat events for one decoded update.
+    // If that update contains hidden reasoning, including delimiter-only block
+    // starts or ends, omit its token metadata as well as its visible delta.
+    let mut inside_hidden_reasoning = false;
+    let mut suppress_current_update_metadata = false;
 
     // If the client requested logprobs or token_ids, we need to buffer chunks until
     // we receive the separate `LogprobsDelta` event, so that we can emit one
@@ -274,29 +282,44 @@ async fn chat_completion_chunk_stream(
                 }
             }
             Ok(ChatEvent::BlockDelta { kind, delta, .. }) => {
-                if let Some(pending_chunk) = pending_chunk.as_mut() {
-                    pending_chunk.push_block_delta(kind, delta, include_reasoning);
-                } else if include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning) {
-                    y.yield_ok(block_delta_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        kind,
-                        delta,
-                    ))
-                    .await;
+                let include_delta =
+                    include_reasoning || !matches!(kind, AssistantBlockKind::Reasoning);
+                if include_delta {
+                    if let Some(pending_chunk) = pending_chunk.as_mut() {
+                        pending_chunk.push_block_delta(kind, delta);
+                    } else {
+                        y.yield_ok(block_delta_chunk(
+                            &request_id,
+                            &response_model,
+                            created,
+                            kind,
+                            delta,
+                        ))
+                        .await;
+                    }
+                } else {
+                    suppress_current_update_metadata = true;
                 }
             }
             Ok(ChatEvent::LogprobsDelta {
                 logprobs,
                 token_ids,
             }) => {
-                let openai_logprobs = logprobs
-                    .as_ref()
-                    .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
-                    .transpose()?;
-                let openai_token_ids =
-                    return_token_ids.then_some(token_ids).filter(|t| !t.is_empty());
+                let include_metadata =
+                    !suppress_current_update_metadata && !inside_hidden_reasoning;
+                suppress_current_update_metadata = false;
+                let openai_logprobs = if include_metadata {
+                    logprobs
+                        .as_ref()
+                        .map(|lp| decoded_logprobs_to_openai_chat(lp, return_tokens_as_token_ids))
+                        .transpose()?
+                } else {
+                    None
+                };
+                let openai_token_ids = include_metadata
+                    .then_some(token_ids)
+                    .and_then(|token_ids| return_token_ids.then_some(token_ids))
+                    .filter(|t| !t.is_empty());
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
@@ -317,9 +340,17 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
                 debug!(?kind, "starting new block");
+                if !include_reasoning && matches!(kind, AssistantBlockKind::Reasoning) {
+                    inside_hidden_reasoning = true;
+                    suppress_current_update_metadata = true;
+                }
             }
             Ok(ChatEvent::BlockEnd { .. }) => {
                 debug!("ending current block");
+                if inside_hidden_reasoning {
+                    inside_hidden_reasoning = false;
+                    suppress_current_update_metadata = true;
+                }
             }
             Ok(ChatEvent::ToolCallStart { index, id, name }) => {
                 let tool_index = index as u32;
@@ -457,28 +488,15 @@ struct PendingChatChunk {
     logprobs: Option<ChatLogProbs>,
     /// Per-update output token IDs for the same decoded update.
     token_ids: Option<Vec<u32>>,
-    /// Whether this decoded update included reasoning that was intentionally
-    /// suppressed from the OpenAI response.
-    suppressed_reasoning: bool,
 }
 
 impl PendingChatChunk {
     /// Append one assistant text/reasoning block delta to the buffered OpenAI
     /// delta payload.
-    fn push_block_delta(
-        &mut self,
-        kind: AssistantBlockKind,
-        delta: String,
-        include_reasoning: bool,
-    ) {
+    fn push_block_delta(&mut self, kind: AssistantBlockKind, delta: String) {
         match kind {
             AssistantBlockKind::Text => append_delta_text(&mut self.delta.content, delta),
-            AssistantBlockKind::Reasoning if include_reasoning => {
-                append_delta_text(&mut self.delta.reasoning, delta);
-            }
-            AssistantBlockKind::Reasoning => {
-                self.suppressed_reasoning = true;
-            }
+            AssistantBlockKind::Reasoning => append_delta_text(&mut self.delta.reasoning, delta),
             AssistantBlockKind::ToolCall => {
                 unreachable!("tool calls must flow through dedicated tool-call chunks")
             }
@@ -531,14 +549,8 @@ impl PendingChatChunk {
         let has_delta = self.delta.content.is_some()
             || self.delta.reasoning.is_some()
             || self.delta.tool_calls.is_some();
-        let suppressed_reasoning = std::mem::take(&mut self.suppressed_reasoning);
         let logprobs = self.logprobs.take();
         let token_ids = self.token_ids.take();
-        let (logprobs, token_ids) = if suppressed_reasoning {
-            (None, None)
-        } else {
-            (logprobs, token_ids)
-        };
         if !has_delta && logprobs.is_none() && token_ids.is_none() {
             return None;
         }
@@ -788,7 +800,9 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
 mod tests {
     use futures::{StreamExt as _, stream};
     use serde_json::json;
-    use vllm_chat::{AssistantBlockKind, AssistantToolCall, ChatEvent, FinishReason};
+    use vllm_chat::{
+        AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
+    };
     use vllm_engine_core_client::protocol::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
@@ -1147,6 +1161,144 @@ mod tests {
                         .as_ref()
                         .and_then(|logprobs| logprobs.content.as_ref())
                         .is_none_or(|content| content.iter().all(|entry| entry.token != "think"))
+            })
+        }));
+    }
+
+    #[tokio::test]
+    async fn chunk_stream_omits_logprobs_for_hidden_reasoning_delimiters() {
+        let stream = stream::iter(vec![
+            Ok(ChatEvent::Start {
+                prompt_token_ids: vec![].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(ChatEvent::BlockStart {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 11,
+                            token: "<think>".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![11],
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 0,
+                kind: AssistantBlockKind::Reasoning,
+                delta: "think".to_string(),
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 12,
+                            token: "think".to_string(),
+                            logprob: -0.2,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![12],
+            }),
+            Ok(ChatEvent::BlockEnd {
+                index: 0,
+                block: AssistantContentBlock::Reasoning {
+                    text: "think".to_string(),
+                },
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 13,
+                            token: "</think>".to_string(),
+                            logprob: -0.3,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![13],
+            }),
+            Ok(ChatEvent::BlockStart {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+            }),
+            Ok(ChatEvent::BlockDelta {
+                index: 1,
+                kind: AssistantBlockKind::Text,
+                delta: "answer".to_string(),
+            }),
+            Ok(ChatEvent::LogprobsDelta {
+                logprobs: Some(DecodedLogprobs {
+                    positions: vec![DecodedPositionLogprobs {
+                        entries: vec![DecodedTokenLogprob {
+                            token_id: 22,
+                            token: "answer".to_string(),
+                            logprob: -0.4,
+                            rank: 1,
+                        }],
+                    }],
+                }),
+                token_ids: vec![22],
+            }),
+            Ok(ChatEvent::Done {
+                message: Default::default(),
+                prompt_token_count: 1,
+                output_token_count: 4,
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let chunks = chat_completion_chunk_stream(
+            stream,
+            "chatcmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            false,
+            false,
+            true,
+            false,
+            None,
+            true,
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("stream chunks");
+
+        assert_eq!(chunks.len(), 3);
+        let choice = &chunks[1].choices[0];
+        assert_eq!(choice.delta.content.as_deref(), Some("answer"));
+        assert_eq!(choice.token_ids.as_deref(), Some(&[22][..]));
+        let logprobs = choice.logprobs.as_ref().expect("answer logprobs");
+        let content = logprobs.content.as_ref().expect("logprobs content");
+        assert_eq!(content[0].token, "answer");
+        assert!(chunks.iter().all(|chunk| {
+            chunk.choices.iter().all(|choice| {
+                choice.delta.reasoning.is_none()
+                    && !choice
+                        .token_ids
+                        .as_ref()
+                        .is_some_and(|ids| matches!(ids.as_slice(), [11] | [12] | [13]))
+                    && choice
+                        .logprobs
+                        .as_ref()
+                        .and_then(|logprobs| logprobs.content.as_ref())
+                        .is_none_or(|content| {
+                            content.iter().all(|entry| {
+                                !matches!(entry.token.as_str(), "<think>" | "think" | "</think>")
+                            })
+                        })
             })
         }));
     }
