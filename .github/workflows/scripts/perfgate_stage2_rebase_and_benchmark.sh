@@ -26,9 +26,26 @@ read_env_value() {
   local name=$1
   local env_file=$2
   awk -v key="$name" '
+    $0 == key {
+      # Defensive no-op for malformed entries.
+      next
+    }
     index($0, key "=") == 1 {
       print substr($0, length(key) + 2)
       found = 1
+      exit
+    }
+    index($0, key "<<") == 1 {
+      delimiter = substr($0, length(key) + 3)
+      value = ""
+      while ((getline line) > 0) {
+        if (line == delimiter) {
+          print value
+          found = 1
+          exit
+        }
+        value = value (value == "" ? "" : "\n") line
+      }
     }
     END { exit found ? 0 : 1 }
   ' "$env_file"

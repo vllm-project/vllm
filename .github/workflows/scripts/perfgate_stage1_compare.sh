@@ -8,6 +8,17 @@ MODE=${PERFGATE_MODE:-report}
 REPORT_FILE=${PERFGATE_REPORT_FILE:-$RESULT_ROOT/perfgate_report.md}
 STAGE1_CURRENT=${PERFGATE_STAGE1_CURRENT_FILE:-$RESULT_ROOT/submissions/$RUN_ID/run_leaderboard.json}
 
+write_env() {
+  local name=$1
+  local value=$2
+  local delimiter="EOF_${name}_$$_${RANDOM}"
+  {
+    echo "${name}<<${delimiter}"
+    printf '%s\n' "$value"
+    echo "$delimiter"
+  } >> "$GITHUB_ENV"
+}
+
 read_expected_spec_id() {
   if [[ -n "${PERFGATE_EXPECTED_SPEC_ID:-}" ]]; then
     printf '%s\n' "$PERFGATE_EXPECTED_SPEC_ID"
@@ -36,11 +47,9 @@ if [[ "${PERFGATE_BASELINE_AVAILABLE:-1}" != "1" || -z "${PERFGATE_BASELINE_FILE
     echo
     echo "Stage 1 baseline is unavailable: $reason"
   } > "$REPORT_FILE"
-  {
-    echo "PERFGATE_STAGE1_RESULT=unknown"
-    echo "PERFGATE_REPORT_FILE=$REPORT_FILE"
-    echo "PERFGATE_STAGE2_NOT_RUN_REASON=Stage 1 baseline is unavailable; Stage 2 was not run"
-  } >> "$GITHUB_ENV"
+  write_env PERFGATE_STAGE1_RESULT unknown
+  write_env PERFGATE_REPORT_FILE "$REPORT_FILE"
+  write_env PERFGATE_STAGE2_NOT_RUN_REASON "Stage 1 baseline is unavailable; Stage 2 was not run"
   echo "Stage 1 performance gate skipped: $reason"
   exit 0
 fi
@@ -48,7 +57,6 @@ fi
 set +e
 expected_spec_id=$(read_expected_spec_id)
 args=(
-  compare
   --current "$STAGE1_CURRENT"
   --baseline "$PERFGATE_BASELINE_FILE"
   --fork-point "${FORK_POINT:-}"
@@ -59,7 +67,7 @@ if [[ -n "$expected_spec_id" ]]; then
   args+=(--expected-spec-id "$expected_spec_id")
 fi
 "${PYTHON_BIN:-python}" -m vllm_hust_benchmark.perfgate compare \
-  "${args[@]:1}"
+  "${args[@]}"
 rc=$?
 set -e
 
@@ -70,10 +78,8 @@ elif grep -q '\*\*Overall: FAIL\*\*' "$REPORT_FILE" 2>/dev/null; then
 else
   result=unknown
 fi
-{
-  echo "PERFGATE_STAGE1_RESULT=$result"
-  echo "PERFGATE_REPORT_FILE=$REPORT_FILE"
-} >> "$GITHUB_ENV"
+write_env PERFGATE_STAGE1_RESULT "$result"
+write_env PERFGATE_REPORT_FILE "$REPORT_FILE"
 
 if [[ "$rc" -ne 0 ]]; then
   echo "Stage 1 performance gate result: $result (exit $rc); final perfgate comparison/report step will decide job status."

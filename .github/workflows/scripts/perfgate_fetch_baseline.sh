@@ -8,17 +8,25 @@ ALLOW_BASELINE_FALLBACK=${PERFGATE_ALLOW_BASELINE_FALLBACK:-0}
 MODE=${PERFGATE_MODE:-report}
 GITHUB_ENV=${GITHUB_ENV:-/dev/null}
 
+write_env() {
+  local name=$1
+  local value=$2
+  local delimiter="EOF_${name}_$$_${RANDOM}"
+  {
+    echo "${name}<<${delimiter}"
+    printf '%s\n' "$value"
+    echo "$delimiter"
+  } >> "$GITHUB_ENV"
+}
+
 baseline_unavailable() {
   local reason=$1
-  local env_reason=${reason//[^A-Za-z0-9._:-]/_}
   echo "$reason" >&2
   if [[ "$MODE" == "report" ]]; then
-    {
-      echo "PERFGATE_BASELINE_AVAILABLE=0"
-      echo "PERFGATE_BASELINE_COMMIT=$COMMIT"
-      echo "PERFGATE_BASELINE_SOURCE=unavailable"
-      echo "PERFGATE_BASELINE_UNAVAILABLE_REASON=$env_reason"
-    } >> "$GITHUB_ENV"
+    write_env PERFGATE_BASELINE_AVAILABLE 0
+    write_env PERFGATE_BASELINE_COMMIT "$COMMIT"
+    write_env PERFGATE_BASELINE_SOURCE unavailable
+    write_env PERFGATE_BASELINE_UNAVAILABLE_REASON "$reason"
     echo "Perfgate baseline unavailable in report mode; continuing without baseline."
     exit 0
   fi
@@ -56,11 +64,9 @@ fi
 
 resolved_file="$OUTPUT_DIR/baseline-${COMMIT:0:8}.json"
 cp "$baseline_file" "$resolved_file"
-{
-  echo "PERFGATE_BASELINE_FILE=$resolved_file"
-  echo "PERFGATE_BASELINE_AVAILABLE=1"
-  echo "PERFGATE_BASELINE_COMMIT=$baseline_commit"
-  echo "PERFGATE_BASELINE_SOURCE=$baseline_source"
-} >> "$GITHUB_ENV"
+write_env PERFGATE_BASELINE_FILE "$resolved_file"
+write_env PERFGATE_BASELINE_AVAILABLE 1
+write_env PERFGATE_BASELINE_COMMIT "$baseline_commit"
+write_env PERFGATE_BASELINE_SOURCE "$baseline_source"
 
 echo "Fetched perfgate baseline: $baseline_commit ($baseline_source) -> $resolved_file"
