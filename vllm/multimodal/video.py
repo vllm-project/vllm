@@ -437,47 +437,67 @@ class PyAVVideoBackendMixin:
             total_frames = int(duration * fps)
         return VideoSourceMetadata(total_frames, fps, duration)
 
-    @staticmethod
+    @classmethod
+    def _demux_keyframes(
+        cls,
+        container: "av.container.InputContainer",
+        fps: float,
+    ) -> list[int]:
+        """Demux the video stream to locate keyframe positions."""
+        stream = container.streams.video[0]
+        time_base = float(stream.time_base)
+        keyframes: list[int] = []
+        for packet in container.demux(stream):
+            if packet.is_keyframe and packet.pts is not None:
+                keyframes.append(round(packet.pts * time_base * fps))
+        return keyframes
+
+    @classmethod
     def decode_frames(
+        cls,
         container: "av.container.InputContainer",
         frame_indices: list[int],
         fps: float,
         duration: float,
     ) -> tuple[npt.NDArray, list[int]]:
-        """Decode target frames via per-frame seek + forward decode to PTS."""
-        stream = container.streams.video[0]
-        # SLICE parallelizes within a single frame without the
-        # one-frame-per-thread latency penalty of FRAME threading.
-        stream.thread_type = "SLICE"
-        time_base = stream.time_base
+        """Decode target frames via demux-guided seek + per-segment decode."""
+        from bisect import bisect_right
 
+        stream = container.streams.video[0]
+        stream.thread_type = "FRAME"
+        stream.thread_count = 0
+        time_base = float(stream.time_base)
+
+        # Phase 1: demux to find keyframe positions
+        keyframe_indices = cls._demux_keyframes(container, fps)
+
+        # Phase 2: group targets by preceding keyframe
+        sorted_indices = sorted(frame_indices)
+        groups: dict[int, list[int]] = {}
+        for target in sorted_indices:
+            ki = bisect_right(keyframe_indices, target) - 1
+            kf = keyframe_indices[max(ki, 0)]
+            groups.setdefault(kf, []).append(target)
+
+        # Decode each group
         frames_list: list[npt.NDArray] = []
         valid_indices: list[int] = []
-        frame_interval = 1.0 / fps if fps > 0 else 0.1
-        max_ts = max(0.0, duration - frame_interval) if duration > 0 else float("inf")
 
-        decoder = None
-        last_pts = None
-        for idx in frame_indices:
-            ts = min(idx / fps, max_ts) if fps > 0 else 0.0
-            pts = int(ts / time_base)
-            # seek() snaps backward to a keyframe; reuse the running decoder
-            # while targets advance monotonically to avoid re-decoding the
-            # GOP prefix once per requested frame.
-            if decoder is None or last_pts is None or pts <= last_pts:
-                container.seek(pts, stream=stream)
-                decoder = container.decode(video=0)
-            chosen = None
-            for frame in decoder:
-                if frame.pts is not None and frame.pts >= pts:
-                    chosen = frame
-                    last_pts = frame.pts
+        for kf in sorted(groups):
+            targets = groups[kf]
+            seg_max = targets[-1]
+            kf_pts = int(kf / fps / time_base)
+            container.seek(kf_pts, stream=stream)
+
+            for frame in container.decode(stream):
+                if frame.pts is None:
+                    continue
+                actual_idx = round(frame.pts * time_base * fps)
+                if actual_idx in targets:
+                    frames_list.append(frame.to_ndarray(format="rgb24"))
+                    valid_indices.append(actual_idx)
+                if actual_idx >= seg_max:
                     break
-            if chosen is not None:
-                frames_list.append(chosen.to_ndarray(format="rgb24"))
-                valid_indices.append(idx)
-            else:
-                decoder = None
 
         if not frames_list:
             return np.empty((0,), dtype=np.uint8), valid_indices
