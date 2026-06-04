@@ -13,12 +13,17 @@ import torch
 
 from tests.kernels.attention.test_triton_unified_attention import ref_paged_attn
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_mi3xx
 from vllm.utils.torch_utils import set_random_seed
+
+_SKIP_NON_MI3XX = True
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_mi3xx
+
+    _SKIP_NON_MI3XX = not on_mi3xx()
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests"),
-    pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only"),
+    pytest.mark.skipif(_SKIP_NON_MI3XX, reason="MI300/MI350 ROCm only"),
 ]
 
 NUM_Q_HEADS = 8
