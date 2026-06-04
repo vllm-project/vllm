@@ -616,7 +616,14 @@ class DeepseekV4MoE(nn.Module):
         self.tp_rank = get_tensor_model_parallel_rank()
         assert config.n_routed_experts % self.tp_size == 0
 
+        self.n_routed_experts = config.n_routed_experts
+        self.n_shared_experts = config.n_shared_experts or 0
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_routed_experts
+        self.n_redundant_experts = 0
+
         self.n_local_experts = config.n_routed_experts // self.tp_size
+        self.n_local_physical_experts = self.n_local_experts
         self.experts_start_idx = self.tp_rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
 
@@ -797,7 +804,6 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
 
         self.rope_parameters = config.rope_scaling
 
