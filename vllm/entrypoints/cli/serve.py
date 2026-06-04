@@ -5,8 +5,6 @@ import argparse
 import signal
 import time
 
-import uvloop
-
 import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
@@ -37,6 +35,8 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
+            import uvloop
+
             from vllm.entrypoints.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
@@ -129,6 +129,8 @@ class ServeSubcommand(CLISubcommand):
         elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
             run_multi_api_server(args)
         else:
+            import uvloop
+
             from vllm.entrypoints.openai.api_server import run_server
 
             # Single API server (this process).

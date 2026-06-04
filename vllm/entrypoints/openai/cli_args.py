@@ -16,11 +16,11 @@ from typing import Any, Literal
 import vllm.envs as envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.entrypoints.constants import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser

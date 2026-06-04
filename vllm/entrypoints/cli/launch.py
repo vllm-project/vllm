@@ -4,8 +4,6 @@
 import argparse
 import signal
 
-import uvloop
-
 from vllm.entrypoints.cli import (
     VLLM_SUBCMD_PARSER_EPILOG,
     is_cli_subcommand,
@@ -48,6 +46,8 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
+        import uvloop
+
         uvloop.run(run_launch_fastapi(args))
 
 
