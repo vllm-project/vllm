@@ -485,10 +485,10 @@ class NixlConnectorWorker:
             get_representative_spec_type(g.kv_cache_spec)
             for g in self.kv_cache_config.kv_cache_groups
         )
-        # Per-region MLA flag, 1:1 with block_len_per_layer. Populated by
-        # register_kv_caches; empty until then -> _region_class falls back to
-        # SPLIT for callers (and tests) that set block_len_per_layer without
-        # registering caches.
+
+        # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
+        # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
+        # combining both (e.g. GQA main + MLA Eagle-3 draft).
         self._region_is_mla = list[bool]()
 
         # Per-engine TP mappings. Generated during handshake.
@@ -891,10 +891,6 @@ class NixlConnectorWorker:
         # Enable different block lengths for different layers *only* when MLA is used.
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
-        # Per-region MLA flag, 1:1 with block_len_per_layer. True -> REPLICATE
-        # (MLA), False -> SPLIT (head-sharded full-attn). Mixed only for models
-        # combining both (e.g. GQA main + MLA Eagle-3 draft).
-        self._region_is_mla = list[bool]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
