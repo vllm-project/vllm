@@ -70,6 +70,19 @@ def _warmup_triton_nvfp4_attention(runner: "GPUModelRunner") -> None:
         profile_seq_lens=profile_seq_lens,
     )
 
+    # NVFP4 prefill can bypass the paged cache and use the Triton context
+    # attention kernel directly. Warm a modest pure-prefill shape as well so
+    # this kernel does not JIT on the first long prompt.
+    prefill_tokens = min(runner.max_num_tokens, runner.max_model_len, 1024)
+    if prefill_tokens > 1:
+        runner._dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=False,
+        )
+
 
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     factors = aot_compile_hash_factors(runner.vllm_config)

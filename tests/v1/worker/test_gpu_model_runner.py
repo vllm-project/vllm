@@ -340,7 +340,7 @@ def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
 
     _warmup_triton_nvfp4_attention(runner)
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     assert calls[0] == {
         "num_tokens": 1,
         "skip_eplb": True,
@@ -348,6 +348,13 @@ def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
         "force_attention": True,
         "uniform_decode": True,
         "profile_seq_lens": 1024,
+    }
+    assert calls[1] == {
+        "num_tokens": 1024,
+        "skip_eplb": True,
+        "is_profile": True,
+        "force_attention": True,
+        "uniform_decode": False,
     }
 
 
