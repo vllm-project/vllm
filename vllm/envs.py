@@ -177,7 +177,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
-    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = False
+    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = True
     VLLM_TRITON_MLA_SPARSE: bool | None = None
     VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: int = 512
     VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
@@ -1422,7 +1422,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
     ),
     "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL": lambda: bool(
-        int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "0"))
+        int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "1"))
     ),
     # Experimental sparse MLA fallback controls.
     # ``VLLM_TRITON_MLA_SPARSE`` unset means auto-select where FlashMLA sparse
