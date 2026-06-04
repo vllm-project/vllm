@@ -4,7 +4,7 @@
 import pytest
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
     sanitize_message,
     should_include_usage,
