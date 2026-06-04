@@ -8,8 +8,9 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionState,
+    AttentionStatePair,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
     CudaGraphManager,
     prepare_inputs_to_capture,
 )
@@ -18,19 +19,20 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class PrefillEagleCudaGraphManager(CudaGraphManager):
-    """Eagle CudaGraphManager for prefill, using pre-built attention states
+class PrefillSpeculatorCudaGraphManager(CudaGraphManager):
+    """CudaGraphManager for draft prefill, using pre-built attention states
     from the target model's capture."""
 
     def capture(
         self,
         forward_fn: Callable,
-        full_cg_attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
+            warmup: bool,
+        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -38,7 +40,8 @@ class PrefillEagleCudaGraphManager(CudaGraphManager):
                 if self.dp_size > 1
                 else None
             )
-            attn_state = full_cg_attn_states[desc]
+            attn_state_pair = attn_states[desc]
+            attn_state = attn_state_pair.warmup if warmup else attn_state_pair.captured
             attn_metadata, slot_mappings = attn_state
             fwd = lambda cg_mode: forward_fn(
                 num_reqs,
@@ -53,9 +56,8 @@ class PrefillEagleCudaGraphManager(CudaGraphManager):
         super().capture(create_forward_fn, progress_bar_desc)
 
 
-class DecodeEagleCudaGraphManager(CudaGraphManager):
-    """Eagle CudaGraphManager for decode draft generation, building its own
-    attention metadata from scratch."""
+class DecodeSpeculatorCudaGraphManager(CudaGraphManager):
+    """CudaGraphManager for draft decode, building its own attention metadata."""
 
     def capture(
         self,
@@ -69,7 +71,8 @@ class DecodeEagleCudaGraphManager(CudaGraphManager):
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
+            warmup: bool,
+        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
