@@ -301,25 +301,42 @@ void chunk_gated_delta_rule_kernel_impl(
       // attn = k_beta @ key.transpose(-1, -2)
       // attn: [B, HV, num_chunk, chunk_size, chunk_size]
       // transpose and pack for key
-      pack_vnni<scalar_t>(
-          /*    dst */ k_transpose,
-          /*    src */ curr_k_pad,
-          /*     N  */ chunk_size,
-          /*     K  */ qk_head_size,
-          /* ld_src */ qk_head_size,
-          /* ld_dst */ chunk_size);
-      // k_beta @ key.transpose(-1, -2)
-      at::native::cpublas::brgemm(
-          /*     M */ chunk_size,
-          /*     N */ chunk_size,
-          /*     K */ qk_head_size,
-          /*   lda */ qk_head_size,
-          /*   ldb */ chunk_size,
-          /*   ldc */ chunk_size,
-          /* add_C */ false,
-          /*     A */ curr_k_beta,
-          /*     B */ k_transpose,
-          /*     C */ curr_attn);
+      if constexpr (brgemm_supported()) {
+        pack_vnni<scalar_t>(
+            /*    dst */ k_transpose,
+            /*    src */ curr_k_pad,
+            /*     N  */ chunk_size,
+            /*     K  */ qk_head_size,
+            /* ld_src */ qk_head_size,
+            /* ld_dst */ chunk_size);
+        // k_beta @ key.transpose(-1, -2)
+        at::native::cpublas::brgemm(
+            /*     M */ chunk_size,
+            /*     N */ chunk_size,
+            /*     K */ qk_head_size,
+            /*   lda */ qk_head_size,
+            /*   ldb */ chunk_size,
+            /*   ldc */ chunk_size,
+            /* add_C */ false,
+            /*     A */ curr_k_beta,
+            /*     B */ k_transpose,
+            /*     C */ curr_attn);
+      } else {
+        blas_gemm(
+            at::native::TransposeType::Transpose,
+            at::native::TransposeType::NoTranspose,
+            chunk_size,
+            chunk_size,
+            qk_head_size,
+            1.0f,
+            curr_k_pad,
+            qk_head_size,
+            curr_k_beta,
+            qk_head_size,
+            0.0f,
+            curr_attn,
+            chunk_size);
+      }
       // attn = attn * decay_mask
       for (int64_t m = 0; m < chunk_size; m++) {
         at::vec::map2<float>(
@@ -413,25 +430,42 @@ void chunk_gated_delta_rule_kernel_impl(
       // k_beta_g = k_beta * g: [B, HV, num_chunk, chunk_size, EK]
       // k_cumdecay: [B, HV, num_chunk, chunk_size, EK]
       // pack for value
-      pack_vnni2<scalar_t>(
-          /*    dst */ v_pack,
-          /*    src */ curr_v_beta,
-          /*     N  */ chunk_size,
-          /*     K  */ v_head_size,
-          /* ld_src */ v_head_size,
-          /* ld_dst */ v_head_size);
-      // value = attn @ v_beta
-      at::native::cpublas::brgemm(
-          /*     M */ chunk_size,
-          /*     N */ v_head_size,
-          /*     K */ chunk_size,
-          /*   lda */ chunk_size,
-          /*   ldb */ v_head_size,
-          /*   ldc */ v_head_size,
-          /* add_C */ false,
-          /*     A */ curr_attn_reduced,
-          /*     B */ v_pack,
-          /*     C */ curr_value);
+      if constexpr (brgemm_supported()) {
+        pack_vnni2<scalar_t>(
+            /*    dst */ v_pack,
+            /*    src */ curr_v_beta,
+            /*     N  */ chunk_size,
+            /*     K  */ v_head_size,
+            /* ld_src */ v_head_size,
+            /* ld_dst */ v_head_size);
+        // value = attn @ v_beta
+        at::native::cpublas::brgemm(
+            /*     M */ chunk_size,
+            /*     N */ v_head_size,
+            /*     K */ chunk_size,
+            /*   lda */ chunk_size,
+            /*   ldb */ v_head_size,
+            /*   ldc */ v_head_size,
+            /* add_C */ false,
+            /*     A */ curr_attn_reduced,
+            /*     B */ v_pack,
+            /*     C */ curr_value);
+      } else {
+        blas_gemm(
+            at::native::TransposeType::NoTranspose,
+            at::native::TransposeType::NoTranspose,
+            v_head_size,
+            chunk_size,
+            chunk_size,
+            1.0f,
+            curr_v_beta,
+            v_head_size,
+            curr_attn_reduced,
+            chunk_size,
+            0.0f,
+            curr_value,
+            v_head_size);
+      }
       // k_beta_g = k_beta * g.exp().unsqueeze(-1)
       for (int64_t j = 0; j < chunk_size; j++) {
         int64_t i = 0;
@@ -445,25 +479,42 @@ void chunk_gated_delta_rule_kernel_impl(
         }
       }
       // pack for k_beta_g
-      pack_vnni2<scalar_t>(
-          /*    dst */ k_beta_g_pack,
-          /*    src */ k_beta_g,
-          /*     N  */ chunk_size,
-          /*     K  */ qk_head_size,
-          /* ld_src */ qk_head_size,
-          /* ld_dst */ qk_head_size);
-      // k_cumdecay = attn @ k_beta_g
-      at::native::cpublas::brgemm(
-          /*     M */ chunk_size,
-          /*     N */ qk_head_size,
-          /*     K */ chunk_size,
-          /*   lda */ chunk_size,
-          /*   ldb */ qk_head_size,
-          /*   ldc */ qk_head_size,
-          /* add_C */ false,
-          /*     A */ curr_attn_reduced,
-          /*     B */ k_beta_g_pack,
-          /*     C */ k_cumdecay);
+      if constexpr (brgemm_supported()) {
+        pack_vnni2<scalar_t>(
+            /*    dst */ k_beta_g_pack,
+            /*    src */ k_beta_g,
+            /*     N  */ chunk_size,
+            /*     K  */ qk_head_size,
+            /* ld_src */ qk_head_size,
+            /* ld_dst */ qk_head_size);
+        // k_cumdecay = attn @ k_beta_g
+        at::native::cpublas::brgemm(
+            /*     M */ chunk_size,
+            /*     N */ qk_head_size,
+            /*     K */ chunk_size,
+            /*   lda */ chunk_size,
+            /*   ldb */ qk_head_size,
+            /*   ldc */ qk_head_size,
+            /* add_C */ false,
+            /*     A */ curr_attn_reduced,
+            /*     B */ k_beta_g_pack,
+            /*     C */ k_cumdecay);
+      } else {
+        blas_gemm(
+            at::native::TransposeType::NoTranspose,
+            at::native::TransposeType::NoTranspose,
+            qk_head_size,
+            chunk_size,
+            chunk_size,
+            1.0f,
+            k_beta_g,
+            qk_head_size,
+            curr_attn_reduced,
+            chunk_size,
+            0.0f,
+            k_cumdecay,
+            qk_head_size);
+      }
       for (int i = 0; i < chunk_size; i++) {
         at::vec::map<scalar_t>(
             [](fVec x) { return x; },
@@ -551,25 +602,42 @@ void chunk_gated_delta_rule_kernel_impl(
 
         // attn_i = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
         // k_transpose_i = k_i.transpose(-1, -2)
-        pack_vnni<scalar_t>(
-            /*    dst */ k_transpose_i,
-            /*    src */ k_i,
-            /*     N  */ chunk_size,
-            /*     K  */ qk_head_size,
-            /* ld_src */ qk_head_size,
-            /* ld_dst */ chunk_size);
-        // attn_i = q_i @ k_transpose_i
-        at::native::cpublas::brgemm(
-            /* M */ chunk_size,
-            /* N */ chunk_size,
-            /* K */ qk_head_size,
-            /* lda */ qk_head_size,
-            /* ldb */ chunk_size,
-            /* ldc */ chunk_size,
-            /* add_C */ false,
-            /* A */ q_i,
-            /* B */ k_transpose_i,
-            /* C */ attn_i);
+        if constexpr (brgemm_supported()) {
+          pack_vnni<scalar_t>(
+              /*    dst */ k_transpose_i,
+              /*    src */ k_i,
+              /*     N  */ chunk_size,
+              /*     K  */ qk_head_size,
+              /* ld_src */ qk_head_size,
+              /* ld_dst */ chunk_size);
+          // attn_i = q_i @ k_transpose_i
+          at::native::cpublas::brgemm(
+              /* M */ chunk_size,
+              /* N */ chunk_size,
+              /* K */ qk_head_size,
+              /* lda */ qk_head_size,
+              /* ldb */ chunk_size,
+              /* ldc */ chunk_size,
+              /* add_C */ false,
+              /* A */ q_i,
+              /* B */ k_transpose_i,
+              /* C */ attn_i);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::Transpose,
+              at::native::TransposeType::NoTranspose,
+              chunk_size,
+              chunk_size,
+              qk_head_size,
+              1.0f,
+              k_i,
+              qk_head_size,
+              q_i,
+              qk_head_size,
+              0.0f,
+              attn_i,
+              chunk_size);
+        }
         // attn_i = attn_i * decay_mask_i
         for (int64_t m = 0; m < chunk_size; m++) {
           auto attn_i_m = attn_i + m * chunk_size;
@@ -609,28 +677,45 @@ void chunk_gated_delta_rule_kernel_impl(
         }
 
         // pack for curr_last_recurrent_state
-        pack_vnni2<scalar_t>(
-            /*    dst */ curr_last_recurrent_state_pack_reduced,
-            /*    src */ curr_last_recurrent_state_reduced,
-            /*     N  */ qk_head_size,
-            /*     K  */ v_head_size,
-            /* ld_src */ v_head_size,
-            /* ld_dst */ v_head_size);
+        if constexpr (brgemm_supported()) {
+          pack_vnni2<scalar_t>(
+              /*    dst */ curr_last_recurrent_state_pack_reduced,
+              /*    src */ curr_last_recurrent_state_reduced,
+              /*     N  */ qk_head_size,
+              /*     K  */ v_head_size,
+              /* ld_src */ v_head_size,
+              /* ld_dst */ v_head_size);
 
-        // v_prime = k_cumdecay_i @ curr_last_recurrent_state: [chunk_size, EV]
-        // k_cumdecay_i: [chunk_size, EK]
-        // curr_last_recurrent_state: [EK, EV]
-        at::native::cpublas::brgemm(
-            /*     M */ chunk_size,
-            /*     N */ v_head_size,
-            /*     K */ qk_head_size,
-            /*   lda */ qk_head_size,
-            /*   ldb */ v_head_size,
-            /*   ldc */ v_head_size,
-            /* add_C */ false,
-            /*     A */ k_cumdecay_i_reduced,
-            /*     B */ curr_last_recurrent_state_pack_reduced,
-            /*     C */ v_prime);
+          // v_prime = k_cumdecay_i @ curr_last_recurrent_state: [chunk_size, EV]
+          // k_cumdecay_i: [chunk_size, EK]
+          // curr_last_recurrent_state: [EK, EV]
+          at::native::cpublas::brgemm(
+              /*     M */ chunk_size,
+              /*     N */ v_head_size,
+              /*     K */ qk_head_size,
+              /*   lda */ qk_head_size,
+              /*   ldb */ v_head_size,
+              /*   ldc */ v_head_size,
+              /* add_C */ false,
+              /*     A */ k_cumdecay_i_reduced,
+              /*     B */ curr_last_recurrent_state_pack_reduced,
+              /*     C */ v_prime);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              v_head_size,
+              chunk_size,
+              qk_head_size,
+              1.0f,
+              curr_last_recurrent_state_reduced,
+              v_head_size,
+              k_cumdecay_i_reduced,
+              qk_head_size,
+              0.0f,
+              v_prime,
+              v_head_size);
+        }
 
         // v_new = v_prime = v_i - v_prime
         // v_i: [chunk_size, EV]
@@ -663,41 +748,75 @@ void chunk_gated_delta_rule_kernel_impl(
         }
         // attn_inter = qg @ curr_last_recurrent_state: [chunk_size, EV]
         // curr_last_recurrent_state: [EK, EV]
-        at::native::cpublas::brgemm(
-            /* M */ chunk_size,
-            /* N */ v_head_size,
-            /* K */ qk_head_size,
-            /* lda */ qk_head_size,
-            /* ldb */ v_head_size,
-            /* ldc */ v_head_size,
-            /* add_C */ false,
-            /* A */ qg,
-            /* B */ curr_last_recurrent_state_pack_reduced,
-            /* C */ attn_inter);
+        if constexpr (brgemm_supported()) {
+          at::native::cpublas::brgemm(
+              /* M */ chunk_size,
+              /* N */ v_head_size,
+              /* K */ qk_head_size,
+              /* lda */ qk_head_size,
+              /* ldb */ v_head_size,
+              /* ldc */ v_head_size,
+              /* add_C */ false,
+              /* A */ qg,
+              /* B */ curr_last_recurrent_state_pack_reduced,
+              /* C */ attn_inter);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              v_head_size,
+              chunk_size,
+              qk_head_size,
+              1.0f,
+              curr_last_recurrent_state_reduced,
+              v_head_size,
+              qg,
+              qk_head_size,
+              0.0f,
+              attn_inter,
+              v_head_size);
+        }
 
         // core_attn_out[:, :, i] = attn_inter + attn_i @ v_new
         // pack for v_prime
-        pack_vnni2<scalar_t>(
-            /*    dst */ v_prime_pack_reduced,
-            /*    src */ v_prime_reduced,
-            /*     N  */ chunk_size,
-            /*     K  */ v_head_size,
-            /* ld_src */ v_head_size,
-            /* ld_dst */ v_head_size);
-        // attn_inter = attn_inter + attn_i @ v_new: [chunk_size, EV]
-        // attn_i: [chunk_size, chunk_size]
-        // v_new: [chunk_size, EV]
-        at::native::cpublas::brgemm(
-            /* M */ chunk_size,
-            /* N */ v_head_size,
-            /* K */ chunk_size,
-            /* lda */ chunk_size,
-            /* ldb */ v_head_size,
-            /* ldc */ v_head_size,
-            /* add_C */ true,
-            /* A */ attn_i_reduced,
-            /* B */ v_prime_pack_reduced,
-            /* C */ attn_inter);
+        if constexpr (brgemm_supported()) {
+          pack_vnni2<scalar_t>(
+              /*    dst */ v_prime_pack_reduced,
+              /*    src */ v_prime_reduced,
+              /*     N  */ chunk_size,
+              /*     K  */ v_head_size,
+              /* ld_src */ v_head_size,
+              /* ld_dst */ v_head_size);
+          // attn_inter = attn_inter + attn_i @ v_new: [chunk_size, EV]
+          // attn_i: [chunk_size, chunk_size]
+          // v_new: [chunk_size, EV]
+          at::native::cpublas::brgemm(
+              /* M */ chunk_size,
+              /* N */ v_head_size,
+              /* K */ chunk_size,
+              /* lda */ chunk_size,
+              /* ldb */ v_head_size,
+              /* ldc */ v_head_size,
+              /* add_C */ true,
+              /* A */ attn_i_reduced,
+              /* B */ v_prime_pack_reduced,
+              /* C */ attn_inter);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              v_head_size,
+              chunk_size,
+              chunk_size,
+              1.0f,
+              v_prime_reduced,
+              v_head_size,
+              attn_i_reduced,
+              chunk_size,
+              1.0f,
+              attn_inter,
+              v_head_size);
+        }
 
         // core_attn_out[:, :, i] = attn_inter
         for (int64_t m = 0; m < chunk_size; m++) {
@@ -762,17 +881,34 @@ void chunk_gated_delta_rule_kernel_impl(
             /* ld_dst */ chunk_size);
         // kgv = kg.transpose(-1, -2) @ v_new
         // v_new: [chunk_size, EV]
-        at::native::cpublas::brgemm(
-            /* M */ qk_head_size,
-            /* N */ v_head_size,
-            /* K */ chunk_size,
-            /* lda */ chunk_size,
-            /* ldb */ v_head_size,
-            /* ldc */ v_head_size,
-            /* add_C */ false,
-            /* A */ kg_transpose,
-            /* B */ v_prime_pack_reduced,
-            /* C */ kgv);
+        if constexpr (brgemm_supported()) {
+          at::native::cpublas::brgemm(
+              /* M */ qk_head_size,
+              /* N */ v_head_size,
+              /* K */ chunk_size,
+              /* lda */ chunk_size,
+              /* ldb */ v_head_size,
+              /* ldc */ v_head_size,
+              /* add_C */ false,
+              /* A */ kg_transpose,
+              /* B */ v_prime_pack_reduced,
+              /* C */ kgv);
+        } else {
+          blas_gemm(
+              at::native::TransposeType::NoTranspose,
+              at::native::TransposeType::NoTranspose,
+              v_head_size,
+              qk_head_size,
+              chunk_size,
+              1.0f,
+              v_prime_reduced,
+              v_head_size,
+              kg_transpose,
+              chunk_size,
+              0.0f,
+              kgv,
+              v_head_size);
+        }
         // last_recurrent_state = 1) + 2)
         for (int64_t m = 0; m < qk_head_size; m++) {
           at::vec::map2<float>(
@@ -921,7 +1057,8 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
       float k_scale = use_qk_l2norm_in_kernel ? qk_scale_buf[k_scale_offset] : 1.0f;
       int64_t v_offset = si * v_strideS + bi * v_strideB + ni * v_strideH;
       int64_t o_offset = ((bi * seq_len + si) * v_num_heads + ni) * v_head_dim;
-      float beta_val = 1 / (1 + std::exp(-b_ptr[ni]));
+      // See: https://github.com/sgl-project/sglang/pull/26634
+      float beta_val = 1 / (1 + std::exp(-b_ptr[bi * v_num_heads + ni]));
       fVec beta_vec = fVec(beta_val);
       int64_t dvi = 0;
       for (; dvi <= v_head_dim - VecSize; dvi += VecSize) {

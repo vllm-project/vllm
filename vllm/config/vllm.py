@@ -66,7 +66,13 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "Qwen3ForCausalLM",
+    }
+)
 
 
 class OptimizationLevel(IntEnum):
@@ -488,6 +494,19 @@ class VllmConfig:
         return hash_str
 
     @property
+    def max_concurrent_batches(self) -> int:
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        # Async scheduling requires 2 concurrent batches to overlap.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        if self.scheduler_config.async_scheduling:
+            if self.use_v2_model_runner:
+                return pp_size + 1
+            # V1 Model Runner does not fully support async scheduling with PP.
+            if pp_size <= 1:
+                return 2
+        return pp_size
+
+    @property
     def num_speculative_tokens(self) -> int:
         if (
             self.speculative_config is not None
@@ -761,10 +780,6 @@ class VllmConfig:
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-        num_kv_ranks = (
-            self.parallel_config.tensor_parallel_size
-            * self.parallel_config.pipeline_parallel_size
-        )
 
         if kv_offloading_backend == "native":
             if envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
@@ -776,12 +791,12 @@ class VllmConfig:
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
-            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
-            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
-            self.kv_transfer_config.kv_connector_extra_config = {
-                "lmcache.local_cpu": True,
-                "lmcache.max_local_cpu_size": kv_gb_per_rank,
-            }
+            # Default to LMCache multi-process (MP) mode. The actual KV
+            # storage capacity is managed by the standalone LMCache server
+            # process, so ``kv_offloading_size`` is not propagated here.
+            # ``LMCacheMPConnector`` falls back to ``tcp://localhost:5555``
+            # when host/port are not provided via extra_config.
+            self.kv_transfer_config.kv_connector = "LMCacheMPConnector"
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
