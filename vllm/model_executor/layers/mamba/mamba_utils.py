@@ -121,8 +121,6 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, torch.dtype]:
-        # KDA fuses the q/k/v short convs into a single conv state (like GDN),
-        # so it has 2 states: one fused conv state + one recurrent state.
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype, torch.float32)
 
@@ -246,8 +244,6 @@ class MambaStateShapeCalculator:
         conv_kernel_size: int = 4,
         num_spec: int = 0,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
-        # KDA fuses the q/k/v short convs into a single conv (like GDN), so the
-        # conv state is one tensor over the concatenated q+k+v channels.
         if num_k_heads is None:
             num_k_heads = num_heads
         if head_k_dim is None:
@@ -362,6 +358,4 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def kda_state_copy_func(cls):
-        # KDA fuses q/k/v short convs into a single conv state (like GDN): one
-        # conv copy + one temporal copy.
         return (get_conv_copy_spec, get_temporal_copy_spec)

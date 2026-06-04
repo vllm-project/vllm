@@ -168,12 +168,6 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefix=f"{prefix}.b_proj",
         )
 
-        # q/k/v keep separate convs (compute is NOT fused), but their conv
-        # states are stored as a single contiguous cache tensor (see
-        # `kda_state_shape`); `_forward` slices that one tensor into q/k/v views.
-        self.q_dim = projection_size
-        self.k_dim = projection_size
-        self.v_dim = projection_size
         self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
             output_size=projection_size,
@@ -312,15 +306,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
 
-        # The q/k/v conv states share a single contiguous cache tensor; slice it
-        # into three channel views. The conv kernels honor tensor strides, so the
-        # in-place state updates write back to the correct sub-region. Compute is
-        # NOT fused: q/k/v still run as three separate depthwise convs.
-        local_q = divide(self.q_dim, self.tp_size)
-        local_k = divide(self.k_dim, self.tp_size)
-        conv_state_q = conv_state[..., :local_q, :]
-        conv_state_k = conv_state[..., local_q : local_q + local_k, :]
-        conv_state_v = conv_state[..., local_q + local_k :, :]
+        conv_state_q, conv_state_k, conv_state_v = conv_state.chunk(3, dim=-2)
 
         q_conv_weights = self.q_conv1d.weight.view(
             self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
