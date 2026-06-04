@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the disagg request/response protocol.
+"""Unit tests for the Tokens IN <> Tokens OUT request/response protocol.
 
 These tests intentionally avoid spinning up a server — they exercise the
 pydantic validators on ``GenerateRequest`` directly so they run fast and

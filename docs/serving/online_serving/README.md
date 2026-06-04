@@ -68,7 +68,14 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-## Disaggregated APIs
+## Scale Out APIs
+
+### Tokens IN <> Tokens OUT APIs
+
+Disaggregated Everything - Token In <> Token Out API Server
+
+- `/inference/v1/generate` - Generate completions
+- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
 
 ### Renderer APIs
 
@@ -78,6 +85,13 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
+
+### Elastic EP
+
+With Elastic EP, vLLM will be able to dynamically scale up or down based on workload fluctuations, with minimal interruption to serving.
+
+- `/scale_elastic_ep` - Trigger scaling operations
+- `/is_scaling_elastic_ep` - Check if scaling is in progress
 
 ## Custom APIs
 

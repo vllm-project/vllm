@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Roundtrip tests for multimodal serde used by the token_in_token_out generate endpoint."""
+"""Roundtrip tests for multimodal serde used by the Tokens IN <> Tokens OUT generate endpoint."""
 
 import torch
 
