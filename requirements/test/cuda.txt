@@ -182,7 +182,8 @@ encodec==0.1.1
     # via vocos
 et-xmlfile==2.0.0
     # via openpyxl
-evaluate==0.4.3
+evaluate==0.4.6
+    # cohere
     # via lm-eval
 fastapi==0.128.0
     # via
