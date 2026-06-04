@@ -79,6 +79,105 @@ def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
+# ---------------------------------------------------------------------------
+# TP transfer slice
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ShardRange:
+    """A contiguous [start, stop) range along any sharding dimension.
+
+    Carries global_size for safety assertions (prevents mixing ranges from
+    different dimension spaces).
+    """
+
+    start: int
+    stop: int
+    global_size: int
+
+    def __post_init__(self):
+        assert 0 <= self.start <= self.stop <= self.global_size, (
+            f"Invalid ShardRange [{self.start}:{self.stop}] "
+            f"for global_size={self.global_size}"
+        )
+
+    def __len__(self) -> int:
+        return self.stop - self.start
+
+    def offset_within(self, parent: ShardRange) -> int:
+        """Return self.start's position within parent's range.
+
+        Asserts both ranges share the same global_size and self is within parent.
+        """
+        assert self.global_size == parent.global_size, (
+            f"Dimension mismatch: {self.global_size} vs {parent.global_size}"
+        )
+        assert self.start >= parent.start and self.stop <= parent.stop, (
+            f"{self} is not within {parent}"
+        )
+        return self.start - parent.start
+
+    def intersect(self, other: ShardRange) -> ShardRange | None:
+        """Find overlap with another range. Returns None if disjoint."""
+        assert self.global_size == other.global_size, (
+            f"Dimension mismatch: {self.global_size} vs {other.global_size}"
+        )
+        lo = max(self.start, other.start)
+        hi = min(self.stop, other.stop)
+        if lo >= hi:
+            return None
+        return ShardRange(lo, hi, self.global_size)
+
+    def __repr__(self) -> str:
+        return f"[{self.start}:{self.stop}]/{self.global_size}"
+
+
+@dataclass(frozen=True)
+class TPTransferSlice:
+    """Describes what KV heads to read from one remote rank.
+
+    All ShardRanges are in global head coordinates (over total_num_kv_heads).
+    transfer_range is the intersection of remote_shard and local_shard.
+    """
+
+    remote_rank: int
+    remote_shard: ShardRange
+    local_shard: ShardRange
+    transfer_range: ShardRange
+
+    def __post_init__(self):
+        assert self.transfer_range.global_size == self.remote_shard.global_size, (
+            f"Dimension mismatch: transfer_range {self.transfer_range.global_size} "
+            f"vs remote_shard {self.remote_shard.global_size}"
+        )
+        assert (
+            self.transfer_range.start >= self.remote_shard.start
+            and self.transfer_range.stop <= self.remote_shard.stop
+        ), (
+            f"transfer_range {self.transfer_range} "
+            f"not within remote_shard {self.remote_shard}"
+        )
+
+    @property
+    def remote_read_offset(self) -> int:
+        """Element offset into remote rank's tensor to start reading."""
+        return self.transfer_range.offset_within(self.remote_shard)
+
+    @property
+    def local_write_offset(self) -> int:
+        """Element offset into local tensor to start writing."""
+        return self.transfer_range.offset_within(self.local_shard)
+
+    def __repr__(self) -> str:
+        return (
+            f"TPTransferSlice(rank={self.remote_rank}, "
+            f"transfer={self.transfer_range}, "
+            f"remote={self.remote_shard}, "
+            f"local={self.local_shard})"
+        )
+
+
 class KVCacheSpecKind(str, Enum):
     FULL_ATTENTION = "full_attention"
     MLA_ATTENTION = "mla_attention"
@@ -129,6 +228,23 @@ class KVCacheSpec:
         Create a new KVCacheSpec from self but replacing the block size.
         """
         return replace(self, block_size=block_size)
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+        total_num_kv_heads: int,
+    ) -> dict[int, TPTransferSlice]:
+        """Compute transfer slices for this local rank.
+
+        Returns a mapping from remote_rank -> TPTransferSlice describing
+        which remote ranks to read from and what sub-range to transfer.
+        Must be overridden by subclasses that participate in PD transfers.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement get_tp_transfer_slices"
+        )
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -198,6 +314,81 @@ class AttentionSpec(KVCacheSpec):
             * self.head_size
             * get_dtype_size(self.dtype)
         )
+
+    # ------------------------------------------------------------------
+    # TP transfer slice interface
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+        total_num_kv_heads: int,
+    ) -> dict[int, TPTransferSlice]:
+        """Compute transfer slices for this local rank.
+
+        Returns rank -> TPTransferSlice mapping. Logic mirrors the old
+        compute_tp_mapping attention-rank selection on main.
+        """
+
+        def _shard_for_rank(rank: int, tp_size: int) -> ShardRange:
+            s = rank * total_num_kv_heads // tp_size
+            e = (rank + 1) * total_num_kv_heads // tp_size
+            if s == e:
+                # Replicated: this rank holds same head as a neighbor.
+                # Express as size-1 shard for the head it actually holds.
+                return ShardRange(
+                    s, s + max(1, total_num_kv_heads // tp_size), total_num_kv_heads
+                )
+            return ShardRange(s, e, total_num_kv_heads)
+
+        local_shard = _shard_for_rank(local_tp_rank, local_tp_size)
+
+        if local_tp_size >= remote_tp_size:
+            # D_TP >= P_TP: read from one remote rank.
+            remote_rank = local_tp_rank * remote_tp_size // local_tp_size
+            remote_shard = _shard_for_rank(remote_rank, remote_tp_size)
+            transfer_range = remote_shard.intersect(local_shard)
+            assert transfer_range is not None, (
+                f"local_shard {local_shard} and remote_shard {remote_shard} "
+                f"are disjoint for rank {remote_rank}"
+            )
+            return {
+                remote_rank: TPTransferSlice(
+                    remote_rank=remote_rank,
+                    remote_shard=remote_shard,
+                    local_shard=local_shard,
+                    transfer_range=transfer_range,
+                )
+            }
+        else:
+            # P_TP > D_TP: read from multiple remotes with GQA dedup.
+            abs_tp = remote_tp_size // local_tp_size
+            start = local_tp_rank * abs_tp
+
+            result: dict[int, TPTransferSlice] = {}
+            seen_heads: set[int] = set()
+            for r in range(start, start + abs_tp):
+                head_start = r * total_num_kv_heads // remote_tp_size
+                if head_start in seen_heads:
+                    continue
+                seen_heads.add(head_start)
+
+                remote_shard = _shard_for_rank(r, remote_tp_size)
+                transfer_range = remote_shard.intersect(local_shard)
+                assert transfer_range is not None, (
+                    f"local_shard {local_shard} and remote_shard {remote_shard} "
+                    f"are disjoint for rank {r}"
+                )
+                result[r] = TPTransferSlice(
+                    remote_rank=r,
+                    remote_shard=remote_shard,
+                    local_shard=local_shard,
+                    transfer_range=transfer_range,
+                )
+
+            return result
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -361,6 +552,32 @@ class MLAAttentionSpec(FullAttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
+
+    # ------------------------------------------------------------------
+    # TP transfer slice interface (MLA: cache is always replicated)
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+        total_num_kv_heads: int,
+    ) -> dict[int, TPTransferSlice]:
+        """MLA cache is fully replicated -- read full block from one remote.
+
+        Load-balances by picking the aligned remote rank.
+        """
+        aligned_remote = local_tp_rank * remote_tp_size // local_tp_size
+        shard = ShardRange(0, 1, 1)
+        return {
+            aligned_remote: TPTransferSlice(
+                remote_rank=aligned_remote,
+                remote_shard=shard,
+                local_shard=shard,
+                transfer_range=shard,
+            )
+        }
 
     @property
     def storage_block_size(self) -> int:
@@ -541,6 +758,32 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
     def __post_init__(self):
         _apply_alignment_padding(self)
 
+    # ------------------------------------------------------------------
+    # TP transfer slice interface (MLA: cache is always replicated)
+    # ------------------------------------------------------------------
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+        total_num_kv_heads: int,
+    ) -> dict[int, TPTransferSlice]:
+        """MLA cache is fully replicated -- read full block from one remote.
+
+        Load-balances by picking the aligned remote rank.
+        """
+        aligned_remote = local_tp_rank * remote_tp_size // local_tp_size
+        shard = ShardRange(0, 1, 1)
+        return {
+            aligned_remote: TPTransferSlice(
+                remote_rank=aligned_remote,
+                remote_shard=shard,
+                local_shard=shard,
+                transfer_range=shard,
+            )
+        }
+
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
@@ -621,6 +864,45 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
+
+    def get_tp_transfer_slices(
+        self,
+        local_tp_rank: int,
+        local_tp_size: int,
+        remote_tp_size: int,
+        total_num_kv_heads: int,
+    ) -> dict[int, TPTransferSlice]:
+        """Mamba SSM state is TP-sharded but not along KV heads.
+
+        The actual byte-level sub-projection slicing (conv x/B/C + ssm)
+        is handled by _build_mamba_remote via MambaConvSplitInfo.
+        Here we only determine which remote ranks to read from.
+        Uses a placeholder ShardRange(0,1,1) since the real byte-level
+        decomposition is handled by MambaConvSplitInfo.
+        """
+        shard = ShardRange(0, 1, 1)
+        if local_tp_size >= remote_tp_size:
+            remote_rank = local_tp_rank * remote_tp_size // local_tp_size
+            return {
+                remote_rank: TPTransferSlice(
+                    remote_rank=remote_rank,
+                    remote_shard=shard,
+                    local_shard=shard,
+                    transfer_range=shard,
+                )
+            }
+        else:
+            abs_tp = remote_tp_size // local_tp_size
+            start = local_tp_rank * abs_tp
+            return {
+                r: TPTransferSlice(
+                    remote_rank=r,
+                    remote_shard=shard,
+                    local_shard=shard,
+                    transfer_range=shard,
+                )
+                for r in range(start, start + abs_tp)
+            }
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":

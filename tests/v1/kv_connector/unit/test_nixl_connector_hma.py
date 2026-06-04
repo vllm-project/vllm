@@ -141,9 +141,6 @@ def test_read_blocks_for_req_expands_remote_ids(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-        TPMapping,
-    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -172,7 +169,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     remote_engine_id = "remote-engine"
 
     worker.transfer_topo = MagicMock()
-    # tp_ratio not exercised (all_source_ranks is empty so no reads run),
+    # tp_ratio not exercised (remote_ranks is empty so no reads run),
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
@@ -180,10 +177,10 @@ def test_read_blocks_for_req_expands_remote_ids(
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
-    mock_plan = MagicMock(spec=TPMapping)
-    mock_plan.all_source_ranks = ()
-    mock_plan.source_ranks_per_group = ()
-    worker.tp_mappings = {remote_engine_id: mock_plan}
+    # Empty tp_mappings: no source ranks so no reads are issued.
+    num_groups = len(resolved_types)
+    worker.tp_mappings = {remote_engine_id: tuple({} for _ in range(num_groups))}
+    worker.remote_ranks = {remote_engine_id: ()}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -346,9 +343,6 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
         mamba_enabled=True,
     )
     worker._has_mamba = True
-    worker._group_spec_types = tuple(
-        type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
-    )
 
     local_block_ids = (local_fa_blocks, ssm_blocks)
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
