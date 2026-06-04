@@ -13,11 +13,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
-from vllm.entrypoints.serve.disagg.protocol import (
+from vllm.entrypoints.scale_out.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
 )
-from vllm.entrypoints.serve.disagg.serving import (
+from vllm.entrypoints.scale_out.disagg.serving import (
     ServingTokens,
 )
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization

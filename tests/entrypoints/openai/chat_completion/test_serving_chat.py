@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput

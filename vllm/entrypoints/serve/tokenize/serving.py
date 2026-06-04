@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,

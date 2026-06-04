@@ -9,7 +9,7 @@ fail loudly if the validator semantics ever drift.
 
 import json
 
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.sampling_params import SamplingParams
 
 

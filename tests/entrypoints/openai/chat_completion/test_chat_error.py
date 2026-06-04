@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config

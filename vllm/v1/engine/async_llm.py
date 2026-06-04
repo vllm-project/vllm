@@ -20,7 +20,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+from vllm.entrypoints.scale_out.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest

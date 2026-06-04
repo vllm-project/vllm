@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
+from vllm.entrypoints.scale_out.disagg import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     TokenizeChatRequest,

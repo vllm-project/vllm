@@ -46,7 +46,7 @@ from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 

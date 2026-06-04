@@ -47,7 +47,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 
 logger = logging.getLogger(__name__)
 
