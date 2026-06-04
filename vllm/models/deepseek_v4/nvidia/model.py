@@ -563,7 +563,7 @@ class DeepseekV4MoE(nn.Module):
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
-            self._init_fused_moe_experts(config, quant_config, prefix)
+            self._init_fused_moe_experts(vllm_config, config, quant_config, prefix)
 
     def _init_mega_moe_experts(
         self,
@@ -609,6 +609,7 @@ class DeepseekV4MoE(nn.Module):
 
     def _init_fused_moe_experts(
         self,
+        vllm_config: VllmConfig,
         config,
         quant_config,
         prefix: str,
@@ -644,6 +645,8 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
+            num_redundant_experts=vllm_config.parallel_config.eplb_config.num_redundant_experts,
         )
 
     def forward(
