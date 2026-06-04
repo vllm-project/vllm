@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
-from vllm.entrypoints.utils import log_non_default_args
+from vllm.entrypoints.serve.utils.api_utils import log_non_default_args
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
