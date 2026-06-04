@@ -346,34 +346,34 @@ def test_wer_correctness(
             torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
 
 
-# # 14-22mins of 6 audio samples of total ~115 mins and 37MB.
-# # checks for long audio transcription correctness and RMS split.
-# @pytest.mark.parametrize(
-#     "model_config",
-#     [("openai/whisper-large-v3", 9.5)],
-# )
-# def test_long_audio_wer_correctness(model_config):
-#     model_name, expected_wer = model_config
-#     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
-#     server_args = [
-#         f"--tokenizer_mode={model_info.tokenizer_mode}",
-#     ]
+# 14-22mins of 6 audio samples of total ~115 mins and 37MB.
+# checks for long audio transcription correctness and RMS split.
+@pytest.mark.parametrize(
+    "model_config",
+    [("openai/whisper-large-v3", 9.5)],
+)
+def test_long_audio_wer_correctness(model_config):
+    model_name, expected_wer = model_config
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
+    server_args = [
+        f"--tokenizer_mode={model_info.tokenizer_mode}",
+    ]
 
-#     if model_info.trust_remote_code:
-#         server_args.append("--trust-remote-code")
+    if model_info.trust_remote_code:
+        server_args.append("--trust-remote-code")
 
-#     with RemoteOpenAIServer(
-#         model_name,
-#         server_args,
-#     ) as remote_server:
-#         dataset = load_longform_dataset()
-#         client = remote_server.get_async_client()
-#         wer = run_longform_evaluation(
-#             model=model_name,
-#             client=client,
-#             dataset=dataset,
-#             max_concurrent_reqs=LONGFORM_NUM_SAMPLES,
-#         )
+    with RemoteOpenAIServer(
+        model_name,
+        server_args,
+    ) as remote_server:
+        dataset = load_longform_dataset()
+        client = remote_server.get_async_client()
+        wer = run_longform_evaluation(
+            model=model_name,
+            client=client,
+            dataset=dataset,
+            max_concurrent_reqs=LONGFORM_NUM_SAMPLES,
+        )
 
-#     print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
-#     torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
+    print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
+    torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
