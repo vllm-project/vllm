@@ -10,11 +10,13 @@ import torch
 
 from tests.kernels.moe.utils import make_test_quant_config
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
     get_dp_group,
+    get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -171,12 +173,20 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend="torch_nccl",
+            expert_weights=rank_expert_weights,
+            expert_buffer=expert_buffer,
+        )
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
+            communicator,
         )
 
         num_global_experts = test_config.num_experts

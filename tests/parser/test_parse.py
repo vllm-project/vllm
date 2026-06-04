@@ -6,7 +6,7 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.parser.abstract_parser import _WrappedParser
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -65,9 +65,11 @@ TOOLS = [
 
 
 def make_parser(tokenizer, reasoning=False, tool=False):
-    _WrappedParser.reasoning_parser_cls = ThinkReasoningParser if reasoning else None
-    _WrappedParser.tool_parser_cls = Hermes2ProToolParser if tool else None
-    return _WrappedParser(tokenizer)
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = ThinkReasoningParser if reasoning else None
+        tool_parser_cls = Hermes2ProToolParser if tool else None
+
+    return TestParser(tokenizer)
 
 
 @pytest.mark.parametrize(
