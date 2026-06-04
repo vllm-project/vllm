@@ -696,6 +696,13 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+                    # num_new_tokens can be 0 for streaming requests rebuilt
+                    # via _update_request_as_session() where num_computed_tokens
+                    # has been clamped to num_prompt_tokens.
+                    # Skip the request gracefully rather than asserting.
+                    # See https://github.com/vllm-project/vllm/issues/42760
+                    if num_new_tokens <= 0:
+                        break
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -1054,6 +1061,15 @@ class Scheduler(SchedulerInterface):
         # Update block hashes for the new tokens.
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
+        # Clamp num_computed_tokens after session rebuild so
+        # num_new_tokens = num_tokens - num_computed_tokens > 0.
+        # After extending the prompt with kept output tokens and new
+        # streaming update tokens, num_computed_tokens can exceed
+        # num_prompt_tokens if spec decode tokens were counted.
+        # See https://github.com/vllm-project/vllm/issues/42760
+        session.num_computed_tokens = min(
+            session.num_computed_tokens, session.num_prompt_tokens
+        )
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
