@@ -577,6 +577,7 @@ class QuarkConfig(QuantizationConfig):
             # when 2D per-block scales are loaded into 0D per-tensor slots.
             try:
                 from vllm.model_executor.layers.fused_moe import FusedMoE
+
                 _is_fused_moe = isinstance(module, FusedMoE)
             except Exception:
                 _is_fused_moe = False
