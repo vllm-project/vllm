@@ -238,16 +238,15 @@ ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-ll
 On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so vLLM pulls the tested `zentorch` version for that release:
 
 ```bash
-export VLLM_VERSION=0.20.2
-pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
     --extra-index-url https://download.pytorch.org/whl/cpu
 ```
 
-vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with INFO-level logs and look for the platform-selection line:
+vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
 
 ```bash
-VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
-    2>&1 | grep "AMD Zen CPU detected with zentorch installed"
+vllm serve Qwen/Qwen3-0.6B 2>&1 | grep "AMD Zen CPU detected with zentorch installed"
 ```
 
 For per-backend dispatch details (which kernel each linear layer was bound to), re-run with `VLLM_LOGGING_LEVEL=DEBUG` and grep for `CPU unquantized GEMM dispatch`.
