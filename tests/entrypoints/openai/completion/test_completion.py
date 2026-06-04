@@ -59,7 +59,10 @@ async def test_single_completion(client: openai.AsyncOpenAI, model_name: str) ->
     assert len(choice.text) >= 5
     assert choice.finish_reason == "length"
     assert completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=6, total_tokens=11
+        completion_tokens=5,
+        prompt_tokens=6,
+        total_tokens=11,
+        prompt_tokens_details=openai.types.PromptTokensDetails(cached_tokens=0),
     )
 
     # test using token IDs
