@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from itertools import product as iprod
+from itertools import product
 from typing import Any
 
 import numpy as np
@@ -56,7 +56,6 @@ def raise_if_nan_logits(num_nans_in_logits: Mapping[str, int]) -> None:
 @triton.jit(do_not_specialize=["n_blocks"])
 def _zero_kv_blocks_kernel(
     seg_addrs_ptr,
-    seg_block_strides_ptr,
     seg_page_sizes_ptr,
     block_ids_ptr,
     n_blocks,
@@ -71,10 +70,10 @@ def _zero_kv_blocks_kernel(
     buffer.  For backends where K/V is outermost (block_dim=1) there are
     two segments per buffer (one for K, one for V).
 
-    Segments may have different block strides and page sizes (e.g. packed
-    KV views or models with multiple KV cache groups like MLA + DSA
-    indexer). Each segment's block stride determines where a logical block
-    begins, while its page size determines how many elements are cleared.
+    Segments may have different page sizes (e.g. models with multiple KV
+    cache groups like MLA + DSA indexer).  Each segment's page size is
+    read from seg_page_sizes_ptr; programs whose chunk_index falls beyond
+    their segment's page size early-exit.
 
     seg_addrs_ptr holds absolute byte addresses (int64) for each segment,
     allowing segments to live in different CUDA allocations.
@@ -89,7 +88,6 @@ def _zero_kv_blocks_kernel(
     remainder = pid % work_per_block
     seg_index = remainder // MAX_CHUNKS
     chunk_index = remainder % MAX_CHUNKS
-    block_stride_el = tl.load(seg_block_strides_ptr + seg_index)
     page_size_el = tl.load(seg_page_sizes_ptr + seg_index)
     if chunk_index >= page_size_el // BLOCK_SIZE:
         return
@@ -97,7 +95,7 @@ def _zero_kv_blocks_kernel(
     seg_addr = tl.load(seg_addrs_ptr + seg_index)
     ptr = tl.cast(seg_addr, tl.pointer_type(tl.int32))
     offset = (
-        block_id.to(tl.int64) * block_stride_el.to(tl.int64)
+        block_id.to(tl.int64) * page_size_el.to(tl.int64)
         + chunk_index.to(tl.int64) * BLOCK_SIZE
     )
     cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
@@ -128,21 +126,18 @@ class KVBlockZeroer:
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
-        Each virtual block is represented as an independent segment so its
-        physical block stride and zeroed page span remain independent.
+        Each segment's page_size_el accounts for this ratio so that
+        ``block_id * page_size_el`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
         """
         self.device = device
-        self._meta: (
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int] | None
-        ) = None
+        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
         seg_addrs: list[int] = []
-        seg_block_strides: list[int] = []
         seg_page_sizes: list[int] = []
 
         for group in attn_groups_iter:
@@ -152,15 +147,7 @@ class KVBlockZeroer:
             if group.kv_cache_group_id >= len(kernel_block_sizes):
                 continue
             kernel_bs = kernel_block_sizes[group.kv_cache_group_id]
-            assert spec.block_size % kernel_bs == 0
             ratio = spec.block_size // kernel_bs
-            block_dim = group.backend.get_kv_cache_block_dim(
-                kernel_bs,
-                spec.num_kv_heads,
-                spec.head_size,
-                cache_dtype_str=cache_dtype,
-            )
-
             for layer_name in group.layer_names:
                 if layer_name in runner_only_attn_layers:
                     continue
@@ -173,32 +160,13 @@ class KVBlockZeroer:
                 seen_ptrs.add(dp)
 
                 el = kv.element_size()
-                block_stride_bytes = kv.stride(block_dim) * el
-                assert block_stride_bytes % 4 == 0
-                assert kv.shape[block_dim] % ratio == 0
-                outer_dims = [
-                    d
-                    for d in range(block_dim)
-                    if kv.stride(d) * el > block_stride_bytes
-                ]
-                outer_strides = [kv.stride(d) * el for d in outer_dims]
-                inner_dims = [
-                    d for d in range(kv.ndim) if d != block_dim and d not in outer_dims
-                ]
-                kernel_page_bytes = el + sum(
-                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
-                )
-                assert kernel_page_bytes % 4 == 0
-                logical_block_stride_bytes = block_stride_bytes * ratio
-                for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
-                    off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    assert (dp + off_bytes) % 4 == 0
-                    for virtual_index in range(ratio):
-                        seg_addrs.append(
-                            dp + off_bytes + virtual_index * block_stride_bytes
-                        )
-                        seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                cur_bytes = kv.stride(0) * el
+                assert cur_bytes % 4 == 0
+                kernel_block_el = cur_bytes // 4
+                cur_page_el = kernel_block_el * ratio
+
+                seg_addrs.append(dp)
+                seg_page_sizes.append(cur_page_el)
 
         if not seg_addrs:
             self._meta = None
@@ -211,7 +179,6 @@ class KVBlockZeroer:
         )
         self._meta = (
             torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            torch.tensor(seg_block_strides, dtype=torch.int64, device=self.device),
             torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
             max_page_size_el // blk_size,
             blk_size,
@@ -222,20 +189,12 @@ class KVBlockZeroer:
         """Zero the KV cache memory for the given block IDs."""
         if not block_ids or self._meta is None:
             return
-        (
-            seg_addrs,
-            seg_block_strides,
-            seg_page_sizes,
-            max_chunks,
-            blk_size,
-            n_segs,
-        ) = self._meta
+        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
         idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
         grid = (n_blocks * n_segs * max_chunks,)
         _zero_kv_blocks_kernel[grid](
             seg_addrs,
-            seg_block_strides,
             seg_page_sizes,
             idx,
             n_blocks,
@@ -554,12 +513,116 @@ def bind_kv_cache(
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
 
-    # Bind kv_caches to forward context. Each layer's bind_kv_cache unpacks
-    # its raw allocation into the per-layer view(s) it needs (e.g. Mamba
-    # splits conv/ssm), so the kv_caches dict can hold a single tensor per
-    # layer for the KV connector to register.
+    # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
+
+
+def get_kv_cache_block_regions(
+    named_tensors: Iterable[tuple[str, torch.Tensor]],
+    num_blocks: int,
+) -> dict[str, torch.Tensor]:
+    """Return unique contiguous ``[num_blocks, block_bytes]`` byte views.
+
+    A standardized per-layer cache has logical block dimension 0, but that
+    dimension need not be physically outermost. Block-major layouts can pack
+    every layer into one storage block, while specialized layouts such as
+    ``separate_kv_head_groups`` place one or more head dimensions outside the
+    block dimension. Virtual block splitting can also make several physical
+    blocks correspond to one scheduler block.
+
+    Derive regions from the actual views rather than the configured global
+    layout so all of those cases use the same copy/offload representation.
+    """
+    if num_blocks <= 0:
+        raise ValueError("num_blocks must be positive")
+
+    storage_groups: dict[tuple[torch.device, int], list[tuple[str, torch.Tensor]]] = (
+        defaultdict(list)
+    )
+    for name, tensor in named_tensors:
+        if tensor.ndim == 0:
+            raise ValueError(f"KV cache tensor {name!r} must have a block dimension")
+        storage = tensor.untyped_storage()
+        storage_groups[(tensor.device, storage.data_ptr())].append((name, tensor))
+
+    regions: dict[str, torch.Tensor] = {}
+    seen_regions: set[tuple[torch.device, int, int, int]] = set()
+    for entries in storage_groups.values():
+        first_name, first_tensor = entries[0]
+        storage = first_tensor.untyped_storage()
+        storage_nbytes = storage.nbytes()
+        if storage_nbytes % num_blocks != 0:
+            raise ValueError(
+                f"KV cache storage for {first_name!r} has {storage_nbytes} bytes, "
+                f"which is not divisible by {num_blocks} blocks"
+            )
+        storage_block_bytes = storage_nbytes // num_blocks
+
+        tensor_block_bytes: dict[int, int] = {}
+        for _, tensor in entries:
+            physical_num_blocks = tensor.shape[0]
+            if physical_num_blocks % num_blocks != 0:
+                raise ValueError(
+                    f"KV cache has {physical_num_blocks} physical blocks, which is "
+                    f"not divisible by {num_blocks} scheduler blocks"
+                )
+            physical_per_logical = physical_num_blocks // num_blocks
+            tensor_block_bytes[id(tensor)] = (
+                tensor.stride(0) * tensor.element_size() * physical_per_logical
+            )
+
+        raw = torch.empty(0, dtype=torch.uint8, device=first_tensor.device).set_(
+            storage, 0, (storage_nbytes,)
+        )
+
+        # A block stride spanning the complete storage block means the storage
+        # itself is block-major (for example BLHNC/BHLNC). Copy it exactly once.
+        if any(
+            tensor_block_bytes[id(tensor)] == storage_block_bytes
+            for _, tensor in entries
+        ):
+            regions[first_name] = raw.view(num_blocks, storage_block_bytes)
+            continue
+
+        for name, tensor in entries:
+            block_bytes = tensor_block_bytes[id(tensor)]
+            element_size = tensor.element_size()
+            # Dimensions physically outside B form independent block sequences.
+            outer_dims = [
+                dim
+                for dim in range(1, tensor.ndim)
+                if tensor.shape[dim] > 1
+                and tensor.stride(dim) * element_size >= block_bytes
+            ]
+            outer_indices = (
+                product(*(range(tensor.shape[dim]) for dim in outer_dims))
+                if outer_dims
+                else [()]
+            )
+            segment_idx = 0
+            for indices in outer_indices:
+                offset = tensor.storage_offset() * element_size + sum(
+                    index * tensor.stride(dim) * element_size
+                    for dim, index in zip(outer_dims, indices)
+                )
+                region_key = (tensor.device, storage.data_ptr(), offset, block_bytes)
+                if region_key in seen_regions:
+                    continue
+                seen_regions.add(region_key)
+                end = offset + num_blocks * block_bytes
+                if end > storage_nbytes:
+                    raise ValueError(
+                        f"KV cache region for {name!r} exceeds its backing storage"
+                    )
+                region_name = name if segment_idx == 0 else f"{name}.{segment_idx}"
+                while region_name in regions:
+                    segment_idx += 1
+                    region_name = f"{name}.{segment_idx}"
+                regions[region_name] = raw[offset:end].view(num_blocks, block_bytes)
+                segment_idx += 1
+
+    return regions
 
 
 def copy_kv_cache_blocks_inplace(
@@ -570,34 +633,26 @@ def copy_kv_cache_blocks_inplace(
     if not kv_cache_block_copies:
         return
 
-    storage_tensors: list[torch.Tensor] = []
-    seen_storage: set[int] = set()
-    for entry in kv_caches:
+    named_tensors: list[tuple[str, torch.Tensor]] = []
+    for entry_idx, entry in enumerate(kv_caches):
         # Mamba layers hold a list of state tensors; attention layers a single
         # tensor. Both alias the shared block-major backing storage.
         tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
-        for tensor in tensors:
-            ptr = tensor.untyped_storage().data_ptr()
-            if ptr in seen_storage:
-                continue
-            seen_storage.add(ptr)
-            storage_tensors.append(tensor)
+        named_tensors.extend(
+            (f"cache.{entry_idx}.{tensor_idx}", tensor)
+            for tensor_idx, tensor in enumerate(tensors)
+        )
 
-    if not storage_tensors:
+    block_regions = get_kv_cache_block_regions(named_tensors, num_blocks)
+    if not block_regions:
         return
-    device = storage_tensors[0].device
+    device = next(iter(block_regions.values())).device
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
     indices = async_tensor_h2d(indices_np, device=device)
     src_indices, dst_indices = indices.unbind(dim=1)
 
-    for tensor in storage_tensors:
-        assert tensor.device == device
-        blocks = torch.empty(0, dtype=torch.uint8, device=device)
-        blocks.set_(tensor.untyped_storage())
-        # Block-major backing storage: block i owns the contiguous byte range
-        # [i * page_size, (i + 1) * page_size).
-        assert blocks.numel() % num_blocks == 0
-        blocks = blocks.view(num_blocks, -1)
+    for blocks in block_regions.values():
+        assert blocks.device == device
         blocks[dst_indices] = blocks[src_indices]
 
 

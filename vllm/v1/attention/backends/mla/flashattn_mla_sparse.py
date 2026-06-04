@@ -103,16 +103,6 @@ class FlashAttnMLASparseBackend(AttentionBackend):
                 return "FlashAttention MLA Sparse requires model with index_topk"
         return None
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
 
 @dataclass
 class FlashAttnMLASparseMetadata(AttentionMetadata):

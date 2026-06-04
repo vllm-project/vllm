@@ -50,14 +50,13 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, resolve_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -122,9 +121,8 @@ def _expand_transfer_regions(
     kv_block_lens: list[int],
     layer_names: list[str],
     layer_indices: list[int],
-    is_kv_layout_blocks_first: bool,
+    is_kv_layout_blocks_first: bool,  # kept for API compat, unused
     group_indices: list[int] | None = None,
-    split_kv_regions: list[bool] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -146,13 +144,6 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
-    if split_kv_regions is None:
-        split_kv_regions = [is_kv_layout_blocks_first] * len(layer_names)
-    assert len(split_kv_regions) == len(layer_names), (
-        "Mooncake transfer regions require matching split metadata, "
-        f"got split_kv_regions={len(split_kv_regions)}, "
-        f"layer_names={len(layer_names)}."
-    )
     regions: list[TransferRegion] = []
     for (
         base_addr,
@@ -161,7 +152,6 @@ def _expand_transfer_regions(
         layer_name,
         layer_index,
         group_index,
-        split_kv_region,
     ) in zip(
         base_addrs,
         block_lens,
@@ -169,7 +159,6 @@ def _expand_transfer_regions(
         layer_names,
         layer_indices,
         group_indices,
-        split_kv_regions,
     ):
         regions.append(
             TransferRegion(
@@ -181,17 +170,6 @@ def _expand_transfer_regions(
                 group_index=group_index,
             )
         )
-        if split_kv_region:
-            regions.append(
-                TransferRegion(
-                    layer_name=layer_name,
-                    layer_index=layer_index,
-                    base_addr=base_addr + kv_block_len,
-                    block_len=block_len,
-                    kv_block_len=kv_block_len,
-                    group_index=group_index,
-                )
-            )
     return regions
 
 
@@ -506,10 +484,10 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         if vllm_config.model_config.use_mla:
             return None
         logger.info_once(
-            "MooncakeConnector setting KV cache layout to HND for "
+            "MooncakeConnector setting KV cache layout to LBHNC for "
             "heterogeneous TP-safe KV transfer."
         )
-        return "HND"
+        return "LBHNC"
 
     ############################################################
     # Scheduler Side Methods
@@ -1023,7 +1001,7 @@ class MooncakeConnectorWorker:
         self._sync_block_size_with_kernel()
 
         self.attn_backends = get_current_attn_backends(vllm_config)
-        self.kv_cache_layout = get_kv_cache_layout()
+        self.kv_cache_layout = resolve_kv_cache_layout().name
         logger.debug(
             "Detected attention backends %s",
             [backend.get_name() for backend in self.attn_backends],
@@ -1674,13 +1652,10 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
-            if isinstance(layer_spec, MambaSpec):
-                conv, _ = cache_or_caches
-                cache_list = [conv]
-            else:
-                # K and V are packed into one blocks-first tensor per layer,
-                # so each layer registers as a single region.
-                cache_list = [cache_or_caches]
+            # Standardized allocation exposes one raw page tensor per layer.
+            # For Mamba that page contains all recurrent states; the layer
+            # unpacks it only when binding the cache for model execution.
+            cache_list = [cache_or_caches]
 
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
@@ -1690,25 +1665,32 @@ class MooncakeConnectorWorker:
 
             for cache in cache_list:
                 self._log_debug_cache_registration(layer_name, cache)
-                base_addr = cache.data_ptr()
-                block_len = cache.stride(0) * cache.element_size()
-                region_base_addresses.append(base_addr)
-
-                if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-                    kv_block_len = layer_spec.page_size_bytes
-                elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(
-                    layer_spec, MambaSpec
+                if (
+                    isinstance(layer_spec, AttentionSpec)
+                    and layer_spec.separate_kv_head_groups
                 ):
-                    kv_block_len = block_len // 2
+                    region_caches = [cache[:, head] for head in range(cache.shape[1])]
                 else:
-                    kv_block_len = block_len
-                self.block_len_per_layer.append(block_len)
-                self.kv_block_len_per_layer.append(kv_block_len)
-                self.registered_layer_names.append(layer_name)
-                self.registered_layer_indices.append(layer_index)
-                self.registered_group_indices.append(
-                    self._layer_group_indices[layer_name]
-                )
+                    region_caches = [cache]
+
+                for region_cache in region_caches:
+                    base_addr = region_cache.data_ptr()
+                    block_len = region_cache.stride(0) * region_cache.element_size()
+                    region_base_addresses.append(base_addr)
+
+                    kv_block_len = (
+                        layer_spec.page_size_bytes
+                        if isinstance(layer_spec, AttentionSpec)
+                        and not layer_spec.separate_kv_head_groups
+                        else block_len
+                    )
+                    self.block_len_per_layer.append(block_len)
+                    self.kv_block_len_per_layer.append(kv_block_len)
+                    self.registered_layer_names.append(layer_name)
+                    self.registered_layer_indices.append(layer_index)
+                    self.registered_group_indices.append(
+                        self._layer_group_indices[layer_name]
+                    )
                 storage = cache.untyped_storage()
                 storage_addr = storage.data_ptr()
                 if storage_addr not in seen_storage_ptrs:
@@ -2055,24 +2037,14 @@ class MooncakeConnectorWorker:
                 self._layer_group_indices.get(layer_name, 0)
                 for layer_name in layer_names
             ]
-        split_kv_regions = None
-        if self.transfer_topo.virtually_split_kv_in_blocks:
-            split_kv_regions = [
-                not isinstance(
-                    self._layer_specs[layer_name],
-                    (MambaSpec, MLAAttentionSpec, SlidingWindowMLASpec),
-                )
-                for layer_name in layer_names
-            ]
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
             kv_block_lens=kv_block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
-            is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
+            is_kv_layout_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
             group_indices=group_indices,
-            split_kv_regions=split_kv_regions,
         )
 
     def _get_sender_transfer_plan(

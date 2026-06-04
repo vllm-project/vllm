@@ -31,7 +31,6 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -123,20 +122,6 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
                 return "FlashInfer MLA Sparse requires model with index_topk config"
         return None
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
-
 
 class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     """FlashInfer sparse MLA backend for SM120."""
@@ -214,23 +199,6 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
                     "FLASHINFER_MLA_SPARSE_SM120 requires index_topk=2048; "
                     f"got {index_topk}"
                 )
-        return None
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
-            # fp8_ds_mla packed layout: 512 NoPE + 16 scales + 128 RoPE.
-            return (num_blocks, block_size, 656)
-        return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
 
 
@@ -439,7 +407,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            kv_cache=kv_c_and_k_pe_cache,
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
