@@ -1867,9 +1867,16 @@ class DPEngineCoreProc(EngineCoreProc):
                     continue
 
                 # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                with self.log_iteration_details(None):
-                    self.execute_dummy_batch()
+                # if the model didn't execute any ready requests -- unless the
+                # executor is asleep. sleep(level>=1) discards the KV cache,
+                # but execute_dummy_batch runs a decode-shaped batch that
+                # reads/writes KV memory, causing an illegal memory access
+                # (e.g. sleep(level=1) followed by sleep(level=0) while KV
+                # is still released). The finished-sync all-reduce below still
+                # runs (DP group, no GPU work), keeping DP ranks in lockstep.
+                elif not self.model_executor.is_sleeping:
+                    with self.log_iteration_details(None):
+                        self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
