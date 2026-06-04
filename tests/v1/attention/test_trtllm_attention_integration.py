@@ -113,10 +113,7 @@ def _create_hnd_kv_cache(
     slot_mapping = common_attn_metadata.slot_mapping
     batch_size = len(k_contexts)
 
-    # Build cache in (num_blocks, block_size, num_kv_heads, 2 * head_size) for
-    # easy flat per-token indexing (K/V packed in the content dim), then
-    # transpose to the FlashInfer logical shape.
-    kv_cache_raw = torch.zeros(
+    kv_cache_fill = torch.zeros(
         num_blocks,
         block_size,
         num_kv_heads,
@@ -124,7 +121,7 @@ def _create_hnd_kv_cache(
         dtype=dtype,
         device=device,
     )
-    kv_cache_flat = kv_cache_raw.view(-1, num_kv_heads, 2 * head_size)
+    kv_cache_flat = kv_cache_fill.view(-1, num_kv_heads, 2 * head_size)
 
     start_block_idx = 1
     for i in range(batch_size):
@@ -141,7 +138,7 @@ def _create_hnd_kv_cache(
     perm = torch.randperm(blocks_end - 1) + 1
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
     inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache_raw[1:blocks_end] = kv_cache_raw[perm]
+    kv_cache_fill[1:blocks_end] = kv_cache_fill[perm]
 
     # Build block table.
     start_block_idx = 1
@@ -164,10 +161,7 @@ def _create_hnd_kv_cache(
             i, block_indices
         ] * block_size + intra_block_offsets.to(device)
 
-    # Transpose to FlashInfer logical shape (num_blocks, num_kv_heads,
-    # block_size, 2 * head_size); HND packed is contiguous in this order.
-    kv_cache = kv_cache_raw.transpose(1, 2).contiguous()
-    return kv_cache
+    return kv_cache_fill.transpose(1, 2).contiguous()
 
 
 def _create_nvfp4_hnd_kv_cache(
@@ -187,9 +181,9 @@ def _create_nvfp4_hnd_kv_cache(
     _create_hnd_kv_cache.
 
     The returned tensor is dtype ``uint8`` with head-group layout
-    ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``; K heads occupy
-    the first ``num_kv_heads`` heads and V heads the second. Each
-    ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
+      ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
+    where K heads occupy the first ``num_kv_heads`` heads and V heads the second.
+    Each ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
       - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
         two per byte.
       - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
@@ -225,17 +219,14 @@ def _create_nvfp4_hnd_kv_cache(
         common_attn_metadata,
     )
 
-    # Allocate nvfp4 cache in head-group layout:
-    # (num_blocks, 2 * num_kv_heads, block_size, full_dim) — K heads first,
-    # then V heads.
+    # (num_blocks, 2 * num_kv_heads, block_size, full_dim) — K heads first, then V heads
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     nvfp4_cache = torch.zeros(
         (num_blocks, 2 * num_kv_heads, block_size, full_dim),
         dtype=torch.uint8,
         device=device,
     )
-    k_cache = nvfp4_cache[:, :num_kv_heads]
-    v_cache = nvfp4_cache[:, num_kv_heads:]
+    k_cache, v_cache = nvfp4_cache.split(num_kv_heads, dim=1)
 
     # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
     # bf16_cache is packed (num_blocks, num_kv_heads, block_size, 2*head_size).

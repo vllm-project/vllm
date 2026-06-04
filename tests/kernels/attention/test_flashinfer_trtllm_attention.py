@@ -74,8 +74,8 @@ def make_nvfp4_kv_cache(
         kv_scale_val, dtype=torch.float32, device=kv_bf16_hnd.device
     )
 
-    # Production layout: 4D (B, 2*H, N, full_dim) where K heads occupy
-    # the first H heads and V heads occupy the second H heads.
+    # layout: (B, 2*H, N, full_dim)
+    #   where K heads occupy the first H heads and V heads occupy the second H heads.
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     kv_cache_hnd = torch.zeros(
         (num_blocks, 2 * num_kv_heads, block_size, full_dim),

@@ -255,8 +255,6 @@ def test_reshape_and_cache_flash(
     nvfp4_key_data = None
     nvfp4_value_data = None
     if kv_cache_dtype == "nvfp4":
-        # The factory returns single-side K and V caches; split each into its
-        # data and scale views directly.
         nvfp4_key_data, key_scale_cache = nvfp4_split_data_scale(key_cache)
         nvfp4_value_data, value_scale_cache = nvfp4_split_data_scale(value_cache)
 
