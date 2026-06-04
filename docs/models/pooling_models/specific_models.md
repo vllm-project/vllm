@@ -44,7 +44,9 @@ limits, and query expansion). Use the Pooling API with `task: "token_embed"` and
 
 !!! note
     `embedding_mode` requires a vLLM build that includes ColBERT asymmetric encoding
-    support (see the implementation PR linked from [#43852](https://github.com/vllm-project/vllm/pull/43852)).
+    support (implementation PR: branch
+    [`feat/colbert-embedding-mode`](https://github.com/vllm-project/vllm/compare/main...neerajrapelli:feat/colbert-embedding-mode);
+    merge the implementation before relying on this docs-only guidance in production).
     It is **not** the same as `input_type` on `/v1/embeddings` (used by some dense
     embedding models). Manual prefixes such as `[QueryMarker]` in the input string are
     **not** a substitute — markers are applied by the server when `embedding_mode` is set.
