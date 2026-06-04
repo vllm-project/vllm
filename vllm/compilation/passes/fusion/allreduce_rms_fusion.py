@@ -1439,6 +1439,139 @@ class AiterAllreduceFusedAddRMSNormGroupQuantWithIndexerPattern(
         return _replacement
 
 
+class AiterAllreduceFusedRMSNormMXFP4QuantPattern(BasePattern, VllmPatternReplacement):
+    """Fuse AllReduce + RMSNorm + MXFP4 quant (no residual — first layer).
+
+    Matched 3-node subgraph::
+
+        tensor_model_parallel_all_reduce(x)
+          → vllm_ir.rms_norm(y, weight, eps)
+          → rocm_aiter_dynamic_mxfp4_quant(z)
+
+    Replacement: a single AITER fused kernel call
+    ``rocm_aiter_fused_allreduce_rmsnorm_mxfp4_quant``.
+
+    Registered AFTER Pattern B (with residual) so that the larger 4-node
+    pattern takes greedy priority for layers 1-N.  This pattern fires only
+    when no residual is present (first transformer layer).
+
+    Feature guard: only registered when
+    ``rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant()`` returns True.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.DYNAMIC_MXFP4_QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
+        self.FUSED_AR_RMSNORM_MXFP4_OP = (
+            rocm_aiter_ops.get_fused_allreduce_rmsnorm_mxfp4_quant_op()
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # input (post-linear BF16), norm weight
+        return [self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input_: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input_)
+            rms = vllm.ir.ops.rms_norm(allreduce_output, weight, self.epsilon)
+            fp4, scale = self.DYNAMIC_MXFP4_QUANT_OP(rms)
+            return fp4, scale, allreduce_output
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input_: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            fp4, scale = self.FUSED_AR_RMSNORM_MXFP4_OP(
+                input_=input_,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            return fp4, scale, input_
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddRMSNormMXFP4QuantPattern(
+    BasePattern, VllmPatternReplacement
+):
+    """Fuse AllReduce + fused_add_RMSNorm + MXFP4 quant (with residual — layers 1-N).
+
+    Matched 4-node subgraph::
+
+        tensor_model_parallel_all_reduce(x)
+          → vllm_ir.fused_add_rms_norm(y, residual, weight, eps)
+          → rocm_aiter_dynamic_mxfp4_quant(z)
+
+    Replacement: a single AITER fused kernel call
+    ``rocm_aiter_fused_allreduce_add_rmsnorm_mxfp4_quant``, returning
+    ``(fp4_data, scale, updated_residual)``.
+
+    Registered BEFORE Pattern A (no residual) so that this larger subgraph
+    is attempted first (greedy matching).
+
+    Feature guard: only registered when
+    ``rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant()`` returns True.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.DYNAMIC_MXFP4_QUANT_OP = rocm_aiter_ops.get_dynamic_mxfp4_quant_op()
+        self.FUSED_AR_ADD_RMSNORM_MXFP4_OP = (
+            rocm_aiter_ops.get_fused_allreduce_add_rmsnorm_mxfp4_quant_op()
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # AR input, residual, norm weight
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor, input_: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input_)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight, self.epsilon
+            )
+            fp4, scale = self.DYNAMIC_MXFP4_QUANT_OP(rms)
+            return fp4, scale, residual
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor, input_: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            fp4, scale, residual_out = self.FUSED_AR_ADD_RMSNORM_MXFP4_OP(
+                input_=input_,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+            )
+            return fp4, scale, residual_out
+
+        return _replacement
+
+
 class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config, "rocm_aiter_allreduce_fusion_pass")
@@ -1525,6 +1658,27 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             )
 
         for epsilon in [1e-5, 1e-6]:
+            # ── MXFP4 patterns (Pattern B before Pattern A for greedy priority) ──
+            # Guarded independently: the fused AITER AR+MXFP4 kernel is a
+            # separate export from the AR+RMSNorm kernel.
+            if rocm_aiter_ops.has_fused_allreduce_rmsnorm_mxfp4_quant():
+                # Pattern B (with residual, 4 nodes) registered BEFORE Pattern A
+                # (no residual, 3 nodes) — larger subgraph wins in greedy match.
+                self.register(
+                    AiterAllreduceFusedAddRMSNormMXFP4QuantPattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+                self.register(
+                    AiterAllreduceFusedRMSNormMXFP4QuantPattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                    )
+                )
+
             # Quant-fused variants must register first so the pattern matcher
             # tries them before the AR+RMS-only variants. Otherwise the
             # AR+RMS-only fusion runs first and consumes the all_reduce node,
