@@ -920,10 +920,9 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     if all(
         isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
     ):
+        # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
-        layer_tuple_page_bytes = sum(buckets.keys())
-        num_layer_tuples = max(len(slots) for slots in buckets.values())
-        return layer_tuple_page_bytes * num_layer_tuples
+        return sum(ps * len(slots) for ps, slots in buckets.items())
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -1178,7 +1177,7 @@ def _bucket_layers_by_page_size(
 ) -> dict[int, list[list[str]]]:
     """Bucket layers by page size: ``result[ps][slot_idx] = [layer_names]``.
 
-    Layers from different groups at the same ``slot_idx`` share a block
+    Layers from different groups at the same ``slot_idx`` share an underlying tensor
     (they have independent block tables so block-id namespaces never collide).
     """
     buckets: dict[int, list[list[str]]] = defaultdict(list)
@@ -1209,21 +1208,18 @@ def _get_kv_cache_config_deepseek_v4(
     groups at the same slot share a tensor (they have independent block
     tables so block-id namespaces never collide).
     """
+    # buckets = {page_size: [[layer_names], [layer_names], ...]}
     buckets = _bucket_layers_by_page_size(kv_cache_groups)
-    page_sizes = sorted(buckets.keys())
-    layer_tuple_page_bytes = sum(page_sizes)
-    num_layer_tuples = max(len(slots) for slots in buckets.values())
+    total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
 
-    num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    num_blocks = available_memory // total_num_bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
     kv_cache_tensors: list[KVCacheTensor] = []
-    for slot_idx in range(num_layer_tuples):
-        for ps in page_sizes:
-            slots = buckets[ps]
-            shared_by = slots[slot_idx] if slot_idx < len(slots) else []
+    for ps, slots in buckets.items():
+        for slot_idx in range(len(slots)):
             kv_cache_tensors.append(
-                KVCacheTensor(size=ps * num_blocks, shared_by=shared_by)
+                KVCacheTensor(size=ps * num_blocks, shared_by=slots[slot_idx])
             )
 
     return num_blocks, kv_cache_tensors
