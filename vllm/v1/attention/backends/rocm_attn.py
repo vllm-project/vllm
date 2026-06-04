@@ -30,7 +30,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
-from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
@@ -414,10 +413,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Packed logical (B, H, N, 2*C); split_kv_cache permutes internally.
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)

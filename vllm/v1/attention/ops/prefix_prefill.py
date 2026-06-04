@@ -50,7 +50,6 @@ def _fwd_kernel(
     out_scale_inv,
     B_Start_Loc,
     B_Seqlen,
-    x: tl.constexpr,
     Out,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -69,8 +68,7 @@ def _fwd_kernel(
     stride_k_cache_bs,
     stride_k_cache_h,
     stride_k_cache_d,
-    stride_k_cache_bl: tl.constexpr,
-    stride_k_cache_x,
+    stride_k_cache_bl,
     stride_v_cache_bs,
     stride_v_cache_h,
     stride_v_cache_d,
@@ -174,13 +172,11 @@ def _fwd_kernel(
         # each token within its physical block.
         internal_offsets = token_indices % PHYSICAL_BLOCK_SIZE
 
-        # Addressing of K (5D)
         off_k = (
             bn[None, :] * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // x) * stride_k_cache_d
+            + offs_d[:, None] * stride_k_cache_d
             + internal_offsets[None, :] * stride_k_cache_bl
-            + (offs_d[:, None] % x) * stride_k_cache_x
         )
 
         # Addressing of V (4D)
@@ -379,7 +375,6 @@ def _fwd_kernel_alibi(
     B_Seqlen,
     Alibi_slopes,
     block_size,
-    x,
     Out,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -399,7 +394,6 @@ def _fwd_kernel_alibi(
     stride_k_cache_h,
     stride_k_cache_d,
     stride_k_cache_bl,
-    stride_k_cache_x,
     stride_v_cache_bs,
     stride_v_cache_h,
     stride_v_cache_d,
@@ -475,9 +469,8 @@ def _fwd_kernel_alibi(
         off_k = (
             bn[None, :] * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
-            + (offs_d[:, None] // x) * stride_k_cache_d
+            + offs_d[:, None] * stride_k_cache_d
             + ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl
-            + (offs_d[:, None] % x) * stride_k_cache_x
         )
         off_v = (
             bn[:, None] * stride_v_cache_bs
@@ -756,8 +749,7 @@ def context_attention_fwd(
             b_start_loc,
             b_seq_len,
             alibi_slopes,
-            v_cache.shape[3],
-            k_cache.shape[4],
+            v_cache.shape[2],
             o,
             b_loc.stride(0),
             b_loc.stride(1),
@@ -777,11 +769,10 @@ def context_attention_fwd(
             k_cache.stride(1),
             k_cache.stride(2),
             k_cache.stride(3),
-            k_cache.stride(4),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
             v_cache.stride(0),
             v_cache.stride(1),
             v_cache.stride(2),
-            v_cache.stride(3),  # [num_blocks, num_kv_heads, head_size, block_size]
+            v_cache.stride(3),
             num_queries_per_kv=num_queries_per_kv,
             IN_PRECISION=IN_PRECISION,
             BLOCK_M=BLOCK,
@@ -799,7 +790,7 @@ def context_attention_fwd(
     if current_platform.is_rocm():
         extra_kargs = {}
 
-    real_block_size = v_cache.shape[3]
+    real_block_size = v_cache.shape[2]
     is_pow2 = real_block_size > 0 and (real_block_size & (real_block_size - 1) == 0)
     # For standard models involving powers of 2,
     # follow the original logic (Llama 128/64)
@@ -831,7 +822,6 @@ def context_attention_fwd(
         1.0 / fp8_out_scale if fp8_out_scale is not None else 1.0,
         b_start_loc,
         b_seq_len,
-        k_cache.shape[4],
         o,
         processed_b_loc.stride(0),
         processed_b_loc.stride(1),
@@ -851,7 +841,6 @@ def context_attention_fwd(
         stride_k_cache_h=k_cache.stride(1),
         stride_k_cache_d=k_cache.stride(2),
         stride_k_cache_bl=k_cache.stride(3),
-        stride_k_cache_x=k_cache.stride(4),
         stride_v_cache_bs=v_cache.stride(0),
         stride_v_cache_h=v_cache.stride(1),
         stride_v_cache_d=v_cache.stride(2),
