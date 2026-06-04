@@ -28,6 +28,22 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
 
 
+def _fp8_reload_unsupported() -> bool:
+    """Whether the FP8 reload/online-quantize tests should be skipped.
+
+    ``supports_fp8()`` returns True on MI250 (gfx90a) because the general
+    quantization paths upcast FP8 weights, but gfx90a has no native FP8 and
+    cannot run these reload models, so treat it as unsupported here.
+    """
+    if not current_platform.supports_fp8():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx90a
+
+        return on_gfx90a()
+    return False
+
+
 class _AliasedBufferLayer(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -284,7 +300,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
-    if "FP8" in base_model and not current_platform.supports_fp8():
+    if "FP8" in base_model and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(
@@ -308,7 +324,7 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
 
 def test_kv_scale_reload(vllm_runner):
     """Test reloading a checkpoint that contains k_scale/v_scale weights."""
-    if not current_platform.supports_fp8():
+    if _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
@@ -378,7 +394,7 @@ def test_online_quantize_reload(
     if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough GPU devices")
 
-    if quantization == "fp8" and not current_platform.supports_fp8():
+    if quantization == "fp8" and _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
 
     with vllm_runner(
