@@ -176,26 +176,29 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.v_dim = projection_size
         self.q_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
-            output_size=self.q_dim,
+            output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.q_conv1d",
         )
         self.k_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
-            output_size=self.k_dim,
+            output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.k_conv1d",
         )
         self.v_conv1d = ColumnParallelLinear(
             input_size=self.conv_size,
-            output_size=self.v_dim,
+            output_size=projection_size,
             bias=False,
             params_dtype=torch.float32,
             prefix=f"{prefix}.v_conv1d",
         )
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
+        # Can't do this in `weight_loader` since it already exists in
+        # `ColumnParallelLinear` and `set_weight_attrs`
+        # doesn't allow to override it
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
