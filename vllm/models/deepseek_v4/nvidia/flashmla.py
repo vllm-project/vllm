@@ -11,10 +11,11 @@ from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
-    fused_inv_rope_fp8_quant,
 )
-from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_einsum
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+    compute_fp8_einsum_recipe,
+    deep_gemm_fp8_o_proj,
+)
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
@@ -68,43 +69,23 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # Pick fp8_einsum recipe based on GPU arch:
-        # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
-        # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        cap = current_platform.get_device_capability()
-        assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
+        self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # O projection: inverse RoPE + FP8 quant + einsum + wo_b
-        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+        return deep_gemm_fp8_o_proj(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
+            self.wo_a,
+            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
             rope_dim=self.rope_head_dim,
+            o_lora_rank=self.o_lora_rank,
+            einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
-
-        wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
-
-        z = torch.empty(
-            (o.shape[0], self.n_local_groups, self.o_lora_rank),
-            device=o.device,
-            dtype=torch.bfloat16,
-        )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_fp8, o_scale),
-            (wo_a_fp8, wo_a_scale),
-            z,
-            recipe=self._einsum_recipe,
-        )
-        return self.wo_b(z.flatten(1))
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

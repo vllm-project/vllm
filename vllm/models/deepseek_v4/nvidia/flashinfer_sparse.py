@@ -13,12 +13,14 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     build_flashinfer_mixed_sparse_indices,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import (
-    DeepseekV4FlashMLAAttention,
-    DeepseekV4FlashMLASparseBackend,
+from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLASparseBackend
+from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
+    compute_fp8_einsum_recipe,
+    deep_gemm_fp8_o_proj,
 )
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseMetadata
@@ -59,7 +61,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLASparseBackend):
         return "FLASHINFER_MLA_SPARSE_DSV4"
 
 
-class DeepseekV4FlashInferMLAAttention(DeepseekV4FlashMLAAttention):
+class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     """FlashInfer TRTLLM-gen sparse MLA attention layer for DeepSeek V4."""
 
     backend_cls = DeepseekV4FlashInferMLASparseBackend
@@ -74,8 +76,25 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4FlashMLAAttention):
             )
         return 64 if num_heads <= 64 else 128
 
+    def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        return deep_gemm_fp8_o_proj(
+            o,
+            positions,
+            self.rotary_emb.cos_sin_cache,
+            self.wo_a,
+            self.wo_b,
+            n_groups=self.n_local_groups,
+            heads_per_group=self.n_local_heads // self.n_local_groups,
+            nope_dim=self.nope_head_dim,
+            rope_dim=self.rope_head_dim,
+            o_lora_rank=self.o_lora_rank,
+            einsum_recipe=self._einsum_recipe,
+            tma_aligned_scales=self._tma_aligned_scales,
+        )
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
         # Per-tensor FP8 scale buffers + precomputed scalar BMM scales. Only the
         # per-tensor FP8 cache path consumes these; bf16 reads ``self.scale``.
         if self.kv_cache_torch_dtype != torch.float8_e4m3fn:
