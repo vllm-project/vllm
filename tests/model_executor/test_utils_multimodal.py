@@ -48,9 +48,9 @@ def test_shape_mismatch():
     hidden_size = 4
     inputs_embeds = torch.randn(seq_len, hidden_size)
 
-    # 2 True values, but we provide 3 embeddings
-    is_multimodal = torch.tensor([False, True, True, False, False])
-    mm_embeds_flat = torch.randn(3, hidden_size)
+    # 3 True values, but we provide 2 embeddings
+    is_multimodal = torch.tensor([False, True, True, True, False])
+    mm_embeds_flat = torch.randn(2, hidden_size)
 
     with pytest.raises(ValueError, match="Attempted to assign"):
         _merge_multimodal_embeddings(inputs_embeds, [mm_embeds_flat], is_multimodal)

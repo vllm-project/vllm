@@ -472,15 +472,6 @@ def _merge_multimodal_embeddings(
     mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
     input_dtype = inputs_embeds.dtype
 
-    num_actual_tokens = len(mm_embeds_flat)
-    num_expected_tokens = is_multimodal.sum().item()
-    if num_actual_tokens != num_expected_tokens:
-        expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {num_actual_tokens} "
-            f"multimodal tokens to {num_expected_tokens} placeholders"
-        )
-
     try:
         mm_embeds_device = mm_embeds_flat.to(
             dtype=input_dtype, device=inputs_embeds.device
@@ -508,6 +499,17 @@ def _merge_multimodal_embeddings(
             inputs_embeds,
         )
     except (RuntimeError, IndexError) as e:
+        num_actual_tokens = len(mm_embeds_flat)
+        num_expected_tokens = is_multimodal.sum().item()
+
+        if num_actual_tokens != num_expected_tokens:
+            expr = _embedding_count_expression(multimodal_embeddings)
+
+            raise ValueError(
+                f"Attempted to assign {expr} = {num_actual_tokens} "
+                f"multimodal tokens to {num_expected_tokens} placeholders"
+            ) from e
+
         raise ValueError("Error during multimodal embedding merge operation") from e
 
     return inputs_embeds
