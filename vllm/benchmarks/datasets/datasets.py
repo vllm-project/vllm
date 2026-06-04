@@ -3972,18 +3972,19 @@ class ASRDataset(HuggingFaceDataset):
     Dataset class for processing a ASR dataset for transcription.
     Tested on the following set:
 
-    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
-    | Dataset               | Domain                                 | Speaking Style           | hf-subset                   |
-    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
-    | TED-LIUM              | TED talks                              | Oratory                  | release1, release2, release3|
-    |                       |                                        |                          | release3-speaker-adaptation |
-    | VoxPopuli             | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
-    | LibriSpeech           | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
-    | GigaSpeech            | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
-    | SPGISpeech            | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
-    | Earnings22-Cleaned-AA | Earnings calls                         | Prepared remarks, Q&A    | test                        |
-    | AMI                   | Meetings                               | Spontaneous              | ihm, sdm                    |
-    +-----------------------+----------------------------------------+--------------------------+-----------------------------+
+    +---------------------------+----------------------------------------+--------------------------+-----------------------------+
+    | Dataset                   | Domain                                 | Speaking Style           | hf-subset                   |
+    +---------------------------+----------------------------------------+--------------------------+-----------------------------+
+    | TED-LIUM                  | TED talks                              | Oratory                  | release1, release2, release3|
+    |                           |                                        |                          | release3-speaker-adaptation |
+    | VoxPopuli                 | European Parliament                    | Oratory                  | en, de, it, fr,  ...        |
+    | LibriSpeech               | Audiobook                              | Narrated                 | "LIUM/tedlium"              |
+    | GigaSpeech                | Audiobook, podcast, YouTube            | Narrated, spontaneous    | xs, s, m, l, xl, dev, test  |
+    | SPGISpeech                | Financial meetings                     | Oratory, spontaneous     | S, M, L, dev, test          |
+    | Earnings22-Cleaned-AA     | Long form earnings calls               | Prepared remarks, Q&A    | test                        |
+    | Earnings22-Tiny-Filtered  | Earnings calls                         | Prepared remarks, Q&A    | validation                  |
+    | AMI                       | Meetings                               | Spontaneous              | ihm, sdm                    |
+    +---------------------------+----------------------------------------+--------------------------+-----------------------------+
 
     """  # noqa: E501
 
