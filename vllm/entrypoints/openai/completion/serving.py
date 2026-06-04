@@ -24,9 +24,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    PromptTokenUsageInfo,
     RequestResponseMetadata,
-    UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
@@ -426,10 +424,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
                         completion_tokens = previous_num_tokens[i]
-                        chunk.usage = UsageInfo(
+                        chunk.usage = self.make_usage_info(
+                            enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                            num_cached_tokens=num_cached_tokens,
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
-                            total_tokens=prompt_tokens + completion_tokens,
                         )
 
                     response_json = chunk.model_dump_json(exclude_unset=True)
@@ -437,16 +436,12 @@ class OpenAIServingCompletion(OpenAIServing):
 
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
-            final_usage_info = UsageInfo(
+            final_usage_info = self.make_usage_info(
+                enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+                num_cached_tokens=num_cached_tokens,
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
             )
-
-            if self.enable_prompt_tokens_details and num_cached_tokens:
-                final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens
-                )
 
             if include_usage:
                 final_usage_chunk = CompletionStreamResponse(
@@ -458,7 +453,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     system_fingerprint=self.system_fingerprint,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
-                    exclude_unset=False, exclude_none=True
+                    exclude_unset=False, exclude_none=False
                 )
                 yield f"data: {final_usage_data}\n\n"
 
@@ -574,20 +569,13 @@ class OpenAIServingCompletion(OpenAIServing):
 
             num_prompt_tokens += len(prompt_token_ids)
 
-        usage = UsageInfo(
+        num_cached = last_final_res.num_cached_tokens if last_final_res else None
+        usage = self.make_usage_info(
+            enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+            num_cached_tokens=num_cached,
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-
-        if (
-            self.enable_prompt_tokens_details
-            and last_final_res
-            and last_final_res.num_cached_tokens
-        ):
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens
-            )
 
         request_metadata.final_usage_info = usage
         if final_res_batch:
