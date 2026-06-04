@@ -84,11 +84,13 @@ async def transcribe_audio(client, tokenizer, y, sr, extra_body=None):
     return latency, num_output_tokens, transcription.text
 
 
-async def bound_transcribe(sem, client, tokenizer, audio, reference, extra_body=None):
+async def bound_transcribe(
+    sem, client, tokenizer, audio, sr, reference, extra_body=None
+):
     # Use semaphore to limit concurrent requests.
     async with sem:
         result = await transcribe_audio(
-            client, tokenizer, *audio, extra_body=extra_body
+            client, tokenizer, audio, sr, extra_body=extra_body
         )
         # Normalize *english* output/reference for evaluation.
         out = normalizer(result[2])
@@ -108,14 +110,14 @@ async def process_dataset(model, client, data, concurrent_request, extra_body=No
 
     # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = load_audio_sample(data[0]["audio"])
-    _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "", extra_body)
+    _ = await bound_transcribe(sem, client, tokenizer, audio, sr, "", extra_body)
 
     tasks: list[asyncio.Task] = []
     for sample in data:
         audio, sr = load_audio_sample(sample["audio"])
         task = asyncio.create_task(
             bound_transcribe(
-                sem, client, tokenizer, (audio, sr), sample["text"], extra_body
+                sem, client, tokenizer, audio, sr, sample["text"], extra_body
             )
         )
         tasks.append(task)
@@ -346,7 +348,7 @@ def test_wer_correctness(
             torch.testing.assert_close(wer, expected_wer, atol=1e-1, rtol=1e-2)
 
 
-# 14-22mins of 6 audio samples of total ~115 mins and 37MB.
+# 14-22mins of 6 audio samples of total ~115 mins and just 37MB.
 # checks for long audio transcription correctness and RMS split.
 @pytest.mark.parametrize(
     "model_config",

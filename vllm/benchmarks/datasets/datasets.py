@@ -4021,6 +4021,8 @@ class ASRDataset(HuggingFaceDataset):
         super().load_data()
 
     def _materialize_local_audio_column(self) -> None:
+        from datasets import Audio
+
         local_path_root = Path(
             hf_api().snapshot_download(self.hf_name, repo_type="dataset")
         )
