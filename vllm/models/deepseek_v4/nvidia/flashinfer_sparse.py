@@ -3,12 +3,13 @@
 """DeepSeek V4 FlashInfer TRTLLM-gen sparse MLA backend.
 
 Uses FlashInfer's public ``trtllm_batch_decode_sparse_mla_dsv4`` launcher with a
-contiguous bf16 / per-tensor FP8 KV cache. Shares the V4 sparse-index pipeline
-(SWA cache + compressor + indexer, 256-token blocks, head_size 512) with the
-FlashMLA V4 backend; only the attention forward differs.
+plain bf16 / per-tensor FP8 KV row (vs FlashMLA's packed ``fp8_ds_mla`` block
+format). Shares the V4 sparse-index pipeline (SWA cache + compressor + indexer,
+256-token blocks, head_size 512) with the FlashMLA V4 backend; only the
+attention forward differs.
 """
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
@@ -52,8 +53,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLASparseBackend):
     Inheriting from the FlashMLA V4 backend reuses its ``FlashMLASparseMetadata``
     builder (which the V4 sparse-index pipeline needs — the V3.2 FlashInfer
     builder lacks the ``c128a_*`` fields), 256-token blocks, head_size 512, and
-    the contiguous (num_blocks, block_size, 512) cache shape for non-``fp8_ds_mla``
-    dtypes.
+    the (num_blocks, block_size, 512) cache shape for non-``fp8_ds_mla`` dtypes.
     """
 
     @staticmethod
@@ -65,6 +65,9 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     """FlashInfer TRTLLM-gen sparse MLA attention layer for DeepSeek V4."""
 
     backend_cls = DeepseekV4FlashInferMLASparseBackend
+    # FlashInfer stores a plain bf16 / per-tensor fp8 KV row, not the FlashMLA
+    # packed fp8_ds_mla block format (UE8M0 block-scaled fp8 as uint8).
+    use_flashmla_fp8_layout: ClassVar[bool] = False
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

@@ -54,7 +54,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.attention import _resolve_dsv4_backend
+from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
 )
@@ -729,13 +729,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         # An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects
         # the FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
+        attn_cls: type[DeepseekV4Attention]
         if (
-            _resolve_dsv4_backend(vllm_config)
+            vllm_config.attention_config.backend
             == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
         ):
-            attn_cls: type[DeepseekV4FlashMLAAttention] = (
-                DeepseekV4FlashInferMLAAttention
-            )
+            attn_cls = DeepseekV4FlashInferMLAAttention
         else:
             attn_cls = DeepseekV4FlashMLAAttention
         self.attn = attn_cls(

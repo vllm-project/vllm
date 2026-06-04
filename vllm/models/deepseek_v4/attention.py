@@ -61,46 +61,38 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 logger = init_logger(__name__)
 
 
-def _resolve_dsv4_backend(vllm_config: VllmConfig | None):
-    """Return the explicitly-requested DSv4 sparse backend enum, or None."""
-    if vllm_config is None:
-        return None
-    attn_config = getattr(vllm_config, "attention_config", None)
-    return getattr(attn_config, "backend", None) if attn_config is not None else None
-
-
 def _resolve_dsv4_kv_cache_dtype(
-    backend,
+    use_flashmla_fp8_layout: bool,
     kv_cache_dtype: str,
     cache_config: CacheConfig | None,
 ) -> tuple[str, torch.dtype]:
-    """Map ``(backend, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
+    """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
-    FlashInfer V4 reads a contiguous 512-wide KV row (bf16 or per-tensor FP8
-    E4M3); FlashMLA V4 reads the legacy UE8M0 paged layout (uint8 /
-    ``fp8_ds_mla``).  For FlashMLA the canonical ``fp8_ds_mla`` string is
-    written back onto ``cache_config`` so the page-size specs pick the 576B
-    layout.
+    Both layouts are paged; they differ in the per-token block format. The
+    FlashMLA fp8 layout (FlashMLA / ROCm Aiter) is the ``fp8_ds_mla`` format:
+    UE8M0 block-scaled fp8 packed as ``uint8`` (the canonical ``fp8_ds_mla``
+    string is written back onto ``cache_config`` so the page-size specs pick
+    the 576B per-token slot). Otherwise (FlashInfer) each token's KV row is
+    stored in its plain element dtype — bf16 or per-tensor FP8 E4M3.
     """
-    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+    if use_flashmla_fp8_layout:
+        # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
+        assert kv_cache_dtype.startswith("fp8"), (
+            f"DeepseekV4 FlashMLA fp8 layout only supports fp8 kv-cache, "
+            f"got {kv_cache_dtype}"
+        )
+        if kv_cache_dtype != "fp8_ds_mla":
+            if cache_config is not None:
+                cache_config.cache_dtype = "fp8_ds_mla"
+            kv_cache_dtype = "fp8_ds_mla"
+            logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
+        return kv_cache_dtype, torch.uint8
 
-    if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4:
-        if kv_cache_dtype.startswith("fp8"):
-            return kv_cache_dtype, torch.float8_e4m3fn
-        # auto / bfloat16 -> contiguous BF16 cache.
-        return kv_cache_dtype, torch.bfloat16
-
-    # FlashMLA (and ROCm Aiter): legacy UE8M0 paged uint8 cache.
-    assert kv_cache_dtype.startswith("fp8"), (
-        f"DeepseekV4 FlashMLA sparse backend only supports fp8 kv-cache, "
-        f"got {kv_cache_dtype}"
-    )
-    if kv_cache_dtype != "fp8_ds_mla":
-        if cache_config is not None:
-            cache_config.cache_dtype = "fp8_ds_mla"
-        kv_cache_dtype = "fp8_ds_mla"
-        logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
-    return kv_cache_dtype, torch.uint8
+    # Plain bf16 / per-tensor fp8 KV row (FlashInfer).
+    if kv_cache_dtype.startswith("fp8"):
+        return kv_cache_dtype, torch.float8_e4m3fn
+    # auto / bfloat16 -> plain bf16 KV row.
+    return kv_cache_dtype, torch.bfloat16
 
 
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
@@ -116,6 +108,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
+    # KV-cache per-token block format (both layouts are paged). True (default)
+    # = FlashMLA / ROCm fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8);
+    # False = FlashInfer plain bf16 / per-tensor fp8 KV row.
+    use_flashmla_fp8_layout: ClassVar[bool] = True
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -281,13 +277,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.max_model_len = vllm_config.model_config.max_model_len
 
-        # Resolve the kv-cache dtype from the selected backend. FlashMLA uses the
-        # legacy UE8M0 paged uint8 (fp8_ds_mla) layout; FlashInfer uses a
-        # contiguous bf16 / per-tensor fp8 row. The same resolution drives the
-        # SWA cache tensor dtype below.
-        backend = _resolve_dsv4_backend(vllm_config)
+        # Resolve the kv-cache dtype from this backend's block format (a
+        # ClassVar set by the subclass): fp8_ds_mla (UE8M0 block-scaled fp8 as
+        # uint8) for FlashMLA / ROCm, vs a plain bf16 / per-tensor fp8 row for
+        # FlashInfer. The same resolution drives the SWA cache tensor dtype
+        # below.
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
-            backend, cache_config.cache_dtype, cache_config
+            self.use_flashmla_fp8_layout, cache_config.cache_dtype, cache_config
         )
 
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -546,9 +542,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata.block_size,
             )
 
-        # FlashInfer full-cache path: contiguous [num_blocks, block_size, 512]
-        # cache (no Q padding). bf16 rewrites q in place; per-tensor fp8 writes a
-        # separately-allocated fp8 q and quantizes the KV row.
+        # FlashInfer full-cache path: the [num_blocks, block_size, 512] cache
+        # stores the KV row in its plain dtype (no Q padding). bf16 rewrites q
+        # in place; per-tensor fp8 writes a separately-allocated fp8 q and
+        # quantizes the KV row.
         block_size = swa_metadata.block_size
         swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
         if cache_dtype == torch.bfloat16:
@@ -589,8 +586,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.compress_ratio <= 1
         ):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        # FlashMLA uses the UE8M0 paged uint8 layout (576B aligned); FlashInfer
-        # uses a contiguous bf16 / per-tensor fp8 cache with no extra alignment.
+        # FlashMLA uses the fp8_ds_mla block format (UE8M0 block-scaled fp8 as
+        # uint8, 576B aligned); FlashInfer stores a plain bf16 / per-tensor fp8
+        # row with no extra alignment.
         is_flashmla = self.kv_cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
