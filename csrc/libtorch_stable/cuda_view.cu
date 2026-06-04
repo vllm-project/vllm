@@ -3,6 +3,8 @@
 #include <torch/csrc/stable/accelerator.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/csrc/stable/device.h>
+#include <torch/csrc/stable/c/shim.h>
+#include <torch/headeronly/version.h>
 #include <cuda_runtime.h>
 
 #include <array>
@@ -26,7 +28,7 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   std::array<StableIValue, 2> is_pinned_stack{
       torch::stable::detail::from(cpu_tensor),
       torch::stable::detail::from(std::nullopt)};
-  STABLE_TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
+  TORCH_ERROR_CODE_CHECK(torch_call_dispatcher(
       "aten::is_pinned", "", is_pinned_stack.data(), TORCH_ABI_VERSION));
   if (torch::stable::detail::to<bool>(is_pinned_stack[0])) {
     // If CPU tensor is pinned, directly get the device pointer.
