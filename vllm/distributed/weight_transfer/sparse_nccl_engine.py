@@ -135,7 +135,12 @@ class SparseNCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
-        device = torch.accelerator.current_device_index()
+        # Use the worker's assigned device rather than the ambient current
+        # device: the receive path is no longer wrapped in
+        # `with torch.device(self.device)` by the caller, so the current device
+        # is not guaranteed to match self.device. The recv buffers must live on
+        # the same device as the NCCL communicator (created on self.device).
+        device = self.device
         for name, dtype_name, num_updates in zip(
             update_info.names,
             update_info.dtype_names,

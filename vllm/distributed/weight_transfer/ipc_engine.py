@@ -238,7 +238,12 @@ class IPCWeightTransferEngine(
                         and IPC handles. Each IPC handle is a mapping between physical
                         GPU UUID and the rebuild_cuda_tensor args tuple.
         """
-        device_index = torch.accelerator.current_device_index()
+        # Use the worker's assigned device rather than the ambient current
+        # device: the receive path is no longer wrapped in
+        # `with torch.device(self.device)` by the caller, so the current device
+        # is not guaranteed to match self.device. The IPC tensors must be
+        # rebuilt on the device the model lives on.
+        device_index = self.device.index
 
         if update_info.packed:
             assert update_info.tensor_sizes is not None
