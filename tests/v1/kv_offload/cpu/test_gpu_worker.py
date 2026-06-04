@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -90,13 +91,15 @@ def test_transfer(
 
     mmap_region: SharedOffloadRegion | None = None
     if use_shared_memory:
-        cpu_page_size = gpu_page_size_bytes * num_tensors * block_size_factor
+        cpu_page_size = round_up(
+            gpu_page_size_bytes * num_tensors * block_size_factor,
+            SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+        )
         mmap_region = SharedOffloadRegion(
             instance_id=str(uuid.uuid4()),
-            total_size_bytes=num_cpu_blocks * cpu_page_size,
             num_blocks=num_cpu_blocks,
             rank=0,
-            num_workers=1,
+            kv_bytes_per_block=cpu_page_size,
             cpu_page_size=cpu_page_size,
         )
 
