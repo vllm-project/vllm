@@ -4,13 +4,13 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
+    AttentionState,
+    AttentionStatePair,
     BatchExecutionDescriptor,
-    CapturedAttentionState,
     CudaGraphManager,
     prepare_inputs_to_capture,
 )
@@ -19,39 +19,20 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 
-class EagleCudaGraphManagerBase(CudaGraphManager):
-    """Base CudaGraphManager for Eagle with a dedicated graph pool."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        cudagraph_mode: CUDAGraphMode,
-        decode_query_len: int,
-    ):
-        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
-
-        # Use a dedicated pool for Eagle to avoid memory overlap with the main
-        # model's cudagraph. The base class uses a shared global pool, but Eagle's
-        # internal allocations (e.g., gumbel_sample temporaries) can conflict with
-        # the main model's allocations when sharing the same pool.
-        if cudagraph_mode:
-            self.pool = torch.cuda.graph_pool_handle()
-
-
-class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
+class PrefillEagleCudaGraphManager(CudaGraphManager):
     """Eagle CudaGraphManager for prefill, using pre-built attention states
     from the target model's capture."""
 
     def capture(
         self,
         forward_fn: Callable,
-        full_cg_attn_states: dict[BatchExecutionDescriptor, CapturedAttentionState],
+        attn_states: dict[BatchExecutionDescriptor, AttentionStatePair],
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
+            warmup: bool,
+        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -59,7 +40,8 @@ class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
                 if self.dp_size > 1
                 else None
             )
-            attn_state = full_cg_attn_states[desc]
+            attn_state_pair = attn_states[desc]
+            attn_state = attn_state_pair.warmup if warmup else attn_state_pair.captured
             attn_metadata, slot_mappings = attn_state
             fwd = lambda cg_mode: forward_fn(
                 num_reqs,
@@ -74,7 +56,7 @@ class PrefillEagleCudaGraphManager(EagleCudaGraphManagerBase):
         super().capture(create_forward_fn, progress_bar_desc)
 
 
-class DecodeEagleCudaGraphManager(EagleCudaGraphManagerBase):
+class DecodeEagleCudaGraphManager(CudaGraphManager):
     """Eagle CudaGraphManager for decode draft generation, building its own
     attention metadata from scratch."""
 
@@ -90,7 +72,8 @@ class DecodeEagleCudaGraphManager(EagleCudaGraphManagerBase):
     ) -> None:
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState]:
+            warmup: bool,
+        ) -> tuple[Callable[[CUDAGraphMode], None], AttentionState]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (

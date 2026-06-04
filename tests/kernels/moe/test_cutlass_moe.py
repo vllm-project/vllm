@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    CutlassExpertsFp4,
     CutlassExpertsFp8,
     run_cutlass_moe_fp8,
 )
@@ -50,6 +51,12 @@ MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+
+
+def test_cutlass_moe_supports_gelu_tanh_activation_metadata():
+    assert CutlassExpertsFp8._supports_activation(MoEActivation.GELU_TANH)
+    assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH)
+    assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH_NO_MUL)
 
 
 @dataclasses.dataclass
@@ -214,7 +221,6 @@ def run_with_expert_maps(
                 moe_config=moe_config,
                 quant_config=new_quant_config,
             ),
-            inplace=False,
         )
         out_tensor = out_tensor + kernel.apply(**kwargs)
 
@@ -284,7 +290,6 @@ def run_8_bit(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
         return kernel.apply(**kwargs)
 
