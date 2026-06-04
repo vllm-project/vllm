@@ -86,7 +86,7 @@ class Sampler:
             output_token_ids,
             sampling_params,
         )
-    
+
     def remove_request(self, req_idx: int) -> None:
         self.thinking_budget_state.remove_request(req_idx)
 

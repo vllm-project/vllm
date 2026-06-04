@@ -142,9 +142,7 @@ class ThinkingBudgetState:
             0 if predict_bonus_token else self.holder.num_spec_tokens
         )
         if holder.in_spec_mode:
-            holder._mask_capacity = input_batch.num_reqs * (
-                holder.num_spec_tokens + 1
-            )
+            holder._mask_capacity = input_batch.num_reqs * (holder.num_spec_tokens + 1)
         else:
             holder._mask_capacity = input_batch.num_reqs
 
