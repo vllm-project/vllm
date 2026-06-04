@@ -3,6 +3,7 @@
 
 import itertools
 from abc import abstractmethod
+from collections.abc import Iterable
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -968,6 +969,21 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             tp_rank=self.tp_rank,
         )
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            shard_id_str, _, param_name = name.partition(".")
+            # If the shard_id is not an integer, the weight is not sharded
+            try:
+                shard_id = int(shard_id_str)
+            except ValueError:
+                shard_id = None
+            # If param_name is "bias" get it from self, otherwise load into self
+            param: Parameter = getattr(self, param_name, self)
+            param.weight_loader(param, loaded_weight, shard_id)
+            yield param_name
+
 
 class QKVParallelLinear(ColumnParallelLinear):
     """Linear layers for the attention's QKV transformation.
@@ -1382,6 +1398,22 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        for name, loaded_weight in weights:
+            shard_id_str, _, param_name = name.partition(".")
+            # If the shard_id is not valid, the weight is not sharded
+            try:
+                self.validate_shard_id(shard_id_str)
+                shard_id = shard_id_str
+            except ValueError:
+                shard_id = None
+            # If param_name is "bias" get it from self, otherwise load into self
+            param: Parameter = getattr(self, param_name, self)
+            param.weight_loader(param, loaded_weight, shard_id)
+            yield param_name
 
 
 # --8<-- [start:row_parallel_linear]
