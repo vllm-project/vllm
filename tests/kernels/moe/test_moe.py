@@ -117,7 +117,7 @@ def iterative_moe(
 NUM_EXPERTS = [8, 64, 192]
 NUM_EXPERTS_LARGE = [128, 256]
 EP_SIZE = [1, 4]
-TOP_KS = [2, 6]
+TOP_KS = [2, 6, 8]
 TOP_KS_SMALL = [1, 2]
 
 MOE_MARLIN_QUANT_TEST_CONFIGS = [
