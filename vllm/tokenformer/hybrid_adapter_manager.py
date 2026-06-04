@@ -28,6 +28,7 @@ from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.tokenformer.adapter_format import (
     AdapterKind,
     load_adapter_from_pt,
+    normalize_lora_state_dict,
 )
 from vllm.tokenformer.lora_from_pt import load_lora_model_from_pt
 from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
@@ -77,8 +78,13 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
                 f"--enable-tokenformer instead, or as a hybrid adapter "
                 f"with both --enable-lora and --enable-tokenformer."
             )
+        # Re-normalize the lora_sd using the live model's prefix so the
+        # same .pt file works across model families (e.g. Qwen3-4B uses
+        # `model.layers.*` while Qwen3.5-4B uses
+        # `language_model.model.layers.*`).
+        lora_sd = self._renormalize_lora_sd_for_model(loaded.lora_sd)
         lora_model = load_lora_model_from_pt(
-            loaded.lora_sd,
+            lora_sd,
             lora_model_id=lora_request.adapter_id,
             device=self.device,
             dtype=(
@@ -96,6 +102,103 @@ class PTWorkerLoRAManager(LRUCacheWorkerLoRAManager):
         )
         self._warn_on_zero_base_match(lora_model, loaded.source_path)
         return lora_model
+
+    def _detect_model_layers_prefix(self) -> str:
+        """Probe the live base model to find which prefix its decoder
+        layers use.  Returns the string that should replace the
+        training-side ``model.layers.`` prefix in LoRA keys.
+
+        Known variants:
+          - ``model.layers.``            — standard decoder-only (Qwen3)
+          - ``language_model.model.layers.`` — VL-wrapped decoder
+                                               (Qwen3.5, Gemma4)
+
+        Falls back to ``model.layers.`` (the vLLM default) if the
+        model tree is not accessible.
+        """
+        try:
+            model = self._adapter_manager.model
+            for name, _ in model.named_modules():
+                if name.endswith(".self_attn") or name.endswith(".mlp"):
+                    # Strip the layer suffix to get the layers container
+                    # e.g. "language_model.model.layers.0.self_attn"
+                    #   -> "language_model.model.layers."
+                    # or  "model.layers.0.self_attn"
+                    #   -> "model.layers."
+                    parts = name.split(".")
+                    try:
+                        layers_idx = next(
+                            i for i, p in enumerate(parts) if p == "layers"
+                        )
+                        prefix = ".".join(parts[: layers_idx + 1]) + "."
+                        logger.debug(
+                            "Detected model layers prefix: %s", prefix
+                        )
+                        return prefix
+                    except StopIteration:
+                        continue
+        except Exception:
+            pass
+        logger.debug(
+            "Could not detect model layers prefix; defaulting to "
+            "model.layers."
+        )
+        return "model.layers."
+
+    def _renormalize_lora_sd_for_model(
+        self, lora_sd: dict
+    ) -> dict:
+        """Re-run key normalization using the live model's prefix.
+
+        ``adapter_format.normalize_lora_key`` uses a static rule that
+        maps ``model.layers.*`` to ``language_model.model.layers.*``
+        (needed for Qwen3.5/Gemma4).  For models whose vLLM tree really
+        does use ``model.layers.*`` (e.g. Qwen3-4B-Instruct) that
+        mapping is wrong.
+
+        This method detects the correct target prefix from the live
+        model, then re-applies *only* the structural part of the
+        normalization (prefix swap + PEFT ``.default.`` strip +
+        ClippableLinear ``.linear.`` strip) with the right target.
+        """
+        target_prefix = self._detect_model_layers_prefix()
+        # target_prefix is e.g. "model.layers." or
+        # "language_model.model.layers."
+
+        out: dict = {}
+        for k, v in lora_sd.items():
+            # The key has already been through normalize_lora_key once
+            # (inside load_adapter_from_pt -> split_adapter_state_dict).
+            # That pass may have mapped it to the wrong prefix.  We
+            # undo the structural prefix and re-apply with the correct
+            # target.
+
+            # Undo any previous prefix normalization: if the key starts
+            # with a known vLLM prefix that isn't the target, strip it
+            # back to bare "layers.*" then re-prefix.
+            KNOWN_PREFIXES = (
+                "language_model.model.layers.",
+                "model.layers.",
+            )
+            bare = k
+            for kp in KNOWN_PREFIXES:
+                if k.startswith(kp):
+                    bare = "layers." + k[len(kp):]
+                    break
+
+            # Re-prefix with the correct target
+            if bare.startswith("layers."):
+                nk = target_prefix + bare[len("layers."):]
+            else:
+                nk = k  # non-layers key (vision_tower, embed_vision, …)
+
+            if nk in out:
+                raise ValueError(
+                    f"LoRA key re-normalization collision: {k!r} and an "
+                    f"earlier key both map to {nk!r}."
+                )
+            out[nk] = v
+        return out
 
     def _warn_on_zero_base_match(self, lora_model, source_path) -> None:
         """If every parsed LoRA module path is missing from the base
