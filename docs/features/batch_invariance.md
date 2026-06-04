@@ -17,10 +17,7 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher:
-
-- **H-series**: H100, H200
-- **B-series**: B100, B200
+Batch invariance requires NVIDIA GPUs with compute capability 8.0 or higher.
 
 ## Enabling Batch Invariance
 
