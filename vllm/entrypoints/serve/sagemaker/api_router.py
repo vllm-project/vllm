@@ -14,11 +14,11 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.generate.factories import get_generate_invocation_types
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.base.serving import PoolingServingBase
 from vllm.entrypoints.pooling.factories import get_pooling_invocation_types
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.tasks import SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
