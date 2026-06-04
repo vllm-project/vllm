@@ -779,9 +779,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
-                # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                mqa_q = torch.cat(mqa_q, dim=-1)
+                if isinstance(mqa_q, tuple):
+                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
+                    mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 

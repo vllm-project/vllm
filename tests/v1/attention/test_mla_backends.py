@@ -19,6 +19,7 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config.vllm import set_current_vllm_config
+from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
@@ -552,6 +553,10 @@ class MockMLAAttentionLayer(MLAAttention):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
+            if self.impl.dcp_world_size > 1:
+                if isinstance(mqa_q, tuple):
+                    mqa_q = torch.cat(mqa_q, dim=-1)
+                mqa_q = mla_attention_module.get_dcp_group().all_gather(mqa_q, dim=1)
 
             attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 
@@ -567,6 +572,124 @@ class MockMLAAttentionLayer(MLAAttention):
             )
 
         return output
+
+
+def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
+    monkeypatch, default_vllm_config
+):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for FP8 decode query quantization path.")
+
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    num_tokens = 2
+    num_heads = 2
+    qk_nope_head_dim = 4
+    qk_rope_head_dim = 2
+    v_head_dim = 3
+    kv_lora_rank = 5
+
+    class _DummyKVProj:
+        def __init__(self):
+            # Shape expected by MockMLAAttentionLayer.__init__
+            self.weight = torch.randn(
+                num_heads * (qk_nope_head_dim + v_head_dim),
+                kv_lora_rank,
+                device=device,
+                dtype=torch.float32,
+            )
+
+    class _FakeImpl:
+        def __init__(self):
+            self.kv_cache_dtype = "fp8"
+            self.supports_quant_query_input = True
+            self.dcp_world_size = 2
+            self.forward_q = None
+
+        def forward_mha(self, *args, **kwargs):
+            return None
+
+        def forward_mqa(self, q, kv_cache, attn_metadata, layer):
+            self.forward_q = q
+            assert isinstance(q, torch.Tensor)
+            bsz, _, _ = q.shape
+            return (
+                torch.zeros(
+                    bsz,
+                    num_heads,
+                    kv_lora_rank,
+                    device=q.device,
+                    dtype=torch.float32,
+                ),
+                None,
+            )
+
+    class _FakeDCPGroup:
+        def __init__(self):
+            self.calls = 0
+            self.input_dtype = None
+            self.input_shape = None
+
+        def all_gather(self, x, dim=1):
+            self.calls += 1
+            self.input_dtype = x.dtype
+            self.input_shape = tuple(x.shape)
+            return torch.cat([x, x], dim=dim)
+
+    fake_group = _FakeDCPGroup()
+    monkeypatch.setattr(mla_attention_module, "get_dcp_group", lambda: fake_group)
+
+    impl = _FakeImpl()
+    with set_current_vllm_config(default_vllm_config):
+        layer = MockMLAAttentionLayer(
+            impl=impl,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            device=device,
+            kv_b_proj=_DummyKVProj(),
+            q_scale=1.0,
+            k_scale=1.0,
+        )
+
+    q = torch.randn(
+        num_tokens,
+        num_heads,
+        qk_nope_head_dim + qk_rope_head_dim,
+        device=device,
+        dtype=torch.float32,
+    )
+    kv_c = torch.randn(num_tokens, kv_lora_rank, device=device, dtype=torch.float32)
+    k_pe = torch.randn(
+        num_tokens, 1, qk_rope_head_dim, device=device, dtype=torch.float32
+    )
+    kv_cache = torch.empty(0, device=device, dtype=torch.float32)
+    output = torch.empty(
+        num_tokens, num_heads * v_head_dim, device=device, dtype=torch.float32
+    )
+
+    class _AttnMeta:
+        num_decode_tokens = num_tokens
+        num_decodes = 1
+        num_prefills = 0
+        slot_mapping = torch.empty(0, dtype=torch.long, device=device)
+
+    layer.forward_impl(q, kv_c, k_pe, kv_cache, _AttnMeta(), output)
+
+    assert fake_group.calls == 1
+    assert fake_group.input_dtype == current_platform.fp8_dtype()
+    assert fake_group.input_shape == (
+        num_tokens,
+        num_heads,
+        kv_lora_rank + qk_rope_head_dim,
+    )
+    assert isinstance(impl.forward_q, torch.Tensor)
+    assert tuple(impl.forward_q.shape) == (
+        num_tokens,
+        num_heads * impl.dcp_world_size,
+        kv_lora_rank + qk_rope_head_dim,
+    )
 
 
 def run_attention_backend(
