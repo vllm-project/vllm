@@ -2339,10 +2339,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_lse=suffix_lse,
                 prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
             )
-        elif output_scale is not None:
-            # FA4 already wrote results in-place into `output`.
-            assert isinstance(output_prefill, torch.Tensor)
-        else:
+        elif output_scale is None:
+            # With output_scale set, backend already wrote into `output` in place.
             assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)

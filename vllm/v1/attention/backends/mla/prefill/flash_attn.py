@@ -92,12 +92,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
 
     def supports_quant_output(self, quant_key: "QuantKey") -> bool:
-        # FA4 can write native fused FP8 (e4m3fn) output on Blackwell
-        # SM100/SM110 only (see flash-attention#135); FA4 natively handles
-        # MLA's mismatched qk/v head dims so no V padding is involved.
-        # Only static per-tensor FP8 is wired today; per-group FP8 / NVFP4
-        # still go through the post-quant path. get_device_capability() is
-        # @cache'd, so this stays cheap on the hot path.
         device_capability = current_platform.get_device_capability()
         return (
             self.vllm_flash_attn_version == 4
@@ -114,6 +108,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         v: torch.Tensor,
         return_softmax_lse: bool = False,
         softmax_scale: float | None = None,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         maybe_padded_v = v
@@ -124,10 +120,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         if self._is_vllm_fa:
             kwargs["return_softmax_lse"] = return_softmax_lse
+            kwargs["out"] = out
+            kwargs["output_scale"] = output_scale
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
+            assert out is None and output_scale is None
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
@@ -163,25 +162,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # `out` / `output_scale` are vLLM-FA (FA4) extensions; upstream ROCm
-        # flash_attn rejects unknown kwargs. supports_quant_output() gates
-        # these to vLLM-FA only, so non-vLLM-FA callers must leave them unset.
-        if self._is_vllm_fa:
-            return self._flash_attn_varlen_diff_headdims(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=self._prefill_metadata.query_start_loc,
-                cu_seqlens_k=self._prefill_metadata.query_start_loc,
-                max_seqlen_q=self._prefill_metadata.max_query_len,
-                max_seqlen_k=self._prefill_metadata.max_query_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=return_softmax_lse,
-                out=out,
-                output_scale=output_scale,
-            )
-        assert out is None and output_scale is None
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
@@ -193,6 +173,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=return_softmax_lse,
+            out=out,
+            output_scale=output_scale,
         )
 
     def run_prefill_context_chunk(
