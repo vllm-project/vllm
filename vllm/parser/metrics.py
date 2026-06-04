@@ -4,12 +4,25 @@
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from enum import Enum
+from itertools import product
+from typing import cast
 
 from prometheus_client import REGISTRY, Counter
 
 _TOOL_CALL_PARSER_INVOCATIONS_TOTAL = "vllm:tool_call_parser_invocations_total"
 _tool_call_parser_invocations: Counter | None = None
+
+
+class ToolCallOutcome(Enum):
+    TOOL_CALL = "tool_call"
+    NO_TOOL_CALL = "no_tool_call"
+
+
+class RequestType(Enum):
+    CHAT_COMPLETIONS = "chat_completions"
+    RESPONSES = "responses"
+    OTHER = "other"
 
 
 def init_parser_metrics() -> None:
@@ -31,17 +44,59 @@ def init_parser_metrics() -> None:
             REGISTRY._names_to_collectors[_TOOL_CALL_PARSER_INVOCATIONS_TOTAL],
         )
 
+    for mode, outcome, request_type in product(
+        ("streaming", "non_streaming"),
+        ToolCallOutcome,
+        RequestType,
+    ):
+        _tool_call_parser_invocations.labels(
+            mode=mode,
+            outcome=outcome.value,
+            request_type=request_type.value,
+        )
+
 
 def record_tool_parser_invocation(
     *,
-    mode: Literal["streaming", "non_streaming"],
-    tools_called: bool,
+    is_tool_called: bool | Exception,
+    is_streaming: bool,
     request: object,
 ) -> None:
-    """Increment the tool-call parser invocation counter when registered."""
-    if _tool_call_parser_invocations is not None:
-        _tool_call_parser_invocations.labels(
-            mode=mode,
-            outcome="tool_call" if tools_called else "no_tool_call",
-            request_type=request.__class__.__name__,
-        ).inc()
+    """Increment the tool-call parser invocation counter when registered.
+    Currently parser failures are treated as no tool calls.
+
+    TODO: To accurately track parser failures, add a new ToolCallOutcome and
+    more importantly, ensure exceptions are propagated out of the ToolParsers
+    instead of being caught internally. This would require going through
+    ToolParser implementation on a case-by-case basis.
+    """
+    if _tool_call_parser_invocations is None:
+        return
+
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+    match request:
+        case ChatCompletionRequest():
+            request_type = RequestType.CHAT_COMPLETIONS
+        case ResponsesRequest():
+            request_type = RequestType.RESPONSES
+        case _:
+            request_type = RequestType.OTHER
+            return
+
+    match is_tool_called:
+        case bool():
+            outcome = (
+                ToolCallOutcome.TOOL_CALL
+                if is_tool_called
+                else ToolCallOutcome.NO_TOOL_CALL
+            )
+        case _:
+            outcome = ToolCallOutcome.NO_TOOL_CALL
+
+    _tool_call_parser_invocations.labels(
+        mode="streaming" if is_streaming else "non_streaming",
+        outcome=outcome.value,
+        request_type=request_type.value,
+    ).inc()

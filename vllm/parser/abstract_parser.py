@@ -669,15 +669,20 @@ class DelegatingParser(Parser):
                 tools_called=False, tool_calls=[], content=model_output
             )
         result = None
+        is_tool_called: bool | Exception = False
         try:
             result = self._tool_parser.extract_tool_calls(
                 model_output,
                 request=request,  # type: ignore[arg-type]
             )
+            is_tool_called = bool(result.tools_called)
+        except Exception as e:
+            is_tool_called = e
+            raise
         finally:
             record_tool_parser_invocation(
-                mode="non_streaming",
-                tools_called=result is not None and result.tools_called,
+                is_tool_called=is_tool_called,
+                is_streaming=False,
                 request=request,
             )
         return result
@@ -695,6 +700,7 @@ class DelegatingParser(Parser):
         if self._tool_parser is None:
             return None
         result = None
+        is_tool_called: bool | Exception = False
         try:
             result = self._tool_parser.extract_tool_calls_streaming(
                 previous_text,
@@ -705,10 +711,14 @@ class DelegatingParser(Parser):
                 delta_token_ids,
                 request,  # type: ignore[arg-type]
             )
+            is_tool_called = bool(result and result.tool_calls)
+        except Exception as e:
+            is_tool_called = e
+            raise
         finally:
             record_tool_parser_invocation(
-                mode="streaming",
-                tools_called=bool(result and result.tool_calls),
+                is_tool_called=is_tool_called,
+                is_streaming=True,
                 request=request,
             )
         return result
