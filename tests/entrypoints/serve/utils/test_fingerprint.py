@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.entrypoints.openai import fingerprint as fp
+from vllm.entrypoints.serve.utils import fingerprint as fp
 
 
 def _cfg(tp=1, pp=1, dp=1, ep=False, digest="a3b21f94deadbeef"):

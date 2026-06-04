@@ -37,6 +37,4 @@ rust/target/
 docs/
 .github/
 .pre-commit-config.yaml
-.clang-format
-.gitattributes
 format.sh
