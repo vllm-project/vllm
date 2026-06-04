@@ -8,8 +8,6 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
-from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_BOS_TOKEN,
     MOSS_AUDIO_BOS_TOKEN_ID,
@@ -31,6 +29,8 @@ from vllm.model_executor.models.moss_audio import (
     MossQwen3Model,
 )
 from vllm.model_executor.models.utils import AutoWeightsLoader
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.sequence import IntermediateTensors
 
 
