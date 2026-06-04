@@ -123,3 +123,74 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+def test_touch_nonexistent_key_does_not_create_orphan():
+    """Regression test for https://github.com/vllm-project/vllm/issues/43941
+
+    Calling touch() on a key that doesn't exist in the cache must NOT add it
+    to __order, because that creates an "orphan" entry that causes popitem()
+    to loop infinitely during eviction.
+    """
+    cache = LRUCache(3)
+    cache.put("a", 1)
+    cache.put("b", 2)
+
+    # Touch a key that was never inserted
+    cache.touch("ghost")
+
+    # "ghost" must NOT appear in the order
+    assert "ghost" not in cache.order
+    assert "ghost" not in cache
+    assert len(cache) == 2
+
+    # Eviction should still work normally
+    cache.put("c", 3)
+    cache.put("d", 4)  # triggers eviction of "a"
+    assert len(cache) == 3
+    assert "a" not in cache
+    assert set(cache.cache) == {"b", "c", "d"}
+
+
+def test_popitem_cleans_orphan_keys_no_infinite_loop():
+    """Regression test for https://github.com/vllm-project/vllm/issues/43941
+
+    If an orphan key somehow ends up in __order (e.g. from a prior bug),
+    popitem() must clean it up rather than looping forever.
+    """
+    cache = LRUCache(3)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    cache.put("c", 3)
+
+    # Manually inject an orphan key into __order (simulating the old bug)
+    cache._LRUCache__order["orphan"] = None  # type: ignore
+    # Move orphan to front (oldest position)
+    cache._LRUCache__order.move_to_end("orphan", last=False)  # type: ignore
+
+    # Now insert a new item, which requires eviction
+    # Without the fix, this would loop forever on the orphan
+    cache.put("d", 4)
+
+    # The orphan should have been cleaned, and "a" evicted as the real LRU
+    assert "orphan" not in cache.order
+    assert "a" not in cache
+    assert len(cache) == 3
+    assert set(cache.cache) == {"b", "c", "d"}
+
+
+def test_touch_existing_key_updates_lru_order():
+    """touch() on an existing key should move it to the end (most recent)."""
+    cache = LRUCache(3)
+    cache.put("a", 1)
+    cache.put("b", 2)
+    cache.put("c", 3)
+
+    # Touch "a" to make it most recently used
+    cache.touch("a")
+
+    # Now "b" should be the oldest - evicted next
+    cache.put("d", 4)
+    assert "b" not in cache
+    assert "a" in cache
+    assert set(cache.cache) == {"a", "c", "d"}

@@ -121,7 +121,11 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         try:
             self._LRUCache__order.move_to_end(key)  # type: ignore
         except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
+            # Only add to __order if the key actually exists in the cache.
+            # Otherwise we create an "orphan" key that can cause infinite
+            # loops during eviction (see github.com/vllm-project/vllm/issues/43941).
+            if key in self:
+                self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...
@@ -190,6 +194,18 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
 
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
+        order = self._LRUCache__order  # type: ignore
+
+        # Defensive cleanup: remove orphan keys from the head of __order
+        # that exist in __order but not in __data. This prevents infinite
+        # loops if an orphan was introduced by a prior bug or race condition.
+        # See github.com/vllm-project/vllm/issues/43941
+        while order:
+            first_key = next(iter(order))
+            if first_key in self:
+                break
+            del order[first_key]
+
         if not remove_pinned:
             # pop the oldest item in the cache that is not pinned
             lru_key = next(
