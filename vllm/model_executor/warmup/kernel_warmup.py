@@ -68,8 +68,20 @@ def kernel_warmup(worker: "Worker"):
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
     )
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
+    # NOTE: Autotuning may have already been run early (before KV cache
+    # allocation) in gpu_worker.determine_available_memory() to avoid OOM.
+    # When early autotuning ran, we skip the second call here because the
+    # autotuner workspace buffers would compete with the now-allocated KV
+    # cache for GPU memory, causing OOM on shapes not covered by the early
+    # run's cache.
+    _did_early_autotune = getattr(worker, "_did_flashinfer_autotune_early", False)
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
+    elif _did_early_autotune:
+        logger.info(
+            "Skipping FlashInfer autotune in kernel_warmup — "
+            "already completed early (before KV cache allocation)."
+        )
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
