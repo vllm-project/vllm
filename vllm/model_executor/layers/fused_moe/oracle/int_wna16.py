@@ -35,7 +35,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
     marlin_moe_permute_zero_points,
     marlin_permute_bias,
-    marlin_zero_points,
     moe_awq_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -602,6 +601,13 @@ def _process_weights_marlin(
                 marlin_w2_scales
             )
 
+    # --- Permute bias ---
+    if w13_bias is not None:
+        w13_bias_out = marlin_permute_bias(w13_bias)
+    if w2_bias is not None:
+        w2_bias_out = marlin_permute_bias(w2_bias)
+
+    # --- Process zero points ---
     if w13_qzeros is not None:
         w13_qzeros = _marlin_moe_process_zero_points(
             w13_qzeros, pack_factor, num_bits, is_a_8bit
@@ -610,24 +616,6 @@ def _process_weights_marlin(
     if w2_qzeros is not None:
         w2_qzeros = _marlin_moe_process_zero_points(
             w2_qzeros, pack_factor, num_bits, is_a_8bit
-        )
-
-    if w13_qzeros is not None:
-        w13_qzeros_out = marlin_zero_points(
-            w13_qzeros,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=w13_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
-        )
-
-    if w2_qzeros is not None:
-        w2_qzeros_out = marlin_zero_points(
-            w2_qzeros,
-            size_k=w2_qzeros.shape[1] * group_size_or_pack_factor,
-            size_n=w2_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
         )
 
     return (
