@@ -348,16 +348,14 @@ class AutoWeightsLoader:
         # We look at the causal model's direct children for this reason.
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
-        quant_config = next(iterator, None)
-        cache_scale_mapper = (
-            quant_config.get_cache_scale_mapper() if quant_config is not None else None
-        )
-        if cache_scale_mapper is not None:
-            mapper = (
-                mapper | cache_scale_mapper
-                if mapper is not None
-                else cache_scale_mapper
-            )
+        if quant_config := next(iterator, None):
+            # Skip loading extra bias for GPTQ models
+            if "gptq" in quant_config.get_name():
+                self.ignore_unexpected_suffixes.append(".bias")
+            # Get mappings for KV cache quantization scales
+            if cache_scale_mapper := quant_config.get_cache_scale_mapper():
+                mapper = mapper or WeightsMapper()
+                mapper |= cache_scale_mapper
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
