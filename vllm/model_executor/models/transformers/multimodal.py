@@ -62,14 +62,20 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         processor = self.get_hf_processor()
         return hasattr(processor, "audio_token")
 
+    def _is_vision_model(self) -> bool:
+        processor = self.get_hf_processor()
+        return hasattr(processor, "image_token") or hasattr(
+            processor, "boi_token"
+        )
+
     def _get_audio_token_id(self) -> int:
         processor = self.get_hf_processor()
         if hasattr(processor, "audio_token_id"):
             return processor.audio_token_id
         config = self.get_hf_config()
-        for attr in ("audio_token_id", "audio_token_index"):
-            if hasattr(config, attr):
-                return getattr(config, attr)
+        val = getattr_iter(config, ("audio_token_id", "audio_token_index"))
+        if val is not None:
+            return val
         if hasattr(processor, "audio_token"):
             tokenizer = self.get_tokenizer()
             vocab = tokenizer.get_vocab()
@@ -79,10 +85,9 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     def _get_audio_sampling_rate(self) -> float:
         processor = self.get_hf_processor()
-        for attr in ("audio_processor", "feature_extractor"):
-            sub = getattr(processor, attr, None)
-            if sub is not None and hasattr(sub, "sampling_rate"):
-                return sub.sampling_rate
+        sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
+        if sub is not None and hasattr(sub, "sampling_rate"):
+            return sub.sampling_rate
         return 16000.0
 
     def get_data_parser(self) -> MultiModalDataParser:
@@ -94,27 +99,37 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return super().get_data_parser()
 
     def get_supported_mm_limits(self):
+        limits = {}
         if self._is_audio_model():
-            return {"audio": None}
-        return {"image": None}
+            limits["audio"] = None
+        if self._is_vision_model():
+            limits["image"] = None
+        return limits if limits else {"image": None}
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
+        result = {}
         if self._is_audio_model():
-            return {"audio": self.get_max_audio_tokens()}
-        return {"image": self.get_max_image_tokens()}
+            result["audio"] = self.get_max_audio_tokens()
+        if self._is_vision_model():
+            result["image"] = self.get_max_image_tokens()
+        return result if result else {"image": self.get_max_image_tokens()}
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
-        for cfg_attr in ("audio_config", "encoder_config"):
-            sub = getattr(config, cfg_attr, None)
-            if sub is not None:
-                for token_attr in ("max_source_positions", "max_position_embeddings"):
-                    val = getattr(sub, token_attr, None)
-                    if val is not None:
-                        return int(val)
-        # Voxtral's max_source_positions=3000 is the largest known value;
-        # AudioFlamingo3/GLM-ASR use 1500. Granite Speech is variable.
-        return 3000
+        sub = getattr_iter(config, ("audio_config", "encoder_config"))
+        if sub is not None:
+            val = getattr_iter(
+                sub,
+                ("max_source_positions", "max_position_embeddings", "max_pos_emb"),
+            )
+            if val is not None:
+                return int(val)
+        raise ValueError(
+            f"{type(config).__name__} does not have a recognized audio "
+            "encoder config with max_source_positions, max_position_embeddings, "
+            "or max_pos_emb. Please update the model config or add support "
+            "for this architecture in get_max_audio_tokens()."
+        )
 
     def get_max_image_tokens(self) -> int:
         width, height = self.get_max_image_size()
@@ -159,13 +174,11 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             audio_overrides = mm_options.get("audio")
             sampling_rate = self.info._get_audio_sampling_rate()
             processor = self.info.get_hf_processor()
-            for attr in ("audio_processor", "feature_extractor"):
-                sub = getattr(processor, attr, None)
-                if sub is not None:
-                    chunk_length = getattr(sub, "chunk_length", None)
-                    if chunk_length is not None:
-                        break
-            else:
+            sub = getattr_iter(
+                processor, ("audio_processor", "feature_extractor")
+            )
+            chunk_length = getattr(sub, "chunk_length", None) if sub else None
+            if chunk_length is None:
                 chunk_length = 30
             audio_len = int(chunk_length * sampling_rate)
             return {

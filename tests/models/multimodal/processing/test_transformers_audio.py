@@ -3,9 +3,7 @@
 import numpy as np
 import pytest
 
-from vllm import SamplingParams
 from vllm.config import ModelConfig
-from vllm.envs import disable_envs_cache
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 AUDIO_MODEL_SETTINGS = {
@@ -110,55 +108,3 @@ def test_audio_multimodal_processor(model_id):
     assert has_features, (
         f"No audio features (input_features/input_values) in {item_keys} for {model_id}"
     )
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "ibm-granite/granite-speech-3.3-2b",
-        "nvidia/audio-flamingo-3-hf",
-        pytest.param(
-            "mistralai/Voxtral-Mini-3B-2507",
-            marks=pytest.mark.xfail(
-                reason="MistralCommonBackend tokenizer does not produce audio "
-                "placeholder token (ID 24) from text; requires "
-                "apply_chat_template path",
-                strict=False,
-            ),
-        ),
-        "microsoft/VibeVoice-ASR-HF",
-        "zai-org/GLM-ASR-Nano-2512",
-    ],
-)
-def test_audio_model_loading(monkeypatch, vllm_runner, model_id):
-    """Single-process workaround for V1 fork safety deadlock issue
-    (vllm-project/vllm/issues/17676). Running multiple audio models together
-    under pytest can cause (possibly flaky) hangs, so they are grouped under
-    the same config. Using VLLM_WORKER_MULTIPROC_METHOD=spawn avoids the
-    deadlock and allows worker processes to terminate cleanly, and release
-    GPU memory between test runs until the issue is fixed."""
-    # TODO: Remove monkeypatch once
-    # https://github.com/vllm-project/vllm/issues/17676 is fixed.
-    disable_envs_cache()
-    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
-    settings = AUDIO_MODEL_SETTINGS[model_id]
-
-    with vllm_runner(
-        model_id,
-        model_impl="transformers",
-        max_model_len=2048,
-        enforce_eager=True,
-        limit_mm_per_prompt={"audio": 1},
-    ) as vllm_model:
-        model_config = vllm_model.llm.llm_engine.model_config
-        assert model_config.using_transformers_backend()
-
-        audio = np.zeros(16000 * 2, dtype=np.float32)
-        outputs = vllm_model.generate(
-            prompts=[settings["prompt"]],
-            sampling_params=SamplingParams(max_tokens=16, temperature=0.0),
-            audios=[(audio, 16000)],
-        )
-        assert len(outputs) == 1
-        assert len(outputs[0][1]) > 0

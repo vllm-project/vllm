@@ -50,6 +50,16 @@ class MistralCommonFeatureExtractor:
             {"audio_arrays": audios_processed}, tensor_type=return_tensors
         )
 
+    def fetch_audio(self, audio_url_or_urls, sampling_rate=None):
+        if isinstance(audio_url_or_urls, list) and not isinstance(
+            audio_url_or_urls[0], float
+        ):
+            return [
+                self.fetch_audio(x, sampling_rate=sampling_rate)
+                for x in audio_url_or_urls
+            ]
+        return audio_url_or_urls
+
     def get_num_audio_tokens(self, audio_length: int) -> int:
         return ceil(audio_length / (self.sampling_rate // self.frame_rate))
 
