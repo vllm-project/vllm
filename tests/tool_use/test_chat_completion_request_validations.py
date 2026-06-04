@@ -181,3 +181,25 @@ def test_multiple_structured_outputs_rejected():
                 },
             }
         )
+
+
+@pytest.mark.parametrize(
+    "structured_outputs",
+    [True, False, 123, 1.5, "json", ["json"]],
+)
+def test_structured_outputs_non_object_rejected(structured_outputs):
+    """A non-object `structured_outputs` (e.g. a bool/number/string/list) must
+    be rejected with a clear validation error (HTTP 400) instead of crashing
+    with `AttributeError: '<type>' object has no attribute 'get'`, which would
+    otherwise surface as an HTTP 500 Internal Server Error."""
+    with pytest.raises(
+        ValueError,
+        match="`structured_outputs` must be a JSON object",
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "structured_outputs": structured_outputs,
+            }
+        )
