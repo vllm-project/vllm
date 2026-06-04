@@ -174,6 +174,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 is_int4=self.is_int4,
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
+                is_block_fp8=self.is_block_fp8,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
@@ -242,7 +243,6 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
 
 
 class XPUExpertsBlockFp8(XPUExperts):
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
