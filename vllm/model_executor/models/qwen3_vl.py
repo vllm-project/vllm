@@ -2268,9 +2268,9 @@ class Qwen3VLForConditionalGeneration(
         These embeddings will replace the placeholder embeddings to create
         input_embeds for the LLM.
         """
-        
+
         device = video_embeddings.device
-        
+
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized
         # special tokens to ensure consistent tokenization regardless of
