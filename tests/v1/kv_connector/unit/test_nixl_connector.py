@@ -2737,3 +2737,116 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+class _QueueingFakeNixlWrapper(FakeNixlWrapper):
+    """FakeNixlWrapper extension that lets a test queue notifications."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._queued: list[bytes] = []
+
+    def queue_notif(self, req_id: str, n_consumers: int = 1) -> None:
+        self._queued.append(f"{req_id}:{n_consumers}".encode())
+
+    def get_new_notifs(self) -> dict[str, list[bytes]]:
+        if not self._queued:
+            return {}
+        notifs = {"agent": list(self._queued)}
+        self._queued.clear()
+        return notifs
+
+
+def _build_producer_worker():
+    vllm_config = create_vllm_config()
+    kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0,
+        kv_cache_config=kv_cache_config,
+    )
+    return connector.connector_worker
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    _QueueingFakeNixlWrapper,
+)
+def test_one_sibling_pull_releases_all_registered_siblings(
+    default_vllm_config, dist_init
+):
+    """D-side prefix cache pulls only sibling 7; without the fix, siblings
+    0..6 strand until the 480s expiry."""
+    # Given a producer holding all 8 best_of siblings of one parent prompt.
+    # Sibling ids follow vllm/v1/engine/parallel_sampling.py:92's f"{i}_{parent}".
+    worker = _build_producer_worker()
+    parent = "cmpl-fb4bc0e0-7dec-4bdc-9774-55b4575bf876-0-9e35b663"
+    siblings = {f"{i}_{parent}" for i in range(8)}
+    worker._reqs_to_process = set(siblings)
+    worker._reqs_to_send = {sib: 0.0 for sib in siblings}
+
+    # When only sibling 7's pull-complete notification arrives.
+    worker.nixl_wrapper.queue_notif(f"7_{parent}", n_consumers=1)
+    done_sending, _ = worker.get_finished()
+
+    # Then all 8 siblings are released, not just sibling 7.
+    assert done_sending == siblings
+    assert worker._reqs_to_process == set()
+    assert worker._reqs_to_send == {}
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    _QueueingFakeNixlWrapper,
+)
+def test_sibling_registering_after_parent_pulled_is_freed_at_registration(
+    default_vllm_config, dist_init
+):
+    """A late-registering sibling of an already-pulled parent must not strand."""
+    # Given a producer that has already seen one sibling of this parent pulled.
+    worker = _build_producer_worker()
+    parent = "cmpl-0fd4875b-320a-4b95-82ff-289a3d30fd2b-0-ac8bcbf3"
+    worker._pulled_bases[parent] = None
+
+    # When a late sibling of the same parent registers via start_load_kv.
+    late_sibling = f"3_{parent}"
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {late_sibling}
+    worker.start_load_kv(metadata)
+    done_sending, _ = worker.get_finished()
+
+    # Then the late sibling is freed via get_finished, not stranded.
+    assert late_sibling in done_sending
+    assert late_sibling not in worker._reqs_to_process
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    _QueueingFakeNixlWrapper,
+)
+def test_notification_arriving_before_registration_settles_on_registration(
+    default_vllm_config, dist_init
+):
+    """The pull-complete notif can race start_load_kv; before the fix it was
+    dropped and the request stranded until the 480s expiry."""
+    # Given the consumer's pull-complete notif arrives before the producer
+    # has registered the request in _reqs_to_process.
+    worker = _build_producer_worker()
+    req_id = "7_cmpl-35dba481-9b73-4fce-8636-7a5d40f3167a-0-b48d1be7"
+    worker.nixl_wrapper.queue_notif(req_id, n_consumers=1)
+    worker.get_finished()
+    assert req_id in worker._notif_n_consumers
+    assert worker.consumer_notification_counts_by_req[req_id] == 1
+
+    # When the producer registers the request via start_load_kv.
+    metadata = NixlConnectorMetadata()
+    metadata.reqs_in_batch = {req_id}
+    worker.start_load_kv(metadata)
+    done_sending, _ = worker.get_finished()
+
+    # Then the req is released instead of stranding until the 480s expiry.
+    assert req_id in done_sending
+    assert req_id not in worker._notif_n_consumers
+    assert req_id not in worker._reqs_to_process

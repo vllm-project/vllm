@@ -433,6 +433,16 @@ class NixlConnectorWorker:
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
+        # FIX(early-notif race): a pull-complete notif can arrive before start_load_kv
+        # registers the req. Stage tp_size so registration can settle; FIFO-capped so
+        # never-registering reqs (aborts) can't accumulate.
+        self._notif_n_consumers: dict[ReqId, int] = {}
+        self._late_released: set[ReqId] = set()
+        # FIX(best_of fan-out): n>1 siblings f"{i}_{parent_id}" share one prompt KV;
+        # D-side prefix cache pulls only one, so the rest must free when any is
+        # pulled (else strand at VLLM_NIXL_ABORT_REQUEST_TIMEOUT). FIFO-capped.
+        self._pulled_bases: dict[str, None] = {}
+        self._fanout_released: set[ReqId] = set()
         self.xfer_stats = NixlKVConnectorStats()
 
         self._physical_blocks_per_logical_kv_block = 1
@@ -1691,6 +1701,12 @@ class NixlConnectorWorker:
                 indices=indices,
             )
 
+    @staticmethod
+    def _best_of_parent(req_id: str) -> str | None:
+        # Children are named f"{index}_{parent_id}" (parallel_sampling.py:92).
+        head, sep, tail = req_id.partition("_")
+        return tail if sep and head.isdigit() else None
+
     def get_finished(self) -> tuple[set[str], set[str]]:
         """
         Get requests that are done sending or recving on this specific worker.
@@ -1699,6 +1715,14 @@ class NixlConnectorWorker:
         """
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
+        # FIX(best_of fan-out): siblings released at registration.
+        if self._fanout_released:
+            done_sending |= self._fanout_released
+            self._fanout_released = set()
+        # FIX(early-notif race): merge late settlements.
+        if self._late_released:
+            done_sending |= self._late_released
+            self._late_released = set()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
         # Drain queue of requests where handshake or transfer setup failed.
@@ -1814,11 +1838,21 @@ class NixlConnectorWorker:
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
                 ):
-                    logger.error(
-                        "Potentially invalid KV blocks for "
-                        "unrecognized request %s were retrieved by "
-                        "a decode worker. They may have expired.",
+                    # FIX(early-notif race): record + count, settle on registration.
+                    if (
+                        req_id not in self._notif_n_consumers
+                        and len(self._notif_n_consumers) >= 8192
+                    ):
+                        _ev = next(iter(self._notif_n_consumers))
+                        self._notif_n_consumers.pop(_ev)
+                        self.consumer_notification_counts_by_req.pop(_ev, None)
+                    self._notif_n_consumers[req_id] = int(tp_size)
+                    self.consumer_notification_counts_by_req[req_id] += 1
+                    logger.debug(
+                        "Early notif arrived for req %s before registration "
+                        "(n_consumers=%s); will settle on registration.",
                         req_id,
+                        tp_size,
                     )
                     continue
 
@@ -1842,6 +1876,32 @@ class NixlConnectorWorker:
                     del self.consumer_notification_counts_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
+                    # FIX(early-notif race): drop any staged orphan entry so it
+                    # doesn't linger until FIFO eviction drops an unrelated id.
+                    self._notif_n_consumers.pop(req_id, None)
+                    # FIX(best_of fan-out): release un-pulled siblings of this parent.
+                    parent = self._best_of_parent(req_id)
+                    if parent is not None and parent not in self._pulled_bases:
+                        self._pulled_bases[parent] = None
+                        if len(self._pulled_bases) > 8192:
+                            self._pulled_bases.pop(next(iter(self._pulled_bases)))
+                        _siblings = [
+                            r
+                            for r in list(self._reqs_to_process)
+                            if self._best_of_parent(r) == parent
+                        ]
+                        for _sib in _siblings:
+                            notified_req_ids.add(_sib)
+                            self.consumer_notification_counts_by_req.pop(_sib, None)
+                            self._notif_n_consumers.pop(_sib, None)
+                            self._reqs_to_process.discard(_sib)
+                            self._reqs_to_send.pop(_sib, None)
+                        if _siblings:
+                            logger.debug(
+                                "best_of fan-out: parent %s released %d sibling(s)",
+                                parent,
+                                len(_siblings),
+                            )
         return notified_req_ids
 
     def _handle_heartbeat(self, payload: str) -> None:
@@ -1975,6 +2035,30 @@ class NixlConnectorWorker:
         # expiration for requests that have not been read from D yet.
         for req_id in metadata.reqs_in_batch:
             self._reqs_to_process.add(req_id)
+            # FIX(early-notif race): settle if a notif arrived before registration.
+            if req_id in self._notif_n_consumers:
+                assert self.transfer_topo is not None
+                _n = self._notif_n_consumers[req_id]
+                _cpp = -self.transfer_topo.tp_ratio(_n) if _n > self.world_size else 1
+                if self.consumer_notification_counts_by_req[req_id] >= _cpp:
+                    self._late_released.add(req_id)
+                    self.consumer_notification_counts_by_req.pop(req_id, None)
+                    self._notif_n_consumers.pop(req_id, None)
+                    self._reqs_to_process.discard(req_id)
+                    self._reqs_to_send.pop(req_id, None)
+                    logger.debug(
+                        "Settled early notif for req %s after registration.",
+                        req_id,
+                    )
+                    continue
+            # FIX(best_of fan-out): late sibling of an already-pulled parent.
+            _parent = self._best_of_parent(req_id)
+            if _parent is not None and _parent in self._pulled_bases:
+                self._fanout_released.add(req_id)
+                self.consumer_notification_counts_by_req.pop(req_id, None)
+                self._notif_n_consumers.pop(req_id, None)
+                self._reqs_to_process.discard(req_id)
+                self._reqs_to_send.pop(req_id, None)
 
         # Remove all requests that are not to be processed (eg aborted).
         for req_id in metadata.reqs_not_processed:
