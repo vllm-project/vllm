@@ -423,7 +423,6 @@ class DeepseekV2Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         prefix: str = "",
-        **kwargs,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -902,7 +901,6 @@ class DeepseekV2MLAAttention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
-        is_mtp: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -1020,28 +1018,20 @@ class DeepseekV2MLAAttention(nn.Module):
                 is_inplace_rope=self.indexer_rope_emb.enabled(),
             )
 
-            if is_mtp:
-                _skip_topk = getattr(config, "index_share_for_mtp_iteration", False)
-            else:
-                # IndexCache config
-                # Refer: https://arxiv.org/abs/2603.12201 for more details.
-                _index_topk_freq = getattr(config, "index_topk_freq", 1)
-                _index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                _index_skip_topk_offset = getattr(
-                    config, "index_skip_topk_offset", None
-                )
-                layer_id = extract_layer_index(prefix)
+            # IndexCache config
+            # Refer: https://arxiv.org/abs/2603.12201 for more details.
+            _index_topk_freq = getattr(config, "index_topk_freq", 1)
+            _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+            _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+            layer_id = extract_layer_index(prefix)
 
-                if _index_topk_pattern is None and _index_skip_topk_offset is not None:
-                    _skip_topk = (
-                        max(layer_id - _index_skip_topk_offset + 1, 0)
-                        % _index_topk_freq
-                        != 0
-                    )
-                elif _index_topk_pattern is None:
-                    _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
-                elif 0 <= layer_id < len(_index_topk_pattern):
-                    _skip_topk = _index_topk_pattern[layer_id] == "S"
+            if _index_topk_pattern is None:
+                _skip_topk = (
+                    max(layer_id - _index_skip_topk_offset + 1, 0) % _index_topk_freq
+                    != 0
+                )
+            elif 0 <= layer_id < len(_index_topk_pattern):
+                _skip_topk = _index_topk_pattern[layer_id] == "S"
 
         else:
             self.indexer_rope_emb = None
@@ -1100,7 +1090,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
-        is_mtp: bool = False,
     ) -> None:
         super().__init__()
 
@@ -1151,7 +1140,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
-            is_mtp=is_mtp,
         )
 
         if (

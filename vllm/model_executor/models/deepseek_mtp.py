@@ -96,8 +96,11 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             prefix,
             config=self.config,
             topk_indices_buffer=topk_indices_buffer,
-            is_mtp=True,
         )
+
+        if self.is_v32:
+            skip_topk = getattr(self.config, "index_share_for_mtp_iteration", False)
+            self.mtp_block.self_attn.mla_attn.skip_topk = skip_topk
 
     def forward(
         self,
