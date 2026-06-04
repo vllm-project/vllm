@@ -142,10 +142,6 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                 )
             }
         )
-        # Expose topk_indices_buffer so that eagle_utils / proposer can
-        # discover and replace it with the target model's shared buffer.
-        first_layer = next(iter(self.layers.values()))
-        self.topk_indices_buffer = first_layer.topk_indices_buffer
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
