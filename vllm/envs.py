@@ -129,6 +129,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT: bool = False  # F2
+    VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE: bool = False  # F3
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1204,6 +1206,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
+    # F2: fused RMSNorm + dynamic MXFP4-quant (single Triton pass).
+    # Active when VLLM_ROCM_USE_AITER_RMSNORM=1 AND this flag=1.
+    # Default False until benchmarked across DeepSeek-V2/V3/R1.
+    "VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT", "False").lower()
+        in ("true", "1")
+    ),
+    # F3: fused RoPE + MLA KV-cache write (single aiter kernel).
+    # Active when VLLM_ROCM_USE_AITER_MLA=1 AND this flag=1.
+    # Default False until benchmarked across DeepSeek-V2/V3/R1.
+    "VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE", "False").lower()
+        in ("true", "1")
+    ),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
@@ -2195,6 +2211,8 @@ def compile_factors() -> dict[str, object]:
         # F2/F3 direct-dispatch gates: runtime flags only, not compile-time
         "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_FP4_QUANT",
         "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE",
+        "VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT",
+        "VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE",
     }
 
     from vllm.config.utils import normalize_value

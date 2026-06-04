@@ -8,6 +8,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -116,6 +117,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+        # F3: fused RoPE + MLA KV-cache write gate (ROCm + aiter only).
+        # Checked once at init; uses is_fusion_rope_mla_kv_cache_enabled()
+        # which is decorated with @if_aiter_supported so it returns None/False
+        # on non-ROCm platforms.
+        self._f3_fusion_enabled: bool = False
+        if current_platform.is_rocm():
+            try:
+                from vllm._aiter_ops import rocm_aiter_ops
+
+                self._f3_fusion_enabled = bool(
+                    rocm_aiter_ops.is_fusion_rope_mla_kv_cache_enabled()
+                )
+            except Exception:
+                pass  # aiter not available; stay False
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -160,7 +176,46 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
+        if self._f3_fusion_enabled and self.rotary_emb is not None:
+            # F3: single Triton kernel — RoPE(q_pe, k_pe) + kv_cache write.
+            # Runs here with PRE-RoPE tensors; replaces the separate rotary_emb
+            # call and the do_kv_cache_update call inside mla_attn.
+            from vllm._aiter_ops import rocm_aiter_ops
+            from vllm.forward_context import get_forward_context
+
+            fwd_ctx = get_forward_context()
+            slot_mapping_dict = fwd_ctx.slot_mapping
+            layer_slot_mapping = slot_mapping_dict.get(self.mla_attn.layer_name)
+            if layer_slot_mapping is not None and self.mla_attn.kv_cache.numel() > 0:
+                q_nope = q[..., : self.qk_nope_head_dim]
+                q_pe_pre = q[..., self.qk_nope_head_dim :]
+                k_nope = kv_c_normed.unsqueeze(1)  # [B, 1, kv_lora_rank]
+                k_pe_out = torch.empty_like(k_pe)
+                rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
+                    q_nope=q_nope,
+                    q_pe=q_pe_pre,
+                    k_nope=k_nope,
+                    k_pe=k_pe,
+                    kv_cache=self.mla_attn.kv_cache,
+                    slot_mapping=layer_slot_mapping.flatten(),
+                    positions=positions,
+                    cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                    k_scale=self.mla_attn._k_scale,
+                    is_neox=self.rotary_emb.is_neox_style,
+                    q_out=q,
+                    k_pe_out=k_pe_out,
+                )
+                k_pe = k_pe_out
+                # kv_cache already updated; do_kv_cache_update inside mla_attn
+                # will write the same data again (redundant but correct).
+                # Eliminating that duplicate write is deferred to the follow-on PR
+                # when this flag defaults to True.
+            else:
+                # Fallback: slot_mapping unavailable or kv_cache empty
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
+        elif self.rotary_emb is not None:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )

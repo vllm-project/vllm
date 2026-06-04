@@ -1455,6 +1455,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: Controls FP4 assembly GEMM.
         VLLM_ROCM_USE_AITER_TRITON_ROPE: Controls Triton rotary embeddings.
         VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: Controls shared expert fusion.
+        VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT: Controls F2 fused RMSNorm+MXFP4-quant.
+        VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE: Controls F3 fused RoPE+MLA KV-cache.
         VLLM_ROCM_USE_AITER_TRITON_GEMM: Controls Triton unquantized GEMM.
 
     Note:
@@ -1522,6 +1524,8 @@ class rocm_aiter_ops:
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
     _TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    _FUSION_RMSNORM_FP4_QUANT = envs.VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT  # F2
+    _FUSION_ROPE_MLA_KV_CACHE = envs.VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE  # F3
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
     # Lazily probed: whether aiter.topk_softmax supports the
@@ -1553,6 +1557,12 @@ class rocm_aiter_ops:
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        cls._FUSION_RMSNORM_FP4_QUANT = (
+            envs.VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT
+        )
+        cls._FUSION_ROPE_MLA_KV_CACHE = (
+            envs.VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE
+        )
         cls._TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
     @staticmethod
@@ -1689,6 +1699,24 @@ class rocm_aiter_ops:
             and cls.topk_softmax_supports_fused_sigmoid()
             and aiter_topK_meta_data is not None
         )
+
+    @classmethod
+    @if_aiter_supported
+    def is_fusion_rmsnorm_fp4_quant_enabled(cls) -> bool:
+        """F2: fused RMSNorm + dynamic MXFP4-quant.
+        Requires VLLM_ROCM_USE_AITER_RMSNORM=1 and
+        VLLM_ROCM_USE_AITER_FUSION_RMSNORM_FP4_QUANT=1.
+        """
+        return cls._AITER_ENABLED and cls._FUSION_RMSNORM_FP4_QUANT
+
+    @classmethod
+    @if_aiter_supported
+    def is_fusion_rope_mla_kv_cache_enabled(cls) -> bool:
+        """F3: fused RoPE + MLA KV-cache write.
+        Requires VLLM_ROCM_USE_AITER_MLA=1 and
+        VLLM_ROCM_USE_AITER_FUSION_ROPE_MLA_KV_CACHE=1.
+        """
+        return cls.is_mla_enabled() and cls._FUSION_ROPE_MLA_KV_CACHE
 
     @classmethod
     @if_aiter_supported
@@ -2451,6 +2479,67 @@ class rocm_aiter_ops:
             q_out=query,
             k_out=key,
             output_zeros=False,
+        )
+
+    @staticmethod
+    def fused_rope_and_mla_kv_cache_write(
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        k_scale: torch.Tensor,
+        is_neox: bool,
+        q_out: torch.Tensor,
+        k_pe_out: torch.Tensor,
+        num_decode_toks_for_zeros: int = 0,
+    ) -> None:
+        """F3: fused RoPE + MLA KV-cache write (single Triton kernel).
+
+        Replaces the separate ``rotary_emb`` call + ``concat_and_cache_mla``
+        call in the MLA forward path with a single aiter Triton kernel.
+
+        Must be called with PRE-RoPE ``q_pe`` and ``k_pe`` before
+        ``rotary_emb`` is applied.  The correct call site is in
+        ``MultiHeadLatentAttentionWrapper.forward`` in ``vllm/model_executor/layers/mla.py``,
+        guarded by ``rocm_aiter_ops.is_fusion_rope_mla_kv_cache_enabled()``.
+
+        Args:
+            q_nope: Pre-RoPE nope part of Q, shape [B, QH, qk_nope_head_dim].
+            q_pe:   Pre-RoPE rope part of Q, shape [B, QH, qk_rope_head_dim].
+            k_nope: Compressed KV (kv_c_normed) with head dim, shape [B, 1, kv_lora_rank].
+            k_pe:   Pre-RoPE rope part of K, shape [B, 1, qk_rope_head_dim].
+            kv_cache: KV cache tensor, shape [max_tokens, 1, kv_lora_rank + qk_rope_head_dim].
+            slot_mapping: Flat slot indices for cache writes.
+            positions: Token positions for RoPE.
+            cos_sin_cache: Concatenated [cos, sin] table from rotary_emb.
+            k_scale: Per-tensor KV quantization scale.
+            is_neox: Whether NeoX-style RoPE interleaving is used.
+            q_out: Output buffer for post-RoPE q, shape [B, QH, qk_head_dim].
+            k_pe_out: Output buffer for post-RoPE k_pe, shape [B, 1, qk_rope_head_dim].
+            num_decode_toks_for_zeros: Number of decode tokens for zeros padding.
+        """
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
+
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+        fused_qk_rope_cat_and_cache_mla(
+            q_nope=q_nope,
+            q_pe=q_pe,
+            k_nope=k_nope,
+            k_pe=k_pe,
+            kv_cache=kv_cache,
+            slot_mapping=slot_mapping,
+            pos=positions,
+            cos=cos,
+            sin=sin,
+            k_scale=k_scale,
+            is_neox=is_neox,
+            num_decode_toks_for_zeros=num_decode_toks_for_zeros,
+            q_out=q_out,
+            k_pe_out=k_pe_out,
         )
 
     @staticmethod
