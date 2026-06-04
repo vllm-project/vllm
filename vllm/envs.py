@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
+    VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -95,7 +96,6 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
     VLLM_PLUGINS: list[str] | None = None
@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
@@ -277,6 +278,9 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_GPU_NIC_PCIE_MAPPING: str = ""
+    VLLM_NIC_SELECTION_VARS: str = ""
+    VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
 
 
 def get_default_cache_root():
@@ -874,6 +878,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
+    # When True, GroupCoordinator constructs its CPU/device subgroups via
+    # ``torch.distributed.split_group(backend=...)``
+    # and ``init_distributed_environment`` initializes the default PG with
+    # mixed ``cpu:gloo,cuda:nccl`` backend + eager ``device_id`` binding.
+    "VLLM_DISTRIBUTED_USE_SPLIT_GROUP": lambda: bool(
+        int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
+    ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
@@ -1012,9 +1023,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
-    # Time in ms for the zmq client to wait for a response from the backend
-    # server for simple data operations
-    "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
@@ -1032,6 +1040,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
         None
         if "VLLM_PLUGINS" not in os.environ
         else os.environ["VLLM_PLUGINS"].split(",")
+    ),
+    # Retain local sliding-window KV checkpoints for prefix caching.
+    # Unset (default) preserves the dense local checkpointing behavior. `0`
+    # retains only the latest completed prompt boundary. Positive values retain
+    # checkpoints at the specified interval boundaries (rounded up to the
+    # prefix-cache alignment).
+    # Applies to sliding-window attention for now but not yet Mamba/linear attention.
+    "VLLM_PREFIX_CACHE_RETENTION_INTERVAL": lambda: (
+        int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
+        if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
+        else None
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
@@ -1102,6 +1121,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # MoE sorting dispatch policy for AITER fused MoE kernels.
+    #   0 = auto (default): single-pass for small batches, multi-pass
+    #       for large batches
+    #   1 = always single-pass: one kernel launch, no workspace,
+    #       may be preferred for low-concurrency decode workloads
+    #   2 = always multi-pass: can be faster for MoE-heavy models
+    #       (e.g., +2-5% on Qwen3-Next, +1.5% on DeepSeek-V3 at TP4,
+    #       see PR #39177 for benchmarks)
+    "VLLM_ROCM_AITER_MOE_DISPATCH_POLICY": lambda: int(
+        os.getenv("VLLM_ROCM_AITER_MOE_DISPATCH_POLICY", "0")
     ),
     # use aiter rms norm op if aiter ops are enabled.
     "VLLM_ROCM_USE_AITER_RMSNORM": lambda: (
@@ -1961,6 +1991,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use Python spinloop extension to poll in a more efficient
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
+    # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
+    # Must be set together with VLLM_NIC_SELECTION_VARS.
+    "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),
+    # Comma-separated list of env vars to set from the GPU-NIC mapping.
+    # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
+    # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
+    "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
 }
 
 

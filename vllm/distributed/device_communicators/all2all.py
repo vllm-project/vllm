@@ -764,14 +764,19 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
 
 class MoriAll2AllManager(All2AllManagerBase):
-    def __init__(self, cpu_group):
+    def __init__(self, cpu_group, all2all_backend: str):
         assert has_mori(), (
             "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
             " to install MoRI kernels."
         )  # noqa
+        assert all2all_backend in (
+            "mori_high_throughput",
+            "mori_low_latency",
+        ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
         import mori
 
         super().__init__(cpu_group)
+        self._all2all_backend = all2all_backend
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
@@ -805,8 +810,12 @@ class MoriAll2AllManager(All2AllManagerBase):
             warp_num_per_block = 16
             block_num = 80
         else:
-            # multi node
-            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+            # Multi-node: kernel follows --all2all-backend (mirrors deepep_* split).
+            # mori_low_latency → InterNodeV1LL; mori_high_throughput → V1.
+            if self._all2all_backend == "mori_low_latency":
+                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
+            else:
+                kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
             if on_gfx942():
                 warp_num_per_block = 16
                 block_num = 32
