@@ -391,7 +391,7 @@ class FusedMoEQuantConfig:
         return self._a1.dtype is None and self._w1.dtype == "int4"
 
     def is_int4_w4a16_interleaved(self, w: torch.Tensor) -> bool:
-        # ROCm repacks int4 weights into int32 for interleaved unpacking
+        # AMD RDNA repacks int4 weights into int32 for interleaved unpacking
         return self.use_int4_w4a16 and w.dtype == torch.int32
 
     @property

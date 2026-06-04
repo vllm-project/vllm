@@ -360,8 +360,13 @@ class MoeWNA16Method(FusedMoEMethodBase):
         super().process_weights_after_loading(layer)
         # Repack int4 weights from K-packed uint8 [E,N,K//2] to N-packed
         # int32 [E,K,N//8] for tl.interleave unpacking in the Triton kernel.
-        # ROCm only — CUDA's C++ moe_wna16_gemm expects the original uint8.
+        # Currently only for AMD RDNA
         if not current_platform.is_rocm() or self.quant_config.weight_bits != 4:
+            return
+
+        from vllm.platforms.rocm import on_gfx1x
+
+        if not on_gfx1x():
             return
 
         from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (

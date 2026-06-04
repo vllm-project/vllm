@@ -630,21 +630,24 @@ def test_fused_moe_wn16(
             w_qzeros[expert_id] = qzeros
 
     if weight_bits == 4 and current_platform.is_rocm():
-        from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
-            repack_int4_to_int32,
-            unpack_zp_int4_to_fp16,
-        )
+        from vllm.platforms.rocm import on_gfx1x
 
-        if w1_qweight.shape[1] % 8 == 0:
-            w1_qweight = repack_int4_to_int32(w1_qweight)
-            w1_scales = w1_scales.permute(0, 2, 1).contiguous()
-            if has_zp:
-                w1_qzeros = unpack_zp_int4_to_fp16(w1_qzeros)
-        if w2_qweight.shape[1] % 8 == 0:
-            w2_qweight = repack_int4_to_int32(w2_qweight)
-            w2_scales = w2_scales.permute(0, 2, 1).contiguous()
-            if has_zp:
-                w2_qzeros = unpack_zp_int4_to_fp16(w2_qzeros)
+        if on_gfx1x():
+            from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
+                repack_int4_to_int32,
+                unpack_zp_int4_to_fp16,
+            )
+
+            if w1_qweight.shape[1] % 8 == 0:
+                w1_qweight = repack_int4_to_int32(w1_qweight)
+                w1_scales = w1_scales.permute(0, 2, 1).contiguous()
+                if has_zp:
+                    w1_qzeros = unpack_zp_int4_to_fp16(w1_qzeros)
+            if w2_qweight.shape[1] % 8 == 0:
+                w2_qweight = repack_int4_to_int32(w2_qweight)
+                w2_scales = w2_scales.permute(0, 2, 1).contiguous()
+                if has_zp:
+                    w2_qzeros = unpack_zp_int4_to_fp16(w2_qzeros)
 
     if ep_size > 1:
         local_e = e // ep_size

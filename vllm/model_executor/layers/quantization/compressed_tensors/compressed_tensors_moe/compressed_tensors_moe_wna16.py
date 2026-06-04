@@ -199,9 +199,14 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
 
-        # On ROCm int4, further repack to N-packed int32 [E, K, N//8] for
+        # AMD RDNA int4 only: further repack to N-packed int32 [E, K, N//8] for
         # tl.interleave unpacking in the Triton kernel.
         if not current_platform.is_rocm() or self.num_bits != 4:
+            return
+
+        from vllm.platforms.rocm import on_gfx1x
+
+        if not on_gfx1x():
             return
 
         from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
