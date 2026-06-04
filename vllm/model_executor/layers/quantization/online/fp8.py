@@ -114,6 +114,8 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         self.use_marlin = False
         self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
+        self.marlin_input_dtype = None
+        self.use_marlin = False
         # Use per-token quantization for better perf if dynamic and cutlass
         if cutlass_fp8_supported():
             self.activation_quant_key = kFp8DynamicTokenSym
@@ -158,11 +160,12 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
 
         # Update layer with new values.
-        replace_parameter(layer, "weight", qweight.t().data)
+        replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
         if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
             self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+
         self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
