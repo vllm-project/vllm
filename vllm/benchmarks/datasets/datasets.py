@@ -4032,7 +4032,7 @@ class ASRDataset(HuggingFaceDataset):
                 "text": item["transcript"],
             }
         )
-        self.data = self.data.cast_column("audio", Audio())
+        self.data = self.data.cast_column("audio", Audio(decode=False))
 
     def sample(
         self,
