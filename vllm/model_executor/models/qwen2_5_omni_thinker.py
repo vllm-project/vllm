@@ -33,7 +33,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
-from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
     Qwen2_5OmniAudioEncoderConfig,
     Qwen2_5OmniConfig,
@@ -46,6 +45,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import set_forward_context
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
@@ -53,6 +53,8 @@ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer,
@@ -262,6 +264,8 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         self.dropout = config.attention_dropout
         self.head_dim = self.embed_dim // self.num_heads
         self.config = config
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_local_heads = self.num_heads // tp_size
 
         if (self.head_dim * self.num_heads) != self.embed_dim:
             raise ValueError(
@@ -273,13 +277,23 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         self.is_decoder = False
         self.is_causal = False
 
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.qkv = QKVParallelLinear(
+            hidden_size=self.embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=self.num_heads,
+            total_num_kv_heads=self.num_heads,
+            bias=True,
+            prefix=f"{prefix}.qkv",
+        )
+        self.out_proj = RowParallelLinear(
+            input_size=self.embed_dim,
+            output_size=self.embed_dim,
+            bias=True,
+            prefix=f"{prefix}.out_proj",
+        )
 
         self.attn = MMEncoderAttention(
-            num_heads=self.num_heads,
+            num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
             prefix=f"{prefix}.attn",
@@ -291,16 +305,12 @@ class Qwen2_5OmniAudioAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor | None,
     ) -> torch.Tensor:
-        seq_length, all_dim = hidden_states.size()
-        query_states = self.q_proj(hidden_states).view(
-            1, seq_length, self.num_heads, self.head_dim
-        )
-        key_states = self.k_proj(hidden_states).view(
-            1, seq_length, self.num_heads, self.head_dim
-        )
-        value_states = self.v_proj(hidden_states).view(
-            1, seq_length, self.num_heads, self.head_dim
-        )
+        seq_length, _ = hidden_states.size()
+        qkv, _ = self.qkv(hidden_states)
+        query_states, key_states, value_states = qkv.chunk(3, dim=-1)
+        query_states = query_states.view(1, seq_length, -1, self.head_dim)
+        key_states = key_states.view(1, seq_length, -1, self.head_dim)
+        value_states = value_states.view(1, seq_length, -1, self.head_dim)
 
         attn_output = self.attn(
             query=query_states,
@@ -310,8 +320,9 @@ class Qwen2_5OmniAudioAttention(nn.Module):
             max_seqlen=max_seqlen,
         )
 
-        attn_output = attn_output.view(seq_length, all_dim)
-        return self.out_proj(attn_output)
+        attn_output = attn_output.view(seq_length, -1)
+        output, _ = self.out_proj(attn_output)
+        return output
 
 
 class Qwen2_5OmniAudioEncoderLayer(nn.Module):
@@ -447,7 +458,7 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
         input_features: torch.Tensor,
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
-    ) -> BaseModelOutput:
+    ) -> torch.Tensor:
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
         num_chunks = int(chunk_num.sum().item())
         chunk_lengths = torch.tensor(
@@ -513,7 +524,47 @@ class Qwen2_5OmniAudioEncoder(nn.Module):
             token_audio_list.append(each_audio_states)
 
         token_audio = torch.cat(token_audio_list, dim=0)
-        return BaseModelOutput(last_hidden_state=token_audio)
+        return token_audio
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load audio tower weights with HF q/k/v projections packed for vLLM."""
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("self_attn.qkv.", "self_attn.q_proj.", "q"),
+            ("self_attn.qkv.", "self_attn.k_proj.", "k"),
+            ("self_attn.qkv.", "self_attn.v_proj.", "v"),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        with torch.no_grad():
+            for name, param in params_dict.items():
+                if name.endswith("self_attn.qkv.bias"):
+                    # HF Qwen2.5-Omni audio has bias=False for k_proj, while
+                    # vLLM's packed QKV bias has a slot for q/k/v. Keep the
+                    # missing K bias equivalent to HF by zeroing before load.
+                    param.zero_()
+
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict.get(name)
+                if param is not None:
+                    weight_loader = getattr(
+                        param,
+                        "weight_loader",
+                        default_weight_loader,
+                    )
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
     def padded_and_mask_function(
         self,
@@ -1312,7 +1363,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_feat_lengths,
         )
-        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
+        return audio_outputs.split(audio_output_lengths.tolist())
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs

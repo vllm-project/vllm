@@ -7,7 +7,9 @@ from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
     Qwen2_5OmniAudioEncoderConfig,
 )
 
+import vllm.model_executor.layers.linear as linear
 import vllm.model_executor.models.qwen2_5_omni_thinker as qwen2_5_omni
+import vllm.model_executor.parameter as parameter
 
 
 def tiny_audio_config() -> Qwen2_5OmniAudioEncoderConfig:
@@ -67,6 +69,20 @@ class RecordingMMEncoderAttention(nn.Module):
         return torch.zeros_like(query)
 
 
+def patch_single_rank_tensor_parallel(monkeypatch):
+    monkeypatch.setattr(
+        qwen2_5_omni,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(linear, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(linear, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(parameter, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(linear, "tensor_model_parallel_all_reduce", lambda x: x)
+    monkeypatch.setattr(linear, "tensor_model_parallel_all_gather", lambda x: x)
+
+
 def test_qwen2_5_omni_audio_tower_is_vllm_native():
     assert not hasattr(qwen2_5_omni, "flash_attn")
     assert qwen2_5_omni.Qwen2_5OmniAudioEncoder.__module__ == qwen2_5_omni.__name__
@@ -74,12 +90,14 @@ def test_qwen2_5_omni_audio_tower_is_vllm_native():
 
 def test_audio_attention_forwards_varlen_metadata_to_mm_encoder_attention(
     monkeypatch,
+    default_vllm_config,
 ):
     monkeypatch.setattr(
         qwen2_5_omni,
         "MMEncoderAttention",
         RecordingMMEncoderAttention,
     )
+    patch_single_rank_tensor_parallel(monkeypatch)
 
     config = tiny_audio_config()
     attention = qwen2_5_omni.Qwen2_5OmniAudioAttention(config)
@@ -99,7 +117,7 @@ def test_audio_attention_forwards_varlen_metadata_to_mm_encoder_attention(
     assert call["max_seqlen"] is max_seqlen
 
 
-def test_audio_encoder_keeps_huggingface_checkpoint_key_names(
+def test_audio_encoder_uses_packed_qkv_weight_structure(
     monkeypatch,
     default_vllm_config,
 ):
@@ -108,18 +126,73 @@ def test_audio_encoder_keeps_huggingface_checkpoint_key_names(
         "MMEncoderAttention",
         RecordingMMEncoderAttention,
     )
+    patch_single_rank_tensor_parallel(monkeypatch)
 
     encoder = qwen2_5_omni.Qwen2_5OmniAudioEncoder(tiny_audio_config())
     keys = set(encoder.state_dict())
 
     assert "conv1.weight" in keys
-    assert "layers.0.self_attn.q_proj.weight" in keys
-    assert "layers.0.self_attn.k_proj.weight" in keys
-    assert "layers.0.self_attn.v_proj.bias" in keys
+    assert "layers.0.self_attn.qkv.weight" in keys
+    assert "layers.0.self_attn.qkv.bias" in keys
     assert "layers.0.self_attn.out_proj.bias" in keys
     assert "audio_bos_eos_token.weight" in keys
     assert "proj.weight" in keys
-    assert not any("qkv" in key for key in keys)
+    assert "layers.0.self_attn.q_proj.weight" not in keys
+    assert "layers.0.self_attn.k_proj.weight" not in keys
+    assert "layers.0.self_attn.v_proj.bias" not in keys
+
+
+def test_audio_encoder_load_weights_remaps_hf_qkv_to_packed_qkv(
+    monkeypatch,
+    default_vllm_config,
+):
+    monkeypatch.setattr(
+        qwen2_5_omni,
+        "MMEncoderAttention",
+        RecordingMMEncoderAttention,
+    )
+    patch_single_rank_tensor_parallel(monkeypatch)
+
+    config = tiny_audio_config()
+    encoder = qwen2_5_omni.Qwen2_5OmniAudioEncoder(config)
+    attention = encoder.layers[0].self_attn
+    hidden_size = config.d_model
+
+    q_weight = torch.arange(hidden_size * hidden_size, dtype=torch.float32).view(
+        hidden_size, hidden_size
+    )
+    k_weight = q_weight + 100
+    v_weight = q_weight + 200
+    q_bias = torch.arange(hidden_size, dtype=torch.float32)
+    v_bias = q_bias + 20
+
+    with torch.no_grad():
+        attention.qkv.bias.fill_(123)
+
+    loaded = encoder.load_weights(
+        [
+            ("layers.0.self_attn.q_proj.weight", q_weight),
+            ("layers.0.self_attn.k_proj.weight", k_weight),
+            ("layers.0.self_attn.v_proj.weight", v_weight),
+            ("layers.0.self_attn.q_proj.bias", q_bias),
+            ("layers.0.self_attn.v_proj.bias", v_bias),
+        ]
+    )
+
+    assert "layers.0.self_attn.qkv.weight" in loaded
+    assert "layers.0.self_attn.qkv.bias" in loaded
+    torch.testing.assert_close(attention.qkv.weight[:hidden_size], q_weight)
+    torch.testing.assert_close(
+        attention.qkv.weight[hidden_size : hidden_size * 2],
+        k_weight,
+    )
+    torch.testing.assert_close(attention.qkv.weight[hidden_size * 2 :], v_weight)
+    torch.testing.assert_close(attention.qkv.bias[:hidden_size], q_bias)
+    torch.testing.assert_close(
+        attention.qkv.bias[hidden_size : hidden_size * 2],
+        torch.zeros_like(q_bias),
+    )
+    torch.testing.assert_close(attention.qkv.bias[hidden_size * 2 :], v_bias)
 
 
 def test_audio_encoder_forward_uses_mm_encoder_attention(
@@ -131,6 +204,7 @@ def test_audio_encoder_forward_uses_mm_encoder_attention(
         "MMEncoderAttention",
         RecordingMMEncoderAttention,
     )
+    patch_single_rank_tensor_parallel(monkeypatch)
     monkeypatch.setattr(
         qwen2_5_omni,
         "get_vit_attn_backend",
@@ -149,7 +223,7 @@ def test_audio_encoder_forward_uses_mm_encoder_attention(
         aftercnn_lens=aftercnn_lens,
     )
 
-    assert outputs.last_hidden_state.shape == (output_lens.item(), config.output_dim)
+    assert outputs.shape == (output_lens.item(), config.output_dim)
     attention = encoder.layers[0].self_attn.attn
     assert len(attention.calls) == 1
     call = attention.calls[0]
