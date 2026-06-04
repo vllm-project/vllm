@@ -206,6 +206,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
+    VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 4
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
@@ -1619,6 +1620,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
     ),
+    # Timeout in seconds for worker process shutdown (only applies when TP >
+    # 1).
+    "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(
+        os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "4")
+    ),
     # KV Cache layout used throughout vllm.
     # Some common values are:
     # - NHD
@@ -2102,6 +2108,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
