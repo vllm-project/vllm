@@ -634,7 +634,7 @@ def kernel_unified_attention(
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
     USE_RAW_CURRENT_KV: tl.constexpr = False,
-    USE_NVFP4_BYTEWISE_2D_DECODE: tl.constexpr = False,
+    USE_NVFP4_BYTEWISE_DECODE: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE == 2 or KV_QUANT_MODE == 3
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
@@ -654,38 +654,34 @@ def kernel_unified_attention(
             "NVFP4 requires (head_size // 16) % 4 == 0",
         )
         tl.static_assert(BLOCK_SIZE % 4 == 0, "NVFP4 requires block_size % 4 == 0")
-    if USE_NVFP4_BYTEWISE_2D_DECODE:
+    if USE_NVFP4_BYTEWISE_DECODE:
         tl.static_assert(
             USE_NVFP4,
-            "USE_NVFP4_BYTEWISE_2D_DECODE requires NVFP4 KV cache",
-        )
-        tl.static_assert(
-            not IS_3D,
-            "USE_NVFP4_BYTEWISE_2D_DECODE supports only the 2D kernel",
+            "USE_NVFP4_BYTEWISE_DECODE requires NVFP4 KV cache",
         )
         tl.static_assert(
             not USE_RAW_CURRENT_KV,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support raw-current KV",
+            "USE_NVFP4_BYTEWISE_DECODE does not support raw-current KV",
         )
         tl.static_assert(
             not USE_TD_QO,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support TD Q/O",
+            "USE_NVFP4_BYTEWISE_DECODE does not support TD Q/O",
         )
         tl.static_assert(
             SLIDING_WINDOW == 0,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support sliding-window masks",
+            "USE_NVFP4_BYTEWISE_DECODE does not support sliding-window masks",
         )
         tl.static_assert(
             not USE_MM_PREFIX,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support MM prefix masks",
+            "USE_NVFP4_BYTEWISE_DECODE does not support MM prefix masks",
         )
         tl.static_assert(
             CHUNK_LOOKBACK == -1,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support chunk-local masks",
+            "USE_NVFP4_BYTEWISE_DECODE does not support chunk-local masks",
         )
         tl.static_assert(
             not USE_FP8,
-            "USE_NVFP4_BYTEWISE_2D_DECODE does not support FP8 output stores",
+            "USE_NVFP4_BYTEWISE_DECODE does not support FP8 output stores",
         )
 
     q_block_global_idx = tl.program_id(0)
@@ -737,7 +733,7 @@ def kernel_unified_attention(
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
-    if USE_NVFP4_BYTEWISE_2D_DECODE:
+    if USE_NVFP4_BYTEWISE_DECODE:
         even_d = offs_b * 2
         odd_d = even_d + 1
         query_offset_even = (
@@ -792,7 +788,7 @@ def kernel_unified_attention(
         sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
     )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-    if USE_NVFP4_BYTEWISE_2D_DECODE:
+    if USE_NVFP4_BYTEWISE_DECODE:
         acc_even = tl.zeros([BLOCK_M, BYTE_SIZE_PADDED], dtype=tl.float32)
         acc_odd = tl.zeros([BLOCK_M, BYTE_SIZE_PADDED], dtype=tl.float32)
     else:
@@ -860,7 +856,7 @@ def kernel_unified_attention(
             CHUNK_SIZE,
         )
 
-        if USE_NVFP4_BYTEWISE_2D_DECODE:
+        if USE_NVFP4_BYTEWISE_DECODE:
             K_low, K_high = _load_k_tile_nvfp4_bytewise(
                 key_cache_ptr,
                 k_scale_cache_ptr,
@@ -1177,7 +1173,7 @@ def kernel_unified_attention(
 
         M, L, P, alpha = softmax_step(S, M, L)
 
-        if USE_NVFP4_BYTEWISE_2D_DECODE:
+        if USE_NVFP4_BYTEWISE_DECODE:
             acc_even = acc_even * alpha[:, None]
             acc_odd = acc_odd * alpha[:, None]
 
@@ -1228,7 +1224,38 @@ def kernel_unified_attention(
         if USE_FP8_Q_DESCALE:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
-        if USE_TD_QO:
+        if USE_NVFP4_BYTEWISE_DECODE:
+            even_d = offs_b * 2
+            odd_d = even_d + 1
+            segm_output_offset_even = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + even_d[None, :]
+            )
+            segm_output_offset_odd = (
+                query_offset_0[:, None].to(tl.int64)
+                * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+                + segm_idx * HEAD_SIZE_PADDED
+                + odd_d[None, :]
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset_even,
+                acc_even,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+            )
+            tl.store(
+                segm_output_ptr + segm_output_offset_odd,
+                acc_odd,
+                mask=(
+                    byte_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]
+                ),
+            )
+        elif USE_TD_QO:
             # 3D target: segm_output[token, head, segm_idx, :].  Advance
             # the base to the correct (token-start, head-start, segm)
             # slice; strides step between tokens / heads of the flattened
@@ -1281,7 +1308,7 @@ def kernel_unified_attention(
             NUM_SEGMENTS_PER_SEQ,
         )
     else:
-        if USE_NVFP4_BYTEWISE_2D_DECODE:
+        if USE_NVFP4_BYTEWISE_DECODE:
             acc_even = acc_even / L[:, None]
             acc_odd = acc_odd / L[:, None]
             even_d = offs_b * 2
@@ -1615,7 +1642,7 @@ def unified_attention(
     elif sliding_window_val <= 0:
         chunk_lookback = -1
 
-    use_nvfp4_bytewise_2d_decode = (
+    use_nvfp4_bytewise_decode = (
         use_nvfp4
         and not use_raw_current_kv
         and max_seqlen_q == 1
@@ -1694,7 +1721,6 @@ def unified_attention(
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
-    use_nvfp4_bytewise_2d_decode = use_nvfp4_bytewise_2d_decode and not use_3d
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
@@ -1844,7 +1870,7 @@ def unified_attention(
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
         USE_RAW_CURRENT_KV=use_raw_current_kv,
-        USE_NVFP4_BYTEWISE_2D_DECODE=use_nvfp4_bytewise_2d_decode,
+        USE_NVFP4_BYTEWISE_DECODE=use_nvfp4_bytewise_decode,
         **launch_kwargs,
     )
 
