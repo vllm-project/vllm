@@ -83,7 +83,12 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     weight_schema = BaseWeightSchema.from_config(quant_config)
     input_schema = HummingInputSchema()
 
-    shape_k_stacks = [layer.input_size_per_partition]
+    # ReplicatedLinear has no TP partitioning and so does not set
+    # input_size_per_partition; for it that is just input_size.
+    input_size_per_partition = getattr(
+        layer, "input_size_per_partition", layer.input_size
+    )
+    shape_k_stacks = [input_size_per_partition]
     shape_n_stacks = layer.output_partition_sizes
 
     # Step 1: convert weight to humming standard format
@@ -109,7 +114,7 @@ def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     HummingMethod.prepare_layer_meta(
         layer=layer,
         shape_n=sum(layer.output_partition_sizes),
-        shape_k=layer.input_size_per_partition,
+        shape_k=input_size_per_partition,
         weight_schema=weight_schema,
         input_schema=input_schema,
         pad_n_to_multiple=256,
