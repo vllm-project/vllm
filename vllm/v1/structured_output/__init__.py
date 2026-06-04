@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -274,6 +274,9 @@ class StructuredOutputManager:
                     assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
+                simulated_token_ids: list[int] | None = None
+                if not apply_bitmask:
+                    simulated_token_ids = list(request.all_token_ids)
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
@@ -282,10 +285,24 @@ class StructuredOutputManager:
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
+                        cumulative_index += 1
+                        continue
                     if apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if accepted:
+                            state_advancements += 1
+                        else:
+                            # The current draft token is rejected by the
+                            # grammar. Its bitmask has already been applied,
+                            # and rejection sampling will stop at this token,
+                            # so later speculative positions are irrelevant.
+                            apply_bitmask = False
+                    elif not apply_bitmask and simulated_token_ids is not None:
+                        simulated_token_ids.append(token)
+                        if self._reasoning_ends_with_delta(
+                            request, simulated_token_ids, [token]
+                        ):
+                            apply_bitmask = True
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
@@ -368,6 +385,50 @@ class StructuredOutputManager:
                 return True
 
         return False
+
+    def grammar_advance_token_ids(
+        self, request: "Request", token_ids: list[int]
+    ) -> list[int]:
+        """Return the generated tokens that should advance the grammar.
+
+        When structured outputs are combined with a reasoning parser, grammar
+        constraints are disabled while the model is still reasoning. Speculative
+        decoding may accept several tokens in one scheduler step, including the
+        reasoning-end token and following content tokens. In that case only the
+        suffix after the reasoning-end token belongs to the structured output
+        grammar.
+        """
+        if not request.use_structured_output or not token_ids:
+            return []
+
+        reasoner = self._get_reasoner(request)
+        if reasoner is None or self.enable_in_reasoning:
+            return token_ids
+
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        if structured_req.reasoning_ended:
+            return token_ids
+
+        all_token_ids = request.all_token_ids
+        previous_len = max(len(all_token_ids) - len(token_ids), 0)
+        for index, token_id in enumerate(token_ids):
+            current_ids = all_token_ids[: previous_len + index + 1]
+            if self._reasoning_ends_with_delta(request, current_ids, [token_id]):
+                structured_req.reasoning_ended = True
+                return token_ids[index + 1 :]
+        return []
+
+    def _reasoning_ends_with_delta(
+        self,
+        request: "Request",
+        all_token_ids: Sequence[int],
+        delta_token_ids: Iterable[int],
+    ) -> bool:
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
+            return False
+        return reasoner.is_reasoning_end_streaming(all_token_ids, delta_token_ids)
 
     def clear_backend(self) -> None:
         if self.backend is not None:
