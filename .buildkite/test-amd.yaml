@@ -449,29 +449,6 @@ steps:
   commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
-#------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
-
-- label: Model Executor # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  torch_nightly: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/engine/arg_utils.py
-  - vllm/config/model.py
-  - vllm/model_executor
-  - tests/model_executor
-  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - apt-get update && apt-get install -y curl libsodium23
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s model_executor -m '(not slow_test)'
-  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
-
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
@@ -1738,6 +1715,29 @@ steps:
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+
+#------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
+
+- label: Model Executor # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - tests/model_executor
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - apt-get update && apt-get install -y curl libsodium23
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s model_executor -m '(not slow_test)'
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 

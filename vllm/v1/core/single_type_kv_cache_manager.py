@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     TQFullAttentionSpec,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 
@@ -1252,27 +1253,30 @@ class SinkFullAttentionManager(FullAttentionManager):
         self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
 
 
-spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
-    FullAttentionSpec: FullAttentionManager,
-    TQFullAttentionSpec: FullAttentionManager,
-    MLAAttentionSpec: FullAttentionManager,
-    HiddenStateCacheSpec: FullAttentionManager,
-    SlidingWindowSpec: SlidingWindowManager,
-    SlidingWindowMLASpec: SlidingWindowManager,
-    ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
-    MambaSpec: MambaManager,
-    CrossAttentionSpec: CrossAttentionManager,
-    SinkFullAttentionSpec: SinkFullAttentionManager,
-}
-
-
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_num_batched_tokens: int,
     max_model_len: int,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
-    manager_class = spec_manager_map[type(kv_cache_spec)]
+    """
+    Get the appropriate manager for a given KVCacheSpec.
+
+    Uses the KVCacheSpecRegistry to look up the manager class, supporting
+    both built-in and custom specs registered via @register_kv_cache_spec
+    and KVCacheSpecRegistry.register.
+
+    Args:
+        kv_cache_spec: The KVCacheSpec instance
+        max_num_batched_tokens: The maximum number of tokens in a batch
+        max_model_len: The maximum context length the model could serve
+    Returns:
+        An instance of the appropriate SingleTypeKVCacheManager subclass
+    """
+    manager_class = KVCacheSpecRegistry.get_manager_class(kv_cache_spec)
+    assert manager_class is not None, (
+        f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
+    )
     # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
     # chunks; the runtime admission cap must match the recycling-aware bound
     # the startup pool sizer uses (single source of truth: the spec method).
@@ -1285,3 +1289,64 @@ def get_manager_for_kv_cache_spec(
         )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
+
+
+def register_all_kvcache_specs(vllm_config):
+    """Built-in spec registration"""
+    KVCacheSpecRegistry.register(
+        FullAttentionSpec,
+        FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+
+    KVCacheSpecRegistry.register(
+        SlidingWindowSpec,
+        SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowSpec,
+    )
+    KVCacheSpecRegistry.register(
+        SlidingWindowMLASpec,
+        SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+
+    KVCacheSpecRegistry.register(
+        MambaSpec, MambaManager, uniform_type_base_spec=MambaSpec
+    )
+    KVCacheSpecRegistry.register(
+        ChunkedLocalAttentionSpec,
+        ChunkedLocalAttentionManager,
+        uniform_type_base_spec=ChunkedLocalAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        CrossAttentionSpec,
+        CrossAttentionManager,
+        uniform_type_base_spec=CrossAttentionSpec,
+    )
+
+    # FullAttentionSpec subclasses — grouped with FullAttentionSpec
+    KVCacheSpecRegistry.register(
+        TQFullAttentionSpec,
+        FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
+    )
+    # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
+    # grouping, thus the uniform_type_base_spec is just a
+    # placeholder.
+    KVCacheSpecRegistry.register(
+        HiddenStateCacheSpec,
+        FullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+    KVCacheSpecRegistry.register(
+        SinkFullAttentionSpec,
+        SinkFullAttentionManager,
+        uniform_type_base_spec=FullAttentionSpec,
+    )
+
+    from vllm.platforms import current_platform
+
+    current_platform.register_custom_kv_cache_specs(vllm_config)
