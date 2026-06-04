@@ -45,7 +45,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
@@ -296,7 +296,6 @@ class KimiVLForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsEncoderCudaGraph, SupportsPP
 ):
     supports_encoder_tp_data = True
-    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -359,8 +358,8 @@ class KimiVLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
             buffer_keys=[
+                "pixel_values",
                 "pos_embeds",
                 "rope_freqs_cis",
                 "cu_seqlens",
@@ -375,9 +374,6 @@ class KimiVLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> str:
         return "image"
-
-    def get_max_frames_per_video(self) -> int:
-        return 0
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -402,26 +398,20 @@ class KimiVLForConditionalGeneration(
             grid_hws = grid_hws.tolist()
         return grid_hws
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        return len(self._get_grid_hws(mm_kwargs))
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
         kh, kw = self.config.vision_config.merge_kernel_size
-        grid_hws = self._get_grid_hws(mm_kwargs)
-        return [(h // kh) * (w // kw) for h, w in grid_hws]
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        grid_hws = self._get_grid_hws(mm_kwargs)
-        return [h * w for h, w in grid_hws]
+        return [
+            EncoderItemSpec(
+                input_size=h * w,
+                output_tokens=(h // kh) * (w // kw),
+            )
+            for h, w in self._get_grid_hws(mm_kwargs)
+        ]
 
     def select_encoder_cudagraph_items(
         self,
@@ -495,13 +485,9 @@ class KimiVLForConditionalGeneration(
             max_seqlen_override=token_budget,
             device=device,
         )
+        values = buffers | {"pixel_values": dummy_pixel_values}
 
-        mm_kwargs = {"pixel_values": dummy_pixel_values}
-
-        return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
-        )
+        return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -515,16 +501,17 @@ class KimiVLForConditionalGeneration(
             max_batch_size=max_batch_size,
             device=mm_kwargs["pixel_values"].device,
         )
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = buffers | {"pixel_values": mm_kwargs["pixel_values"]}
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        pixel_values = mm_kwargs["pixel_values"]
+        pixel_values = values.pop("pixel_values")
+        metadata = values
         image_features = self.vision_tower(
-            pixel_values, grid_hw=None, encoder_metadata=buffers
+            pixel_values, grid_hw=None, encoder_metadata=metadata
         )
         return self.multi_modal_projector(image_features)
 

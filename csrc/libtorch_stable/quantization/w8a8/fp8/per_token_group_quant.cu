@@ -7,7 +7,11 @@
 
 #include <cmath>
 
-#include <cuda_fp8.h>
+#ifdef USE_ROCM
+  #include <hip/hip_fp8.h>
+#else
+  #include <cuda_fp8.h>
+#endif
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
@@ -15,12 +19,23 @@
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
+#ifdef USE_ROCM
+  // 16-thread logical groups may pack up to four per 64-lane wavefront; use a
+  // 64-bit mask and explicit width so shuffles stay within each group.
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFFFull << ((lane_in_wave / 16) * 16);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 8, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1, 16));
+#else
   unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
 
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+#endif
   return val;
 }
 
@@ -237,10 +252,12 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == torch::headeronly::ScalarType::Char) {
+        if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
+        } else {
+          VLLM_STABLE_DISPATCH_FP8_TYPES(
+              dst_type, "per_token_group_quant_8bit_fp8",
+              ([&] { LAUNCH_KERNEL(scalar_t, fp8_t); }));
         }
       }));
 
@@ -317,10 +334,18 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
   // 8 lanes within the warp that share a group.
+#ifdef USE_ROCM
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFull << (lane_in_wave & ~7);
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4, 8));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2, 8));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1, 8));
+#else
   unsigned mask = 0xffu << (threadIdx.x & 24u);
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
+#endif
 
   float y_s = local_absmax / max_8bit;
   y_s = fmaxf(y_s, 1e-10f);
@@ -503,15 +528,12 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit_packed_register", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-          LAUNCH_REG_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == torch::headeronly::ScalarType::Char) {
+        if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_REG_KERNEL(scalar_t, int8_t);
         } else {
-          STD_TORCH_CHECK(
-              false,
-              "per_token_group_quant_8bit_packed only supports FP8/INT8 "
-              "outputs.");
+          VLLM_STABLE_DISPATCH_FP8_TYPES(
+              dst_type, "per_token_group_quant_8bit_packed_fp8",
+              ([&] { LAUNCH_REG_KERNEL(scalar_t, fp8_t); }));
         }
       }));
 

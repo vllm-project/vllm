@@ -81,6 +81,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -113,12 +114,46 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
 )
 
 logger = init_logger(__name__)
+
+
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src)
+    if n < dst.shape[0]:
+        dst[n:] = src[-1]
+
+
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
 
 # === Vision Inputs === #
 
@@ -369,7 +404,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -426,6 +462,7 @@ class Qwen2_5_VisionAttention(nn.Module):
     dynamic_arg_dims={
         "x": 0,
         "cu_seqlens": 0,
+        "sequence_lengths": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
     },
@@ -471,6 +508,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -478,7 +517,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
-            sequence_lengths=None,
+            sequence_lengths=sequence_lengths,
         )
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
@@ -598,6 +637,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.fullatt_block_indexes = vision_config.fullatt_block_indexes
         self.spatial_merge_unit = self.spatial_merge_size**2
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
         self.patch_embed = Qwen2_5_VisionPatchEmbed(
             patch_size=patch_size,
             temporal_patch_size=temporal_patch_size,
@@ -607,6 +652,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+        # FP8 attention: Q/K/V become independent contiguous tensors after
+        # quantization, so FlashInfer cu_seqlens uses uniform stride.
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -625,7 +675,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     dim=self.hidden_size,
                     num_heads=self.num_heads,
                     mlp_hidden_dim=vision_config.intermediate_size,
-                    act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                    act_fn=get_act_and_mul_fn(
+                        vision_config.hidden_act,
+                        compile_native=not current_platform.is_rocm(),
+                    ),
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
@@ -776,6 +829,38 @@ class Qwen2_5_VisionTransformer(nn.Module):
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
+    def get_encoder_cudagraph_max_window_seqs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ) -> int:
+        # token_budget is an upper bound on the total number of merged vision
+        # tokens replayed by this encoder CUDA graph. cu_window_seqlens, however,
+        # is sized by the number of window-attention sequences (non-empty local
+        # windows), not by the number of tokens. Using max_num_batched_tokens as
+        # this sequence count can over-pad cu_window_seqlens and make FlashAttention
+        # launch thousands of empty CTAs during replay.
+        vit_merger_window_size = (
+            self.window_size // self.spatial_merge_size // self.patch_size
+        )
+        max_sequence_units = max(max_batch_size, max_frames_per_batch)
+
+        # Each local window covers vit_merger_window_size tokens along one merged
+        # spatial axis. The largest number of non-empty windows for a fixed token
+        # budget comes from a thin strip that advances along only one axis, so
+        # ceil(token_budget / window_side) is a safe geometry-driven bound. Multiple
+        # images or video frames can fragment that strip at item/frame boundaries,
+        # so add max_sequence_units to cover one extra partial window per sequence.
+        max_strip_windows = (
+            token_budget + vit_merger_window_size - 1
+        ) // vit_merger_window_size
+
+        # A non-empty window must contain at least one merged vision token, so the
+        # number of window sequences can never exceed token_budget. This final
+        # clamp keeps the bound tight for tiny budgets while remaining safe.
+        return min(token_budget, max_sequence_units + max_strip_windows)
+
     def prepare_encoder_metadata(
         self,
         grid_thw: list[list[int]],
@@ -902,21 +987,55 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     )
                 )
 
-        # transformers
-        # pre-compute seqlens for window/full attn to reduce cuMemcpy operations
-        if max_seqlen_override is None:
-            max_seqlen_full = self.compute_attn_mask_seqlen(cu_seqlens)
-        else:
-            max_seqlen_full = torch.tensor(max_seqlen_override, dtype=torch.int32)
-        if max_seqlen_window_override is None:
-            max_seqlen_window = self.compute_attn_mask_seqlen(cu_window_seqlens)
-        else:
-            max_seqlen_window = torch.tensor(
-                max_seqlen_window_override, dtype=torch.int32
-            )
+        cu_seqlens_np = cu_seqlens.cpu().numpy()
+        cu_window_seqlens_np = cu_window_seqlens.cpu().numpy()
 
-        cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
-        cu_window_seqlens = cu_window_seqlens.to(device=device, non_blocking=True)
+        # FlashInfer needs the real per-sequence lengths in addition to
+        # cu_seqlens. For other backends this returns None and is ignored.
+        sequence_lengths_full = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_seqlens_np, device
+        )
+        sequence_lengths_window = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend, cu_window_seqlens_np, device
+        )
+
+        # Pre-compute max sequence lengths for window/full attention. FlashInfer
+        # buckets this value for cuDNN graph reuse; other backends keep the exact
+        # maximum. Keep the scalar on CPU because attention wrappers call .item().
+        if max_seqlen_override is None:
+            max_seqlen_full_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens_np
+            )
+        else:
+            max_seqlen_full_val = max_seqlen_override
+        max_seqlen_full = torch.tensor(max_seqlen_full_val, dtype=torch.int32)
+        if max_seqlen_window_override is None:
+            max_seqlen_window_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_window_seqlens_np
+            )
+        else:
+            max_seqlen_window_val = max_seqlen_window_override
+        max_seqlen_window = torch.tensor(max_seqlen_window_val, dtype=torch.int32)
+
+        # FlashInfer uses backend-specific cu_seqlens offsets into the flattened
+        # Q/K/O and V buffers. Other backends receive the original cumulative
+        # token offsets unchanged.
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_seqlens_np,
+            self.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
+        cu_window_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+            self.attn_backend,
+            cu_window_seqlens_np,
+            self.hidden_size,
+            self.tp_size,
+            device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
+        )
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(device=device, non_blocking=True)
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(device=device, non_blocking=True)
         window_index = window_index.to(device=device, non_blocking=True)
@@ -930,13 +1049,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         metadata["cu_window_seqlens"] = cu_window_seqlens
         metadata["max_seqlen_full"] = max_seqlen_full
         metadata["max_seqlen_window"] = max_seqlen_window
+        metadata["sequence_lengths_full"] = sequence_lengths_full
+        metadata["sequence_lengths_window"] = sequence_lengths_window
 
         return metadata
 
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: list[list[int]],
+        grid_thw: list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -955,6 +1076,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens = encoder_metadata["cu_window_seqlens"]
         max_seqlen_full = encoder_metadata["max_seqlen_full"]
         max_seqlen_window = encoder_metadata["max_seqlen_window"]
+        sequence_lengths_full = encoder_metadata.get("sequence_lengths_full")
+        sequence_lengths_window = encoder_metadata.get("sequence_lengths_window")
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
@@ -968,9 +1091,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
                 max_seqlen_now = max_seqlen_full
+                sequence_lengths_now = sequence_lengths_full
             else:
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
+                sequence_lengths_now = sequence_lengths_window
 
             hidden_states = blk(
                 hidden_states,
@@ -978,6 +1103,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
+                sequence_lengths=sequence_lengths_now,
             )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
@@ -1579,13 +1705,15 @@ class Qwen2_5_VLForConditionalGeneration(
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
+        cu_seqlens_padding = (
+            _pad_flashinfer_cu_seqlens_buffer
+            if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+            else _pad_cumulative_seqlens_buffer
+        )
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
                 "window_index",
@@ -1594,7 +1722,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 "cu_window_seqlens",
                 "max_seqlen_full",
                 "max_seqlen_window",
+                "sequence_lengths_full",
+                "sequence_lengths_window",
             ],
+            padding_logics={
+                "cu_seqlens": cu_seqlens_padding,
+                "cu_window_seqlens": cu_seqlens_padding,
+            },
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
@@ -1728,9 +1862,8 @@ class Qwen2_5_VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        max_window_seqs_per_batch = min(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len,
+        max_window_seqs_per_batch = self.visual.get_encoder_cudagraph_max_window_seqs(
+            token_budget, max_batch_size, max_frames_per_batch
         )
         # Use ceil here (not floor) so total captured capacity is never smaller
         # than token_budget when token_budget is not divisible by max_batch_size
@@ -1794,7 +1927,7 @@ class Qwen2_5_VLForConditionalGeneration(
             // self.visual.patch_size
         )
         max_seqlen_window_override = vit_merger_window_size**2 * (spatial_merge_size**2)
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1806,14 +1939,12 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Just use image-modality dummy input_buffer for capturing, since it's also
         # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1825,37 +1956,37 @@ class Qwen2_5_VLForConditionalGeneration(
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
+        # Keep replay metadata sized to the actual batch. The captured buffers
+        # may be larger, but EncoderCudaGraphManager fills the remaining
+        # cu*_seqlens entries with the last cumulative offset to represent empty
+        # sequences. Padding cu_window_seqlens here would require a static upper
+        # bound and can over-pad window attention into many empty FlashAttention
+        # CTAs.
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         elif modality == "video":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
-                max_window_seqs_per_batch=min(
-                    self.vllm_config.scheduler_config.max_num_batched_tokens,
-                    self.model_config.max_model_len,
-                ),
             )
         else:
             raise AssertionError("This line should be unreachable.")
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,

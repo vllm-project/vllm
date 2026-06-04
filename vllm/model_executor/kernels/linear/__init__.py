@@ -45,11 +45,17 @@ from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
 from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
     ExllamaLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+    HummingLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.machete import (
     MacheteLinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.rdna3_w4a16 import (
+    RDNA3W4A16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
     TritonW4A16LinearKernel,
@@ -57,6 +63,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
+    ZentorchWNA16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp4 import (
     MxFp4LinearKernel,
@@ -155,7 +164,11 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockScaledMMKernel,
     XPUFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
@@ -254,7 +267,7 @@ def _filter_kernels_by_backend(
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
+    PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
@@ -308,6 +321,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
+        XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
 }
@@ -334,10 +348,13 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MacheteLinearKernel,
         AllSparkLinearKernel,
         MarlinLinearKernel,
+        HummingLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        RDNA3W4A16LinearKernel,
         TritonW4A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
@@ -348,6 +365,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
     PlatformEnum.CPU: [
         Dynamic4bitLinearKernel,
+        ZentorchWNA16LinearKernel,
         CPUWNA16LinearKernel,
     ],
 }
@@ -828,33 +846,52 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
 }
 
 
-def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
 
-    # VLLM_BATCH_INVARIANT unconditionally forces emulation for deterministic
-    # execution. It overrides both --linear-backend and the deprecated env
-    # vars below.
+    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
+    # batch-invariant CUTLASS implementation when available, otherwise fall
+    # back to emulation. It overrides both --linear-backend and the deprecated
+    # env vars below.
     force_kernel: type[NvFp4LinearKernel] | None = None
     linear_backend = _get_linear_backend()
     if envs.VLLM_BATCH_INVARIANT:
-        if linear_backend not in ("auto", "emulation"):
-            logger.warning_once(
-                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using "
-                "the emulation backend for deterministic execution.",
-                linear_backend,
-            )
+        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+        if bi_supported:
+            if linear_backend not in ("auto", "cutlass"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the CUTLASS backend for deterministic execution.",
+                    linear_backend,
+                )
+            else:
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+                    "CUTLASS backend for deterministic execution."
+                )
+            force_kernel = CutlassNvFp4LinearKernel
         else:
+            if linear_backend not in ("auto", "emulation"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the emulation backend for deterministic execution.",
+                    linear_backend,
+                )
             logger.info_once(
-                "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                "emulation backend for deterministic execution."
+                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                "kernel is not supported on this platform; falling back to "
+                "emulation for deterministic execution. Reason: %s",
+                reason,
             )
-        force_kernel = EmulationNvFp4LinearKernel
+            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
         # is "auto". Deprecation warnings are emitted from vllm/envs.py.
-        if envs.VLLM_USE_FBGEMM:
+        if use_a16:  # force a16 if running weight-only quantization
+            force_kernel = MarlinNvFp4LinearKernel
+        elif envs.VLLM_USE_FBGEMM:
             force_kernel = FbgemmNvFp4LinearKernel
         elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             force_kernel = EmulationNvFp4LinearKernel
@@ -1001,6 +1038,8 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "ZentorchInt8ScaledMMLinearKernel",
+    "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
     "AllSparkLinearKernel",
