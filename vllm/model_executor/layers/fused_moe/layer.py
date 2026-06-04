@@ -129,6 +129,7 @@ class FusedMoE(PluggableLayer):
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
+        expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
@@ -139,10 +140,6 @@ class FusedMoE(PluggableLayer):
         apply_routed_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
         hash_indices_table: torch.Tensor | None = None,
-        ckpt_gate_proj_name: str | tuple[str | None, ...] | None = None,
-        ckpt_down_proj_name: str | tuple[str, ...] | None = None,
-        ckpt_up_proj_name: str | tuple[str | None, ...] | None = None,
-        ckpt_gate_up_proj_name: str | tuple[str | None, ...] | None = None,
     ):
         super().__init__()
 
@@ -186,11 +183,8 @@ class FusedMoE(PluggableLayer):
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
 
-        # Used in self.load_weights to generate expert mapping
-        self.ckpt_gate_proj_name = ckpt_gate_proj_name
-        self.ckpt_down_proj_name = ckpt_down_proj_name
-        self.ckpt_up_proj_name = ckpt_up_proj_name
-        self.ckpt_gate_up_proj_name = ckpt_gate_up_proj_name
+        # Expert mapping used in self.load_weights
+        self.expert_mapping = expert_mapping
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -1152,21 +1146,11 @@ class FusedMoE(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        if self.ckpt_down_proj_name is None:
+        if (expert_mapping := self.expert_mapping) is None:
             raise ValueError(
-                "ckpt_..._proj_name attributes are required for loading weights with"
-                "FusedMoE.load_weights. Please set them to the corresponding "
-                "checkpoint weight names."
+                "`self.expert_mapping` must be provided to "
+                "load weights using `self.load_weights`."
             )
-        expert_mapping = FusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name=self.ckpt_gate_proj_name,
-            ckpt_down_proj_name=self.ckpt_down_proj_name,
-            ckpt_up_proj_name=self.ckpt_up_proj_name,
-            ckpt_gate_up_proj_name=self.ckpt_gate_up_proj_name,
-            num_experts=self.logical_num_experts,
-            num_redundant_experts=self.global_num_experts - self.logical_num_experts,
-        )
         for expert_name, loaded_weight in weights:
             expert_name = expert_name.removesuffix(".weight")
             qual_name = f"{self.layer_name}.{expert_name}.weight"

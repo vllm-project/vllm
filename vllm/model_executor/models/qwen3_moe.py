@@ -217,10 +217,20 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            expert_mapping=self.get_expert_mapping(),
+        )
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             ckpt_gate_up_proj_name="gate_up_proj",
+            num_experts=self.n_routed_experts,
+            num_redundant_experts=self.n_redundant_experts,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -517,17 +527,9 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            ckpt_gate_up_proj_name="gate_up_proj",
-            num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
-        )
+        return next(
+            m for m in self.modules() if isinstance(m, Qwen3MoeSparseMoeBlock)
+        ).get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -607,8 +609,8 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                 if is_pp_missing_parameter(name, self):
                     continue
                 if "mlp.experts" in name:
-                    fused_moe = self.layers[extract_layer_index(name)].mlp.experts
-                    _, _, expert_name = name.partition(".experts.")
+                    mlp_name, _, expert_name = name.partition(".experts.")
+                    fused_moe = self.layers[extract_layer_index(mlp_name)].mlp.experts
                     # FusedMoE.load_weights handles both:
                     # - 2D expert weights (nn.ModuleList)
                     # - 3D expert weights (nn.Linear)

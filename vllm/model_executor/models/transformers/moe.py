@@ -214,6 +214,9 @@ class MoEMixin(MixtureOfExperts):
         elif "grok1" in wrapped_arch:
             activation = "gelu"
 
+        # Expert mapping for `AutoWeightsLoader`
+        expert_mapping = self.get_expert_mapping()
+
         # Expert parallel load balancing kwargs
         enable_eplb = self.parallel_config.enable_eplb
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
@@ -278,11 +281,7 @@ class MoEMixin(MixtureOfExperts):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
-                        # (Most common style, Granite/Mixtral/Phi style, Grok1 style)
-                        ckpt_gate_proj_name=("gate_proj", "w1", "linear"),
-                        ckpt_down_proj_name=("down_proj", "w2", "linear_1"),
-                        ckpt_up_proj_name=("up_proj", "w3", "linear_v"),
-                        ckpt_gate_up_proj_name=("gate_up_proj", None, None),
+                        expert_mapping=expert_mapping,
                     )
                     mlp.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
