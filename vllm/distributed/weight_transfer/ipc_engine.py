@@ -5,7 +5,7 @@
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pybase64 as base64
 import ray
@@ -14,8 +14,10 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
@@ -125,16 +127,22 @@ class IPCWeightTransferEngine(
     update_info_cls = IPCWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the IPC weight transfer engine.
 
         Args:
             config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
+            vllm_config: The full vLLM config
+            device: The device this worker's model lives on
+            model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config)
+        super().__init__(config, vllm_config, device, model)
 
     def parse_update_info(
         self, update_dict: dict[str, Any]

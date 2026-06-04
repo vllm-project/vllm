@@ -13,11 +13,10 @@ overview; the canonical example lives at ``examples/rl/rlhf_rdt.py``.
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -25,6 +24,9 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -105,9 +107,13 @@ class RDTWeightTransferEngine(
     update_info_cls = RDTWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
-        super().__init__(config, parallel_config)
+        super().__init__(config, vllm_config, device, model)
         self._trainer_actor: Any | None = None
         self._produce_method: Any | None = None
 

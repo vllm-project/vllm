@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -109,16 +109,22 @@ class NCCLWeightTransferEngine(
     update_info_cls = NCCLWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the NCCL weight transfer engine.
 
         Args:
             config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
+            vllm_config: The full vLLM config
+            device: The device this worker's model lives on
+            model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config)
+        super().__init__(config, vllm_config, device, model)
         self.model_update_group: PyNcclCommunicator | None = None
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:

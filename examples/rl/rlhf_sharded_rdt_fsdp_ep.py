@@ -504,9 +504,25 @@ async def main():
         print("-" * 60)
 
     # ---- Weight transfer ----
+    # Fetch the trainer's parameter metadata and partition it into layer-aligned
+    # groups *before* init: the sharded RDT engine bakes a replay plan for every
+    # group during init_weight_transfer_engine, so it needs the full group list
+    # up front. update_weights then refers to a group by index.
+    names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
+    name_to_idx = {n: i for i, n in enumerate(names)}
+    layer_groups = _layerwise_groups(names)
+    group_dtype_names = [
+        [dtype_names[name_to_idx[n]] for n in g] for g in layer_groups
+    ]
+    group_shapes = [[shapes[name_to_idx[n]] for n in g] for g in layer_groups]
+    print(
+        f"[sync] {len(names)} params -> {len(layer_groups)} groups "
+        f"(max group size = {max(len(g) for g in layer_groups)} params)."
+    )
+
     print(
         f"[sync] Initializing sharded RDT engine on vLLM workers "
-        f"(warmup={'on' if WARMUP else 'off'})..."
+        f"(warmup={'on' if WARMUP else 'off'}); dry-run baking replay plans..."
     )
     _init_t0 = time.perf_counter()
     await engine.init_weight_transfer_engine(
@@ -515,37 +531,25 @@ async def main():
                 ShardedRDTWeightTransferInitInfo(
                     trainer_actor_name=TRAINER_ACTOR_NAME,
                     trainer_actor_namespace=RAY_NAMESPACE,
+                    group_names=layer_groups,
+                    group_dtype_names=group_dtype_names,
+                    group_shapes=group_shapes,
                     warmup_method_name="rdt_warmup" if WARMUP else None,
                 )
             )
         )
     )
     _init_seconds = time.perf_counter() - _init_t0
-    print(f"[sync] init_weight_transfer_engine took {_init_seconds:.3f} s")
-
-    names, dtype_names, shapes = ray.get(fsdp_workers[0].get_weight_metadata.remote())
-    print(f"[sync] {len(names)} parameters to transfer.")
+    print(f"[sync] init_weight_transfer_engine (incl. bake) took {_init_seconds:.3f} s")
 
     print("[sync] Pausing generation...")
     await engine.pause_generation(mode="abort")
 
-    # Group the flat name list into layer-aligned groups so we transfer
-    # one layer at a time. Sync-independent, so compute once and reuse for
-    # every iteration's per-rank gather and per-call update_info.
-    layer_groups = _layerwise_groups(names)
-    print(
-        f"[sync] Partitioned {len(names)} params into {len(layer_groups)} "
-        f"layer groups (max group size = "
-        f"{max(len(g) for g in layer_groups)} params)."
-    )
-    name_to_idx = {n: i for i, n in enumerate(names)}
-
-    # Run SYNC_ITERS back-to-back syncs. Iter 0 records the replay plan (slow)
-    # and iters 1.. replay it (fast). Each iter brackets the per-layer loop in
-    # its own start/finish_weight_update, since initialize/finalize_layerwise_reload
-    # run per sync.
+    # Run SYNC_ITERS back-to-back syncs. The plans were baked at init, so every
+    # sync is a replay. Each iter brackets the per-group loop in its own
+    # start/finish_weight_update, since initialize/finalize_layerwise_reload run
+    # per sync.
     for sync_iter in range(SYNC_ITERS):
-        phase = " [BAKE]" if sync_iter == 0 else " [REPLAY]"
         # Zero rank-0 produce counters so each iter is timed independently.
         ray.get(fsdp_workers[0].reset_produce_timing.remote())
 
@@ -565,16 +569,14 @@ async def main():
         # applying layer K. Backpressure is implicit — the next
         # ``update_weights`` does not fire until the previous one has
         # drained, so the rank-0 cache holds at most two layers at once.
-        print(f"[sync] iter {sync_iter}{phase}: gather + update_weights...")
+        print(f"[sync] iter {sync_iter} [REPLAY]: gather + update_weights...")
         _sync_t0 = time.perf_counter()
         prev_task: asyncio.Task | None = None
         prev_names: list[str] | None = None
-        for group_names in layer_groups:
-            group_info = ShardedRDTWeightTransferUpdateInfo(
-                names=group_names,
-                dtype_names=[dtype_names[name_to_idx[n]] for n in group_names],
-                shapes=[shapes[name_to_idx[n]] for n in group_names],
-            )
+        for group_index, group_names in enumerate(layer_groups):
+            # The trainer side still gathers/frees by name; the inference side
+            # only needs the group index (its replay plan was baked at init).
+            group_info = ShardedRDTWeightTransferUpdateInfo(group_index=group_index)
             gather_futs = [w.gather_layer.remote(group_names) for w in fsdp_workers]
             if prev_task is not None:
                 await prev_task
@@ -604,7 +606,7 @@ async def main():
         slice_s = ptiming["slice_seconds"]
         print("=" * 60)
         print(
-            f"[profile] iter {sync_iter}{phase}  warmup={'ON' if WARMUP else 'OFF'}"
+            f"[profile] iter {sync_iter} [REPLAY]  warmup={'ON' if WARMUP else 'OFF'}"
         )
         if sync_iter == 0:
             print(f"[profile] init_weight_transfer_engine : {_init_seconds:.3f} s")

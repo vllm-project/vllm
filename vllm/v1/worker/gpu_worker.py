@@ -36,7 +36,10 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    WeightTransferEngine,
+    WeightTransferEngineFactory,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -131,15 +134,9 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine (initialized on-demand)
-        self.weight_transfer_engine = (
-            WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-            )
-            if self.vllm_config.weight_transfer_config is not None
-            else None
-        )
+        # Weight transfer engine is created in `load_model`, once the model
+        # exists (engines take the local model instance in their constructor).
+        self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._is_checkpoint_format = True
 
@@ -343,6 +340,17 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        # Create the weight transfer engine now that the model exists; engines
+        # take the local model instance (and full config/device) in their
+        # constructor (e.g. the sharded RDT engine bakes a replay plan at init).
+        if self.vllm_config.weight_transfer_config is not None:
+            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config,
+                self.device,
+                self.model_runner.get_model(),
+            )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

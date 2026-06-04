@@ -34,11 +34,10 @@ and the spike in ``nixl_slice_spike.py`` confirming NIXL is view-aware.
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
@@ -46,6 +45,9 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateInfo,
 )
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
 
@@ -85,67 +87,16 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 
 @dataclass
-class _FetchPlan:
-    """Per-bake state shared by every LazyRDTTensor in one bake load.
-
-    Pass 1 (``online_process_loader`` -> ``get_numel_loaded``) records every
-    ``(name, op_chain)`` it would copy_ onto a meta destination into
-    ``needed``. ``drain`` issues one batched RPC for every chain in ``needed``
-    and stores the results in ``results``. Pass 2 (replay inside
-    ``_layerwise_process``) pops from ``results`` on the real copy_, and — when
-    ``trace_sink`` is set — records the destination descriptor for replay.
-    """
-
-    produce_method: Any = None
-    needed: set[FetchKey] = field(default_factory=set)
-    results: dict[FetchKey, torch.Tensor] = field(default_factory=dict)
-
-    # Trace mode (bake): when ``trace_sink`` is set, the Pass-2 ``copy_`` branch
-    # appends a ``_BakedCopy`` (source key + destination descriptor) for every
-    # materialized copy_ so the scatter can be replayed via ``param.as_strided``
-    # on later syncs without re-running the loader. ``trace_layer`` is the module
-    # currently being processed, used to match the copy_ destination's storage
-    # back to one of its params. A ``None`` entry marks an un-matchable copy_
-    # (the layer is then not bakeable and falls back to the slow path).
-    trace_sink: "list[_BakedCopy | None] | None" = None
-    trace_layer: Any = None
-
-    # Timing instrumentation: cumulative wall-clock seconds spent in the
-    # NIXL pull (the trainer RPC + transfer) and the number of pulls issued.
-    pull_seconds: float = 0.0
-    pull_calls: int = 0
-
-    def drain(self) -> None:
-        """Single batched RPC for every chain Pass 1 recorded into ``needed``."""
-        if not self.needed:
-            return
-        needed = list(self.needed)
-        import ray
-
-        _t0 = time.perf_counter()
-        tensors = ray.get(self.produce_method.remote(needed))
-        self.pull_seconds += time.perf_counter() - _t0
-        self.pull_calls += 1
-        if len(tensors) != len(needed):
-            raise RuntimeError(
-                f"Trainer returned {len(tensors)} tensors for {len(needed)} "
-                f"requested specs."
-            )
-        for key, tensor in zip(needed, tensors):
-            self.results[key] = tensor
-        self.needed.clear()
-
-
-@dataclass
 class _BakedCopy:
     """One recorded scatter: pull ``src`` from the trainer and copy it into
     ``param_name`` at the recorded strided region.
 
-    Captured once during the bake from the Pass-2 ``copy_`` (which holds both
-    the lazy source's op-chain and the materialized destination view). On every
-    later sync the destination is reconstructed as
+    Captured once during the bake's dry run — the lazy source carries the op
+    chain (``src``); the loader binds the destination param (``param_name``),
+    whose **meta** view yields ``offset/shape/stride`` (valid on meta; no real
+    storage needed). On every later sync the destination is reconstructed as
     ``param.as_strided(shape, stride, offset)`` and filled by ``copy_`` — no
-    loader, no lazy tensor, no Pass-1 discovery.
+    loader, no lazy tensor, no discovery.
     """
 
     src: FetchKey
@@ -172,36 +123,35 @@ class _BakedGroup:
     needs_pwal: bool
 
 
-def _match_dst_descriptor(
-    dest: torch.Tensor, layer: Any
-) -> tuple[str, int, tuple[int, ...], tuple[int, ...]] | None:
-    """Match a ``copy_`` destination view back to one of ``layer``'s tensors.
+@dataclass
+class _BakeRecorder:
+    """Per-leaf-module recording context for the dry-run bake.
 
-    Returns ``(param_name, storage_offset, shape, stride)`` such that
-    ``getattr(layer, param_name).as_strided(shape, stride, offset)`` reproduces
-    ``dest`` exactly, or ``None`` if ``dest`` does not alias any of the layer's
-    param/buffer storages — in which case the layer is not bakeable (the loader
-    built its destination by some means other than a view into a registered
-    param) and the engine falls back to the slow path for that group.
+    The dry run replays each buffered loader against the layer's **meta** params
+    (no real storage, no transfer). Before each loader call the engine sets
+    ``param_name`` to the param the loader is bound to; the lazy's ``copy_``
+    then appends a ``_BakedCopy`` reading the op chain from the source and
+    ``offset/shape/stride`` from the (meta) destination view. ``None`` marks a
+    copy_ we couldn't record (the group falls back to a plain load).
     """
-    from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 
-    try:
-        dest_ptr = dest.untyped_storage().data_ptr()
-    except (RuntimeError, ValueError):
-        return None
-    for name, tensor in get_layer_tensors(layer).items():
-        try:
-            if tensor.untyped_storage().data_ptr() == dest_ptr:
-                return (
-                    name,
-                    dest.storage_offset(),
-                    tuple(dest.shape),
-                    tuple(dest.stride()),
-                )
-        except (RuntimeError, ValueError):
-            continue
-    return None
+    sink: "list[_BakedCopy | None]" = field(default_factory=list)
+    param_name: str = ""
+
+
+@dataclass
+class _FetchPlan:
+    """Per-load state for the plain (unbaked) slow path.
+
+    Pass 1 (``online_process_loader`` -> ``get_numel_loaded``) records every
+    ``(name, op_chain)`` it would copy_ onto a meta destination into ``needed``.
+    The engine pulls them all in one batched RPC (``_pull``) into ``results``;
+    Pass 2 (replay inside ``_layerwise_process``) pops from ``results`` on the
+    real copy_.
+    """
+
+    needed: set[FetchKey] = field(default_factory=set)
+    results: dict[FetchKey, torch.Tensor] = field(default_factory=dict)
 
 
 class _UnsupportedLazyOp(NotImplementedError):
@@ -213,23 +163,21 @@ class _UnsupportedLazyOp(NotImplementedError):
 
 
 class LazyRDTTensor(torch.Tensor):
-    """Zero-storage tensor that defers slice fetching during a bake load.
+    """Zero-storage tensor that records how to fetch a weight slice.
 
     Built via ``_make_wrapper_subclass`` so ``.shape``/``.dtype``/``.device``/
-    ``.size()``/``.dim()`` work without allocating storage. The two layerwise
-    passes interact with us as follows:
+    ``.size()``/``.dim()`` work without allocating storage. Every supported op
+    (narrow/view/reshape/transpose/__getitem__/...) returns a new
+    ``LazyRDTTensor`` with the spec appended to its chain; ``copy_`` is the data
+    sink. Its behaviour depends on the ``_ctx`` the engine installed:
 
-    Pass 1 (buffering): every supported op (narrow/view/reshape/transpose/
-    __getitem__/...) returns a new ``LazyRDTTensor`` with the spec appended
-    to its chain. ``copy_`` onto a meta destination records ``(name, chain)``
-    into the fetch plan and returns; no data moves. After load_weights
-    returns, the engine calls ``plan.drain()`` once to fetch every recorded
-    chain in a single batched RPC, populating ``plan.results``.
-
-    Pass 2 (replay): the loader rebuilds the same chain (loader is
-    deterministic over identical bound_args). ``copy_`` onto a real
-    destination pops the prefetched tensor from ``plan.results``, copies it
-    into the destination, then frees the materialized buffer immediately.
+    - ``_BakeRecorder`` (dry-run bake): record a ``_BakedCopy`` (the op chain
+      plus the bound ``param_name`` and the meta destination's
+      offset/shape/stride) and fire a meta ``copy_``. No data moves.
+    - ``_FetchPlan`` (slow path): Pass 1 over a meta destination records the
+      chain into ``needed``; the engine then pulls all chains in one batched
+      RPC into ``results``; Pass 2 over the real destination pops the slice and
+      copies it in.
 
     Any op outside the allowlist (arithmetic, .item, .to, .float, .data,
     bool-mask indexing, etc.) raises ``_UnsupportedLazyOp`` in
@@ -242,7 +190,7 @@ class LazyRDTTensor(torch.Tensor):
     # returns a tensor it can't annotate as ``self``).
     _name: str
     _ops: OpChain
-    _fetch_plan: "_FetchPlan | None"
+    _ctx: "_FetchPlan | _BakeRecorder | None"
     _materialized: "torch.Tensor | None"
 
     @staticmethod
@@ -253,7 +201,7 @@ class LazyRDTTensor(torch.Tensor):
         dtype: torch.dtype,
         device: torch.device,
         ops: OpChain = (),
-        fetch_plan: _FetchPlan | None = None,
+        ctx: "_FetchPlan | _BakeRecorder | None" = None,
     ) -> "LazyRDTTensor":
         t = torch.Tensor._make_wrapper_subclass(
             cls,
@@ -264,7 +212,7 @@ class LazyRDTTensor(torch.Tensor):
         )
         t._name = name
         t._ops = tuple(ops)
-        t._fetch_plan = fetch_plan
+        t._ctx = ctx
         t._materialized = None
         return t
 
@@ -288,7 +236,7 @@ class LazyRDTTensor(torch.Tensor):
             dtype=new_dtype,
             device=self.device,
             ops=self._ops + new_ops,
-            fetch_plan=self._fetch_plan,
+            ctx=self._ctx,
         )
 
     def _meta(self) -> torch.Tensor:
@@ -301,26 +249,20 @@ class LazyRDTTensor(torch.Tensor):
         return torch.empty(self.shape, dtype=self.dtype, device="meta")
 
     def _materialize(self) -> torch.Tensor:
+        # Only the slow (unbaked) path materializes; the bake records and never
+        # pulls. So the ctx here is always a _FetchPlan, and every chain Pass 1
+        # recorded was pulled into ``results`` before this replay.
         if self._materialized is not None:
             return self._materialized
-        assert self._fetch_plan is not None
-        key = self._key()
-        tensor = self._fetch_plan.results.pop(key, None)
+        assert isinstance(self._ctx, _FetchPlan)
+        tensor = self._ctx.results.pop(self._key(), None)
         if tensor is None:
-            # The batched drain should have prefetched every recorded chain;
-            # a miss means this lazy materialized outside the traced replay.
-            # Fall back to a single-tensor RPC and warn so it surfaces.
-            logger.warning(
-                "LazyRDTTensor %r falling back to single-tensor RPC "
-                "(chain=%s); batched drain missed this key.",
-                self._name,
-                self._ops,
+            raise RuntimeError(
+                f"LazyRDTTensor {self._name!r} (chain={self._ops}) has no "
+                "prefetched slice; the batched pull missed this key, which "
+                "means the loader was non-deterministic between record and "
+                "replay."
             )
-            import ray
-
-            tensor = ray.get(
-                self._fetch_plan.produce_method.remote([(self._name, self._ops)])
-            )[0]
         self._materialized = tensor
         return tensor
 
@@ -341,38 +283,44 @@ class LazyRDTTensor(torch.Tensor):
             dest = args[0]
             src = args[1] if len(args) > 1 else kwargs.get("src")
             if isinstance(src, cls):
-                if dest.device.type == "meta":
-                    # Pass 1 over a meta-restored param. Record the chain into
-                    # the plan, then let a meta-backed copy_ fire so layerwise's
-                    # `CopyCounter` (a TorchDispatchMode) still counts the numel
-                    # -- otherwise `info.load_numel` stays at 0 and
-                    # `_layerwise_process` is never triggered, so the slice is
-                    # never fetched.
-                    assert src._fetch_plan is not None
-                    src._fetch_plan.needed.add(src._key())
+                ctx = src._ctx
+                if isinstance(ctx, _BakeRecorder):
+                    # Dry-run bake: dest is a meta view of the param the loader
+                    # is bound to (ctx.param_name). Record how to fetch the
+                    # source slice (the op chain) and where it lands (the meta
+                    # view's offset/shape/stride — valid on meta), then let a
+                    # meta copy_ fire so the layer's numel still counts. No pull,
+                    # no real storage.
+                    if ctx.param_name:
+                        ctx.sink.append(
+                            _BakedCopy(
+                                src._key(),
+                                ctx.param_name,
+                                dest.storage_offset(),
+                                tuple(dest.shape),
+                                tuple(dest.stride()),
+                            )
+                        )
+                    else:
+                        ctx.sink.append(None)
                     meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
                     with torch._C.DisableTorchFunctionSubclass():
                         return dest.copy_(meta_src)
-                # Pass 2 replay onto the materialized param. Pop the
-                # prefetched tensor, copy it in, free immediately.
+                # Slow path. Pass 1 over a meta-restored param: record the chain
+                # into the plan, then let a meta-backed copy_ fire so layerwise's
+                # `CopyCounter` still counts the numel (otherwise `load_numel`
+                # stays 0 and `_layerwise_process` never triggers).
+                assert isinstance(ctx, _FetchPlan)
+                if dest.device.type == "meta":
+                    ctx.needed.add(src._key())
+                    meta_src = torch.empty(src.shape, dtype=src.dtype, device="meta")
+                    with torch._C.DisableTorchFunctionSubclass():
+                        return dest.copy_(meta_src)
+                # Pass 2 replay onto the materialized param: pop the prefetched
+                # tensor, copy it in, free immediately.
                 mat = src._materialize()
                 with torch._C.DisableTorchFunctionSubclass():
                     result = dest.copy_(mat)
-                # Bake: record (source key -> destination descriptor) so later
-                # syncs replay this scatter directly via param.as_strided,
-                # skipping the loader and Pass-1 discovery entirely.
-                plan = src._fetch_plan
-                if plan is not None and plan.trace_sink is not None:
-                    desc = _match_dst_descriptor(dest, plan.trace_layer)
-                    if desc is None:
-                        plan.trace_sink.append(None)
-                    else:
-                        name, offset, shape, stride = desc
-                        plan.trace_sink.append(
-                            _BakedCopy(src._key(), name, offset, shape, stride)
-                        )
-                # Release the prefetched buffer as soon as the data lives in
-                # the destination param. See "Memory contract" in the design.
                 src._materialized = None
                 return result
 
@@ -486,6 +434,21 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     the chain in order on its live parameter before cloning and returning.
     """
 
+    group_names: list[list[str]] = field(default_factory=list)
+    """The full set of parameters to transfer, partitioned into groups (one
+    inner list per group), in the trainer's group-index order. The engine bakes
+    a replay plan for every group once, at ``init_transfer_engine`` time, and
+    ``update_weights`` then refers to a group by its index. Group ``i`` is the
+    set of names the driver gathers + replays together (typically one decoder
+    layer, plus a "pre" group for embeddings and a "post" group for the head).
+    """
+
+    group_dtype_names: list[list[str]] = field(default_factory=list)
+    """Per-group dtype names (e.g. 'bfloat16'), parallel to ``group_names``."""
+
+    group_shapes: list[list[list[int]]] = field(default_factory=list)
+    """Per-group full HF shapes, parallel to ``group_names``."""
+
     warmup_method_name: str | None = None
     """Optional trainer-side method that returns a tiny tensor over NIXL,
     used to prime the worker->trainer NIXL connection during
@@ -499,30 +462,13 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class ShardedRDTWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for the sharded RDT backend."""
+    """Update info for the sharded RDT backend.
 
-    names: list[str]
-    """Parameter names to fetch, in iteration order."""
+    A single integer: which baked group (from ``init_info.group_names``) to
+    apply this call. Names/dtypes/shapes were supplied once at init, so we never
+    encounter a new name mid-run."""
 
-    dtype_names: list[str]
-    """Dtype for each parameter (e.g. 'bfloat16'). Used to build the lazy
-    placeholders before fetch."""
-
-    shapes: list[list[int]]
-    """Full HF-shape for each parameter. Used to build the lazy placeholders."""
-
-    def __post_init__(self) -> None:
-        n = len(self.names)
-        if len(self.dtype_names) != n:
-            raise ValueError(
-                f"`dtype_names` should be of the same size as `names`: "
-                f"got {len(self.dtype_names)} and {n}"
-            )
-        if len(self.shapes) != n:
-            raise ValueError(
-                f"`shapes` should be of the same size as `names`: "
-                f"got {len(self.shapes)} and {n}"
-            )
+    group_index: int
 
 
 class ShardedRDTWeightTransferEngine(
@@ -542,32 +488,40 @@ class ShardedRDTWeightTransferEngine(
         of slice tensors. The chain is replayed on the trainer's live
         parameter via ``getattr(tensor, op_name)(*args, **kwargs)``.
       - ``nixl`` is installed in the env shared by trainer and workers.
-      - ``is_checkpoint_format=True`` (layerwise reload). Raises in
-        ``receive_weights`` if the kernel-format path was selected.
+      - ``is_checkpoint_format=True`` (layerwise reload). ``_bake_all_groups``
+        raises at init if no layerwise infos are active.
       - Weight loaders that only use the supported op set (narrow, view,
         reshape, transpose, t, permute, __getitem__ with int/slice/tuple,
         unsqueeze, squeeze, flatten, contiguous, chunk, copy_). Loaders
         that need .to(), .float(), .item(), .data, bool-mask indexing, or
-        arithmetic on the loaded weight will raise from
-        ``__torch_dispatch__`` and should fall back to backend='rdt'.
+        arithmetic on the loaded weight will land in ``__torch_dispatch__``
+        during the bake (raising) and should fall back to backend='rdt'.
 
-    The first ``update_weights`` for a given name set *bakes* a replay plan
-    (and loads correctly); every later one *replays* it. See the module
-    docstring and ``baked_rdt_replay.md``.
+    Plans are baked once at ``init_transfer_engine`` (a dry run over
+    ``init_info.group_names``); every ``update_weights`` *replays* its group by
+    index. See the module docstring and ``baked_rdt_replay.md``.
     """
 
     init_info_cls = ShardedRDTWeightTransferInitInfo
     update_info_cls = ShardedRDTWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
-        super().__init__(config, parallel_config)
+        super().__init__(config, vllm_config, device, model)
         self._trainer_actor: Any | None = None
         self._produce_method: Any | None = None
-        # Keyed by tuple(update_info.names). Value is the baked group list for
-        # that name set, or None once the set is found unbakeable (slow path).
-        self._baked_plans: dict[tuple[str, ...], "list[_BakedGroup] | None"] = {}
+        # One entry per trainer-provided group, in group-index order: the baked
+        # leaf-module list to replay for that group, or None if the group was
+        # found unbakeable (then it takes the plain load every sync).
+        self._plans: list[list[_BakedGroup] | None] = []
+        # Per-group (names, dtype_names, shapes), so an unbakeable group can
+        # reconstruct its load on the slow path from just the group index.
+        self._group_meta: list[tuple[list[str], list[str], list[list[int]]]] = []
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
@@ -626,44 +580,51 @@ class ShardedRDTWeightTransferEngine(
                 time.perf_counter() - t0,
             )
 
+        # Bake a replay plan for every group now. This is a pure dry run: the
+        # trainer's gather cache is empty at init, so nothing can (or does) get
+        # pulled — we only record how each slice is fetched and where it lands,
+        # then restore the model. Every later update_weights is a replay.
+        self._bake_all_groups(init_info)
+
     def receive_weights(
         self,
         update_info: ShardedRDTWeightTransferUpdateInfo,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
-        """Bake on first sight of a name set, replay after.
+        """Apply one group by index: replay its baked plan, or — if the group
+        was found unbakeable at init — fall back to a plain batched load.
 
-        Keyed by ``tuple(update_info.names)`` so the (driver-stable) per-layer
-        call boundary maps each call to its own plan, order-independently. A
-        name set found unbakeable stores ``None`` and takes the plain batched
-        load every sync.
+        Plans are baked once in ``init_transfer_engine`` and indexed by group,
+        so every name was seen up front; ``load_weights`` is used only by the
+        slow path.
         """
         if self._produce_method is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
             )
-
-        key = tuple(update_info.names)
-        if key not in self._baked_plans:
-            # First sight: bake (a correct, real load plus recording). Stores
-            # None if the group turns out not to be replayable.
-            self._baked_plans[key] = self._do_bake(update_info, load_weights)
-            return
-        plan = self._baked_plans[key]
+        idx = update_info.group_index
+        if not 0 <= idx < len(self._plans):
+            raise RuntimeError(
+                f"group_index {idx} out of range [0, {len(self._plans)}); the "
+                "init_info.group_names baked at init defines the valid indices."
+            )
+        plan = self._plans[idx]
         if plan is None:
-            self._load_unbaked(update_info, load_weights)
+            self._load_unbaked(idx, load_weights)
         else:
-            self._replay(update_info, plan)
+            self._replay(plan)
 
     def _build_lazy_weights(
         self,
-        update_info: ShardedRDTWeightTransferUpdateInfo,
-        plan: "_FetchPlan",
+        names: list[str],
+        dtype_names: list[str],
+        shapes: list[list[int]],
+        ctx: "_FetchPlan | _BakeRecorder",
         device: torch.device,
     ) -> list[tuple[str, torch.Tensor]]:
-        # The base ``load_weights`` callable is typed as taking a ``list``,
-        # and LazyRDTTensors are zero-storage so building them upfront is
-        # just a few object allocations.
+        # LazyRDTTensors are zero-storage, so building them upfront is just a
+        # few object allocations. ``ctx`` is the bake recorder (dry run) or the
+        # slow-path fetch plan.
         return [
             (
                 name,
@@ -672,164 +633,220 @@ class ShardedRDTWeightTransferEngine(
                     shape=torch.Size(shape),
                     dtype=_dtype_from_name(dtype_name),
                     device=device,
-                    fetch_plan=plan,
+                    ctx=ctx,
                 ),
             )
-            for name, dtype_name, shape in zip(
-                update_info.names,
-                update_info.dtype_names,
-                update_info.shapes,
-            )
+            for name, dtype_name, shape in zip(names, dtype_names, shapes)
         ]
 
-    # ---------------- Bake / replay ----------------
+    def _pull(self, keys) -> dict[FetchKey, torch.Tensor]:
+        """The single NIXL pull site: one batched RPC for ``keys`` (a set/list of
+        ``(name, op_chain)``), returning ``{key: slice tensor}``."""
+        keys = list(keys)
+        if not keys:
+            return {}
+        import ray
+
+        tensors = ray.get(self._produce_method.remote(keys))
+        if len(tensors) != len(keys):
+            raise RuntimeError(
+                f"Trainer returned {len(tensors)} tensors for {len(keys)} keys."
+            )
+        return dict(zip(keys, tensors))
+
+    # ---------------- Bake (dry run, at init) / replay ----------------
 
     def _load_unbaked(
         self,
-        update_info: ShardedRDTWeightTransferUpdateInfo,
+        group_index: int,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
-        """Plain batched load for name sets that failed the bake coverage gate:
-        one batched pull for the whole call, then the deferred layer processing.
-        No recording, runs every sync."""
+        """Plain batched load for a group that failed the bake coverage gate:
+        rebuild its lazies from the stored names, one batched pull, then the
+        deferred layer processing. No recording; runs every sync."""
         from vllm.model_executor.model_loader.reload.layerwise import (
             deferred_layerwise_processing,
             run_deferred_layer_processing,
         )
 
-        plan = _FetchPlan(produce_method=self._produce_method)
+        names, dtype_names, shapes = self._group_meta[group_index]
+        plan = _FetchPlan()
         device = torch.empty(0).device
         _t_recv = time.perf_counter()
         with deferred_layerwise_processing() as deferred:
-            load_weights(self._build_lazy_weights(update_info, plan, device))
-            plan.drain()
+            load_weights(self._build_lazy_weights(names, dtype_names, shapes, plan, device))
+            _t_pull = time.perf_counter()
+            plan.results = self._pull(plan.needed)
+            pull_seconds = time.perf_counter() - _t_pull
             _t_proc = time.perf_counter()
             run_deferred_layer_processing(deferred)
             process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
-            "unbaked", plan, time.perf_counter() - _t_recv, process_seconds
+            "unbaked", time.perf_counter() - _t_recv, pull_seconds, 1, process_seconds
         )
 
-    def _do_bake(
-        self,
-        update_info: ShardedRDTWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> "list[_BakedGroup] | None":
-        """Run one real (payload-batch) load while recording a replay plan.
+    def _bake_all_groups(
+        self, init_info: ShardedRDTWeightTransferInitInfo
+    ) -> None:
+        """Bake every group's replay plan once, as a pure dry run.
 
-        Produces correct weights *and* returns the per-leaf-module
-        ``_BakedGroup`` list — or ``None`` if the group is not safely
-        replayable (an un-matchable copy_ destination, or requested names not
-        fully covered by recorded copies, e.g. weights that flow through the
-        attention/partial-layer finalize path).
+        Drives layerwise reload on the local model, runs ``load_weights`` over
+        all groups' names against **meta** params (Pass 1: buffer + count
+        numel, no data), then re-runs each completed leaf module's buffered
+        loaders with a ``_BakeRecorder`` installed — capturing, per copy_, the
+        source op chain and the (meta) destination's ``offset/shape/stride``
+        plus the bound ``param_name``. No pull, no scatter, no kernel copy. The
+        model is restored to its pre-bake weights. Results land in
+        ``self._plans`` indexed by group; a group is ``None`` (slow path) if any
+        of its names never flowed into a recorded copy (e.g. weights applied via
+        the attention/partial-layer finalize path).
         """
+        from collections import defaultdict
+
         from vllm.model_executor.layers.quantization.base_config import (
             QuantizeMethodBase,
         )
         from vllm.model_executor.model_loader.reload.layerwise import (
-            LAYERWISE_INFO,
-            _layerwise_process,
             deferred_layerwise_processing,
+            initialize_layerwise_reload,
         )
 
-        if not any(info.can_load() for info in LAYERWISE_INFO.values()):
-            raise RuntimeError(
-                "ShardedRDTWeightTransferEngine requires layerwise mode "
-                "(is_checkpoint_format=True). For the kernel-format path, "
-                "use backend='rdt' instead."
+        self._group_meta = list(
+            zip(
+                init_info.group_names,
+                init_info.group_dtype_names,
+                init_info.group_shapes,
             )
+        )
+        group_names = init_info.group_names
+        if not group_names:
+            self._plans = []
+            return
 
-        plan = _FetchPlan(produce_method=self._produce_method)
-        device = torch.empty(0).device
+        name_to_idx = {n: i for i, names in enumerate(group_names) for n in names}
+        flat_names = [n for g in group_names for n in g]
+        flat_dtypes = [d for g in init_info.group_dtype_names for d in g]
+        flat_shapes = [s for g in init_info.group_shapes for s in g]
 
-        groups: list[_BakedGroup] = []
-        bakeable = True
-        _t_recv = time.perf_counter()
-        with deferred_layerwise_processing() as deferred:
-            load_weights(self._build_lazy_weights(update_info, plan, device))
-            plan.drain()
-            _t_proc = time.perf_counter()
-            # A layer can appear in the deferred queue more than once: in
-            # deferred mode a module whose load crosses load_numel_total early
-            # (FusedMoE, some quant configs — see online_process_loader's
-            # "excessive loading" note) re-enqueues itself on every subsequent
-            # loader call. The first _layerwise_process replays *all* of its
-            # accumulated loaded_weights and resets the info, so process each
-            # layer exactly once; later duplicates would be no-ops (and would
-            # double-reset on replay).
-            seen: set[int] = set()
-            for layer, info in deferred:
-                if id(layer) in seen:
-                    continue
-                seen.add(id(layer))
-                sink: list[_BakedCopy | None] = []
-                plan.trace_sink = sink
-                plan.trace_layer = layer
-                try:
-                    # Pass 2: replays the buffered loaders onto the materialized
-                    # params; each copy_ appends its (src, dst) to ``sink``.
-                    _layerwise_process(layer, info)
-                finally:
-                    plan.trace_sink = None
-                    plan.trace_layer = None
-                if any(c is None for c in sink):
-                    # A copy_ whose destination didn't alias a registered param
-                    # — this layer can't be replayed by as_strided.
-                    bakeable = False
-                    continue
-                needs_pwal = isinstance(
-                    getattr(layer, "quant_method", None), QuantizeMethodBase
-                )
-                groups.append(
-                    _BakedGroup(
-                        layer=layer,
-                        copies=[c for c in sink if c is not None],
-                        needs_pwal=needs_pwal,
+        model = self.model
+        recorder = _BakeRecorder()
+        groups_by_idx: dict[int, list[_BakedGroup]] = defaultdict(list)
+        unbakeable: set[int] = set()
+
+        _t0 = time.perf_counter()
+        with torch.device(self.device):
+            initialize_layerwise_reload(model)
+            with deferred_layerwise_processing() as deferred:
+                # Pass 1: route names -> modules, buffer bound_args, count numel
+                # (copy_ onto meta). The recorder's param_name is unset here, so
+                # nothing useful is recorded yet — _record_layer re-runs the
+                # buffered loaders below with it set.
+                model.load_weights(
+                    self._build_lazy_weights(
+                        flat_names, flat_dtypes, flat_shapes, recorder, self.device
                     )
                 )
-            process_seconds = time.perf_counter() - _t_proc
-        self._log_timing("bake", plan, time.perf_counter() - _t_recv, process_seconds)
+                # Record each completed leaf module exactly once. (A FusedMoE
+                # re-enqueues itself per expert in deferred mode — see the
+                # "excessive loading" note in online_process_loader.)
+                seen: set[int] = set()
+                for layer, info in deferred:
+                    if id(layer) in seen:
+                        continue
+                    seen.add(id(layer))
+                    copies = self._record_layer(layer, info, recorder)
+                    idxs = {
+                        name_to_idx[c.src[0]]
+                        for c in copies
+                        if c is not None and c.src[0] in name_to_idx
+                    }
+                    if any(c is None for c in copies) or len(idxs) != 1:
+                        # A copy_ we couldn't record, or copies spanning >1
+                        # group: don't replay any group this module touched.
+                        unbakeable |= idxs
+                        continue
+                    needs_pwal = isinstance(
+                        getattr(layer, "quant_method", None), QuantizeMethodBase
+                    )
+                    groups_by_idx[next(iter(idxs))].append(
+                        _BakedGroup(layer=layer, copies=copies, needs_pwal=needs_pwal)
+                    )
+            self._restore_after_dry_run(model)
 
-        # Coverage gate: every requested name must flow into a recorded copy.
-        # Uncovered names load via the finalize path (attention scales / padded
-        # layers) which replay does not reproduce, so we fall back fail-closed.
-        covered = {c.src[0] for g in groups for c in g.copies}
-        uncovered = set(update_info.names) - covered
-        if uncovered or not bakeable:
-            logger.warning(
-                "Sharded RDT bake: group not replayable "
-                "(uncovered_names=%d, unmatched_copy=%s); using slow path. "
-                "Example uncovered: %s",
-                len(uncovered),
-                not bakeable,
-                sorted(uncovered)[:3],
-            )
-            return None
+        # Finalize plans per group index. A group is replayable iff every one of
+        # its names was covered by a recorded copy and no module flagged it.
+        self._plans = []
+        for i, names in enumerate(group_names):
+            grps = groups_by_idx.get(i, [])
+            covered = {c.src[0] for g in grps for c in g.copies}
+            if i in unbakeable or (set(names) - covered):
+                self._plans.append(None)
+            else:
+                self._plans.append(grps)
+        n_baked = sum(1 for p in self._plans if p is not None)
         logger.info(
-            "Sharded RDT baked %d names -> %d leaf groups, %d copies (replay armed)",
-            len(update_info.names),
-            len(groups),
-            sum(len(g.copies) for g in groups),
+            "Sharded RDT dry-run baked %d/%d groups (%d -> slow path) in %.3fs",
+            n_baked,
+            len(group_names),
+            len(group_names) - n_baked,
+            time.perf_counter() - _t0,
         )
-        return groups
 
-    def _replay(
-        self,
-        update_info: ShardedRDTWeightTransferUpdateInfo,
-        groups: "list[_BakedGroup]",
-    ) -> None:
+    def _record_layer(
+        self, layer: Any, info: Any, recorder: "_BakeRecorder"
+    ) -> "list[_BakedCopy | None]":
+        """Re-run a completed leaf module's buffered loaders against its **meta**
+        params with ``recorder`` installed, returning the recorded copies.
+
+        Each loader is bound to its destination param (so the recorder knows
+        ``param_name``) and run via the original (unwrapped) loader; the lazy's
+        ``copy_`` appends a ``_BakedCopy`` per slice. No data moves.
+        """
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            _get_original_loader,
+        )
+
+        recorder.sink = []
+        for name, bargs in info.loaded_weights:
+            recorder.param_name = name
+            bargs.arguments["param"] = getattr(layer, name)
+            original_loader = _get_original_loader(getattr(layer, name))
+            original_loader(*bargs.args, **bargs.kwargs)
+        return recorder.sink
+
+    def _restore_after_dry_run(self, model: torch.nn.Module) -> None:
+        """Restore every layerwise layer to its pre-bake weights WITHOUT pulling.
+
+        The dry run left params on meta and moved no data; calling
+        ``finalize_layerwise_reload`` here would try to load attention/partial
+        layers (lazy loaders -> a pull on the empty gather cache), so we place
+        the saved kernel tensors back directly and reset each info.
+        """
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            LAYERWISE_INFO,
+            _place_kernel_tensors,
+        )
+
+        for layer in model.modules():
+            info = LAYERWISE_INFO.get(layer)
+            if info is not None and info.can_load():
+                if info.kernel_tensors is not None:
+                    _place_kernel_tensors(layer, info)
+                info.reset()
+        if hasattr(model, "_original_do_torchao_reload"):
+            model._do_torchao_reload = model._original_do_torchao_reload
+
+    def _replay(self, groups: "list[_BakedGroup]") -> None:
         """Fast path: one batched pull, then scatter each baked group directly
-        into freshly materialized params — no ``load_weights``, no Pass-1
-        discovery, no lazy-tensor dispatch.
+        into freshly materialized params — no ``load_weights``, no discovery,
+        no lazy-tensor dispatch.
 
         Mirrors ``_layerwise_process`` minus the loader replay: materialize ->
-        scatter via ``as_strided`` -> ``process_weights_after_loading`` ->
-        copy into persistent kernel storage -> ``info.reset()`` (the reset is
-        what makes ``finalize_layerwise_reload`` skip the layer instead of
-        clobbering it with the old kernel tensors).
+        scatter via ``as_strided`` -> ``process_weights_after_loading`` -> copy
+        into persistent kernel storage -> ``info.reset()`` (the reset is what
+        makes ``finalize_layerwise_reload`` skip the layer instead of clobbering
+        it with the old kernel tensors).
         """
-        import ray
-
         from vllm.model_executor.layers.quantization.base_config import (
             QuantizeMethodBase,
         )
@@ -841,16 +858,10 @@ class ShardedRDTWeightTransferEngine(
 
         _t_recv = time.perf_counter()
 
-        # One batched pull for every unique source slice this call needs.
-        keys = sorted({c.src for g in groups for c in g.copies})
+        # One batched pull for every unique source slice this group needs.
         _t_pull = time.perf_counter()
-        tensors = ray.get(self._produce_method.remote(keys))
+        results = self._pull({c.src for g in groups for c in g.copies})
         pull_seconds = time.perf_counter() - _t_pull
-        if len(tensors) != len(keys):
-            raise RuntimeError(
-                f"Trainer returned {len(tensors)} tensors for {len(keys)} keys."
-            )
-        results = dict(zip(keys, tensors))
 
         _t_proc = time.perf_counter()
         for g in groups:
@@ -860,8 +871,7 @@ class ShardedRDTWeightTransferEngine(
                 raise RuntimeError(
                     f"Baked replay: layer {type(layer).__name__} was not set up "
                     "for reload this sync (start_weight_update must run before "
-                    "update_weights, and each baked layer must be processed at "
-                    "most once per replay)."
+                    "update_weights)."
                 )
             # Materialize HF params for this leaf module (cheap empty alloc).
             materialize_layer(layer, info)
@@ -884,34 +894,32 @@ class ShardedRDTWeightTransferEngine(
             # Reset so finalize_layerwise_reload skips this (already-loaded) layer.
             info.reset()
         process_seconds = time.perf_counter() - _t_proc
-
-        # Report timing through the same channel as the slow path. Synthesize a
-        # plan-shaped record so _log_timing can read pull stats uniformly.
-        plan = _FetchPlan(produce_method=self._produce_method)
-        plan.pull_seconds = pull_seconds
-        plan.pull_calls = 1
         self._log_timing(
-            "replay", plan, time.perf_counter() - _t_recv, process_seconds
+            "replay", time.perf_counter() - _t_recv, pull_seconds, 1, process_seconds
         )
 
     @staticmethod
     def _log_timing(
-        mode: str, plan: "_FetchPlan", total_seconds: float, process_seconds: float
+        mode: str,
+        total_seconds: float,
+        pull_seconds: float,
+        pull_calls: int,
+        process_seconds: float,
     ) -> None:
         """Log a one-line timing summary for one ``receive_weights`` call.
 
-        ``mode`` is one of ``bake`` / ``replay`` / ``unbaked``. ``pull_seconds``
-        isolates the NIXL transfer; ``process_seconds`` is the
-        scatter/materialize/quantize/kernel-copy work after the pull.
+        ``mode`` is ``replay`` or ``unbaked``. ``pull_seconds`` isolates the
+        NIXL transfer; ``process_seconds`` is the scatter/materialize/quantize/
+        kernel-copy work after the pull.
         """
         logger.info(
             "[RDT-TIMING] receive_weights mode=%s total=%.4fs nixl_pull=%.4fs "
-            "(%d pull%s) deferred_process=%.4fs",
+            "(%d pull%s) process=%.4fs",
             mode,
             total_seconds,
-            plan.pull_seconds,
-            plan.pull_calls,
-            "" if plan.pull_calls == 1 else "s",
+            pull_seconds,
+            pull_calls,
+            "" if pull_calls == 1 else "s",
             process_seconds,
         )
         # vLLM workers run in an EngineCore subprocess whose logs are not
@@ -924,15 +932,16 @@ class ShardedRDTWeightTransferEngine(
             with open(timing_file, "a") as f:
                 f.write(
                     f"mode={mode} total={total_seconds:.4f} "
-                    f"nixl_pull={plan.pull_seconds:.4f} pull_calls={plan.pull_calls} "
-                    f"deferred_process={process_seconds:.4f}\n"
+                    f"nixl_pull={pull_seconds:.4f} pull_calls={pull_calls} "
+                    f"process={process_seconds:.4f}\n"
                 )
 
     def shutdown(self) -> None:
         self._trainer_actor = None
         self._produce_method = None
         # Drop strong references to baked modules so the model can be freed.
-        self._baked_plans.clear()
+        self._plans.clear()
+        self._group_meta.clear()
 
     @staticmethod
     def trainer_send_weights(

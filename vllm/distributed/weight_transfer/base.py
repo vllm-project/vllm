@@ -5,12 +5,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import torch
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
@@ -65,17 +68,28 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     update_info_cls: type[TUpdateInfo]
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the weight transfer engine.
 
         Args:
             config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
+            vllm_config: The full vLLM config (provides parallel/model config and
+                the local model instance that will receive the weights)
+            device: The device this worker's model lives on
+            model: The local model instance which will receive the weights
         """
         self.config = config
-        self.parallel_config = parallel_config
+        self.vllm_config = vllm_config
+        self.parallel_config: ParallelConfig = vllm_config.parallel_config
+        self.model_config = vllm_config.model_config
+        self.device = device
+        self.model = model
 
     def parse_init_info(self, init_dict: dict[str, Any]) -> TInitInfo:
         """
