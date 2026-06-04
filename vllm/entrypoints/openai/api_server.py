@@ -417,7 +417,6 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
-    # Batch API serving classes
     from vllm.entrypoints.openai.batch.api_router import init_batch_state
 
     init_batch_state(state, args)
