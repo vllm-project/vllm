@@ -87,8 +87,9 @@ class QuarkConfig(QuantizationConfig):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
@@ -652,8 +653,11 @@ class QuarkConfig(QuantizationConfig):
         in quark. If this is the case, return its equivalent param name
         expected by vLLM
 
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
+        Args:
+            name: param name
+
+        Returns:
+            matching param name for KV cache scale in vLLM
         """
         if name.endswith(".output_scale") and ".k_proj" in name:
             return name.replace(".k_proj.output_scale", ".attn.k_scale")
@@ -734,7 +738,9 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_config: the quark kv cache scheme
+
+        Args:
+            kv_cache_config: the quark kv cache scheme
         """
         if kv_cache_config is None:
             return

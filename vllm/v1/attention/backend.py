@@ -814,8 +814,11 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        :param quant_key: QuantKey object that describes the quantization op
-        :return: is fusion supported for this type of quantization
+        Args:
+            quant_key: QuantKey object that describes the quantization op
+
+        Returns:
+            is fusion supported for this type of quantization
         """
         return False
 

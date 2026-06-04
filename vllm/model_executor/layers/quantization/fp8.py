@@ -213,8 +213,11 @@ class Fp8Config(QuantizationConfig):
         in compressed-tensors. If this is the case, return its equivalent
         param name expected by vLLM
 
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
+        Args:
+            name: param name
+
+        Returns:
+            matching param name for KV cache scale in vLLM
         """
         if name.endswith(".output_scale") and ".k_proj" in name:
             return name.replace(".k_proj.output_scale", ".attn.k_scale")

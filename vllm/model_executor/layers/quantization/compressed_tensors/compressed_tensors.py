@@ -243,8 +243,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         cls, config: dict[str, Any]
     ) -> tuple[dict[str, SparsityCompressionConfig], list[str]]:
         """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A tuple with two elements
+        Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A tuple with two elements
             1. A dictionary mapping target layer names to their corresponding
                 sparsity_config
             2. A list of layer names to ignore for sparsity
@@ -272,8 +275,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         cls, config: dict[str, Any]
     ) -> QUANTIZATION_SCHEME_MAP_TYPE:
         """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A dictionary mapping target layer names to their corresponding
+        Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
         """
         target_scheme_map: dict[str, Any] = dict()
@@ -866,7 +872,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_scheme: the compressed-tensors kv cache scheme
+
+        Args:
+            kv_cache_scheme: the compressed-tensors kv cache scheme
         """
         if kv_cache_scheme is None:
             return
