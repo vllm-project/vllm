@@ -1270,9 +1270,6 @@ def get_dcp_group() -> GroupCoordinator:
     return _DCP
 
 
-# kept for backward compatibility
-get_context_model_parallel_group = get_dcp_group
-
 _PP: GroupCoordinator | None = None
 
 
@@ -1840,31 +1837,6 @@ def model_parallel_is_initialized():
 _TP_STATE_PATCHED = False
 
 
-@contextmanager
-def patch_tensor_parallel_group(tp_group: GroupCoordinator):
-    """Patch the tp group temporarily until this function ends.
-
-    This method is for draft workers of speculative decoding to run draft model
-    with different tp degree from that of target model workers.
-
-    Args:
-        tp_group (GroupCoordinator): the tp group coordinator
-    """
-    global _TP_STATE_PATCHED
-    assert not _TP_STATE_PATCHED, "Should not call when it's already patched"
-
-    _TP_STATE_PATCHED = True
-    old_tp_group = get_tp_group()
-    global _TP
-    _TP = tp_group
-    try:
-        yield
-    finally:
-        # restore the original state
-        _TP_STATE_PATCHED = False
-        _TP = old_tp_group
-
-
 def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
@@ -1873,16 +1845,6 @@ def get_tensor_model_parallel_world_size() -> int:
 def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
-
-
-def get_decode_context_model_parallel_world_size() -> int:
-    """Return world size for the decode context model parallel group."""
-    return get_dcp_group().world_size
-
-
-def get_decode_context_model_parallel_rank() -> int:
-    """Return my rank for the decode context model parallel group."""
-    return get_dcp_group().rank_in_group
 
 
 def get_node_count() -> int:
