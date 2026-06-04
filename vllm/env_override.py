@@ -5,6 +5,7 @@ import importlib.util
 import os
 from collections.abc import Callable
 from functools import cache
+from typing import Any, cast
 
 from packaging import version
 
@@ -92,10 +93,6 @@ def _maybe_set_cuda_compatibility_path():
 
 _maybe_set_cuda_compatibility_path()
 
-
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
 
 # set some common config/environment variables that should be set
 # for all processes created by vllm and all processes
@@ -887,7 +884,9 @@ def _patch_inductor_fallback_allow_list() -> None:
     if base is None or getattr(base, "_vllm_patched", False):
         return
 
-    _lowering.FALLBACK_ALLOW_LIST = _VllmFallbackAllowList(base)
+    patched = _VllmFallbackAllowList(base)
+    lowering = cast(Any, _lowering)
+    lowering.FALLBACK_ALLOW_LIST = patched
 
     # torch/_inductor/graph.py imports the symbol at module load time:
     #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
@@ -897,7 +896,8 @@ def _patch_inductor_fallback_allow_list() -> None:
 
     _graph = sys.modules.get("torch._inductor.graph")
     if _graph is not None and hasattr(_graph, "FALLBACK_ALLOW_LIST"):
-        _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
+        graph = cast(Any, _graph)
+        graph.FALLBACK_ALLOW_LIST = patched
 
 
 _patch_after_import("torch._inductor.lowering", _patch_inductor_fallback_allow_list)

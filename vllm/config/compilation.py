@@ -290,7 +290,7 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
-        if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
+        if self.fuse_rope_kvcache_cat_mla and not lazy_platform().is_cuda_alike():
             logger.warning_once(
                 "MLA KV cache update with RoPE fusion enabled but the "
                 "current platform is not CUDA or ROCm. The fusion will be disabled."
