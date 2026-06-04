@@ -9,6 +9,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+import vllm.config as vllm_config_module
+import vllm.v1.attention.ops.triton_prefill_attention as triton_prefill_attention_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -25,6 +27,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup.kernel_warmup import (
     _warmup_triton_nvfp4_attention,
@@ -311,8 +314,10 @@ def _make_warmup_runner(
     cache_dtype: str = "nvfp4",
     backend_name: str = "TRITON_ATTN",
     is_pooling_model: bool = False,
+    layer_names: list[str] | None = None,
 ):
     calls = []
+    layer_names = layer_names or []
     runner = SimpleNamespace(
         is_pooling_model=is_pooling_model,
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
@@ -320,12 +325,18 @@ def _make_warmup_runner(
             [
                 SimpleNamespace(
                     backend=_NamedAttentionBackend(backend_name),
+                    layer_names=layer_names,
                 )
             ]
         ],
         uniform_decode_query_len=1,
         max_num_tokens=4096,
         max_model_len=32768,
+        device=torch.device("cpu"),
+        dtype=torch.float16,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(static_forward_context={})
+        ),
     )
 
     def _dummy_run(**kwargs):
@@ -347,10 +358,10 @@ def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
         "is_profile": True,
         "force_attention": True,
         "uniform_decode": True,
-        "profile_seq_lens": 1024,
+        "profile_seq_lens": 8192,
     }
     assert calls[1] == {
-        "num_tokens": 1024,
+        "num_tokens": 4096,
         "skip_eplb": True,
         "is_profile": True,
         "force_attention": True,
@@ -380,6 +391,94 @@ def test_triton_nvfp4_attention_warmup_skips_other_paths(
     _warmup_triton_nvfp4_attention(runner)
 
     assert calls == []
+
+
+class _WarmupAttentionLayer(AttentionLayerBase):
+    def __init__(self, impl):
+        self.impl = impl
+
+    def get_attn_backend(self):
+        return _NamedAttentionBackend("TRITON_ATTN")
+
+    def get_kv_cache_spec(self, vllm_config):
+        return None
+
+
+def _make_nvfp4_warmup_impl(
+    *,
+    num_heads: int = 8,
+    num_kv_heads: int = 2,
+    head_size: int = 256,
+    sliding_window: tuple[int, int] = (1023, 0),
+):
+    return SimpleNamespace(
+        kv_cache_dtype="nvfp4",
+        kv_sharing_target_layer_name=None,
+        alibi_slopes=None,
+        use_alibi_sqrt=False,
+        sinks=None,
+        chunk_lookback=-1,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        scale=0.125,
+        logits_soft_cap=0,
+        sliding_window=sliding_window,
+    )
+
+
+def test_triton_nvfp4_attention_warmup_compiles_prefill_variants(monkeypatch):
+    layer_names = ["layer.0", "layer.1", "layer.2"]
+    runner, calls = _make_warmup_runner(layer_names=layer_names)
+    layers = {
+        "layer.0": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        # Duplicate shape should be warmed once.
+        "layer.1": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        "layer.2": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(
+                num_kv_heads=1, head_size=512, sliding_window=(-1, -1)
+            )
+        ),
+    }
+    prefill_calls = []
+
+    def fake_get_layers_from_vllm_config(vllm_config, layer_type, names):
+        assert layer_type is AttentionLayerBase
+        return {name: layers[name] for name in names}
+
+    def fake_context_attention_fwd(**kwargs):
+        prefill_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        vllm_config_module,
+        "get_layers_from_vllm_config",
+        fake_get_layers_from_vllm_config,
+    )
+    monkeypatch.setattr(
+        triton_prefill_attention_module,
+        "context_attention_fwd",
+        fake_context_attention_fwd,
+    )
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 2
+    assert len(prefill_calls) == 2
+    assert {call["q"].shape for call in prefill_calls} == {
+        torch.Size([64, 8, 256]),
+        torch.Size([64, 8, 512]),
+    }
+    assert {call["k"].shape for call in prefill_calls} == {
+        torch.Size([64, 2, 256]),
+        torch.Size([64, 1, 512]),
+    }
+    assert {
+        (call["sliding_window_q"], call["sliding_window_k"]) for call in prefill_calls
+    } == {(1023, 0), (-1, -1)}
 
 
 def test_select_common_block_size_prefers_manager_block_size():
