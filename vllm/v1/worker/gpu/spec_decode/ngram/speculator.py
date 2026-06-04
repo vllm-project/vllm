@@ -11,6 +11,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -125,6 +126,226 @@ class _NgramKernel(nn.Module):
         return safe_drafts, num_valid.to(torch.int32)
 
 
+if HAS_TRITON:
+
+    @triton.jit
+    def _ngram_scan_kernel(
+        token_ids_ptr,  # *int32  [B, L]
+        seq_lens_ptr,  # *int32  [B]
+        valid_mask_ptr,  # *int8   [B]
+        scratch_ptr,  # *int64  [B, N_BLOCKS]   (output)
+        L,  # int64 scalar
+        L_PLUS_1,  # int64 scalar (= L + 1, used for packing)
+        N_BLOCKS,  # int64 scalar (stride of scratch's second dim)
+        MIN_N: tl.constexpr,
+        MAX_N: tl.constexpr,
+        MAX_N_PO2: tl.constexpr,
+        BLOCK_L: tl.constexpr,
+    ):
+        b = tl.program_id(0).to(tl.int64)
+        blk = tl.program_id(1).to(tl.int64)
+        L_ = tl.cast(L, tl.int64)
+        Lp1 = tl.cast(L_PLUS_1, tl.int64)
+        NB = tl.cast(N_BLOCKS, tl.int64)
+
+        seq_len = tl.load(seq_lens_ptr + b).to(tl.int64)
+        row_valid = tl.load(valid_mask_ptr + b).to(tl.int1)
+        eligible_row = row_valid & (seq_len >= MIN_N)
+
+        scratch_off = b * NB + blk
+
+        # Ineligible rows (or blocks past the last valid pos) write 0.
+        if not eligible_row:
+            tl.store(scratch_ptr + scratch_off, tl.zeros((), tl.int64))
+            return
+
+        row_off = b * L_
+
+        # Load the length-MAX_N suffix once into registers.
+        suf_iota = tl.arange(0, MAX_N_PO2).to(tl.int64)
+        suf_pos = seq_len - MAX_N + suf_iota
+        suf_in_range = (suf_iota < MAX_N) & (suf_pos >= 0) & (suf_pos < seq_len)
+        suffix = tl.load(
+            token_ids_ptr + row_off + suf_pos,
+            mask=suf_in_range,
+            other=-1,
+        ).to(tl.int32)
+
+        pos_iota = tl.arange(0, BLOCK_L).to(tl.int64)
+        pos = blk * BLOCK_L + pos_iota  # ascending
+
+        best_score = tl.zeros([BLOCK_L], dtype=tl.int64)
+
+        for n_iter in tl.static_range(MIN_N, MAX_N + 1):
+            max_pos_n = seq_len - n_iter - 1
+            match = (pos >= 0) & (pos <= max_pos_n)
+            for j in tl.static_range(0, n_iter):
+                tok = tl.load(
+                    token_ids_ptr + row_off + (pos + j),
+                    mask=match,
+                    other=0,
+                ).to(tl.int32)
+                suf_idx = (MAX_N - n_iter) + j
+                suf_val = tl.sum(tl.where(suf_iota == suf_idx, suffix, 0))
+                match = match & (tok == suf_val)
+
+            cand = n_iter * Lp1 + pos + 1
+            best_score = tl.where(match, cand, best_score)
+
+        block_best = tl.max(best_score, axis=0)
+        tl.store(scratch_ptr + scratch_off, block_best)
+
+    @triton.jit
+    def _ngram_finalize_kernel(
+        token_ids_ptr,  # *int32  [B, L]
+        seq_lens_ptr,  # *int32  [B]
+        valid_mask_ptr,  # *int8   [B]
+        last_sampled_ptr,  # *int64  [B]
+        scratch_ptr,  # *int64  [B, N_BLOCKS]
+        drafts_ptr,  # *int64  [B, K]   (output)
+        num_valid_ptr,  # *int32  [B]      (output)
+        L,
+        L_PLUS_1,
+        N_BLOCKS,
+        K: tl.constexpr,
+        K_PO2: tl.constexpr,
+        N_BLOCKS_PO2: tl.constexpr,
+    ):
+        b = tl.program_id(0).to(tl.int64)
+        L_ = tl.cast(L, tl.int64)
+        Lp1 = tl.cast(L_PLUS_1, tl.int64)
+        NB = tl.cast(N_BLOCKS, tl.int64)
+
+        nb_iota = tl.arange(0, N_BLOCKS_PO2).to(tl.int64)
+        nb_in_range = nb_iota < NB
+        block_scores = tl.load(
+            scratch_ptr + b * NB + nb_iota,
+            mask=nb_in_range,
+            other=0,
+        )
+        score = tl.max(block_scores, axis=0)
+
+        seq_len = tl.load(seq_lens_ptr + b).to(tl.int64)
+        row_valid = tl.load(valid_mask_ptr + b).to(tl.int1)
+        last_tok = tl.load(last_sampled_ptr + b)
+
+        has_match = score > 0
+        s1 = score - 1
+        best_n = tl.where(has_match, s1 // Lp1, tl.zeros_like(s1))
+        best_pos = tl.where(has_match, s1 - best_n * Lp1, tl.zeros_like(s1))
+        draft_start = tl.where(has_match, best_pos + best_n, tl.zeros_like(s1))
+
+        tokens_avail = tl.maximum(seq_len - draft_start, 0)
+        write_ok = row_valid & has_match
+        nv = tl.where(write_ok, tl.minimum(tl.cast(K, tl.int64), tokens_avail), 0)
+        tl.store(num_valid_ptr + b, nv.to(tl.int32))
+
+        row_off = b * L_
+        k_iota = tl.arange(0, K_PO2).to(tl.int64)
+        k_in_range = k_iota < K
+        gather_idx = tl.minimum(draft_start + k_iota, L_ - 1)
+        slot_valid = (k_iota < tokens_avail) & write_ok & k_in_range
+        gathered = tl.load(
+            token_ids_ptr + row_off + gather_idx,
+            mask=slot_valid,
+            other=0,
+        ).to(tl.int64)
+        out = tl.where(slot_valid, gathered, last_tok)
+        tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
+
+
+_NGRAM_SCRATCH: dict[tuple, torch.Tensor] = {}
+
+
+def _get_ngram_scratch(B: int, n_blocks: int, device: torch.device) -> torch.Tensor:
+    key = (device, B, n_blocks)
+    buf = _NGRAM_SCRATCH.get(key)
+    if buf is None:
+        buf = torch.empty((B, n_blocks), dtype=torch.int64, device=device)
+        _NGRAM_SCRATCH[key] = buf
+    return buf
+
+
+def _ngram_propose_triton(
+    token_ids: torch.Tensor,
+    seq_lens: torch.Tensor,
+    valid_mask: torch.Tensor,
+    last_sampled: torch.Tensor,
+    min_n: int,
+    max_n: int,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    For each row, find the longest n-gram suffix match in its context
+    and propose the next k tokens.
+    """
+    B, L = token_ids.shape
+    device = token_ids.device
+
+    drafts = torch.empty((B, k), dtype=torch.int64, device=device)
+    num_valid = torch.empty((B,), dtype=torch.int32, device=device)
+
+    if B == 0:
+        return drafts, num_valid
+
+    tok = token_ids.contiguous().to(torch.int32)
+    seq = seq_lens.contiguous().to(torch.int32)
+    vmask = valid_mask.contiguous().to(torch.bool).to(torch.int8)
+    last = last_sampled.contiguous().to(torch.int64).view(-1)
+
+    if L >= 1024:
+        BLOCK_L = 256
+    elif L >= 256:
+        BLOCK_L = 128
+    elif L >= 64:
+        BLOCK_L = 64
+    else:
+        BLOCK_L = max(16, triton.next_power_of_2(max(L, 1)))
+
+    K_PO2 = max(1, triton.next_power_of_2(k))
+    MAX_N_PO2 = max(1, triton.next_power_of_2(max_n))
+    n_blocks = (L + BLOCK_L - 1) // BLOCK_L
+    n_blocks_po2 = max(1, triton.next_power_of_2(n_blocks))
+
+    scratch = _get_ngram_scratch(B, n_blocks, device)
+
+    L_plus_1 = L + 1
+    _ngram_scan_kernel[(B, n_blocks)](
+        tok,
+        seq,
+        vmask,
+        scratch,
+        L,
+        L_plus_1,
+        n_blocks,
+        min_n,
+        max_n,
+        MAX_N_PO2,
+        BLOCK_L,
+        num_warps=4,
+        num_stages=2,
+    )
+
+    _ngram_finalize_kernel[(B,)](
+        tok,
+        seq,
+        vmask,
+        last,
+        scratch,
+        drafts,
+        num_valid,
+        L,
+        L_plus_1,
+        n_blocks,
+        k,
+        K_PO2,
+        n_blocks_po2,
+        num_warps=2,
+        num_stages=1,
+    )
+    return drafts, num_valid
+
+
 class NgramGPUSpeculator:
     """
     V2-compatible GPU n-gram speculator.
@@ -154,15 +375,21 @@ class NgramGPUSpeculator:
         self.max_num_reqs: int = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len: int = vllm_config.model_config.max_model_len
 
-        self.kernel = (
-            _NgramKernel(
-                min_n=self.min_n,
-                max_n=self.max_n,
-                k=self.num_speculative_steps,
+        # Triton is the default fast path; the torch.compile kernel is
+        # only constructed (and used) when Triton is unavailable.
+        self.use_triton: bool = HAS_TRITON
+        if self.use_triton:
+            self.kernel: _NgramKernel
+        else:
+            self.kernel = (
+                _NgramKernel(
+                    min_n=self.min_n,
+                    max_n=self.max_n,
+                    k=self.num_speculative_steps,
+                )
+                .to(device)
+                .eval()
             )
-            .to(device)
-            .eval()
-        )
 
         self.req_states: RequestState | None = None
 
@@ -175,7 +402,7 @@ class NgramGPUSpeculator:
         pass
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """N-gram kernel is torch.compile-managed; no explicit CG capture."""
+        """N-gram kernels are launched directly; no explicit CG capture."""
         pass
 
     def capture(self, *args: Any, **kwargs: Any) -> None:
@@ -218,12 +445,23 @@ class NgramGPUSpeculator:
 
         valid_mask = (num_sampled > 0) & (active_seq_lens >= self.min_n)
 
-        with set_forward_context(None, self.vllm_config):
-            drafts, num_valid = self.kernel(
+        if self.use_triton:
+            drafts, num_valid = _ngram_propose_triton(
                 active_tokens,
                 active_seq_lens,
                 valid_mask,
                 active_last_sampled,
+                self.min_n,
+                self.max_n,
+                self.num_speculative_steps,
             )
+        else:
+            with set_forward_context(None, self.vllm_config):
+                drafts, num_valid = self.kernel(
+                    active_tokens,
+                    active_seq_lens,
+                    valid_mask,
+                    active_last_sampled,
+                )
 
         return drafts, num_valid
