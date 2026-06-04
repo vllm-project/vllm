@@ -1064,9 +1064,8 @@ class FlexAttentionImpl(AttentionImpl):
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
-        kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        key_cache, value_cache = kv_cache.split(hs, dim=-1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,

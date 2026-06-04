@@ -206,9 +206,8 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         # For decoder and cross-attention, use KV cache as before.
         # Different head_size for K and V.
         # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
-        kv_cache = kv_cache.transpose(1, 2)
-        key_cache = kv_cache[..., : self.head_size]
-        value_cache = kv_cache[..., self.head_size :]
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
         # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.

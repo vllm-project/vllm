@@ -19,19 +19,13 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # kv_cache [B, H, N, 2*C] (K and V in the content dim):
-        #   key   -> [B, H, C//x, N, x]
-        #   value -> [B, H, C, N]
         x = 16 // kv_cache.element_size()
-        key_slice = kv_cache[..., :head_size]
-        value_slice = kv_cache[..., head_size:]
-        B, H, N, _ = kv_cache.shape
-        key_cache = (
-            key_slice.permute(0, 1, 3, 2)
-            .view(B, H, head_size // x, x, N)
-            .transpose(3, 4)
-        )
-        value_cache = value_slice.permute(0, 1, 3, 2)
+        num_blocks = kv_cache.shape[0]
+
+        key_cache = kv_cache[..., :head_size].transpose(2, 3)
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
+        value_cache = kv_cache[..., head_size:].transpose(2, 3)
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
 
     @staticmethod
