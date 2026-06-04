@@ -1442,8 +1442,9 @@ class EngineCoreProc(EngineCore):
             flag = True
             while flag:
                 for input_socket, _ in poller.poll():
+                    parts = input_socket.recv_multipart(copy=False)
                     # (RequestType, RequestData)
-                    type_frame, *data_frames = input_socket.recv_multipart(copy=False)
+                    type_frame, *data_frames = parts
                     # NOTE(yongji): ignore READY message sent by DP coordinator
                     # that is used to notify newly started engines
                     if type_frame.buffer == b"READY":

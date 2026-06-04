@@ -552,7 +552,9 @@ class MPClient(EngineCoreClient):
                     assert self.stats_update_address == (
                         coordinator.get_stats_publish_address()
                     )
-            
+                # After launch_core_engines; matches snapshot_bak assignment.
+                output_address = addresses.outputs[0]
+
             self.output_address = output_address
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
