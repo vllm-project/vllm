@@ -59,7 +59,7 @@ class NixlTransport(DataTransport):
         self._reg = self._agent.register_memory(reg_descs, mem_type="DRAM")
 
         block_tuples = [
-            (self._base_addr + i * self._block_len, self._block_len, 0, "")
+            (self._base_addr + i * self._block_len, self._block_len, 0)
             for i in range(self._num_blocks)
         ]
         xfer_dlist = self._agent.get_xfer_descs(block_tuples, mem_type="DRAM")

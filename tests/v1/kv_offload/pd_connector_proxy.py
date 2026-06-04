@@ -114,6 +114,20 @@ def parse_args():
         default=7777,
         help="Port of the prefiller's PDConnector ZMQ socket",
     )
+    # PDConnector coordinates of the decoder — injected into prefill requests
+    # so the prefiller's submit_store can resolve the peer to push KV to.
+    p.add_argument(
+        "--decoder-pd-connector-host",
+        type=str,
+        default="127.0.0.1",
+        help="Host of the decoder's PDConnector ZMQ socket",
+    )
+    p.add_argument(
+        "--decoder-pd-connector-port",
+        type=int,
+        default=7778,
+        help="Port of the decoder's PDConnector ZMQ socket",
+    )
     p.add_argument(
         "--decoder-first",
         action="store_true",
@@ -152,8 +166,8 @@ async def _prefill(client_info, endpoint, req_data, request_id):
         "do_remote_prefill": False,
         "remote_engine_id": None,
         "remote_block_ids": None,
-        "remote_host": None,
-        "remote_port": None,
+        "remote_host": global_args.decoder_pd_connector_host,
+        "remote_port": global_args.decoder_pd_connector_port,
         "kv_request_id": request_id,
     }
     data["stream"] = False

@@ -125,24 +125,54 @@ class _OutboundRequestState:
 class P2PServerSession:
     """Serves KV blocks to a single client peer.
 
-    Created from a newly accepted connection (constructor performs the
-    connect handshake). Handles lookup_fetch and abort_lookup_fetch
-    messages internally. The manager calls add_stored_blocks() and poll().
+    May be created in a "pending" state (no connection yet) so the
+    prefiller can buffer stored blocks before the decoder connects;
+    attach_connection() promotes it to "connected" once the decoder's
+    connect message arrives. Created via _accept_new_peers, the
+    constructor can attach the connection synchronously instead.
     """
 
     def __init__(
         self,
-        conn: ControlConnection,
+        peer_id: str,
         local_id: str,
         transport: DataTransport,
         local_block_len: int,
+        conn: ControlConnection | None = None,
     ) -> None:
-        """Create a server session from a newly accepted connection.
+        self.peer_id = peer_id
+        self._local_id = local_id
+        self._transport = transport
+        self._local_block_len = local_block_len
+        self._conn: ControlConnection | None = None
 
-        Extracts the connect message from the connection's inbox,
-        validates block_len, registers the NIXL peer, and sends connect_ack.
-        Raises ValueError on validation failure.
+        self._outbound: dict[str, _OutboundRequestState] = {}
+        self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
+        self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
+
+        if conn is not None:
+            self.attach_connection(conn)
+
+    @property
+    def alive(self) -> bool:
+        # Pending sessions (awaiting connection) are alive — only a
+        # closed real connection counts as dead.
+        return self._conn is None or self._conn.alive
+
+    @property
+    def connected(self) -> bool:
+        return self._conn is not None
+
+    def attach_connection(self, conn: ControlConnection) -> None:
+        """Promote a pending session to connected (or do the handshake fresh).
+
+        Reads the inbound connect message, validates it, registers the
+        NIXL peer, and sends connect_ack. Raises ValueError on validation
+        failure (caller must close conn).
         """
+        if self._conn is not None:
+            raise ValueError(f"P2PServerSession {self.peer_id}: already connected")
+
         msgs = conn.recv()
         assert len(msgs) == 1, f"Expected 1 connect message, got {len(msgs)}"
         msg = msgs[0]
@@ -152,21 +182,21 @@ class P2PServerSession:
 
         ConnectMsg.validate(msg)
 
-        if msg[ConnectMsg.BLOCK_LEN] != local_block_len:
+        if msg[ConnectMsg.BLOCK_LEN] != self._local_block_len:
             raise ValueError(
                 f"block_len mismatch from {conn.peer_id}: "
-                f"remote={msg[ConnectMsg.BLOCK_LEN]}, local={local_block_len}"
+                f"remote={msg[ConnectMsg.BLOCK_LEN]}, local={self._local_block_len}"
             )
 
         remote_fp = msg.get(ConnectMsg.CONFIG_FINGERPRINT, "")
-        local_fp = transport.config_fingerprint
+        local_fp = self._transport.config_fingerprint
         if local_fp and remote_fp and remote_fp != local_fp:
             raise ValueError(
                 f"config fingerprint mismatch from {conn.peer_id}: "
                 f"remote={remote_fp!r}, local={local_fp!r}"
             )
 
-        transport.add_remote_peer(
+        self._transport.add_remote_peer(
             conn.peer_id,
             agent_metadata=msg[ConnectMsg.AGENT_METADATA],
             base_addr=msg[ConnectMsg.BASE_ADDR],
@@ -174,19 +204,8 @@ class P2PServerSession:
             block_len=msg[ConnectMsg.BLOCK_LEN],
         )
 
-        self.peer_id = conn.peer_id
         self._conn = conn
-        self._transport = transport
-
-        self._outbound: dict[str, _OutboundRequestState] = {}
-        self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
-        self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
-
-        conn.send({TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: local_id})
-
-    @property
-    def alive(self) -> bool:
-        return self._conn.alive
+        conn.send({TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: self._local_id})
 
     def add_stored_blocks(
         self,
@@ -206,27 +225,18 @@ class P2PServerSession:
 
     def poll(self) -> list[StoreResult]:
         """Process incoming messages, poll transfers, check timeouts."""
+        # Pending session — no connection yet, nothing to receive or
+        # transfer. Store-job timeouts still apply so buffered jobs that
+        # never get picked up by a connecting decoder are eventually
+        # surfaced as failures.
+        if self._conn is None:
+            return self._timeout_pending_jobs()
+
         # Process incoming messages
         for msg in self._conn.recv():
             self._on_message(msg)
 
-        results: list[StoreResult] = []
-
-        # Check store job timeouts
-        now = time.monotonic()
-        timed_out = [
-            jid
-            for jid, submitted_at in self._store_jobs.items()
-            if now - submitted_at >= _STORE_TIMEOUT_S
-        ]
-        for jid in timed_out:
-            del self._store_jobs[jid]
-            results.append(StoreResult(job_id=jid, success=False))
-            logger.warning(
-                "P2PServerSession %s: store job %d timed out",
-                self.peer_id,
-                jid,
-            )
+        results: list[StoreResult] = self._timeout_pending_jobs()
 
         # Poll inflight transfers
         poll_result = self._transport.poll()
@@ -287,9 +297,30 @@ class P2PServerSession:
         self._transport.cancel(list(self._inflight.keys()))
         self._inflight.clear()
         self._outbound.clear()
-        self._send({TYPE_KEY: DisconnectMsg.TYPE})
-        self._conn.close()
+        if self._conn is not None:
+            self._send({TYPE_KEY: DisconnectMsg.TYPE})
+            self._conn.close()
+            self._conn = None
         return failed_jobs
+
+    def _timeout_pending_jobs(self) -> list[StoreResult]:
+        """Surface store-job timeouts as failed StoreResults."""
+        results: list[StoreResult] = []
+        now = time.monotonic()
+        timed_out = [
+            jid
+            for jid, submitted_at in self._store_jobs.items()
+            if now - submitted_at >= _STORE_TIMEOUT_S
+        ]
+        for jid in timed_out:
+            del self._store_jobs[jid]
+            results.append(StoreResult(job_id=jid, success=False))
+            logger.warning(
+                "P2PServerSession %s: store job %d timed out",
+                self.peer_id,
+                jid,
+            )
+        return results
 
     # ------------------------------------------------------------------
     # Internal message handling
@@ -313,7 +344,8 @@ class P2PServerSession:
         elif msg_type == AbortLookupFetchMsg.TYPE:
             self._on_abort_lookup_fetch(msg)
         elif msg_type == DisconnectMsg.TYPE:
-            self._conn.mark_dead()
+            if self._conn is not None:
+                self._conn.mark_dead()
         else:
             logger.warning(
                 "P2PServerSession %s: unknown message type %r",
@@ -388,6 +420,8 @@ class P2PServerSession:
             )
 
     def _send(self, msg: dict) -> None:
+        if self._conn is None:
+            return
         try:
             self._conn.send(msg)
         except Exception:
