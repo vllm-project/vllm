@@ -1051,11 +1051,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Final norm: output = norm(x) * weight
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Embedding scale = sqrt(hidden_size)
-        # Downcast to model dtype (bfloat16 etc.) for numerical parity
+        # Embedding scale = sqrt(hidden_size), cast to model dtype to avoid
+        # mixed-precision drift from bf16 * fp32 across deep stacks.
         self.register_buffer(
             "normalizer",
-            torch.tensor(config.hidden_size**0.5),
+            torch.tensor(
+                config.hidden_size**0.5,
+                dtype=self.embed_tokens.weight.dtype,
+            ),
             persistent=False,
         )
 

@@ -41,6 +41,7 @@ transformers==5.5.3
 tokenizers==0.22.2
 schemathesis>=3.39.15 # Required for openai schema test
 buildkite-test-collector==0.1.9
+tilelang==0.1.10
 
 genai_perf>=0.0.8
 tritonclient>=2.51.0
