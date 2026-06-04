@@ -4515,7 +4515,7 @@ class GPUModelRunner(
             if delta_per_model:
                 eplb_metrics = EplbMetrics(
                     ep_rank=get_ep_group().device_group.rank(),
-                    token_deltas_per_model=delta_per_model,
+                    num_routed_tokens=delta_per_model,
                 )
 
         # self.kv_connector_output may be modified during drafting

@@ -527,13 +527,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         # Cumulative count of tokens routed per (model, layer, rank).
-        # Only populated when EPLBConfig.log_balancedness=True.
         self.counter_eplb_tokens_per_rank = self._counter_cls(
             name="vllm:eplb_tokens_per_rank_total",
-            documentation=(
-                "Cumulative tokens routed per (model, layer, rank). "
-                "Only populated when EPLBConfig.log_balancedness=True."
-            ),
+            documentation="Cumulative tokens routed per (model, layer, rank).",
             labelnames=labelnames + ["model", "layer", "rank"],
         )
 
@@ -1125,16 +1121,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 for (
                     model,
                     delta,
-                ) in scheduler_stats.eplb_metrics.token_deltas_per_model.items():
+                ) in scheduler_stats.eplb_metrics.num_routed_tokens.items():
                     for layer_idx, value in enumerate(delta):
-                        if value > 0:
-                            self.counter_eplb_tokens_per_rank.labels(
-                                model_name=model_name,
-                                engine=engine,
-                                model=model,
-                                layer=str(layer_idx),
-                                rank=rank,
-                            ).inc(value)
+                        self.counter_eplb_tokens_per_rank.labels(
+                            model_name=model_name,
+                            engine=engine,
+                            model=model,
+                            layer=str(layer_idx),
+                            rank=rank,
+                        ).inc(value)
 
             if (
                 self.kv_cache_metrics_enabled

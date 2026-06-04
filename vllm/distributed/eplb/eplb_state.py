@@ -87,51 +87,60 @@ class EplbStats:
     """
 
 
-@dataclass
 class EplbMetricsState:
-    """Per-model ping-pong state for the EPLB tokens counter.
+    """Per-model state for the EPLB Prometheus metrics."""
 
-    Each step adds this rank's per-layer load into ``cumulative_tokens`` on
-    device (never zeroed by the rearrangement logic), then either issues an
-    async D2H of the cumulative tensor into the pinned buffer or consumes a
-    previously-issued copy. ``delta`` is the per-layer increment for the
-    Prometheus counter on the step where a consume completes; None otherwise.
-    """
-
-    cumulative_tokens: torch.Tensor
-    pinned_buffer: torch.Tensor
-    event: "torch.cuda.Event"
-    last_pushed: list[int]
-    pending: bool = False
-    delta: list[int] | None = None
-
-    @classmethod
-    def create(cls, num_layers: int, device: torch.device) -> "EplbMetricsState":
-        return cls(
-            cumulative_tokens=torch.zeros(num_layers, dtype=torch.int64, device=device),
-            pinned_buffer=torch.zeros(num_layers, dtype=torch.int64, pin_memory=True),
-            event=torch.cuda.Event(),
-            last_pushed=[0] * num_layers,
+    def __init__(self, num_layers: int, device: torch.device):
+        self.cumulative_tokens: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, device=device
         )
+        self.pinned_buffer: torch.Tensor = torch.zeros(
+            num_layers, dtype=torch.int64, pin_memory=True
+        )
+        self.event: torch.cuda.Event = torch.cuda.Event()
+        self.last_pushed: list[int] = [0] * num_layers
+        self.pending: bool = False
+        self.delta: list[int] | None = None
 
-    def accumulate(self, per_layer_tokens: torch.Tensor) -> None:
-        """Add this step's per-rank load into the device cumulative tensor."""
+    def accumulate(self, expert_load_pass: torch.Tensor) -> None:
+        """
+        Records a snapshot of the number of tokens routed to this rank.
+        This code assumes that expert_load_pass has been zeroed out between calls.
+        Args:
+            expert_load_pass: (num_moe_layers, num_physical_experts) contains the number
+            of routed tokens for each layer and physical expert across all ranks.
+            Populated by the router and zeroed out by EPLB every step.
+        """
+        ep_group = get_ep_group().device_group
+        ep_size = ep_group.size()
+        rank = ep_group.rank()
+        # (num_moe_layers,) where each element is the number of tokens routed
+        # to "rank" for that layer
+        per_layer_tokens = expert_load_pass.reshape(
+            expert_load_pass.shape[0], ep_size, -1
+        )[:, rank, :].sum(dim=-1)
+
+        # Add the per_layer routed tokens for this rank to the cumulative total.
+        # This tensor is asynchronously copied to cpu in EplbMetricsState.step().
+        # Because the copy is async and non-blocking, this tensor needs to hold
+        # multiple steps worth of routed tokens.
         self.cumulative_tokens.add_(per_layer_tokens)
 
     def step(self) -> None:
-        """Advance the ping-pong by one step (snapshot or consume)."""
+        """Records a snapshot of cumulative_tokens and then compute the delta from the
+        previous snapshot."""
+        # If there's not a device to host transfer in-flight, start one
         if not self.pending:
             self.pinned_buffer.copy_(self.cumulative_tokens, non_blocking=True)
             self.event.record()
             self.pending = True
             self.delta = None
+        # if the transfer from device to host has finished, compute the result
         elif self.event.query():
             current = self.pinned_buffer.tolist()
             self.delta = [c - prev for c, prev in zip(current, self.last_pushed)]
             self.last_pushed = current
             self.pending = False
-        else:
-            self.delta = None
 
 
 @dataclass
@@ -243,6 +252,10 @@ class EplbModelState:
     """
     The communicator for expert weight transfers.
     """
+    metrics_state: EplbMetricsState
+    """
+    State used to populate Prometheus metrics
+    """
     pending_result: AsyncEplbLayerResult | None = None
     """
     Set by the async worker after all writes to expert_buffer are done. Consumed
@@ -251,12 +264,6 @@ class EplbModelState:
 
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
-    """
-
-    metrics_state: EplbMetricsState | None = None
-    """
-    Ping-pong state for the EPLB tokens counter (cumulative tensor +
-    async D2H + delta). Populated in :meth:`EplbState.add_model`.
     """
 
 
@@ -519,7 +526,7 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
-            metrics_state=EplbMetricsState.create(
+            metrics_state=EplbMetricsState(
                 num_layers=model.num_moe_layers,
                 device=self.device,
             ),
@@ -562,20 +569,8 @@ class EplbState:
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
 
-        ep_size = ep_group.size()
-        rank = ep_group.rank()
-
-        # Always-on metric path: accumulate this step's per-rank load into
-        # the per-model cumulative tensor (never zeroed by the rearrangement
-        # logic), then advance the ping-pong (issue an async D2H or consume
-        # a previously-issued one). Decoupled from log_balancedness_interval.
         for eplb_model_state in self.model_states.values():
-            assert eplb_model_state.metrics_state is not None
-            expert_load_pass = eplb_model_state.expert_load_pass
-            per_rank_per_layer = expert_load_pass.reshape(
-                expert_load_pass.shape[0], ep_size, -1
-            )[:, rank, :].sum(dim=-1)
-            eplb_model_state.metrics_state.accumulate(per_rank_per_layer)
+            eplb_model_state.metrics_state.accumulate(eplb_model_state.expert_load_pass)
             eplb_model_state.metrics_state.step()
 
         if (
@@ -584,24 +579,36 @@ class EplbState:
             % self.parallel_config.eplb_config.log_balancedness_interval
             == 0
         ):
+            # Sync the expert load pass for each model (main and drafter).
+            # expert_load_pass: (num_moe_layers, num_physical_experts)
             expert_load_pass_list = self._sync_load_pass()
+            ep_group = get_ep_group().device_group
             for expert_load_pass, eplb_model_state in zip(
                 expert_load_pass_list, self.model_states.values()
             ):
+                # num_tokens_per_rank: (num_moe_layers, num_ranks)
                 num_tokens_per_rank = (
-                    expert_load_pass.reshape(expert_load_pass.shape[0], ep_size, -1)
+                    expert_load_pass.reshape(
+                        expert_load_pass.shape[0], ep_group.size(), -1
+                    )
                     .sum(dim=-1)
                     .float()
                 )
+
+                # Compute balancedness ratio:
+                # for each layer:
+                #   (mean load across ranks) / (max load across ranks)
                 avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
                 max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+
+                # Just to make type checker happy
                 tokens_tensors: list[float] = torch.stack(
                     [avg_tokens_tensor, max_tokens_tensor]
                 ).tolist()
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
-                if rank == 0:
+                if ep_group.rank() == 0:
                     logger.info(
                         "EPLB step: %d for model %s: avg_tokens=%.2f, "
                         "max_tokens=%d, balancedness=%.4f, "
@@ -666,26 +673,11 @@ class EplbState:
         self._update_layer_should_record(log_stats=log_stats)
 
     def _should_record_current_step(self, log_stats: bool = False) -> bool:
-        """Return whether expert-load recording should be enabled this step.
-
-        Recording is enabled when we are close to either:
-        1) The next rearrangement step, so the sliding window is ready.
-        2) The next balancedness logging step, when log_stats is enabled.
-        """
-        steps_remaining = (
-            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
-        )
-        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
-
-        if not log_stats:
-            return should_record_for_rearrange
-
-        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
-        steps_until_next_log = (
-            log_interval - (self.expert_rearrangement_step % log_interval)
-        ) % log_interval
-        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
-        return should_record_for_rearrange or should_record_for_log
+        # TODO (Sage): Previously we only needed to record stats for the logging
+        # interval. Now that prometheus metrics are hooked up, we need to
+        # unconditionally collect stats for each step when EPLB is enabled. This whole
+        # code path should be reworked/removed.
+        return True
 
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
         """Update the shared ``should_record_tensor`` for all layers."""
@@ -695,14 +687,10 @@ class EplbState:
             )
 
     def get_latest_metric_delta(self) -> dict[str, list[int]]:
-        """Return per-model token deltas to inc the Prometheus counter by,
-        for any model that completed a ping-pong consume this step. Empty
-        when every model is mid-snapshot or waiting on a D2H.
-        """
         return {
             state.model_name: state.metrics_state.delta
             for state in self.model_states.values()
-            if state.metrics_state is not None and state.metrics_state.delta is not None
+            if state.metrics_state.delta is not None
         }
 
     def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
