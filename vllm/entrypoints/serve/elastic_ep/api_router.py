@@ -12,11 +12,11 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
-from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
     set_scaling_elastic_ep,
 )
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

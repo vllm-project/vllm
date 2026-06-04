@@ -2453,6 +2453,7 @@ class rocm_aiter_ops:
         alibi_slopes: torch.Tensor | None = None,
         return_lse: bool = False,
         out: torch.Tensor | None = None,
+        sink_ptr: torch.Tensor | None = None,
     ):
         """
         Flash attention with variable length sequences.
@@ -2481,6 +2482,7 @@ class rocm_aiter_ops:
             alibi_slopes=alibi_slopes,
             return_lse=return_lse,
             out=out,
+            sink_ptr=sink_ptr,
         )
 
     @staticmethod

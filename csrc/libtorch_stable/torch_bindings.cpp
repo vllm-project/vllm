@@ -7,11 +7,6 @@
 // Note: We register under namespace "_C" so ops are accessible as
 // torch.ops._C.<op_name> for compatibility with existing code.
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
-#ifndef USE_ROCM
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-#endif
-
-#ifndef USE_ROCM
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(
@@ -32,6 +27,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
 
+#ifndef USE_ROCM
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+#endif
+
+#ifndef USE_ROCM
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(
@@ -247,6 +247,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
 
+  // BF16/FP32 x FP32 -> FP32 router GEMM for H=3072, E=256, M<=32 (SM90+).
+  // conditionally compiled so impl registration is in source file
+  ops.def("fp32_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
   ops.def(
       "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
@@ -332,6 +336,38 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
+
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
+      "Tensor q_in, Tensor kv, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+
+  // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
+  // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
+      "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
+      "Tensor position_ids, Tensor cos_sin_cache, float eps, "
+      "int cache_block_size) -> ()");
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
+      "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
+      "int cache_block_size) -> ()");
+
+#ifndef USE_ROCM
+  ops.def(
+      "minimax_allreduce_rms("
+      "Tensor input, Tensor norm_weight, Tensor workspace, "
+      "int rank, int nranks, float eps) -> Tensor");
+  ops.def(
+      "minimax_allreduce_rms_qk("
+      "Tensor qkv, Tensor norm_weight_q, Tensor norm_weight_k, "
+      "Tensor workspace, int q_size, int kv_size, int rank, int nranks, "
+      "float eps) -> (Tensor, Tensor)");
+#endif
 
   // Apply repetition penalties to logits in-place.
   ops.def(
@@ -474,14 +510,36 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? initial_state_idx,"
       "Tensor? cu_chunk_seqlen,"
       "Tensor? last_chunk_indices) -> ()");
+
+  // Attention ops
+  // Compute the attention between an input query and the cached
+  // keys/values using PagedAttention.
+  ops.def(
+      "paged_attention_v1("
+      "    Tensor! out, Tensor query, Tensor key_cache,"
+      "    Tensor value_cache, int num_kv_heads, float scale,"
+      "    Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
+
+  // PagedAttention V2.
+  ops.def(
+      "paged_attention_v2("
+      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
+      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
+      "    Tensor value_cache, int num_kv_heads, float scale,"
+      "    Tensor block_tables, Tensor seq_lens, int block_size,"
+      "    int max_seq_len, Tensor? alibi_slopes,"
+      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
-#ifndef USE_ROCM
-  ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
-
-#ifndef USE_ROCM
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
   ops.impl("per_token_group_fp8_quant_packed",
@@ -489,6 +547,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
+#ifndef USE_ROCM
+  ops.impl("permute_cols", TORCH_BOX(&permute_cols));
+#endif
+
+#ifndef USE_ROCM
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
@@ -540,6 +603,18 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+           TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
+#ifndef USE_ROCM
+  ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
+  ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
+#endif
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
@@ -581,6 +656,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
   ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
+
+  ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
+  ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
 
 // These capability-check functions take only primitive args (no tensors), so
@@ -601,6 +679,156 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
 
   // GGML block size lookup (no tensor args)
   ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
+}
+
+// Cache ops
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
+  // Swap in (out) the cache blocks from src to dst.
+  ops.def(
+      "swap_blocks(Tensor src, Tensor! dst,"
+      "            int block_size_in_bytes, Tensor block_mapping) -> ()");
+
+  // Batch swap: submit all block copies in a single driver call.
+  ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes,"
+      "                  bool is_src_access_order_any=False) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache(Tensor key, Tensor value,"
+      "                  Tensor! key_cache, Tensor! value_cache,"
+      "                  Tensor slot_mapping,"
+      "                  str kv_cache_dtype,"
+      "                  Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Reshape the key and value tensors and cache them.
+  ops.def(
+      "reshape_and_cache_flash(Tensor key, Tensor value,"
+      "                        Tensor! key_cache,"
+      "                        Tensor! value_cache,"
+      "                        Tensor slot_mapping,"
+      "                        str kv_cache_dtype,"
+      "                        Tensor k_scale, Tensor v_scale) -> ()");
+
+  // Concat kv_c and k_pe and cache them.
+  ops.def(
+      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
+      "                     Tensor! kv_cache,"
+      "                     Tensor slot_mapping,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor scale) -> ()");
+
+  // Rotate Q and K, then write to kv cache for MLA
+  ops.def(
+      "concat_and_cache_mla_rope_fused("
+      "                     Tensor positions,"
+      "                     Tensor! q_pe,"
+      "                     Tensor! k_pe,"
+      "                     Tensor kv_c,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor! kv_cache,"
+      "                     str kv_cache_dtype,"
+      "                     Tensor kv_cache_scale) -> ()");
+
+  // Convert the key and value cache to fp8 data type.
+  ops.def(
+      "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
+      "str kv_cache_dtype) -> ()");
+
+  // Gather cache blocks from src_cache to dst, dequantizing from
+  // src_cache's dtype to dst's dtype if necessary.
+  ops.def(
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "                               Tensor block_table, Tensor cu_seq_lens, "
+      "                               Tensor token_to_seq, "
+      "                               int num_tokens, "
+      "                               str kv_cache_dtype, "
+      "                               Tensor scale, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
+      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
+
+  ops.def(
+      "cp_gather_and_upconvert_fp8_kv_cache(Tensor src_cache, Tensor! dst, "
+      "Tensor block_table, Tensor seq_lens, Tensor workspace_starts, int "
+      "batch_size) -> ()");
+
+  ops.def(
+      "indexer_k_quant_and_cache(Tensor k, Tensor! kv_cache, Tensor "
+      "slot_mapping, "
+      "int quant_block_size, str kv_cache_dtype) -> ()");
+
+  ops.def("concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
+
+  ops.def(
+      "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
+      "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
+  custom_ar.def(
+      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool fully_connected) -> int");
+  custom_ar.def(
+      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.def("dispose(int fa) -> ()");
+  custom_ar.def("meta_size() -> int");
+  custom_ar.def("register_buffer(int fa, int[] ipc_tensors) -> ()");
+  custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (int[], int[])");
+  custom_ar.def(
+      "register_graph_buffers(int fa, int[][] handles, int[][] offsets) -> ()");
+  custom_ar.def("allocate_shared_buffer_and_handle(int size) -> (int, Tensor)");
+  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int");
+  custom_ar.def("free_shared_buffer(int ptr) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CUDA, custom_ar) {
+  custom_ar.impl("init_custom_ar", TORCH_BOX(&init_custom_ar));
+  custom_ar.impl("all_reduce", TORCH_BOX(&all_reduce));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, custom_ar) {
+  custom_ar.impl("open_mem_handle", TORCH_BOX(&open_mem_handle));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, custom_ar) {
+  custom_ar.impl("dispose", TORCH_BOX(&dispose));
+  custom_ar.impl("meta_size", TORCH_BOX(&meta_size));
+  custom_ar.impl("register_buffer", TORCH_BOX(&register_buffer));
+  custom_ar.impl("get_graph_buffer_ipc_meta",
+                 TORCH_BOX(&get_graph_buffer_ipc_meta));
+  custom_ar.impl("register_graph_buffers", TORCH_BOX(&register_graph_buffers));
+  custom_ar.impl("allocate_shared_buffer_and_handle",
+                 TORCH_BOX(&allocate_shared_buffer_and_handle));
+  custom_ar.impl("free_shared_buffer", TORCH_BOX(&free_shared_buffer));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CPU, ops) {
+  ops.impl("swap_blocks_batch", TORCH_BOX(&swap_blocks_batch));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
+  ops.impl("swap_blocks", TORCH_BOX(&swap_blocks));
+  ops.impl("reshape_and_cache", TORCH_BOX(&reshape_and_cache));
+  ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
+  ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
+  ops.impl("concat_and_cache_mla_rope_fused",
+           TORCH_BOX(&concat_and_cache_mla_rope_fused));
+  ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
+  ops.impl("gather_and_maybe_dequant_cache",
+           TORCH_BOX(&gather_and_maybe_dequant_cache));
+  ops.impl("cp_gather_cache", TORCH_BOX(&cp_gather_cache));
+  ops.impl("cp_gather_and_upconvert_fp8_kv_cache",
+           TORCH_BOX(&cp_gather_and_upconvert_fp8_kv_cache));
+  ops.impl("indexer_k_quant_and_cache", TORCH_BOX(&indexer_k_quant_and_cache));
+  ops.impl("concat_mla_q", TORCH_BOX(&concat_mla_q));
+  ops.impl("cp_gather_indexer_k_quant_cache",
+           TORCH_BOX(&cp_gather_indexer_k_quant_cache));
 }
 
 REGISTER_EXTENSION(_C_stable_libtorch)

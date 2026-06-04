@@ -27,7 +27,6 @@
 #                                       ROCM_AITER_UNIFIED_ATTN
 #                         NVIDIA options: FLASH_ATTN, FLASHINFER
 #   VLLM_SSM_CONV_STATE_LAYOUT - SSM conv state layout (e.g. "DS" required for Mamba models)
-#   ENABLE_HMA_FLAG     - set to 1 to enable hybrid KV cache manager
 #   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
 set -ex
 
@@ -85,13 +84,7 @@ if [[ -z "${ATTENTION_BACKEND:-}" ]]; then
 fi
 echo "Using attention backend: ${ATTENTION_BACKEND}"
 
-# ── HMA & extra serve args ────────────────────────────────────────────
-
-ENABLE_HMA_VAR=""
-if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
-  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
-  echo "HMA (Hybrid KV Cache Manager) enabled"
-fi
+# ── Extra serve args ─────────────────────────────────────────────────
 
 EXTRA_SERVE_ARGS=()
 if [[ -n "${VLLM_SERVE_EXTRA_ARGS:-}" ]]; then
@@ -258,7 +251,6 @@ run_test_for_device() {
       --kv-transfer-config "$kv_config" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
       --attention-backend $ATTENTION_BACKEND \
-      ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
@@ -298,7 +290,6 @@ run_test_for_device() {
       --kv-transfer-config "$kv_config" \
       --speculative-config "$DECODE_SPEC_CONFIG" \
       --attention-backend $ATTENTION_BACKEND \
-      ${ENABLE_HMA_VAR} \
       ${EXTRA_SERVE_ARGS[@]+"${EXTRA_SERVE_ARGS[@]}"} &
     local SERVER_PID=$!
 
