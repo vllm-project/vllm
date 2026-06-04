@@ -19,7 +19,7 @@ on:
         required: true
         type: string
       test_group:
-        description: 'which tests to run (cpu_check, fast_check, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization_32bit_logits, guided_generation, bee_sample_tb_check, template_tokenizer_parser_check, lm_eval, bee_eval, performance, speculative_decoding, vision, asr)'
+        description: 'which tests to run (cpu_check, fast_check, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, quantization_32bit_logits, guided_generation, bee_sample_tb_check, template_tokenizer_parser_check, lm_eval, bee_eval, performance, speculative_decoding, vision, asr, weight_reload)'
         type: string
         required: true
       result_upload_branch:

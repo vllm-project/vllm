@@ -2,7 +2,7 @@
 # SWA Window Semantics Tests
 
 > **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 6.2.1–6.2.5 |
-> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section SWA Window Semantics
+> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section Sliding Window
 
 CPU unit suite for the NeMo-inclusive SWA window fix in
 [`vllm/model_executor/models/commandr.py`](../../../../vllm/model_executor/models/commandr.py).

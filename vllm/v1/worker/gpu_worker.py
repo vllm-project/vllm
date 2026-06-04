@@ -350,6 +350,65 @@ class Worker(WorkerBase):
     def reload_weights(self, *args, **kwargs) -> None:
         self.model_runner.reload_weights(*args, **kwargs)
 
+    # cohere start
+    def recapture_cudagraphs(self) -> int:
+        """Drop stale CUDA graphs and recapture against the live model.
+
+        Intended to be invoked via ``/collective_rpc`` between
+        ``reload_weights`` and ``/resume``. Required because every quant
+        backend's ``process_weights_after_loading`` rebuilds backend-specific
+        Python helper objects (e.g. ``moe_kernel`` / ``moe_quant_config``
+        on FP8 MoE methods) on every reload — CUDA graphs captured at
+        startup bind to method addresses on the original objects, so the
+        rebuild leaves the graphs pointing at freed memory and the next
+        forward pass faults with an illegal memory access.
+
+        Upstream's ``finish_weight_update`` (IPC/NCCL weight transfer)
+        runs the same ``finalize_layerwise_reload`` path and inherits the
+        same problem; every upstream IPC/NCCL example/test sets
+        ``enforce_eager=True`` to sidestep it. This RPC is the fork's
+        general fix: it works regardless of which quant backend the
+        model uses and would also be needed for NCCL-based transfer once
+        CUDA graphs get enabled there.
+
+        ``CUDAGraphWrapper.clear_all_graphs`` drops every wrapper's
+        ``concrete_cudagraph_entries``, after which ``capture_model``
+        re-runs the standard warmup-and-capture pipeline. Warmup passes
+        inside ``_warmup_and_capture`` already dispatch with
+        ``CUDAGraphMode.NONE``, so they execute eagerly against the
+        reloaded weights without replaying stale graphs.
+
+        Returns the total number of ``CUDAGraphEntry`` instances that
+        live on ``CUDAGraphWrapper`` instances after recapture (summed
+        across every wrapper). When CUDA graphs are enabled, this is a
+        direct, deterministic signal of "graphs were actually
+        recaptured" — unlike ``capture_model()``'s byte delta, which is
+        computed from ``torch.cuda.mem_get_info`` and can legitimately
+        be ``0`` (or negative) on recapture because CUDA graphs share a
+        global memory pool that is not released between captures.
+
+        Returns ``0`` when CUDA graphs are disabled (``enforce_eager``
+        or ``cudagraph_mode=NONE``); in that case the RPC is a no-op
+        and ``0`` is the expected value. Callers that know CUDA graphs
+        are supposed to be enabled can assert non-zero to catch
+        misconfiguration that would silently bypass the recapture
+        path.
+        """
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+
+        if self.model_config.enforce_eager:
+            return 0
+        if self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            return 0
+
+        CUDAGraphWrapper.clear_all_graphs()
+        self.model_runner.capture_model()
+        return sum(
+            len(w.concrete_cudagraph_entries) for w in CUDAGraphWrapper._all_instances
+        )
+
+    # cohere end
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much

@@ -105,6 +105,12 @@ This matrix is part of a three-layer documentation structure:
 - 6.2.4 `test_window_propagated_to_attention_layer`
 - 6.2.5 `test_nemo_convention_no_eviction_at_exactly_w`
 
+#### 6.3 [Weight Reload](./features/weight_reload.md)
+
+- 6.3.1 `test_reload_weights_fixes_broken_model` (also exercises the
+  `_pause` wait → abort fallback by injecting an in-flight long
+  generation before `/pause`)
+
 ### 7. ASR
 
 #### 7.1 [Cohere ASR](./features/asr.md)

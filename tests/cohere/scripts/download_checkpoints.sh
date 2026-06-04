@@ -353,6 +353,7 @@ run_downloads () {
         model_arch_c5_lora)      download_model_arch_c5_lora_assets      ;;
         bee_sample_tb_check)     download_model_arch_c5_3a30t_assets     ;;
         template_tokenizer_parser_check) download_model_arch_c5_3a30t_assets ;;
+        weight_reload|collective_rpc_reload) download_model_arch_c5_3a30t_assets ;;
         fast_check)        download_fast_check        ;;
         lm_eval)           download_eval              ;;
         bee_eval)          download_eval              ;;
@@ -365,7 +366,7 @@ run_downloads () {
         models)            download_models            ;;
         *)
             echo "Unknown group '${TEST_GROUP}'"
-            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, bee_sample_tb_check, template_tokenizer_parser_check, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, thinking_budget, speculative_decoding, asr, vision, models"
+            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, bee_sample_tb_check, template_tokenizer_parser_check, weight_reload, collective_rpc_reload, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, thinking_budget, speculative_decoding, asr, vision, models"
             exit 1
             ;;
     esac

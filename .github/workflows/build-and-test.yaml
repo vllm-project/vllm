@@ -45,6 +45,7 @@ on:
           - speculative_decoding
           - vision
           - asr
+          - weight_reload
           - all
       hardware_profiles_override:
         required: false
@@ -80,7 +81,7 @@ on:
         required: false
         type: string
         default: 'all'
-        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, template_tokenizer_parser_check, quantization, GG, thinking_budget, speculative_decoding, vision, asr, all). Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora. quantization expands into quantization_32bit_logits. thinking_budget expands into thinking_budget, bee_sample_tb_check.'
+        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, template_tokenizer_parser_check, quantization, GG, thinking_budget, speculative_decoding, vision, asr, weight_reload, all). weight_reload runs the reload_weights behavior test. Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora. quantization expands into quantization_32bit_logits. thinking_budget expands into thinking_budget, bee_sample_tb_check.'
       hardware_profiles_override:
         required: false
         type: string

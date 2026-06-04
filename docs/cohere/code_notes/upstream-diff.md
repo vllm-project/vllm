@@ -13,6 +13,7 @@ For **ownership tagging and reduction planning** on the v0.21 upgrade, see [`../
 - `runtime-and-scheduling.md`: thinking-budget execution path, scheduler/model-runner coupling, structured-output safeguards, SHM lifecycle changes.
 - `models-and-inference.md`: reward/pooler stack, Command-R/EAGLE integration points, KV grouping for draft layers, spec-decode tooling.
 - `tests-benchmarks-and-data.md`: Cohere test topology, hardware/model mapping configs, benchmark dataset extensions, reporting outputs.
+- `reload-weights.md`: `/collective_rpc reload_weights` round-trip surface, layerwise reload internals, and the `--enforce-eager` requirement on quantized models.
 
 ## Why This Split Exists
 

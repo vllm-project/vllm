@@ -154,6 +154,9 @@ function setMatrixOutput({ core, inputs }) {
   if (features === "asr" || features === "all") {
     featureTests.push("asr");
   }
+  if (features === "weight_reload" || features === "all") {
+    featureTests.push("weight_reload");
+  }
   // Handle feature tests
   for (const tg of featureTests) {
     const labels = table[tg];

@@ -1,7 +1,7 @@
 # MM + GG + TB (Multimodal Guided Generation with Thinking Budget)
 
 > **Registry**: [`observability_matrix.md`](../observability_matrix.md) |
-> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md)
+> **Compatibility**: T.3.1.1 cells propagated into C5 Arch, Thinking Budget sections of [`feature_matrix.md`](../feature_matrix.md)
 
 Validates that multimodal (vision) inference works correctly when guided
 generation, thinking budget constraints, and speculative decoding are all

@@ -2,7 +2,7 @@
 # C5 LoRA Serving Tests
 
 > **Registry**: [`observability_matrix.md`](../observability_matrix.md) entry 1.2.1 |
-> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section C5 LoRA Serving
+> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section LoRA
 
 Validates that the c5 3a30t (`cohere2moe`) model can load a LoRA adapter and
 produce valid outputs both with and without the adapter active.

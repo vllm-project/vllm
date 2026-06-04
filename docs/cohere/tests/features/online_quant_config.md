@@ -2,7 +2,7 @@
 # Online Quantization Config Parsing
 
 > **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 2.2.1 - 2.2.8 |
-> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section Online Quantization Config Parsing
+> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section Online Config
 
 Validates the cohere-specific `OnlineQuantizationConfig.from_config` parsing
 path that loads online quantization config from a checkpoint's

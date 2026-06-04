@@ -2,7 +2,7 @@
 # Cohere Auto-Config Tests
 
 > **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 6.1.1, 6.1.2, 6.1.3 |
-> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section Cohere Auto-Config
+> **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section Auto-Config
 
 CPU unit suite for [`vllm/cohere/auto_config.py`](../../../../vllm/cohere/auto_config.py) — the
 opt-in hook that applies

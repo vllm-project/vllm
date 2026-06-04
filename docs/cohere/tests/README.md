@@ -192,6 +192,7 @@ compatibility.
 | `quantization` | ~20m | Quantization regression bucket. Expands into `quantization_32bit_logits` (LM-head fp32 microbenchmark and C5 fp32 logits consistency). |
 | ↳ `quantization_32bit_logits` | ~20m | *(internal group, use `quantization` or `all`)* LM-head fp32 microbenchmark (`test_logits_processor.py`) and full C5 fp32 logits consistency check (`test_c5_fp32_logits.py`). Runs on H100, A100, B200, GB200; not supported on MI300x. |
 | `template_tokenizer_parser_check` | ~5m | Diagnostic tool (not a correctness test). Boots `vllm serve` for `c5-3a30t_fp8` twice (`no_parsers` and `with_parsers`) and logs raw messages, rendered prompt, tokenization, and generation/reasoning per sample for engineer inspection. Fails only on server-side request errors; emitted JSON logs are not uploaded. See [`features/template_tokenizer_parser.md`](./features/template_tokenizer_parser.md). |
+| `collective_rpc_reload` | ~3m | Hot-reload of model weights via `/collective_rpc reload_weights`. Boots server from a corrupted checkpoint, verifies broken score, reloads good weights + recaptures CUDA graphs, verifies recovery. See [`features/weight_reload.md`](./features/weight_reload.md). |
 
 ## Hardware Profiles
 

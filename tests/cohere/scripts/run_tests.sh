@@ -347,6 +347,124 @@ run_bee_samples() {
     done
 }
 
+run_collective_rpc_reload() {
+    echo "Running collective_rpc reload_weights test with TP_SIZE=${TP_SIZE} and MODELS=${MODELS}..."
+
+    cd ${VLLM_WORKSPACE}
+    source tests/cohere/scripts/run-helper.sh
+    check_gpus
+
+    MODELS_LIST="${MODELS}"
+    IFS=',' read -ra MODEL_ARRAY <<< "$MODELS_LIST"
+
+    for MODEL_NAME in "${MODEL_ARRAY[@]}"; do
+        MODEL_NAME=$(echo "$MODEL_NAME" | xargs)
+        MODEL_PATH="${ENGINES_DIR}/${MODEL_NAME}"
+        # The corrupted mirror lives under OUTPUT_DIR (tmpfs-friendly) and
+        # symlinks all unaffected shards back to MODEL_PATH, so the disk
+        # cost is just the rewritten shard.
+        BROKEN_MODEL_PATH="${OUTPUT_DIR}/collective_rpc_reload_${MODEL_NAME}_broken"
+        # Input token embeddings, tied to the LM head in this checkpoint.
+        # Zeroing it makes the model unable to read input tokens AND unable
+        # to project hidden states to vocab logits, guaranteeing a broken
+        # model. Single-layer attention ablation (e.g. one o_proj) is not
+        # enough — deep residual networks pass signal around a single
+        # zeroed layer via the skip connection, so the score barely
+        # changes. embed_tokens has no such bypass.
+        BROKEN_PARAM="model.language_model.embed_tokens.weight"
+
+        echo "=== collective_rpc reload: ${MODEL_NAME} (tp=${TP_SIZE}) ==="
+        cleanup_vllm_shm
+
+        echo "Building corrupted mirror at ${BROKEN_MODEL_PATH} (zeroing ${BROKEN_PARAM})..."
+        # Without `set -e` (not enabled in this script) a Python failure
+        # here is silently ignored. The test would then load a partially
+        # built mirror (everything symlinked, target shard missing) and
+        # still score ~0 in Phase 1 — passing for the wrong reason.
+        # Guard explicitly so the next regression fails loudly.
+        if ! python3 tests/cohere/scripts/zero_safetensor_param.py \
+            --src-dir "${MODEL_PATH}" \
+            --dst-dir "${BROKEN_MODEL_PATH}" \
+            --param-name "${BROKEN_PARAM}"; then
+            echo "ERROR: failed to build corrupted mirror for ${MODEL_NAME}"
+            return 1
+        fi
+
+        local think_start think_end
+        think_start=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import START_THINKING_TOKEN; print(START_THINKING_TOKEN)")
+        think_end=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN; print(END_THINKING_TOKEN)")
+        local reasoning_json="{\"reasoning_start_str\":\"${think_start}\",\"reasoning_end_str\":\"${think_end}\"}"
+        local parsers="--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4"
+
+        # Server boots from the CORRUPTED mirror so the in-memory model is
+        # broken. The test then calls reload_weights pointed at the real
+        # MODEL_PATH to fix the model in place.
+        # VLLM_SERVER_DEV_MODE enables /collective_rpc and /pause /resume endpoints.
+        # CUDA graphs stay enabled: the test calls /collective_rpc
+        # recapture_cudagraphs (Cohere fork addition on the GPU worker) between
+        # reload_weights and /resume, which drops stale graph entries and
+        # re-runs capture_model against the freshly reloaded weights.
+        # See docs/cohere/code_notes/reload-weights.md.
+        local server_cmd="VLLM_SERVER_DEV_MODE=1 vllm serve ${BROKEN_MODEL_PATH} \
+            --tensor-parallel-size ${TP_SIZE} \
+            --served-model-name ${MODEL_NAME} \
+            --disable-log-stats \
+            --mm-processor-cache-type shm \
+            ${parsers} \
+            --reasoning-config '${reasoning_json}'"
+
+        # Capture server output so failures (e.g. EngineCore crash during reload)
+        # are inspectable after the test finishes.
+        local server_log="${OUTPUT_DIR}/collective_rpc_reload_${MODEL_NAME}_server.log"
+        echo "Server command: ${server_cmd}"
+        echo "Server log:     ${server_log}"
+        bash -c "${server_cmd}" >"${server_log}" 2>&1 &
+        server_pid=$!
+
+        if wait_for_server; then
+            echo "vLLM server is up."
+        else
+            echo "vLLM server failed to start. Last 50 lines of server log:"
+            tail -n 50 "${server_log}" || true
+            kill -9 $server_pid 2>/dev/null
+            kill_gpu_processes
+            exit 1
+        fi
+
+        # Use infovqa (ANLS-only scoring) rather than ocrbench: ocrbench's
+        # `compute_soft_accuracy` returns 1.0 when either string contains
+        # the other, so an empty generation matches every label and the
+        # broken-model phase never fails. infovqa scores empty
+        # generations as 0 via Levenshtein distance.
+        RELOAD_MODEL=${MODEL_NAME} \
+        RELOAD_MODEL_PATH=${MODEL_PATH} \
+        RELOAD_SERVER_LOG=${server_log} \
+        RELOAD_TASK=infovqa \
+        RELOAD_DATA_DIR=tests/cohere/bee_eval_data \
+        PYTHONUNBUFFERED=1 \
+            pytest -v -s tests/cohere/test_collective_rpc_reload.py
+        local test_result=$?
+
+        kill -9 $server_pid 2>/dev/null
+        kill_gpu_processes
+        rm -rf "${BROKEN_MODEL_PATH}"
+
+        if [ $test_result -ne 0 ]; then
+            echo "=== FAILED: collective_rpc reload for ${MODEL_NAME} ==="
+            exit 1
+        fi
+        echo "=== PASSED: collective_rpc reload for ${MODEL_NAME} ==="
+    done
+}
+
+run_weight_reload() {
+    MODELS="${MODELS:-c5-3a30t_fp8}"
+    if [[ -z "${TP_SIZE:-}" || "${TP_SIZE}" == "0" ]]; then
+        TP_SIZE=1
+    fi
+    run_collective_rpc_reload
+}
+
 run_performance() {
     echo "Running performance benchmarks with TP_SIZE=${TP_SIZE} and MODELS=${MODELS}..."
     if [[ -z "${BENCHMARK_OUTPUT_LEN:-}" ]]; then
@@ -895,7 +1013,7 @@ run_c4_sanity_check() {
 run_tests() {
     if [[ -z "${TEST_GROUP:-}" ]]; then
         echo "Error: TEST_GROUP environment variable is not set"
-        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
+        echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check, weight_reload"
         exit 1
     fi
 
@@ -963,9 +1081,15 @@ run_tests() {
         template_tokenizer_parser_check)
             run_template_tokenizer_parser_check
             ;;
+        weight_reload)
+            run_weight_reload
+            ;;
+        collective_rpc_reload)
+            run_collective_rpc_reload
+            ;;
         *)
             echo "Unknown test group: $TEST_GROUP"
-            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check"
+            echo "Available test groups: cpu_check, fast_check, model_arch, model_arch_logits, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, template_tokenizer_parser_check, quantization, quantization_32bit_logits, GG, guided_generation, thinking_budget, bee_sample_tb_check, lm_eval, bee_eval, bee_samples, performance, speculative_decoding, vision, asr, c4_sanity_check, weight_reload, collective_rpc_reload"
             exit 1
             ;;
     esac
