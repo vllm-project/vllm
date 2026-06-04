@@ -25,7 +25,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
@@ -84,20 +83,6 @@ class CPUAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["CPUAttentionMetadataBuilder"]:
         return CPUAttentionMetadataBuilder
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return num_blocks, num_kv_heads, block_size, 2 * head_size
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -308,7 +293,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+                [num_blocks, 2*num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -337,13 +322,10 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 self.attn_type,
             )
 
-        # For decoder and cross-attention, use KV cache, size are
-        # [num_blocks, num_kv_heads, block_size, 2 * head_size]
-        # Make a view [num_blocks, num_kv_heads, block_size * 2, head_size]
-        # Then slice KV at dim 2
-        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
-        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
-        key_cache, value_cache = kv_cache.chunk(2, dim=2)
+        # K and V are stored as separate head groups; slice them out as
+        # contiguous per-head tensors (see CPUModelRunner._allocate_kv_caches).
+        key_cache = kv_cache[:, : self.num_kv_heads]
+        value_cache = kv_cache[:, self.num_kv_heads :]
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached

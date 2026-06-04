@@ -80,11 +80,11 @@ def dummy_attention(layer_name, _placeholder):
 
 def basic_cache(
     to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
-    kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
+    kv_cache: torch.Tensor,  # shape: [num_blocks, num_heads, block_size, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
-    block_size = kv_cache.shape[1]
-    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
+    block_size = kv_cache.shape[2]
+    kv_cache[slot_mapping // block_size, :, slot_mapping % block_size] = to_cache
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -119,18 +119,6 @@ class CacheOnlyAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["CacheOnlyAttentionImpl"]:
         return CacheOnlyAttentionImpl
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        # We set `num_kv_heads = num_hidden_layers` and `head_size = hidden_size`
-        # We also don't use a k/v (2) dim
-        return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def get_builder_cls() -> type["CacheOnlyAttentionMetadataBuilder"]:

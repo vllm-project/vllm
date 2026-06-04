@@ -192,7 +192,7 @@ class SimpleCPUOffloadScheduler:
         cpu_tensors = [
             KVCacheTensor(
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
+                shared_by=[list(slot) for slot in t.shared_by],
             )
             for t in gpu_config.kv_cache_tensors
         ]

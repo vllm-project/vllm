@@ -27,7 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -203,12 +203,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        if not self._connectors:
-            return False
-        return all(c.prefer_cross_layer_blocks for c in self._connectors)
-
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -234,13 +228,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 )
             )
         return ret
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # Register on all connectors
-        for c in self._connectors:
-            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -546,7 +533,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
-            str: the required KV cache layout. e.g. HND, or NHD.
+            str: the required KV cache layout. e.g. HNC, or NHC.
             None if the connector does not require a specific layout.
         """
         assert vllm_config.kv_transfer_config is not None

@@ -66,16 +66,6 @@ class XPUMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,  # assumed to be 1 for MLA
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
-
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
@@ -207,7 +197,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+            -1, 1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)

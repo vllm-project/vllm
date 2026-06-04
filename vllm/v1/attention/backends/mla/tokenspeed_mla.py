@@ -23,7 +23,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
 
@@ -122,10 +121,6 @@ class TokenspeedMLABackend(MLACommonBackend):
                     f"got ({qk_nope_head_dim}, {qk_rope_head_dim}, {v_head_dim})"
                 )
         return None
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
-        return "HND"
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -254,8 +249,7 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 q.device, self.num_heads, self.kv_lora_rank
             )
 
-        # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
-        # tokenspeed_mla_decode wants 3D — pass as-is (no unsqueeze, unlike trtllm).
+        # tokenspeed_mla_decode expects 3D (num_blocks, block_size, head_size).
         o = tokenspeed_mla_decode(
             query=q,
             kv_cache=kv_c_and_k_pe_cache,

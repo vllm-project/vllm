@@ -23,11 +23,7 @@ class AttentionLayerBase(ABC):
     impl: "AttentionImpl"
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        """Bind the allocated KV cache tensor to this layer.
-
-        The default stores the cache view as-is; subclasses (e.g. Mamba)
-        override this to unpack the raw buffer into per-state views.
-        """
+        """Bind a ``[B, H, N, C]`` cache view; override to reshape."""
         self.kv_cache = kv_cache
 
     @abstractmethod

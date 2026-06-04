@@ -423,11 +423,11 @@ def nvfp4_split_data_scale(
     """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
     The input is a 4D uint8 tensor whose last dimension is
-    ``full_dim = data_dim + scale_dim``.  The physical layout within each
-    side is ``[data | scale]``, both packed contiguously.
+    ``full_dim = data_dim + scale_dim``.  The physical layout within
+    each side is ``[data | scale]``, both packed contiguously.
 
-    The caller is responsible for slicing K and V from the combined cache
-    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
+    The caller is responsible for slicing K and V from the combined
+    cache first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
 
     Args:
         kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
@@ -445,9 +445,6 @@ def nvfp4_split_data_scale(
     data_per_kv = dim_1 * dim_2 * data_dim
     page_bytes = kv_side.stride(0)
 
-    # Derive inner strides from the kv_side strides, scaling by the
-    # ratio of the target dim to full_dim.  This preserves the physical
-    # layout (NHD vs HND) encoded in the input tensor's strides.
     s1 = kv_side.stride(1) * data_dim // full_dim
     s2 = kv_side.stride(2) * data_dim // full_dim
     data_shape = (num_pages, dim_1, dim_2, data_dim)
@@ -461,7 +458,10 @@ def nvfp4_split_data_scale(
     base = kv_side.storage_offset()
     data = torch.as_strided(kv_side, data_shape, data_strides, storage_offset=base)
     scale = torch.as_strided(
-        kv_side, scale_shape, scale_strides, storage_offset=base + data_per_kv
+        kv_side,
+        scale_shape,
+        scale_strides,
+        storage_offset=base + data_per_kv,
     ).view(torch.float8_e4m3fn)
 
     return data, scale
@@ -477,14 +477,14 @@ def create_kv_caches_with_random_flash(
     model_dtype: str | torch.dtype | None = None,
     seed: int | None = None,
     device: str | None = "cuda",
-    cache_layout: str | None = "NHD",
+    cache_layout: str | None = "LBNHC",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
     set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
-    assert cache_layout in ("NHD", "HND")
-    stride_order = (0, 1, 2, 3, 4) if cache_layout == "NHD" else (0, 1, 3, 2, 4)
+    assert cache_layout in ("LBNHC", "LBHNC")
+    stride_order = (0, 1, 2, 3, 4) if cache_layout == "LBNHC" else (0, 1, 3, 2, 4)
 
     kv_cache_allocation_shape = tuple(generic_kv_cache_shape[i] for i in stride_order)
     scale = head_size**-0.5

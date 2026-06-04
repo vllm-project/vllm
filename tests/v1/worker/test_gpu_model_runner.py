@@ -67,7 +67,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(size=tensor_size, shared_by=[["layer.0"]]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)
@@ -673,55 +673,6 @@ def test_update_states_pp_async_multi_request_keeps_rank_state_consistent(
         )
 
 
-def test_kv_cache_stride_order(monkeypatch, model_runner):
-    # This test checks if GPUModelRunner initializes correctly when an attention
-    # backend enforces a non-default KV cache stride order.
-    n_heads = model_runner.model_config.get_num_kv_heads(model_runner.parallel_config)
-    head_size = model_runner.model_config.get_head_size()
-
-    # Get the expected shape from the backend's get_kv_cache_shape method
-    # to ensure compatibility with different backends (triton vs flexattention)
-    attn_backend = None
-    for attn_group in model_runner._attn_group_iterator():
-        attn_backend = attn_group.backend
-        break
-
-    assert attn_backend is not None, "No attention backend found"
-    expected_kv_cache_shape = list(
-        attn_backend.get_kv_cache_shape(NUM_BLOCKS, BLOCK_SIZE, n_heads, head_size)
-    )
-
-    # TODO mla test
-    default_stride = tuple(range(4))
-    # Permutation that gets you back to expected kv shape
-    for test_stride in ((0, 2, 1, 3), (0, 1, 2, 3)):
-
-        def rnd_stride_order(
-            include_num_layers_dimension: bool = False, test_stride=test_stride
-        ):
-            assert not include_num_layers_dimension
-            return test_stride
-
-        # Patch the attention backend class and re-trigger the KV cache creation
-        for attn_group in model_runner._attn_group_iterator():
-            attn_backend = attn_group.backend
-            monkeypatch.setattr(
-                attn_backend, "get_kv_cache_stride_order", rnd_stride_order
-            )
-
-        model_runner.attn_groups = []
-        model_runner.kv_caches = []
-        model_runner.initialize_kv_cache(model_runner.kv_cache_config)
-
-        # Shape is unchanged, but layout may differ
-        kv_cache_shape = model_runner.kv_caches[0].shape
-        assert list(kv_cache_shape) == expected_kv_cache_shape
-        if default_stride == test_stride:
-            assert all(kv.is_contiguous() for kv in model_runner.kv_caches)
-        else:
-            assert all(not kv.is_contiguous() for kv in model_runner.kv_caches)
-
-
 def test_update_config(model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
@@ -971,21 +922,22 @@ def test_init_kv_cache_without_kv_sharing(default_vllm_config):
         vllm_config, [kv_cache_spec], [available_memory]
     )[0]
     assert kv_cache_config.num_blocks == num_expected_blocks
-    assert len(kv_cache_config.kv_cache_tensors) == 2
-    assert kv_cache_config.kv_cache_tensors[0].size == available_memory // 2
-    assert kv_cache_config.kv_cache_tensors[1].size == available_memory // 2
+    assert len(kv_cache_config.kv_cache_tensors) == 1
+    assert kv_cache_config.kv_cache_tensors[0].size == available_memory
 
     max_context_len = estimate_max_model_len(vllm_config, kv_cache_spec, 5 * GiB_bytes)
     # max context len with KV sharing should be 2x as large as without
     assert max_context_len == 1310720
 
     # important: override tensor size to prevent large mem alloc during test
-    # this will only allocate 2 block worth of memory (2 * 32kb)
+    # this will only allocate 1 block worth of memory per slot (2 slots * 32kb)
     kv_cache_config.num_blocks = 1
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        kv_cache_tensor.size = kv_cache_spec[
-            kv_cache_tensor.shared_by[0]
-        ].page_size_bytes
+        num_layer_slots = len(kv_cache_tensor.shared_by)
+        kv_cache_tensor.size = (
+            kv_cache_spec[kv_cache_tensor.shared_by[0][0]].page_size_bytes
+            * num_layer_slots
+        )
 
     runner.initialize_kv_cache(kv_cache_config)
 
@@ -1079,7 +1031,7 @@ def test_hybrid_attention_mamba_tensor_shapes():
     """
     The GPU model runner creates different views into the
     KVCacheTensors for the attention and mamba layers
-    (via _reshape_kv_cache_tensors function). This test verifies
+    (via _allocate_kv_caches). This test verifies
     that the views are compatible: writing a mamba block
     will not corrupt an attention block and vice versa
     """
@@ -1242,10 +1194,9 @@ def test_hybrid_attention_mamba_tensor_shapes():
             actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
-            # Packed layout: (num_kv_heads, block_size, 2*head_size). Every
-            # head in the block was filled with the same constant.
-            for head_idx in range(actual_kv.shape[0]):
-                assert torch.equal(actual_kv[head_idx], expected)
+            # Check K and V separately
+            assert torch.equal(actual_kv[0], expected)
+            assert torch.equal(actual_kv[1], expected)
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
@@ -1386,7 +1337,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(size=tensor_size, shared_by=[["layer.0"]]),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)

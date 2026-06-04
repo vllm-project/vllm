@@ -188,7 +188,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             device=q.device,
         )
 
-        # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)
         kv_c_cache = kv_c_and_k_pe_cache[..., : self.kv_lora_rank]
         PAGE_SIZE = kv_c_and_k_pe_cache.size(1)

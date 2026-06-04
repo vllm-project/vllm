@@ -126,6 +126,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
         use_cascade = common_prefix_len > 0
 
+        prefix_scheduler_metadata = None
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
                 [0, num_actual_tokens], dtype=torch.int32, device=self.device
@@ -236,19 +237,6 @@ class RocmAttentionBackend(AttentionBackend):
             AttentionType.ENCODER,
             AttentionType.ENCODER_ONLY,
         )
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -375,7 +363,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -494,10 +482,11 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        # Packed logical (B, H, N, 2*C) -> (B, N, H, 2*C); split K/V on the
-        # content dim (flash layout) for the fused rope+cache kernel.
         kv_cache_transposed = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        key_cache, value_cache = kv_cache_transposed.split(
+            self.head_size,
+            dim=-1,
+        )
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)

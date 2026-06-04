@@ -11,6 +11,7 @@ This module provides helpers for running standard attention backends
 import logging
 import types
 from contextlib import contextmanager
+from math import prod
 
 import numpy as np
 import torch
@@ -30,10 +31,13 @@ from vllm.config import (
 )
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
-    get_kv_cache_layout,
-    set_kv_cache_layout,
+    resolve_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    compute_layer_kv_cache_shape_bytes,
+    reshape_kv_cache,
+)
 
 # ============================================================================
 # Backend Configuration
@@ -324,52 +328,23 @@ def _create_input_tensors(
 def _create_kv_cache(
     config: BenchmarkConfig,
     max_num_blocks: int,
-    backend_class,
     device: torch.device,
     dtype: torch.dtype,
 ) -> list:
-    """Create KV cache tensors for all layers using the backend's methods.
-
-    Uses the backend's get_kv_cache_shape() and get_kv_cache_stride_order()
-    to create the cache with the correct shape and memory layout.
-    """
-    # Get the logical shape from the backend
-    cache_shape = backend_class.get_kv_cache_shape(
-        num_blocks=max_num_blocks,
+    """Create KV cache tensors for all layers using the standard allocator."""
+    spec = FullAttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
+        dtype=dtype,
     )
-
-    # Get the stride order for custom memory layout
-    try:
-        stride_order = backend_class.get_kv_cache_stride_order()
-        assert len(stride_order) == len(cache_shape)
-    except (AttributeError, NotImplementedError):
-        stride_order = tuple(range(len(cache_shape)))
-
-    # Permute shape to physical layout order
-    physical_shape = tuple(cache_shape[i] for i in stride_order)
-
-    # Compute inverse permutation to get back to logical view
-    inv_order = [stride_order.index(i) for i in range(len(stride_order))]
-
-    # Use fp8 dtype for cache when requested.
-    cache_dtype = dtype
-    if config.kv_cache_dtype == "fp8":
-        from vllm.platforms import current_platform
-
-        cache_dtype = current_platform.fp8_dtype()
-
-    cache_list = []
-    for _ in range(config.num_layers):
-        # Allocate in physical layout order (contiguous in memory)
-        cache = torch.zeros(*physical_shape, device=device, dtype=cache_dtype)
-        # Permute to logical view
-        cache = cache.permute(*inv_order)
-        cache_list.append(cache)
-
-    return cache_list
+    layout = resolve_kv_cache_layout()
+    total_bytes = (
+        prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
+        * config.num_layers
+    )
+    buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
+    return reshape_kv_cache(buf, spec, max_num_blocks, config.num_layers, layout)
 
 
 # ============================================================================
@@ -514,13 +489,6 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 backend_cfg, config, device, dtype
             )
 
-            # Set KV cache layout if the backend requires a specific one
-            # (e.g., FlashInfer requires HND on SM100/Blackwell for TRTLLM attention)
-            required_layout = backend_class.get_required_kv_cache_layout()
-            if required_layout is not None:
-                set_kv_cache_layout(required_layout)
-                get_kv_cache_layout.cache_clear()
-
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device
             )
@@ -549,9 +517,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 config, total_q, device, dtype, quantize_query=quantize_query
             )
 
-            cache_list = _create_kv_cache(
-                config, max_num_blocks, backend_class, device, dtype
-            )
+            cache_list = _create_kv_cache(config, max_num_blocks, device, dtype)
 
             times, mem_stats = _run_single_benchmark(
                 config,

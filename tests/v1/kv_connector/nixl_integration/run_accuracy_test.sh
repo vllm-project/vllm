@@ -4,7 +4,11 @@ set -xe
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
-CROSS_LAYERS_BLOCKS="False"
+ENABLE_HMA_VAR=""  # Default to empty (HMA disabled by default for kv connector)
+# Check for ENABLE_HMA_FLAG environment variable
+if [[ -n "${ENABLE_HMA_FLAG:-}" ]]; then
+  ENABLE_HMA_VAR="--no-disable-hybrid-kv-cache-manager"
+fi
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -17,12 +21,12 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --enable-cross-layers)
-      CROSS_LAYERS_BLOCKS="True"
+      export VLLM_KV_CACHE_LAYOUT="BLHNC"
       shift 1
       ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>] [--enable-cross-layers]"
       exit 1
       ;;
   esac
@@ -36,26 +40,19 @@ if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
   echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
 
-DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
-if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
+PREFILLER_KV_LAYOUT=${VLLM_KV_CACHE_LAYOUT:-"LBHNC"}
+DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"$PREFILLER_KV_LAYOUT"}
+if [[ "$DECODER_KV_LAYOUT" == "LBNHC" ]]; then
   KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
 else
   KV_CONFIG_HETERO_LAYOUT=''
 fi
 
-if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
-  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
-else
-  KV_EXTRA_CONFIG=''
-fi
-
-# Build the kv-transfer-config for P and D
+# Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"NixlConnector","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
 fi
 
 # Models to run
@@ -152,7 +149,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    VLLM_KV_CACHE_LAYOUT='$PREFILLER_KV_LAYOUT' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
