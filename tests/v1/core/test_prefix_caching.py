@@ -2049,6 +2049,83 @@ def test_null_parent_block_hash():
     assert blocks[num_full_blocks - 1].block_hash is not None
 
 
+def test_block_stored_event_offsets_for_null_blocks():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_null_event_offsets",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = [pool.null_block, *pool.get_new_blocks(1)]
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    ]
+    assert event.extra_keys == [None]
+    assert event.token_ids == list(req.all_token_ids)
+    assert event.block_offsets == [1]
+
+
+def test_block_stored_event_offsets_for_masked_blocks():
+    block_size = 4
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+    req = make_request(
+        "req_masked_event_offsets",
+        prompt_token_ids=list(range(2 * block_size)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+    blocks = pool.get_new_blocks(2)
+
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+        block_mask=[False, True],
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [
+        kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
+    ]
+    assert event.extra_keys == [None]
+    assert event.token_ids == list(req.all_token_ids)
+    assert event.block_offsets == [1]
+    assert blocks[0].block_hash is None
+    assert blocks[1].block_hash is not None
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events_with_lora(blocks_to_cache: int):
     """Test BlockStored events contain correct lora_id when using LoRA requests."""
