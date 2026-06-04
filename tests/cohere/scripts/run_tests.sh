@@ -390,7 +390,6 @@ run_guided_generation() {
 
     cd ../..
     BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
-    BLS_DRAFT_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_eagle_bf16
 
     cd tests/cohere
     export PYTHONPATH="${VLLM_WORKSPACE}:${PYTHONPATH}"
@@ -398,18 +397,6 @@ run_guided_generation() {
     # GG (JSON, tools, long context) with thinking tokens — non-SD BLS
     echo "Running GG merged (JSON + tools + long-context) non-SD with BLS model: $BLS_MODEL_DIR"
     VLLM_WORKER_MULTIPROC_METHOD=spawn python3 test_guided_generation.py --suite merged --model "$BLS_MODEL_DIR" --tensor_parallel_size 1 --mode non-speculative || errors=1
-
-    # GG melody — SD BLS
-    echo "Running test_guided_generation_melody SD with BLS model: $BLS_MODEL_DIR"
-    python3 test_guided_generation_melody.py --mode "speculative" --model="$BLS_MODEL_DIR" --tensor_parallel_size 1 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 || errors=1
-    echo "Running test_guided_generation_tools_melody SD with BLS model: $BLS_MODEL_DIR"
-    python3 test_guided_generation_tools_melody.py --mode "speculative" --model="$BLS_MODEL_DIR" --tensor_parallel_size 1 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 || errors=1
-
-    # GG + MM + Spec + Thinking budget sweep — SD BLS
-    echo "Running GG + MM + TB sweep SD with BLS model: $BLS_MODEL_DIR"
-    cd ../..
-    VLLM_WORKER_MULTIPROC_METHOD=spawn python3 tests/cohere/test_guided_generation_vision_spec_async.py --model $BLS_MODEL_DIR --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 --tensor-parallel-size 1 --mode "speculative" --thinking-budgets 500 1000 5000 || errors=1
-    cd tests/cohere
 
     exit $errors
 }
@@ -419,7 +406,6 @@ run_thinking_budget() {
     local errors=0
 
     BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
-    BLS_DRAFT_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_eagle_bf16
 
     cd cohere
     export PYTHONPATH="${VLLM_WORKSPACE}:${PYTHONPATH}"
@@ -427,10 +413,6 @@ run_thinking_budget() {
     # Thinking budget — non-SD BLS
     echo "Running thinking budget non-SD with BLS model: $BLS_MODEL_DIR"
     python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 1 --mode "non-speculative" || errors=1
-
-    # Thinking budget — SD BLS
-    echo "Running thinking budget SD with BLS model: $BLS_MODEL_DIR"
-    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 2 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 2 --mode "speculative" || errors=1
 
     exit $errors
 }
@@ -592,13 +574,29 @@ run_speculative_decoding() {
     echo "Speculative decoding fp32-logits compatibility test passed (AL off=$c3_mal_off, on=$c3_mal_on, tol=$c3_fp32_relative_tolerance)."
 
     # -----------------------------------------------------------------
-    # Request cancellation sweeps (BLS model)
+    # BLS speculative: guided generation, thinking budget, cancellation
     # -----------------------------------------------------------------
     BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
     BLS_DRAFT_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_eagle_bf16
 
     cd tests/cohere
     export PYTHONPATH="${VLLM_WORKSPACE}:${PYTHONPATH}"
+
+    # GG melody — SD BLS
+    echo "Running test_guided_generation_melody SD with BLS model: $BLS_MODEL_DIR"
+    python3 test_guided_generation_melody.py --mode "speculative" --model="$BLS_MODEL_DIR" --tensor_parallel_size 1 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 || errors=1
+    echo "Running test_guided_generation_tools_melody SD with BLS model: $BLS_MODEL_DIR"
+    python3 test_guided_generation_tools_melody.py --mode "speculative" --model="$BLS_MODEL_DIR" --tensor_parallel_size 1 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 || errors=1
+
+    # GG + MM + Spec + Thinking budget sweep — SD BLS
+    echo "Running GG + MM + TB sweep SD with BLS model: $BLS_MODEL_DIR"
+    cd ../..
+    VLLM_WORKER_MULTIPROC_METHOD=spawn python3 tests/cohere/test_guided_generation_vision_spec_async.py --model $BLS_MODEL_DIR --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 1 --tensor-parallel-size 1 --mode "speculative" --thinking-budgets 500 1000 5000 || errors=1
+    cd tests/cohere
+
+    # Thinking budget — SD BLS
+    echo "Running thinking budget SD with BLS model: $BLS_MODEL_DIR"
+    python3 test_thinking_budget.py --reasoning_mode "reasoning" --model $BLS_MODEL_DIR --tensor_parallel_size 2 --draft_model $BLS_DRAFT_MODEL_DIR --num_spec_tokens 3 --draft_tp 2 --mode "speculative" || errors=1
 
     # Request cancellation sweep [32, 64] — SD BLS
     echo "Running request cancellation sweep (32, 64) SD with BLS model: $BLS_MODEL_DIR"
