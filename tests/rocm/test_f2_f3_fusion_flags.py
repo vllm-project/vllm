@@ -157,22 +157,29 @@ class TestF3IsMethod:
 # Mirrors tests/kernels/core/test_rotary_embedding_mla_cache_fused.py
 
 
+# DeepSeek MLA model head counts:
+#   128 = V2 / V3 / R1 / Coder-V2  (all 671B/236B class)
+#    16 = V2-Lite  (16B class)
+_DEEPSEEK_NUM_Q_HEADS = [128, 16]
+
+
 @rocm_only
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
 @pytest.mark.parametrize("seq_len", [1, 8, 128])  # decode, small/large prefill
-@pytest.mark.parametrize("kv_lora_rank", [512])  # DeepSeek-R1/V2/V3
-@pytest.mark.parametrize("qk_rope_head_dim", [64])  # DeepSeek-R1/V2/V3
+@pytest.mark.parametrize("kv_lora_rank", [512])  # all DeepSeek MLA models
+@pytest.mark.parametrize("qk_rope_head_dim", [64])  # all DeepSeek MLA models
+@pytest.mark.parametrize("num_q_heads", _DEEPSEEK_NUM_Q_HEADS)  # V3/R1=128, V2-Lite=16
 @pytest.mark.parametrize("seed", [0])
 @torch.inference_mode()
-def test_f3_kv_cache_zero_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim, seed):
-    """TC-3.1: KV cache zero region (k_nope placeholder) must be exactly zero.
+def test_f3_kv_cache_zero_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim, num_q_heads, seed):
+    """TC-3.1: Rotated k_pe region written + kv_c data region written.
 
-    The F3 kernel writes:
-      kv_cache[:, :kv_lora_rank]  = 0.0   (zeros, k_nope placeholder)
-      kv_cache[:, kv_lora_rank:]  = kv_c  (compressed KV latent)
+    fused_qk_rope_concat_and_cache_mla layout:
+      kv_cache[..., :qk_rope_head_dim]         = RoPE-rotated k_pe (non-zero)
+      kv_cache[..., qk_rope_head_dim:...]       = kv_c (compressed KV latent)
 
     Validates decode (seq=1), small prefill (seq=8), large prefill (seq=128)
-    with DeepSeek-R1/V3 dimensions.
+    across DeepSeek model families (num_q_heads=128 for V3/R1, 16 for V2-Lite).
     """
     pytest.importorskip("aiter")
     try:
@@ -182,7 +189,6 @@ def test_f3_kv_cache_zero_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim,
 
     torch.manual_seed(seed)
     device = "cuda"
-    num_q_heads = 128  # DeepSeek-R1/V3 production value
     kv_c = torch.randn(seq_len, kv_lora_rank, dtype=dtype, device=device)
     k_pe = torch.randn(seq_len, qk_rope_head_dim, dtype=dtype, device=device)
     # q tensors required by the fused kernel
@@ -222,8 +228,9 @@ def test_f3_kv_cache_zero_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim,
 @pytest.mark.parametrize("seq_len", [1, 8, 128])
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
+@pytest.mark.parametrize("num_q_heads", _DEEPSEEK_NUM_Q_HEADS)  # V3/R1=128, V2-Lite=16
 @torch.inference_mode()
-def test_f3_kv_cache_data_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim):
+def test_f3_kv_cache_data_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim, num_q_heads):
     """TC-3.2: KV data region must match input kv_c exactly (no modification)."""
     pytest.importorskip("aiter")
     try:
@@ -232,7 +239,6 @@ def test_f3_kv_cache_data_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim)
         pytest.skip("aiter.fused_qk_rope_concat_and_cache_mla not found")
 
     device = "cuda"
-    num_q_heads = 128
     kv_c = torch.randn(seq_len, kv_lora_rank, dtype=dtype, device=device)
     k_pe = torch.randn(seq_len, qk_rope_head_dim, dtype=dtype, device=device)
     q_nope = torch.randn(seq_len, num_q_heads, kv_lora_rank, dtype=dtype, device=device)
@@ -267,7 +273,7 @@ def test_f3_kv_cache_data_region(dtype, seq_len, kv_lora_rank, qk_rope_head_dim)
 @pytest.mark.parametrize("seq_len", [1, 128])  # decode + prefill
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
-@pytest.mark.parametrize("num_q_heads", [128])
+@pytest.mark.parametrize("num_q_heads", _DEEPSEEK_NUM_Q_HEADS)  # V3/R1=128, V2-Lite=16
 @torch.inference_mode()
 def test_f3_rope_output_matches_unfused(dtype, seq_len, kv_lora_rank, qk_rope_head_dim, num_q_heads):
     """TC-3.3: RoPE-rotated Q from fused kernel must match vllm RotaryEmbedding.
@@ -314,8 +320,9 @@ def test_f3_rope_output_matches_unfused(dtype, seq_len, kv_lora_rank, qk_rope_he
 @pytest.mark.parametrize("seq_len", [1, 8, 128])
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
+@pytest.mark.parametrize("num_q_heads", _DEEPSEEK_NUM_Q_HEADS)  # V3/R1=128, V2-Lite=16
 @torch.inference_mode()
-def test_f3_non_sequential_slot_mapping(seq_len, kv_lora_rank, qk_rope_head_dim):
+def test_f3_non_sequential_slot_mapping(seq_len, kv_lora_rank, qk_rope_head_dim, num_q_heads):
     """TC-3.4: F3 handles non-sequential slot mappings (paged/chunked prefill).
 
     In production, tokens from different sequences are batched with
@@ -330,7 +337,6 @@ def test_f3_non_sequential_slot_mapping(seq_len, kv_lora_rank, qk_rope_head_dim)
     device = "cuda"
     num_slots = 4096
     dtype = torch.bfloat16
-    num_q_heads = 128
 
     kv_c = torch.randn(seq_len, kv_lora_rank, dtype=dtype, device=device)
     k_pe = torch.randn(seq_len, qk_rope_head_dim, dtype=dtype, device=device)
