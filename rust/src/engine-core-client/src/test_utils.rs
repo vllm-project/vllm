@@ -68,7 +68,19 @@ pub async fn setup_mock_engine_sockets(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
 ) -> MockEngineSockets {
-    connect_to_frontend(engine_handshake, engine_id, test_mock_engine_config())
+    setup_mock_engine_sockets_with_config(engine_handshake, engine_id, test_mock_engine_config())
+        .await
+}
+
+/// Like [`setup_mock_engine_sockets`], but advertises a custom
+/// [`MockEngineConfig`] during handshake (e.g. a different engine-ready
+/// response).
+async fn setup_mock_engine_sockets_with_config(
+    engine_handshake: String,
+    engine_id: impl Into<EngineId>,
+    config: MockEngineConfig,
+) -> MockEngineSockets {
+    connect_to_frontend(engine_handshake, engine_id, config)
         .await
         .expect("connect mock engine")
 }
@@ -107,16 +119,38 @@ pub async fn setup_mock_engine_with_init(
     (init, dealer, push)
 }
 
-/// Complete the engine-core handshake and connect mock input/output sockets.
+/// Spawn a mock engine task using a custom [`MockEngineConfig`], keeping its
+/// sockets alive until the returned shutdown sender is triggered.
 ///
-/// This returns the `DealerSocket` used to receive client requests and the
-/// `PushSocket` used to send engine outputs back to the client.
-pub async fn setup_mock_engine(
+/// Shared core behind the public spawn helpers; they differ only in the config
+/// they advertise during handshake.
+fn spawn_mock_engine_task_with_config<F>(
     engine_handshake: String,
     engine_id: impl Into<EngineId>,
-) -> (DealerSocket, PushSocket) {
-    let (_, dealer, push) = setup_mock_engine_with_init(engine_handshake, engine_id).await;
-    (dealer, push)
+    config: MockEngineConfig,
+    run: F,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>)
+where
+    F: for<'a> FnOnce(
+            &'a mut DealerSocket,
+            &'a mut PushSocket,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+        + Send
+        + 'static,
+{
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_id = engine_id.into();
+    let engine_task = tokio::spawn(async move {
+        let MockEngineSockets { data_sockets, .. } =
+            setup_mock_engine_sockets_with_config(engine_handshake, engine_id, config).await;
+        let MockEngineDataSockets {
+            mut dealer,
+            mut push,
+        } = data_sockets.into_iter().next().expect("mock engine data socket");
+        run(&mut dealer, &mut push).await;
+        let _ = shutdown_rx.await;
+    });
+    (shutdown_tx, engine_task)
 }
 
 /// Spawn a mock engine task and keep its sockets alive until the returned
@@ -138,12 +172,26 @@ where
         + Send
         + 'static,
 {
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let engine_id = engine_id.into();
-    let engine_task = tokio::spawn(async move {
-        let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
-        run(&mut dealer, &mut push).await;
-        let _ = shutdown_rx.await;
-    });
-    (shutdown_tx, engine_task)
+    spawn_mock_engine_task_with_config(engine_handshake, engine_id, test_mock_engine_config(), run)
+}
+
+/// Like [`spawn_mock_engine_task`], but lets the test choose whether the engine
+/// advertises OpenTelemetry tracing as enabled in its handshake ready response.
+pub fn spawn_mock_engine_task_with_tracing<F>(
+    engine_handshake: String,
+    engine_id: impl Into<EngineId>,
+    tracing_enabled: bool,
+    run: F,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>)
+where
+    F: for<'a> FnOnce(
+            &'a mut DealerSocket,
+            &'a mut PushSocket,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+        + Send
+        + 'static,
+{
+    let mut config = test_mock_engine_config();
+    config.ready_response.tracing_enabled = tracing_enabled;
+    spawn_mock_engine_task_with_config(engine_handshake, engine_id, config, run)
 }

@@ -32,7 +32,9 @@ use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
     decode_value,
 };
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_tracing,
+};
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
@@ -888,6 +890,7 @@ async fn test_app_with_backend_and_stream_output_specs(
 
 async fn test_app_with_backend_and_engine_request_check<F>(
     backend: Arc<dyn ChatTextBackend>,
+    tracing_enabled: bool,
     check_request: F,
 ) -> (axum::Router, MockEngineTask)
 where
@@ -897,9 +900,10 @@ where
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-openai-check-request".to_vec();
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_tracing(
         handshake_address.clone(),
         engine_id.clone(),
+        tracing_enabled,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -1647,6 +1651,7 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
         Arc::new(FakeChatBackend::with_multimodal_model_info(
             qwen_multimodal_model_info(),
         )),
+        false,
         |request| {
             let prompt_token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
             assert!(prompt_token_ids.contains(&151655));
@@ -1704,6 +1709,101 @@ async fn non_stream_chat_image_url_reaches_engine_mm_features() {
 
     assert_eq!(json["object"], "chat.completion");
     assert_eq!(json["choices"][0]["message"]["content"], "hi");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn trace_headers_forwarded_to_engine_when_tracing_enabled() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        true,
+        |request| {
+            let trace_headers = request.trace_headers.as_ref().expect("trace headers forwarded");
+            assert_eq!(
+                trace_headers.get("traceparent").map(String::as_str),
+                Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            );
+            assert_eq!(
+                trace_headers.get("tracestate").map(String::as_str),
+                Some("rojo=00f067aa0ba902b7"),
+            );
+            assert_eq!(trace_headers.len(), 2);
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "traceparent",
+                    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                )
+                .header("tracestate", "rojo=00f067aa0ba902b7")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hi"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn trace_headers_suppressed_when_tracing_disabled() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        false,
+        |request| {
+            assert!(
+                request.trace_headers.is_none(),
+                "trace headers must not be forwarded when tracing is disabled",
+            );
+        },
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header(
+                    "traceparent",
+                    "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                )
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hi"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
