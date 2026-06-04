@@ -95,11 +95,7 @@ class NixlConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
-        num_ssm_regions = (
-            len(self.block_len_per_layer) * self._ssm_regions_per_layer
-            if self._has_mamba
-            else 0
-        )
+        num_ssm_regions = len(self.block_len_per_layer) * 4 if self._has_mamba else 0
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -242,10 +238,10 @@ class NixlConnectorWorker:
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
 
         # ---- Model state (derived from model config) ----
-        mamba_ssm_size: tuple[int, ...] = ()
+        mamba_ssm_size = (0, 0)
         # Conv state sub-projection decomposition (None when no Mamba).
         # The 3-read transfer requires DS (dim, state_len) conv layout so
-        # that sub-projections are contiguous in memory.
+        # that x/B/C sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
@@ -258,7 +254,7 @@ class NixlConnectorWorker:
             )
 
             assert is_conv_state_dim_first(), (
-                "Mamba/SSM transfer requires DS conv state layout. "
+                "3-read Mamba conv transfer requires DS conv state layout. "
                 "Set VLLM_SSM_CONV_STATE_LAYOUT=DS"
             )
             mamba_spec = next(
@@ -270,16 +266,7 @@ class NixlConnectorWorker:
                 mamba_spec,
                 vllm_config.parallel_config.tensor_parallel_size,
             )
-            mamba_ssm_size = self._conv_decomp.state_sizes
-
-        # Number of NIXL descriptor regions per SSM layer per block.
-        # KDA: 4 (conv_q, conv_k, conv_v, recurrent)
-        # Mamba2/GDN: 3 conv sub-projections + 1 SSM temporal = 4
-        self._ssm_regions_per_layer: int = 0
-        if self._has_mamba and self._conv_decomp is not None:
-            # MambaConvSplitInfo: 3 conv sub-projections + 1 SSM temporal = 4
-            # (applies to Mamba2, GDN, and KDA)
-            self._ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+            mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
 
         # Agent.
@@ -1029,31 +1016,31 @@ class NixlConnectorWorker:
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
-        """Build desc regions per SSM/Mamba layer for local descriptor
-        registration."""
+        """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
+        blocks, enabling the 3-read transfer with DS conv layout."""
         assert block_size_ratio == 1, (
-            "Mamba/SSM transfer with block_size_ratio != 1 is not tested. "
+            "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
         )
         assert self._conv_decomp is not None
-        offsets = self._conv_decomp.local_conv_offsets
+        conv_offsets = self._conv_decomp.local_conv_offsets
+        conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
         physical_per_logical = self._physical_blocks_per_logical_kv_block
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
+            # Jump one page_size, but ssm page_size may be bigger when kernel
+            # locks block size to a specific value (physical_per_logical scale).
             page_stride = (
                 self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
             )
-            for off, sz in offsets:
+            for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append(
                         (base_addr + blk * page_stride + off, sz, self.device_id)
                     )
-            # Append the SSM temporal state (4th region).
-            # For Mamba2/GDN: SSM temporal (num_heads, head_dim).
-            # For KDA: recurrent state.
-            conv_size, ssm_size = self._mamba_ssm_size
+            # SSM temporal state follows the conv state.
             for blk in range(num_blocks):
                 result.append(
                     (
@@ -1070,11 +1057,13 @@ class NixlConnectorWorker:
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
     ) -> list[tuple[int, int, int]]:
-        """Build remote desc regions per SSM/Mamba layer for hetero-TP."""
+        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
+        for the 3-read transfer.  For hetero-TP, each D rank reads only its
+        sub-projection slice from the P rank."""
         assert self._conv_decomp is not None
-
-        # -- All mamba types: 3 conv sub-projections + SSM temporal --
         effective_ratio = max(tp_ratio, 1)
+        # Mamba conv state is always TP-sharded, even when attention KV
+        # is replicated (num_kv_heads < tp_size).
         local_offset = self.tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
@@ -1089,11 +1078,14 @@ class NixlConnectorWorker:
         device_id = nixl_agent_meta.device_id
 
         result: list[tuple[int, int, int]] = []
+        # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
+        # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append((base_addr + blk * page_stride + off, sz, device_id))
+            # SSM temporal state is also TP-sharded on the heads dimension.
             for blk in range(num_blocks):
                 ssm_addr = (
                     base_addr
