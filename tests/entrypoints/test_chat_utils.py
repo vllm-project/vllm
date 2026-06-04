@@ -13,10 +13,12 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
+    ConversationMessage,
+    _postprocess_messages,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.multimodal import MultiModalDataDict, MultiModalUUIDDict
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
     encode_image_url,
@@ -1458,6 +1460,38 @@ def test_parse_chat_messages_context_text_format(
     assert mm_uuids is None
 
 
+def test_parse_chat_messages_openai_format_image_url(
+    phi3v_model_config,
+    image_url,
+):
+    content = [
+        {"type": "image_url", "image_url": {"url": image_url}},
+        {"type": "text", "text": "What's in the image?"},
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "What's in the image?"},
+            ],
+        }
+    ]
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
     image_url,
@@ -2682,3 +2716,29 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+def test_postprocess_messages_null_arguments_string():
+    """arguments="null" must not reach the chat template as Python None.
+
+    json.loads("null") returns None, which causes Jinja2 templates that call
+    tc.arguments.items() to raise 'None' has no attribute 'items'.
+    The function should coerce it to {} instead.
+    """
+    messages: list[ConversationMessage] = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": "null"},
+                }
+            ],
+        }
+    ]
+    _postprocess_messages(messages)
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["arguments"] == {}

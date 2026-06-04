@@ -14,6 +14,7 @@ import torch.distributed
 from torch.distributed import ProcessGroup
 from typing_extensions import ParamSpec
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -29,6 +30,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -37,20 +39,22 @@ from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_dummy_moe_config, make_test_weights
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),
@@ -80,14 +84,6 @@ def with_dp_metadata(M: int, world_size: int):
         num_tokens_across_dp=num_tokens_across_dp,
     ):
         yield
-
-
-def next_power_of_2(x):
-    import math
-
-    if x == 0:
-        return 1
-    return 2 ** math.ceil(math.log2(x))
 
 
 def make_block_quant_fp8_weights(
@@ -134,10 +130,8 @@ class TestTensors:
 
         fp8_info = torch.finfo(torch.float8_e4m3fn)
         fp8_max, fp8_min = fp8_info.max, fp8_info.min
-
-        rank_tokens = (
-            torch.randn((m, k), device=torch.cuda.current_device(), dtype=dtype) / 10.0
-        )
+        device = torch.accelerator.current_device_index()
+        rank_tokens = torch.randn((m, k), device=device, dtype=dtype) / 10.0
         rank_tokens = rank_tokens.clamp(min=fp8_min, max=fp8_max)
         rank_token_scales = None
 
@@ -145,11 +139,13 @@ class TestTensors:
             low=0,
             high=config.num_experts,
             size=(m, topk),
-            device=torch.cuda.current_device(),
+            device=device,
         ).to(dtype=torch.int64)
 
         topk_weights = torch.randn(
-            topk_ids.shape, dtype=torch.float32, device=torch.cuda.current_device()
+            topk_ids.shape,
+            dtype=torch.float32,
+            device=device,
         )
 
         return TestTensors(
@@ -198,7 +194,6 @@ def make_ll_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -231,7 +226,6 @@ def make_ht_modular_kernel(
     return FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
 
 
@@ -296,7 +290,8 @@ def deepep_deepgemm_moe_impl(
         s = pgi.rank * num_local_experts
         e = s + num_local_experts
         expert_map[s:e] = torch.tensor(list(range(num_local_experts)))
-        return expert_map.to(device=torch.cuda.current_device(), dtype=torch.int32)
+        device = torch.accelerator.current_device_index()
+        return expert_map.to(device=device, dtype=torch.int32)
 
     quant_config = fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
@@ -357,7 +352,6 @@ def triton_impl(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         quant_config=quant_config,
     )
 
@@ -376,12 +370,19 @@ def _test_deepep_deepgemm_moe(
 
     set_random_seed(pgi.rank)
 
-    w1 = w1.to(device=torch.cuda.current_device())
-    w2 = w2.to(device=torch.cuda.current_device())
-    w1_scale = w1_scale.to(device=torch.cuda.current_device())
-    w2_scale = w2_scale.to(device=torch.cuda.current_device())
+    device = torch.accelerator.current_device_index()
+    w1 = w1.to(device=device)
+    w2 = w2.to(device=device)
+    w1_scale = w1_scale.to(device=device)
+    w2_scale = w2_scale.to(device=device)
 
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        pg = torch.distributed.split_group(
+            split_ranks=[list(range(pgi.world_size))],
+            group_desc="deepep_deepgemm_test",
+        )
+    else:
+        pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, pgi.rank)
     block_shape = [w1.size(1) // w1_scale.size(1), w1.size(2) // w1_scale.size(2)]
 

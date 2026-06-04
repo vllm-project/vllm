@@ -17,9 +17,9 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    validate_json_request,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -62,7 +62,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
         error = base_server.create_error_response(
-            message="The model does not support Messages API"
+            NotImplementedError("The model does not support Messages API")
         )
         return translate_error_response(error)
 
@@ -108,7 +108,7 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
         error = base_server.create_error_response(
-            message="The model does not support Messages API"
+            NotImplementedError("The model does not support Messages API")
         )
         return translate_error_response(error)
 

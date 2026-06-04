@@ -10,6 +10,7 @@ build:
   jobs:
     post_checkout:
       - git fetch origin main --unshallow --no-tags --filter=blob:none || true
+      - bash docs/pre_run_check.sh
     pre_create_environment:
       - pip install uv
     create_environment:

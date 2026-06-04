@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from typing import Any, Final
 
-from vllm import PoolingRequestOutput, PromptType
-from vllm.config import ModelConfig
+from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateConfig,
@@ -14,25 +13,39 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.inputs import ProcessorInputs, SingletonPrompt
-from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.inputs import TokPrompt
+from vllm.inputs import EngineInput, SingletonPrompt
+from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
+from ..scoring.typing import ScoringData
+from ..typing import (
+    OfflineInputsContext,
+    OfflineOutputsContext,
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
+    PoolingServeContext,
+)
+
 
 class PoolingIOProcessor:
+    """Processor for handling preprocessing & postprocessing ops for pooling requests.
+
+    This class manages both online (serving) and offline (batch) processing of pooling
+    requests, handling chat and completion formats.
+    """
+
+    name: str
+
     def __init__(
         self,
-        model_config: ModelConfig,
+        vllm_config: VllmConfig,
         renderer: BaseRenderer,
         chat_template_config: ChatTemplateConfig,
     ):
-        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-
-        self.model_config = model_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.renderer = renderer
 
         self.chat_template = chat_template_config.chat_template
@@ -43,37 +56,74 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-    def pre_process_online(self, *args, **kwargs):
-        raise NotImplementedError
-
-    async def pre_process_online_async(self, *args, **kwargs):
-        return self.pre_process_online(*args, **kwargs)
-
-    def pre_process_offline(self, *args, **kwargs):
-        raise NotImplementedError
-
-    async def pre_process_offline_async(self, *args, **kwargs):
-        return self.pre_process_offline(*args, **kwargs)
-
-    def post_process(
-        self, outputs: list[PoolingRequestOutput]
-    ) -> list[PoolingRequestOutput]:
-        return outputs
-
-    async def post_process_async(
-        self, outputs: list[PoolingRequestOutput]
-    ) -> list[PoolingRequestOutput]:
-        return self.post_process(outputs)
+    #######################################
+    # online APIs
 
     def create_pooling_params(self, request):
         return request.to_pooling_params()
 
-    def _preprocess_completion_online(
+    def pre_process_online(self, ctx: PoolingServeContext):
+        request = ctx.request
+
+        if isinstance(request, PoolingChatLikeRequest):
+            self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            _, engine_inputs = self._preprocess_chat_online(
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=None,
+            )
+        elif isinstance(request, PoolingCompletionLikeRequest):
+            engine_inputs = self._preprocess_cmpl_online(
+                request,
+                prompt_input=request.input,
+                prompt_embeds=None,
+            )
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        ctx.engine_inputs = engine_inputs
+
+    def post_process_online(
+        self,
+        ctx: PoolingServeContext,
+    ):
+        pass
+
+    #######################################
+    # offline APIs
+
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        assert not isinstance(ctx.prompts, ScoringData) and not (
+            isinstance(ctx.prompts, dict) and "data" in ctx.prompts
+        )
+
+        prompts_seq = prompt_to_seq(ctx.prompts)
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
+        return self._preprocess_cmpl_offline(prompts=prompts_seq, tok_params=tok_params)
+
+    def post_process_offline(
+        self,
+        ctx: OfflineOutputsContext,
+    ) -> list[PoolingRequestOutput]:
+        return ctx.outputs
+
+    #######################################
+    # helpers
+
+    def _preprocess_cmpl_online(
         self,
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokPrompt]:
+    ) -> list[EngineInput]:
         renderer = self.renderer
         model_config = self.model_config
 
@@ -111,8 +161,8 @@ class PoolingIOProcessor:
         default_template_content_format: ChatTemplateContentFormatOption,
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokPrompt]]:
+        tool_parser: type[ToolParser] | None = None,
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
@@ -123,12 +173,17 @@ class PoolingIOProcessor:
             ),
         )
 
+        mm_config = self.model_config.multimodal_config
+
         tok_params = request.build_tok_params(self.model_config)
         chat_params = request.build_chat_params(
             default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        ).with_defaults(
+            default_template_kwargs,
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
 
-        (conversation,), (engine_prompt,) = renderer.render_chat(
+        (conversation,), (engine_input,) = renderer.render_chat(
             [messages],
             chat_params,
             tok_params,
@@ -139,33 +194,26 @@ class PoolingIOProcessor:
             },
         )
 
-        return conversation, [engine_prompt]
+        return conversation, [engine_input]
 
-    def _preprocess_completion_offline(
+    def _preprocess_cmpl_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[ProcessorInputs]:
-        renderer = self.renderer
-        model_config = self.model_config
-
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
         prompts = prompt_to_seq(prompts)
-
         parsed_prompts = [
             (
                 prompt
                 if isinstance(prompt, bytes)
-                else parse_model_prompt(model_config, prompt)
+                else parse_model_prompt(self.model_config, prompt)
             )
             for prompt in prompts
         ]
-        tok_params = renderer.default_cmpl_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
 
-        return renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
+        return self.renderer.render_cmpl(
+            parsed_prompts, tok_params, prompt_extras=prompt_extras
         )
 
     def _validate_chat_template(
@@ -187,3 +235,19 @@ class PoolingIOProcessor:
                 "Refused request with untrusted chat template."
             )
         return None
+
+    def _params_to_seq(
+        self,
+        params: PoolingParams | Sequence[PoolingParams],
+        num_requests: int,
+    ) -> Sequence[PoolingParams]:
+        if isinstance(params, Sequence):
+            if len(params) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and params ({len(params)}) must be the same."
+                )
+
+            return params
+
+        return [params] * num_requests

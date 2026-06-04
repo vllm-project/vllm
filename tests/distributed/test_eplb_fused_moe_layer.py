@@ -9,9 +9,11 @@ import pytest
 import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_eplb_group,
     get_tp_group,
 )
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -213,12 +215,20 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend="torch_nccl",
+            expert_weights=rank_expert_weights,
+            expert_buffer=expert_buffer,
+        )
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
+            communicator,
         )
 
         num_local_experts = test_config.num_local_experts
@@ -257,7 +267,7 @@ def test_eplb_fml(
     intermediate_size: int,
     column_major_scales: bool,
 ):
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     num_local_experts = num_experts // world_size

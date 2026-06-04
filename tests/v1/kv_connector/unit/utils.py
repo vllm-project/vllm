@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
@@ -31,11 +32,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
@@ -97,6 +101,10 @@ def create_vllm_config(
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
+    kv_connector: str = "NixlConnector",
+    kv_connector_module_path: str | None = None,
+    kv_role: str = "kv_both",
+    disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -112,18 +120,19 @@ def create_vllm_config(
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype=cache_dtype,
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
+        kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
         kv_load_failure_policy=kv_load_failure_policy,
@@ -142,26 +151,32 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+    kv_cache_config: KVCacheConfig | None = None,
+) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
-    )
+    if kv_cache_config is None:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                )
+            ],
+        )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+
+    scheduler_cls = (
+        AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler
+    )
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
@@ -210,6 +225,7 @@ def create_request(
             remote_block_ids=list(range(num_remote_blocks)),
             remote_host="my-host",
             remote_port=1234,
+            tp_size=1,
         )
 
     max_tokens = 1 if do_remote_decode else max_tokens
@@ -239,6 +255,7 @@ def create_model_runner_output(
     invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
+    kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -256,11 +273,13 @@ def create_model_runner_output(
             finished_sending is None
             and finished_recving is None
             and invalid_block_ids is None
+            and kv_connector_worker_meta is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
+            kv_connector_worker_meta=kv_connector_worker_meta,
         )
     )
 
@@ -277,9 +296,14 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    def __init__(self, config: VllmConfig, role, kv_cache_config):
+    def __init__(
+        self,
+        config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = ExampleConnector(config, role)
+        self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -352,7 +376,7 @@ class MockKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         extra_config = self._kv_transfer_config.kv_connector_extra_config
@@ -412,3 +436,90 @@ KVConnectorFactory.register_connector(
 KVConnectorFactory.register_connector(
     "MockKVConnector", __name__, MockKVConnector.__name__
 )
+
+
+def make_kv_cache_config(
+    block_size: int,
+    swa_enabled: bool = False,
+    mamba_enabled: bool = False,
+    sw_size: int = 128,
+    num_blocks: int = 100,
+) -> KVCacheConfig:
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer0", "layer2"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=16,
+                dtype=torch.float16,
+            ),
+        )
+    ]
+    if swa_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["layer1", "layer3"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=4,
+                    head_size=16,
+                    dtype=torch.float16,
+                    sliding_window=sw_size,
+                ),
+            )
+        )
+    if mamba_enabled:
+        kv_cache_groups.append(
+            KVCacheGroupSpec(
+                ["mamba0", "mamba1"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=((16,), (16,)),
+                    dtypes=(torch.float16,),
+                ),
+            )
+        )
+    return KVCacheConfig(
+        num_blocks=num_blocks, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
+    )
+
+
+def make_nixl_scheduler(
+    has_mamba: bool = False,
+    is_hma_required: bool = False,
+    heartbeat: bool = False,
+    kv_lease_duration: int = 30,
+):
+    """Create a NixlConnectorScheduler via __new__ (skipping __init__).
+
+    Only sets the flags needed by the tests.  When *heartbeat=True* the
+    scheduler-side heartbeat bookkeeping fields are also initialised.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
+        NixlConnectorScheduler,
+    )
+
+    sched = object.__new__(NixlConnectorScheduler)
+    sched._has_mamba = has_mamba
+    sched._is_hma_required = is_hma_required
+
+    if heartbeat:
+        sched._heartbeat_by_engine = {}
+        sched._heartbeat_req_engine = {}
+        sched._last_heartbeat_time = 0.0
+        sched._kv_lease_duration = kv_lease_duration
+        sched._heartbeat_interval = kv_lease_duration // 6
+        # Fields touched by build_connector_meta / request_finished:
+        sched._reqs_need_recv = {}
+        sched._reqs_need_send = {}
+        sched._reqs_in_batch = set()
+        sched._reqs_not_processed = set()
+        sched._reqs_need_save = {}
+        sched.use_host_buffer = False
+        sched.engine_id = "test-engine"
+        sched.side_channel_host = "localhost"
+        sched.side_channel_port = 5555
+        sched.blocks_per_sw = []
+        sched.is_bidirectional_kv_xfer_enabled = False
+    return sched

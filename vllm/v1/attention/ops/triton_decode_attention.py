@@ -31,6 +31,7 @@ It supports page size >= 1.
 
 import logging
 
+import torch
 from packaging import version
 
 from vllm.platforms import current_platform
@@ -74,6 +75,8 @@ def _fwd_kernel_stage1(
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
+    k_scale,
+    v_scale,
     kv_group_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_DV: tl.constexpr,
@@ -109,6 +112,8 @@ def _fwd_kernel_stage1(
     acc = tl.zeros([BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
+        ks = tl.load(k_scale)
+        vs = tl.load(v_scale)
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
@@ -129,6 +134,8 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
             )
+            if k.dtype.is_fp8():
+                k = (k.to(tl.float32) * ks).to(q.dtype)
             qk = tl.sum(q[None, :] * k, 1)
             qk *= sm_scale
 
@@ -147,6 +154,8 @@ def _fwd_kernel_stage1(
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
                 other=0.0,
             )
+            if v.dtype.is_fp8():
+                v = (v.to(tl.float32) * vs).to(q.dtype)
 
             n_e_max = tl.maximum(tl.max(qk, 0), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -194,6 +203,8 @@ def _decode_att_m_fwd(
     sm_scale,
     page_size,
     logit_cap,
+    k_scale,
+    v_scale,
 ):
     BLOCK = 64 if not is_hip_ else 8
 
@@ -231,6 +242,8 @@ def _decode_att_m_fwd(
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),
+        k_scale,
+        v_scale,
         kv_group_num=kv_group_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
         BLOCK_DV=BLOCK_DV,
@@ -264,6 +277,8 @@ def _fwd_grouped_kernel_stage1(
     stride_mid_ob,
     stride_mid_oh,
     stride_mid_os,
+    k_scale,
+    v_scale,
     kv_group_num: tl.constexpr,
     q_head_num: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
@@ -276,6 +291,7 @@ def _fwd_grouped_kernel_stage1(
     logit_cap: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    IS_MLA: tl.constexpr = False,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -295,7 +311,12 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_req_idx = cur_batch
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
+    q = tl.load(
+        Q + offs_q,
+        mask=(mask_h[:, None]) & (mask_d[None, :]),
+        other=0.0,
+        cache_modifier=".ca",
+    )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -304,7 +325,10 @@ def _fwd_grouped_kernel_stage1(
             cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
         )
         qpe = tl.load(
-            Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
+            Q + off_qpe,
+            mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+            other=0.0,
+            cache_modifier=".ca",
         )
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
@@ -316,7 +340,14 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
+        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+        base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
+        if BLOCK_DPE > 0:
+            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
+
+        ks = tl.load(k_scale)
+        vs = tl.load(v_scale)
+        for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
                 Req_to_tokens
@@ -324,30 +355,32 @@ def _fwd_grouped_kernel_stage1(
                 + offs_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
+                cache_modifier=".ca",
             )
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
-            offs_buf_k = (
-                kv_loc[None, :] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_d[:, None]
-            )
+
+            # explicitly facilitate overlapping load/compute
+            offs_buf_k = kv_loc[None, :] * stride_buf_kbs + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
+                cache_modifier=".cg",
             )
+
+            if k.dtype.is_fp8():
+                k = (k.to(tl.float32) * ks).to(q.dtype)
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = (
-                    kv_loc[None, :] * stride_buf_kbs
-                    + cur_kv_head * stride_buf_kh
-                    + offs_dpe[:, None]
-                )
+                offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
                     mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
+                    cache_modifier=".cg",
                 )
+                if kpe.dtype.is_fp8():
+                    kpe = (kpe.to(tl.float32) * ks).to(qpe.dtype)
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale
 
@@ -358,16 +391,20 @@ def _fwd_grouped_kernel_stage1(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
             )
 
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
-            v = tl.load(
-                V_Buffer + offs_buf_v,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
-                other=0.0,
-            )
+            if not IS_MLA:
+                offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+                v = tl.load(
+                    V_Buffer + offs_buf_v,
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+                    other=0.0,
+                )
+                if v.dtype.is_fp8():
+                    v = (v.to(tl.float32) * vs).to(q.dtype)
+            else:
+                # MLA uses a single c_kv.
+                # loading the same c_kv to interpret it as v is not necessary.
+                # transpose the existing c_kv (aka k) for the dot product.
+                v = tl.trans(k)
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -416,25 +453,34 @@ def _decode_grouped_att_m_fwd(
     sm_scale,
     page_size,
     logit_cap,
+    k_scale,
+    v_scale,
+    is_mla=False,
 ):
-    BLOCK = 32
+    # with is_mla there is only a single c_kv in smem.
+    # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
 
-    # [TODO] work around shmem limit on MI3xx
-    if is_hip_ and Lk >= 576:
-        BLOCK = 16
-
-    if Lk == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lk == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
+    # Align tile dimensions with latent rank for MLA to avoid shape mismatch.
+    if is_mla:
+        if not is_hip_ and Lk == 576:
+            BLOCK_DMODEL = 512
+            BLOCK_DPE = 64
+        elif not is_hip_ and Lk == 288:
+            BLOCK_DMODEL = 256
+            BLOCK_DPE = 32
+        else:
+            BLOCK_DMODEL = triton.next_power_of_2(Lv)
+            BLOCK_DPE = triton.next_power_of_2(Lk - Lv) if Lk > Lv else 0
     else:
         BLOCK_DMODEL = triton.next_power_of_2(Lk)
         BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
+
+    BLOCK = 32
+    if is_hip_:
+        BLOCK = 16
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
@@ -453,6 +499,11 @@ def _decode_grouped_att_m_fwd(
         # https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html#mi300x-triton-kernel-performance-optimization
         # https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
+        num_stages = 1
+    elif not is_hip_ and BLOCK_DMODEL >= 1024:
+        # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
+        # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
+        # exceeds 101376 bytes limit
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
@@ -473,6 +524,8 @@ def _decode_grouped_att_m_fwd(
         att_out.stride(0),
         att_out.stride(1),
         att_out.stride(2),
+        k_scale,
+        v_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -487,6 +540,7 @@ def _decode_grouped_att_m_fwd(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        IS_MLA=is_mla,
         **extra_kargs,
     )
 
@@ -506,6 +560,7 @@ def _fwd_kernel_stage2(
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
+    OUTPUT_FP16: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -542,9 +597,12 @@ def _fwd_kernel_stage2(
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
 
+    result = acc / e_sum
+    if OUTPUT_FP16:
+        result = result.to(tl.float16)
     tl.store(
         o + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
-        acc / e_sum,
+        result,
         mask=mask_d,
     )
     lse_val = e_max + tl.log(e_sum)
@@ -609,6 +667,8 @@ def decode_attention_fwd_normal(
     sm_scale,
     page_size,
     logit_cap=0.0,
+    k_scale=None,
+    v_scale=None,
 ):
     _decode_att_m_fwd(
         q,
@@ -621,6 +681,8 @@ def decode_attention_fwd_normal(
         sm_scale,
         page_size,
         logit_cap,
+        k_scale,
+        v_scale,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -640,6 +702,9 @@ def decode_attention_fwd_grouped(
     sm_scale,
     page_size,
     logit_cap=0.0,
+    k_scale=None,
+    v_scale=None,
+    is_mla=False,
 ):
     _decode_grouped_att_m_fwd(
         q,
@@ -652,6 +717,9 @@ def decode_attention_fwd_grouped(
         sm_scale,
         page_size,
         logit_cap,
+        k_scale,
+        v_scale,
+        is_mla=is_mla,
     )
     _decode_softmax_reducev_fwd(
         attn_logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
@@ -671,8 +739,17 @@ def decode_attention_fwd(
     sm_scale,
     page_size=1,
     logit_cap=0.0,
+    k_scale=None,
+    v_scale=None,
+    is_mla=False,
 ):
     assert num_kv_splits == attn_logits.shape[2]
+
+    if k_scale is None:
+        k_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+    if v_scale is None:
+        v_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+
     kv_group_num = q.shape[1] // v_buffer.shape[-2]
 
     if kv_group_num == 1:
@@ -690,6 +767,8 @@ def decode_attention_fwd(
             sm_scale,
             page_size,
             logit_cap,
+            k_scale,
+            v_scale,
         )
     else:
         # GQA/MQA/MLA
@@ -706,4 +785,7 @@ def decode_attention_fwd(
             sm_scale,
             page_size,
             logit_cap,
+            k_scale,
+            v_scale,
+            is_mla=is_mla,
         )

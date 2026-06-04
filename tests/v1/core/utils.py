@@ -24,6 +24,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -47,7 +48,7 @@ def create_scheduler(
     enable_prefix_caching: bool = False,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
-    use_kv_connector: None | bool | MockKVConfig = None,
+    use_kv_connector: None | bool | str | MockKVConfig = None,
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: int | None = None,
@@ -94,7 +95,6 @@ def create_scheduler(
     cache_config = CacheConfig(
         block_size=block_size,
         gpu_memory_utilization=0.9,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )
@@ -107,6 +107,11 @@ def create_scheduler(
                 "matched_tokens": use_kv_connector.matched_tokens,
                 "is_async": use_kv_connector.is_async,
             },
+        )
+    elif isinstance(use_kv_connector, str):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector=use_kv_connector,
+            kv_role="kv_both",
         )
     elif use_kv_connector:
         kv_transfer_config = KVTransferConfig(
@@ -156,6 +161,7 @@ def create_scheduler(
         ],
     )
     cache_config.num_gpu_blocks = num_blocks
+    register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     return scheduler_cls(
         vllm_config=vllm_config,

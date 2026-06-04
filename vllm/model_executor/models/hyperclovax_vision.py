@@ -18,11 +18,10 @@ from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -31,7 +30,6 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
 )
@@ -325,7 +323,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
+        fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
             image_sizes_images=MultiModalFieldConfig.batched("image"),
             vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
@@ -333,27 +331,7 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
             vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
         )
 
-
-def _build_hcxvision_hf_info(
-    ctx: InputProcessingContext,
-) -> HCXVisionProcessingInfo:
-    return HCXVisionProcessingInfo(ctx)
-
-
-def _build_hcxvision_hf_processor(
-    info: HCXVisionProcessingInfo,
-    dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    if isinstance(info, HCXVisionProcessingInfo):
-        return HCXVisionMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
-
-    raise NotImplementedError(type(info))
+        return fields
 
 
 def init_vision_tower_for_hcxvision(
@@ -585,17 +563,31 @@ class HCXVisionCAbstractor(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_hcxvision_hf_processor,
-    info=_build_hcxvision_hf_info,
+    HCXVisionMultiModalProcessor,
+    info=HCXVisionProcessingInfo,
     dummy_inputs=HCXVisionDummyInputsBuilder,
 )
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    """
+    HyperCLOVAX-SEED Vision-Language Model (V1 architecture).
+
+    Supports:
+    - HyperCLOVAX-SEED-Vision-Instruct-3B
+
+    Uses CLIP/SigLIP as the vision encoder with C-Abstractor projector.
+    """
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         # init configs
@@ -647,8 +639,9 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.vision_config = vision_config
         self.text_config = text_config
 
-        # use_sum_loss = bool(kwargs.pop("use_sum_loss", False))
-        # self.reduction = self._init_reduction_type(use_sum_loss)
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

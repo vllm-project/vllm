@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
     fused_topk,
@@ -50,7 +50,7 @@ def bench_run(
     per_out_ch: bool,
     mkn: tuple[int, int, int],
 ):
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
     label = "Quant Matmul"
 
     sub_label = (
@@ -224,7 +224,7 @@ def bench_run(
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
@@ -239,7 +239,7 @@ def bench_run(
             topk_weights,
             topk_ids,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     triton_stream = torch.cuda.Stream()
     triton_graph = torch.cuda.CUDAGraph()
@@ -254,7 +254,7 @@ def bench_run(
             w2_scale,
             a_scale,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     min_run_time = 5
     num_warmup = 5

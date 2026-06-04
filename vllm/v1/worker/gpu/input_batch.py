@@ -37,6 +37,7 @@ class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
     num_reqs: int
+    num_reqs_after_padding: int
 
     # batch_idx -> req_state_idx
     idx_mapping: torch.Tensor
@@ -52,15 +53,31 @@ class InputBatch:
     # sum(num_scheduled_tokens)
     num_tokens: int
     num_tokens_after_padding: int
+    # Sum of draft tokens scheduled across requests.
     num_draft_tokens: int
+    # [num_reqs] number of draft tokens scheduled for each request, if any.
+    num_draft_tokens_per_req: np.ndarray | None
 
     # [num_reqs + 1]
     query_start_loc: torch.Tensor
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
+    # [num_reqs] CPU upper bound on seq_lens (see CommonAttentionMetadata).
+    seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
+    # [num_reqs]
+    num_computed_tokens_np: np.ndarray
+    # [num_reqs]
+    prefill_len_np: np.ndarray
+    # [num_reqs]
+    num_computed_prefill_tokens_np: np.ndarray
+    # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
+    is_prefilling_np: np.ndarray
+
+    # [num_reqs] only populated when pipeline parallelism is enabled.
+    max_seq_len_np: np.ndarray | None
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
@@ -120,9 +137,12 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        # Dummy: seq_len == query_len (fresh-prefill shape).
+        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
+            num_reqs_after_padding=num_reqs,
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
@@ -131,10 +151,17 @@ class InputBatch:
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
             num_draft_tokens=0,
+            num_draft_tokens_per_req=None,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
             logits_indices=logits_indices,
@@ -330,7 +357,8 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
 ) -> torch.Tensor:
-    num_reqs = seq_lens.shape[0]
+    # use idx_mapping.shape[0] for actual request count
+    num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
 
     logits_indices = torch.empty(
@@ -423,6 +451,9 @@ def _post_update_kernel(
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    if req_state_idx < 0:
+        # Filter rows with negative index entries.
+        return
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -435,36 +466,43 @@ def _post_update_kernel(
 
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
-        token_ptr = (
-            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + token_id
-        )
-        count = tl.load(token_ptr)
-        count += 1
-        tl.store(token_ptr, count)
         tl.store(
             all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
             token_id,
         )
 
-    query_start = tl.load(query_start_loc_ptr + req_id)
-    query_end = tl.load(query_start_loc_ptr + req_id + 1)
-    query_len = query_end - query_start
+        if output_bin_counts_ptr is not None:
+            token_ptr = (
+                output_bin_counts_ptr
+                + req_state_idx * output_bin_counts_stride
+                + token_id
+            )
+            count = tl.load(token_ptr)
+            tl.store(token_ptr, count + 1)
+
+    if query_start_loc_ptr is None:
+        query_len = 0
+    else:
+        query_start = tl.load(query_start_loc_ptr + req_id)
+        query_end = tl.load(query_start_loc_ptr + req_id + 1)
+        query_len = query_end - query_start
     num_rejected = tl.load(num_rejected_ptr + req_id)
 
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len - num_rejected
-    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
+    computed_delta = query_len - num_rejected
+    if computed_delta != 0:
+        num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+        tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
 
 def post_update(
-    # [num_reqs]
+    # [num_reqs] batch_idx -> req_state_idx; negative index means skip.
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
     num_computed_tokens: torch.Tensor,
     # [max_num_reqs]
     last_sampled_tokens: torch.Tensor,
     # [max_num_reqs, vocab_size]
-    output_bin_counts: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
     # [num_reqs, num_speculative_steps + 1]
     sampled_tokens: torch.Tensor,
     # [num_reqs]
@@ -472,7 +510,7 @@ def post_update(
     # [num_reqs]
     num_rejected: torch.Tensor,
     # [num_reqs + 1]
-    query_start_loc: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
     # [max_num_reqs, max_model_len]
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
@@ -484,7 +522,7 @@ def post_update(
         num_computed_tokens,
         last_sampled_tokens,
         output_bin_counts,
-        output_bin_counts.stride(0),
+        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
         sampled_tokens,
         sampled_tokens.stride(0),
         num_sampled,
@@ -498,7 +536,7 @@ def post_update(
 
 
 @triton.jit
-def _post_update_pool_kernel(
+def _post_update_num_computed_tokens_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     query_start_loc_ptr,
@@ -513,7 +551,7 @@ def _post_update_pool_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
 
 
-def post_update_pool(
+def post_update_num_computed_tokens(
     # [num_reqs]
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
@@ -522,7 +560,7 @@ def post_update_pool(
     query_start_loc: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _post_update_pool_kernel[(num_reqs,)](
+    _post_update_num_computed_tokens_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
         query_start_loc,

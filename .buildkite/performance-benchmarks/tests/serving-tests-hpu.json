@@ -10,7 +10,6 @@
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
-            "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy",
             "max-model-len": 2048,
@@ -22,6 +21,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -37,7 +37,6 @@
         "server_parameters": {
             "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
             "tensor_parallel_size": 4,
-            "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy",
             "max-model-len": 2048,
@@ -49,6 +48,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -64,7 +64,6 @@
         "server_parameters": {
             "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
             "tensor_parallel_size": 2,
-            "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy",
             "max-model-len": 2048,
@@ -76,6 +75,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -91,7 +91,6 @@
         "server_parameters": {
             "model": "deepseek-ai/DeepSeek-R1",
             "tensor_parallel_size": 8,
-            "swap_space": 16,
             "disable_log_stats": "",
             "load_format": "dummy",
             "max-model-len": 2048,
@@ -104,6 +103,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -131,6 +131,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     },
@@ -155,6 +156,7 @@
             "backend": "vllm",
             "dataset_name": "sharegpt",
             "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+            "temperature": 0,
             "num_prompts": 200
         }
     }
