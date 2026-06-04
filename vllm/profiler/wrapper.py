@@ -18,26 +18,19 @@ logger = init_logger(__name__)
 
 class WorkerProfiler(ABC):
     def __init__(self, profiler_config: ProfilerConfig) -> None:
-        self._delay_iters = profiler_config.delay_iterations
-        if self._delay_iters > 0:
-            logger.info_once(
-                "GPU profiling will start "
-                f"{self._delay_iters} steps after start_profile."
-            )
+        self._windows: list[tuple[int, int]] = profiler_config.get_iteration_windows()
+        logger.info_once(
+            "GPU profiling configured for following windows (start_iter, n_iters): %s",
+            str(self._windows),
+        )
 
-        self._max_iters = profiler_config.max_iterations
-        if self._max_iters > 0:
-            logger.info_once(
-                "GPU profiling will stop "
-                f"after {self._max_iters} worker steps, "
-                "or when stop_profile is received."
-            )
+        self._current_window = 0
 
         # Track when the profiler gets triggered by start_profile
         self._active_iteration_count = 0
         self._active = False
 
-        # Track when the profiler is actually running
+        # Track active-profiling iters within the current window
         self._profiling_for_iters = 0
         self._running = False
 
@@ -77,41 +70,47 @@ class WorkerProfiler(ABC):
             )
             return
         self._active = True
-        if self._delay_iters == 0:
-            self._call_start()
+        if self._current_window < len(self._windows):
+            delay, _ = self._windows[self._current_window]
+            if delay == 0:
+                self._call_start()
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
-        to handle delayed starts and max iteration limits."""
-        if not self._active:
+        to handle delayed starts and max iteration limits across one or more
+        profiling windows."""
+        if not self._active or self._current_window >= len(self._windows):
             return
 
         self._active_iteration_count += 1
 
-        if (
-            not self._running
-            and self._delay_iters > 0
-            and self._active_iteration_count == self._delay_iters
-        ):
-            logger.info_once("Starting profiler after delay...")
+        delay, max_iters = self._windows[self._current_window]
+
+        if not self._running and self._active_iteration_count == delay:
+            logger.info_once(
+                "Starting profiler for window %d (delay=%d, max_iters=%d)...",
+                self._current_window,
+                delay,
+                max_iters,
+            )
             self._call_start()
 
-        # Call profiler step for schedule-based profiling
-        # Only count iterations where data is actually recorded (not warmup)
+        # Call profiler step for schedule-based profiling.
+        # Only count iterations where data is actually recorded (not warmup).
         if self._running and self._profiler_step():
             self._profiling_for_iters += 1
 
-        if (
-            self._max_iters > 0
-            and self._running
-            and self._profiling_for_iters > self._max_iters
-        ):
-            # Automatically stop the profiler after max iters
-            # will be marked as not running, but leave as active so that stop
-            # can clean up properly
-            logger.info_once("Max profiling iterations reached. Stopping profiler...")
+        if self._running and self._profiling_for_iters == max_iters:
+            logger.info_once(
+                "Profiling window %d complete (%d iters). Stopping profiler...",
+                self._current_window,
+                max_iters,
+            )
             self._call_stop()
-            return
+
+            # Reset and move to next window
+            self._profiling_for_iters = 0
+            self._current_window += 1
 
     def _profiler_step(self) -> bool:
         """Called each step when profiler is running.

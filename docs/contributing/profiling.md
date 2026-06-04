@@ -85,6 +85,28 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+## Capturing Multiple Discontinuous Ranges
+
+`delay_iterations` and `max_iterations` can be comma-separated strings to
+capture multiple profiling windows after `/start_profile`. Each value in
+`delay_iterations` is paired with the value at the same position in
+`max_iterations`, and both are measured in worker steps relative to
+`/start_profile`.
+
+For example, this captures steps 10-29 and 100-199:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --profiler-config '{"profiler":"cuda",
+                        "delay_iterations":"10,100",
+                        "max_iterations":"20,100"}'
+```
+
+The windows must be ordered and non-overlapping. Every non-final
+`max_iterations` value must be greater than 0. A final value of 0 keeps the last
+window open until `/stop_profile`, preserving the scalar `max_iterations=0`
+behavior.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.

@@ -73,14 +73,23 @@ class ProfilerConfig:
     entire range.
     """
 
-    delay_iterations: int = Field(default=0, ge=0)
+    delay_iterations: int | str = Field(default=0)
     """Number of engine iterations to skip before starting profiling.
     Defaults to 0, meaning profiling starts immediately after receiving /start_profile.
+
+    May also be a comma-separated string (e.g. `"30,100"`) to define multiple
+    profiling windows. Each value is paired positionally with `max_iterations`,
+    and each value is measured from `/start_profile`.
+    Multi-window mode requires `profiler='cuda'`.
     """
 
-    max_iterations: int = Field(default=0, ge=0)
+    max_iterations: int | str = Field(default=0)
     """Maximum number of engine iterations to profile after starting profiling.
     Defaults to 0, meaning no limit.
+
+    May also be a comma-separated string (e.g. `"10,20"`), paired positionally
+    with `delay_iterations`. In multi-window mode, each entry except the final
+    one must be > 0. A final value of 0 means profile until `/stop_profile`.
     """
 
     warmup_iterations: int = Field(default=0, ge=0)
@@ -122,9 +131,83 @@ class ProfilerConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    def get_iteration_windows(self) -> list[tuple[int, int]]:
+        """Return profiling windows as a list of (delay, max) pairs.
+
+        Normalizes scalar `delay_iterations`/`max_iterations` to single-element
+        lists so callers can iterate uniformly.
+        """
+        delays = self._parse_iteration_values("delay_iterations", self.delay_iterations)
+        maxes = self._parse_iteration_values("max_iterations", self.max_iterations)
+        if len(delays) != len(maxes):
+            raise ValueError(
+                "delay_iterations and max_iterations must have the same number "
+                f"of values, got {len(delays)} and {len(maxes)}"
+            )
+        return list(zip(delays, maxes))
+
+    @staticmethod
+    def _parse_iteration_values(field_name: str, value: int | str) -> list[int]:
+        if isinstance(value, int):
+            return [value]
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{field_name} must be an integer or comma-separated integers"
+            )
+
+        parts = [part.strip() for part in value.split(",")]
+        if not parts or any(part == "" for part in parts):
+            raise ValueError(
+                f"{field_name} must be an integer or comma-separated integers"
+            )
+
+        try:
+            return [int(part) for part in parts]
+        except ValueError as e:
+            raise ValueError(
+                f"{field_name} must be an integer or comma-separated integers"
+            ) from e
+
+    def _validate_multi_window_config(self, windows: list[tuple[int, int]]) -> None:
+        if self.profiler != "cuda":
+            raise ValueError(
+                "Multiple profiling windows are only supported when "
+                f"profiler='cuda', got profiler={self.profiler!r}"
+            )
+
+        for i, (delay, max_iters) in enumerate(windows):
+            is_last_window = i == len(windows) - 1
+            if max_iters == 0 and not is_last_window:
+                raise ValueError(
+                    f"max_iterations[{i}] must be > 0 in multi-window mode "
+                    "(0 means unlimited, which is incompatible with later "
+                    "windows)"
+                )
+            if i > 0:
+                previous_delay, previous_max_iters = windows[i - 1]
+                previous_end = previous_delay + previous_max_iters
+                if delay < previous_end:
+                    raise ValueError(
+                        "Profiling windows must not overlap: window "
+                        f"{i - 1} ends at iteration {previous_end} but window "
+                        f"{i} starts at iteration {delay}"
+                    )
+
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
-        has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
+        windows = self.get_iteration_windows()
+
+        if any(delay < 0 for delay, _ in windows):
+            raise ValueError("delay_iterations values must be non-negative")
+        if any(max_iters < 0 for _, max_iters in windows):
+            raise ValueError("max_iterations values must be non-negative")
+
+        if len(windows) > 1:
+            self._validate_multi_window_config(windows)
+
+        has_delay_or_limit = any(
+            delay > 0 or max_iters > 0 for delay, max_iters in windows
+        )
         if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
