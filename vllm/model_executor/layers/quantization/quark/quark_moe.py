@@ -67,7 +67,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -1095,24 +1094,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
-        # Native backends pad to kernel-tile sizes; emulation has no kernel tile and
-        # only needs OCP MX block alignment, so it gets its own rounding below
-        # instead of reusing the native path.
-        if (
-            self.mxfp4_backend is not None
-            and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
-        ):
+        # Round per-partition sizes up to each backend's requirement. Emulation is
+        # handled inside the helper too (OCP MX block alignment), so no special-case.
+        if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
                     self.mxfp4_backend, hidden_size, intermediate_size_per_partition
                 )
-            )
-        else:
-            # Scale buffers are sized `dim // OCP_MX_BLOCK_SIZE`; round both dims up so
-            # a shard like 2880 // 4 = 720 doesn't floor-truncate and corrupt weights.
-            hidden_size = round_up(hidden_size, OCP_MX_BLOCK_SIZE)
-            intermediate_size_per_partition = round_up(
-                intermediate_size_per_partition, OCP_MX_BLOCK_SIZE
             )
         return hidden_size, intermediate_size_per_partition
 
