@@ -648,10 +648,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
 
         # WEIGHTS
+        # Honor is_act_and_mul for non-gated MoE (#44489).
+        # Gated MoE (act+gate) needs 2× intermediate; non-gated needs 1×.
+        if self.moe.is_act_and_mul:
+            w13_up_dim = 2 * intermediate_size_per_partition
+        else:
+            w13_up_dim = intermediate_size_per_partition
         w13_weight = torch.nn.Parameter(
             torch.empty(
                 num_experts,
-                2 * intermediate_size_per_partition,
+                w13_up_dim,
                 hidden_size,
                 dtype=params_dtype,
             ),
@@ -677,7 +683,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w13_bias = torch.nn.Parameter(
                 torch.zeros(
                     num_experts,
-                    2 * intermediate_size_per_partition,
+                    w13_up_dim,
                     dtype=layer.orig_dtype,
                 ),
                 requires_grad=False,
