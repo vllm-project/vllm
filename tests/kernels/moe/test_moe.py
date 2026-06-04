@@ -1656,7 +1656,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.routing_method_type = RoutingMethodType.Renormalize
         layer.expert_map = None
         layer.apply_router_weight_on_input = False
-        layer.routed_scaling_factor = None
+        layer.routed_scaling_factor = 2.446
         layer.shared_experts = None
         layer._expert_routing_tables = lambda: None
 
@@ -1678,7 +1678,10 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         # Compute torch baseline
         w1_original = w1.clone()
         w2_original = w2.clone()
-        baseline_output = torch_moe(a, w1_original, w2_original, router_logits, topk)
+        baseline_output = (
+            torch_moe(a, w1_original, w2_original, router_logits, topk)
+            * layer.routed_scaling_factor
+        )
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
