@@ -241,9 +241,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.vocab_size,
                 device=self.device,
                 req_states=self.req_states,
+                vllm_config=self.vllm_config,
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.num_speculative_steps + 1,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+                pin_memory=is_pin_memory_available(),
             )
             if self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
@@ -706,9 +708,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return cuda_graph_size
 
     def _remove_request(self, req_id: str) -> bool:
-        req_idx = self.req_states.remove_request(req_id)
-        if req_idx is None:
+        req_idx = self.req_states.req_id_to_index.get(req_id)
+        if not self.req_states.remove_request(req_id):
             return False
+        if self.sampler is not None and req_idx is not None:
+            self.sampler.remove_request(req_idx)
         if self.pp_handler is not None:
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
@@ -773,7 +777,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank and new_req_data.sampling_params is not None:
                 assert self.sampler is not None
                 self.sampler.add_request(
-                    req_index, prompt_len, new_req_data.sampling_params
+                    req_index,
+                    prompt_len,
+                    new_req_data.prompt_token_ids,
+                    new_req_data.prefill_token_ids[prompt_len:],
+                    new_req_data.sampling_params,
                 )
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
@@ -1046,6 +1054,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
             self.req_states.prefill_len.gpu,
+        )
+        assert self.sampler is not None
+        self.sampler.thinking_budget_state.update_after_sample(
+            input_batch,
+            sampler_output.sampled_token_ids,
+            num_sampled,
         )
         return sampler_output, num_sampled, num_rejected
 

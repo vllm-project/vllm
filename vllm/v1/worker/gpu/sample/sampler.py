@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -24,7 +25,11 @@ from vllm.v1.worker.gpu.sample.logprob import (
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class Sampler:
@@ -34,9 +39,11 @@ class Sampler:
         vocab_size: int,
         device: torch.device,
         req_states: RequestState,
+        vllm_config: "VllmConfig",
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        pin_memory: bool = False,
     ):
         if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
@@ -51,15 +58,37 @@ class Sampler:
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
+        self.thinking_budget_state = ThinkingBudgetState(
+            vllm_config,
+            max_num_reqs,
+            num_speculative_tokens - 1,
+            device,
+            pin_memory,
+            req_states,
+        )
 
     def add_request(
-        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
+        self,
+        req_idx: int,
+        prompt_len: int,
+        prompt_token_ids: list[int] | None,
+        output_token_ids: list[int],
+        sampling_params: SamplingParams,
     ) -> None:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.thinking_budget_state.add_request(
+            req_idx,
+            prompt_token_ids,
+            output_token_ids,
+            sampling_params,
+        )
+    
+    def remove_request(self, req_idx: int) -> None:
+        self.thinking_budget_state.remove_request(req_idx)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -92,6 +121,7 @@ class Sampler:
 
         sampled, processed_logits = self.sample(
             logits,
+            input_batch,
             expanded_idx_mapping,
             idx_mapping_np,
             pos,
@@ -133,12 +163,13 @@ class Sampler:
     def apply_sampling_params(
         self,
         logits: torch.Tensor,
+        input_batch: InputBatch,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
-        skip_top_k_top_p: bool = False,
+        predict_bonus_token: bool = False,
     ) -> torch.Tensor:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -166,6 +197,12 @@ class Sampler:
             expanded_local_pos,
         )
 
+        logits = self.thinking_budget_state.apply(
+            logits,
+            input_batch,
+            predict_bonus_token=predict_bonus_token,
+        )
+
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
             logits, expanded_idx_mapping, idx_mapping_np
@@ -185,20 +222,24 @@ class Sampler:
     def sample(
         self,
         logits: torch.Tensor,
+        input_batch: InputBatch,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        predict_bonus_token: bool = False,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
+            input_batch,
             expanded_idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
             expanded_local_pos,
+            predict_bonus_token,
             skip_top_k_top_p=True,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(

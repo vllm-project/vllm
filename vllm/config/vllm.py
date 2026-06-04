@@ -2070,12 +2070,6 @@ class VllmConfig:
                 f"Model Runner V2 does not yet support: {', '.join(unsupported)}"
             )
 
-        if self.reasoning_config is not None:
-            logger.warning_once(
-                "Model Runner V2 does not yet support the thinking_token_budget "
-                "request parameter. Set VLLM_USE_V2_MODEL_RUNNER=0 if this is required."
-            )
-
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
 
