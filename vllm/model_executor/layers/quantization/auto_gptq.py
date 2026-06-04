@@ -485,7 +485,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             weight_key,
-            may_have_zp=True,
+            may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
         )
 

@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -230,13 +231,14 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+def check_moe_marlin_supports_config(
+    config: FusedMoEConfig,
+    group_size: int,
+) -> bool:
     if current_platform.is_rocm():
         return False
-    hidden_size = layer.hidden_size
-    intermediate_size_per_partition = layer.intermediate_size_per_partition
-    # apply_router_weight_on_input is not supported for moe marlin
-    supports_router_weight = not layer.apply_router_weight_on_input
+    hidden_size = config.hidden_dim
+    intermediate_size_per_partition = config.intermediate_size_per_partition
 
     # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
     # down: (n, k) = (hidden_size, intermediate_size_per_partition)
@@ -246,7 +248,11 @@ def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bo
         and intermediate_size_per_partition % max(64, group_size) == 0
     )
     supports_group_size = group_size in [-1, 32, 64, 128]
-    return supports_shape and supports_group_size and supports_router_weight
+    return supports_shape and supports_group_size
+
+
+def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+    return check_moe_marlin_supports_config(layer.moe_config, group_size)
 
 
 def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tensor):

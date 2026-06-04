@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_moe_marlin_supports_config,
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
     marlin_moe_permute_zero_points,
@@ -76,7 +77,10 @@ def backend_to_kernel_cls(
 
 
 def _get_priority_backends(
-    may_have_zp: bool, may_have_bias: bool
+    moe_config: FusedMoEConfig,
+    may_have_zp: bool,
+    may_have_bias: bool,
+    group_size: int,
 ) -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
@@ -89,10 +93,14 @@ def _get_priority_backends(
     if not may_have_zp and not may_have_bias:
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
 
-    # Marlin supports ZP and bias
+    # Marlin supports ZP and bias but only certain problem/group sizes.
+    if check_moe_marlin_supports_config(moe_config, group_size):
+        _AVAILABLE_BACKENDS += [
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+        ]
+
     _AVAILABLE_BACKENDS += [
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
         WNA16MoEBackend.TRITON,
     ]
 
@@ -154,7 +162,12 @@ def select_wna16_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends(may_have_zp, may_have_bias)
+    AVAILABLE_BACKENDS = _get_priority_backends(
+        config,
+        may_have_zp,
+        may_have_bias,
+        group_size=weight_key.scale.group_shape[1],
+    )
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = None  # always BF16 activation for WNA16 MoE
