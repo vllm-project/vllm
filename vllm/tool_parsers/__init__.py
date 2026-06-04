@@ -142,6 +142,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "openai_tool_parser",
         "OpenAIToolParser",
     ),
+    "pangu": (
+        "pangu_tool_parser",
+        "PanguToolParser",
+    ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
         "Phi4MiniJsonToolParser",
