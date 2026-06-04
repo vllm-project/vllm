@@ -32,7 +32,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -93,7 +92,8 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_tool_types,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger

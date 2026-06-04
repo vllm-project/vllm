@@ -11,7 +11,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
@@ -31,10 +30,11 @@ from vllm.entrypoints.serve.disagg.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.utils.api_utils import (
     create_error_response,
     get_max_tokens,
 )
+from vllm.entrypoints.serve.utils.logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.serve.utils.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
@@ -65,9 +65,9 @@ async def init_generate_state(
     )
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-    from vllm.entrypoints.openai.fingerprint import set_default_fingerprint_mode
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.disagg.serving import ServingTokens
+    from vllm.entrypoints.serve.utils.fingerprint import set_default_fingerprint_mode
 
     # Applied before any serving class is constructed so that each one picks
     # up the chosen mode on its first cache miss.

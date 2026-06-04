@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.serve.utils.logger import RequestLogger
 from vllm.logger import (
     _DATE_FORMAT,
     _FORMAT,
