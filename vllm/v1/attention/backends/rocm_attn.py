@@ -468,10 +468,8 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        # Packed logical (B, H, N, 2*C) -> (B, N, H, 2*C); split K/V on the
-        # content dim and write via the stride-aware Triton kernel.
-        kv_cache_transposed = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         triton_reshape_and_cache_flash(
             key,
             value,

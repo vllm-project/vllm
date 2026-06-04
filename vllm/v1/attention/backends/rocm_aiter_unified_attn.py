@@ -138,14 +138,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # KV cache is packed as logical (B, H, N, 2*C). Both ROCM_ATTN and
-        # ROCM_AITER_UNIFIED_ATTN now share this same physical layout, so
-        # encoder-decoder layers that alias a ROCM_ATTN decoder allocation no
-        # longer need a special K/V-first reinterpretation: transpose to
-        # (B, N, H, 2*C) and split K/V on the content dim.
-        kv_cache = kv_cache.transpose(1, 2)
-        hs = self.head_size
-        return kv_cache.split(hs, dim=-1)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
         self,
