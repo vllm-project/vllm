@@ -248,7 +248,7 @@ class IrOp:
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
         inplace: bool = False,
-    ):
+    ) -> Callable[[Callable[..., Any]], "IrOpImpl"]:
         """
         Register an implementation for this custom op.
         Args:

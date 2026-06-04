@@ -45,9 +45,6 @@ class BasevLLMParameter(Parameter):
         Args:
             data: torch tensor with the parameter data
             weight_loader: weight loader callable
-
-        Returns:
-            a torch.nn.parameter
         """
 
         # During weight loading, we often do something like:

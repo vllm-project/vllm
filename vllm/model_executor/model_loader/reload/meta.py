@@ -176,7 +176,7 @@ def get_numel_loaded(
     Determine how many elements would be loaded by a weight loader call.
 
     Args:
-        weight loader: used to load weights
+        weight_loader: used to load weights
         args: bound arguments to weight loader
 
     Returns:

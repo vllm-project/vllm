@@ -808,7 +808,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+    def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization

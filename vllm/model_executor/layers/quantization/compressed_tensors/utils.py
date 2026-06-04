@@ -138,8 +138,6 @@ def find_matched_target(
         module: torch.nn.Module
         targets: list of targets to match the layer against
         fused_mapping: map from fused layer names to its components
-        fused_strategy: either "all" or "any". If using "all", fused
-            layers match if "all" of its components match
     """
 
     if layer_name is None:

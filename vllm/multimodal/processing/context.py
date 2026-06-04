@@ -352,8 +352,7 @@ class BaseProcessingInfo:
     def get_data_parser(self) -> MultiModalDataParser:
         """
         Constructs a parser to preprocess multi-modal data items
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        before passing them to BaseMultiModalProcessor._get_hf_mm_data.
 
         You can support additional modalities by creating a subclass
         of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
@@ -435,8 +434,7 @@ class BaseProcessingInfo:
         """
         Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        before passing them to BaseMultiModalProcessor._get_hf_mm_data.
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
