@@ -40,7 +40,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
-    CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -616,8 +615,16 @@ class CompressedTensorsConfig(QuantizationConfig):
         format = format if format is not None else self.quant_format
 
         # Detect If Mixed Precision
-        if self._is_nvfp4_format(weight_quant) and input_quant is None:
-            return CompressedTensorsW4A16Fp4()
+        if self._is_nvfp4_format(weight_quant):
+            if input_quant is None:
+                return CompressedTensorsW4A4Fp4(use_a16=True)
+
+            if not self._is_nvfp4_format(input_quant):
+                raise ValueError(
+                    "For NVFP4 weights, input quantization must also be NVFP4 format, ",
+                    "None for NVFP4A16",
+                )
+            return CompressedTensorsW4A4Fp4()
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
@@ -650,11 +657,6 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
-            if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
-                input_quant
-            ):
-                return CompressedTensorsW4A4Fp4()
-
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False
