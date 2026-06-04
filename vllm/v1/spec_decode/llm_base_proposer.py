@@ -483,6 +483,11 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        # Step 0 of index_share_for_mtp_iteration: let the MTP layer
+        # compute its own indices (skip_topk=False) so subsequent steps
+        # can reuse them.
+        if self._share_mtp_indices:
+            self.model.model.set_skip_topk(False)
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -500,6 +505,11 @@ class SpecDecodeBaseProposer:
                 hidden_states = last_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
+
+        # After step 0: switch to reuse mode so steps 1+ skip the indexer
+        # and read the indices that step 0 just wrote into the shared buffer.
+        if self._share_mtp_indices:
+            self.model.model.set_skip_topk(True)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
@@ -1417,13 +1427,26 @@ class SpecDecodeBaseProposer:
             # Also share at per-module level so that the indexer and
             # sparse-attention backends in each MTP layer read from
             # the target model's buffer.
-            for name, module in self.model.model.named_modules():
+            for _, module in self.model.model.named_modules():
                 if hasattr(module, "topk_indices_buffer"):
                     module.topk_indices_buffer = target_buffer
             logger.info(
                 "Detected MTP model with topk_indices_buffer. "
                 "Sharing target model topk_indices_buffer with the draft model."
             )
+
+        # Detect index_share_for_mtp_iteration: when True, the proposer
+        # toggles skip_topk so step 0 computes MTP's own indices and
+        # steps 1+ reuse them.
+        spec_config = self.vllm_config.speculative_config
+        draft_hf_config = (
+            spec_config.draft_model_config.hf_config
+            if spec_config is not None
+            else None
+        )
+        self._share_mtp_indices = getattr(
+            draft_hf_config, "index_share_for_mtp_iteration", False
+        )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):

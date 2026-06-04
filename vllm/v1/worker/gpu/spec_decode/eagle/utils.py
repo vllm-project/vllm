@@ -83,7 +83,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     if hasattr(target_inner, "topk_indices_buffer"):
         target_buffer = target_inner.topk_indices_buffer
         if target_buffer is not None:
-            for name, module in draft_inner.named_modules():
+            for _, module in draft_inner.named_modules():
                 if hasattr(module, "topk_indices_buffer"):
                     module.topk_indices_buffer = target_buffer
 
