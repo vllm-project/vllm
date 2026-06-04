@@ -131,6 +131,15 @@ class DeepseekV4SparseMLAAttentionImpl(SparseMLAAttentionImpl[FlashMLASparseMeta
         """
         raise NotImplementedError
 
+    @classmethod
+    def init_layer_buffers(cls, layer: "DeepseekV4MLAAttention") -> None:
+        """Register impl-specific buffers on the layer at construction.
+
+        No-op by default; FlashInfer overrides this to register its per-tensor
+        FP8 scale buffers.
+        """
+        return None
+
 
 class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
     @staticmethod
@@ -139,7 +148,7 @@ class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "V4_FLASHMLA_SPARSE"
+        return "FLASHMLA_SPARSE_DSV4"
 
     @staticmethod
     def get_impl_cls() -> type["DeepseekV4SparseMLAAttentionImpl"]:
