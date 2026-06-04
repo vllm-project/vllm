@@ -742,11 +742,16 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_output = attn_metadata.softmax_segm_output
         softmax_segm_max = attn_metadata.softmax_segm_max
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
+        # Decode-only tokens have already been written into paged KV cache by
+        # do_kv_cache_update, so reading them from NVFP4 cache keeps the fast
+        # decode path enabled. Multi-token chunks still use raw K/V for the
+        # current chunk to avoid rereading it from the quantized cache.
         use_nvfp4_raw_current_kv = (
             self._kv_quant_mode == KVQuantMode.NVFP4
             and not uses_shared_kv_cache
             and key is not None
             and value is not None
+            and max_seqlen_q > 1
         )
 
         unified_attention(
