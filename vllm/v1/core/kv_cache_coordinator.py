@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import NamedTuple
 
+from vllm import envs
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -21,8 +22,39 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+
+def _validate_prefix_cache_retention_interval(
+    retention_interval: int | None,
+    scheduler_block_size: int,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    if retention_interval is None:
+        return
+
+    # Retention only sparsifies sliding-window checkpoints for now; every other
+    # manager (full attention, Mamba, chunked-local) caches densely and
+    # ignores it to be conservative.
+    # TODO: Support Mamba/linear attention.
+    if not any(
+        isinstance(g.kv_cache_spec, SlidingWindowSpec)
+        for g in kv_cache_config.kv_cache_groups
+    ):
+        raise ValueError(
+            "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this model has "
+            "no sliding-window KV cache group, so retention has no effect. "
+            "Unset it (the feature only applies to sliding-window attention)."
+        )
+
+    if retention_interval < 0 or retention_interval % scheduler_block_size != 0:
+        raise ValueError(
+            f"VLLM_PREFIX_CACHE_RETENTION_INTERVAL ({retention_interval}) "
+            "must be non-negative and a multiple of scheduler_block_size "
+            f"({scheduler_block_size})."
+        )
 
 
 class KVCacheCoordinator(ABC):
@@ -84,6 +116,14 @@ class KVCacheCoordinator(ABC):
                 scheduler_block_size=self.scheduler_block_size,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
+        )
+
+        # A positive retention interval must be a multiple of the base hit granularity
+        # (``scheduler_block_size``) to land on real cache-hit boundaries.
+        # 0 = keep only the latest replay boundary; None = dense;
+        self.retention_interval = envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+        _validate_prefix_cache_retention_interval(
+            self.retention_interval, self.scheduler_block_size, kv_cache_config
         )
 
     def get_num_blocks_to_allocate(
@@ -235,7 +275,11 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens)
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                retention_interval=self.retention_interval,
+            )
 
     def free(self, request_id: str) -> None:
         """
@@ -545,8 +589,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     num_computed_tokens,
                     aligned_num_computed_tokens + manager.block_size,
                 )
+            # The manager already knows the fine hit granularity
+            # (``scheduler_block_size``); retention is passed separately so it
+            # can keep both the coarse segment tails and the fine replay
+            # boundary (which needs the fine value).
             manager.cache_blocks(
-                request, num_tokens_to_cache, alignment_tokens=self.scheduler_block_size
+                request,
+                num_tokens_to_cache,
+                retention_interval=self.retention_interval,
             )
 
     def find_longest_cache_hit(
