@@ -8,6 +8,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -159,6 +161,12 @@ class RayWorkerProc(WorkerProc):
         in missing vars but never overwrite node-local values.
         *env_vars* (e.g. CUDA_VISIBLE_DEVICES) always overwrite.
         """
+        if torch.cuda.is_initialized():
+            raise RuntimeError(
+                "CUDA context was already initialized in RayWorkerProc "
+                "before CUDA_VISIBLE_DEVICES was set."
+            )
+
         if driver_env_vars:
             for key, value in driver_env_vars.items():
                 os.environ.setdefault(key, value)
