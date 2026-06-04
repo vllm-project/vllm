@@ -2483,6 +2483,9 @@ class GPUModelRunner(
                 ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
+                elif hasattr(self.drafter, "has_draft_kv_cache_group"):
+                    if self.drafter.has_draft_kv_cache_group(kv_cache_gid):
+                        spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
             # Capture per-group block tables for multi-group proposers.
@@ -2490,10 +2493,16 @@ class GPUModelRunner(
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
-            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            elif self.speculative_config and hasattr(
+                self.drafter, "set_per_group_block_table"
+            ):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
+                if hasattr(self.drafter, "set_per_group_slot_mapping"):
+                    self.drafter.set_per_group_slot_mapping(
+                        kv_cache_gid, cm.slot_mapping
+                    )
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
@@ -5008,6 +5017,12 @@ class GPUModelRunner(
                 self.drafter,
                 EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
+
+            num_reqs = self.input_batch.num_reqs
+            if hasattr(self.drafter, "set_draft_num_accepted_tokens"):
+                self.drafter.set_draft_num_accepted_tokens(
+                    self.num_accepted_tokens.gpu[:num_reqs]
+                )
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
