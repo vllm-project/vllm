@@ -36,8 +36,26 @@ def test_block_table_warmup_compute_slot_mapping(monkeypatch):
 
     block_table.warmup_compute_slot_mapping()
 
-    assert len(calls) == 1
+    assert len(calls) == 3
     grid, args, kwargs = calls[0]
+    assert grid == (2,)
+    assert args[0] == 128
+    assert args[1] == 128
+    assert args[2].tolist() == [0, 128]
+    assert args[3].tolist() == list(range(128))
+    assert args[6] == 16
+    assert kwargs["BLOCK_SIZE"] == 1024
+
+    grid, args, kwargs = calls[1]
+    assert grid == (2,)
+    assert args[0] == 2
+    assert args[1] == 128
+    assert args[2].tolist() == [0, 2]
+    assert args[3].tolist() == [0, 1]
+    assert args[6] == 16
+    assert kwargs["BLOCK_SIZE"] == 1024
+
+    grid, args, kwargs = calls[2]
     assert grid == (2,)
     assert args[0] == 1
     assert args[1] == 128
@@ -79,6 +97,7 @@ def test_multi_group_block_table_warmup_compute_slot_mapping(monkeypatch):
 
     block_tables.warmup_compute_slot_mapping()
 
-    assert len(calls) == 2
-    assert [call[0] for call in calls] == [(2,), (2,)]
-    assert [call[1][6] for call in calls] == [16, 16]
+    assert len(calls) == 6
+    assert [call[0] for call in calls] == [(2,), (2,), (2,), (2,), (2,), (2,)]
+    assert [call[1][0] for call in calls] == [128, 2, 1, 128, 2, 1]
+    assert [call[1][6] for call in calls] == [16, 16, 16, 16, 16, 16]

@@ -168,9 +168,28 @@ class BlockTable:
         if self.max_num_reqs <= 0 or self.max_num_batched_tokens <= 0:
             return
 
-        query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=self.device)
-        positions = torch.zeros(1, dtype=torch.int64, device=self.device)
-        self.compute_slot_mapping(1, query_start_loc, positions)
+        # Triton specializes slot mapping differently for single-token,
+        # short non-divisible, and block-sized requests. Cover each shape while
+        # staying inside the table bounds.
+        max_warmup_tokens = min(
+            self.max_num_batched_tokens,
+            self.max_num_blocks_per_req * self.block_size,
+            1024,
+        )
+        if max_warmup_tokens <= 0:
+            return
+
+        warmup_sizes: list[int] = []
+        for num_tokens in (max_warmup_tokens, min(max_warmup_tokens, 2), 1):
+            if num_tokens > 0 and num_tokens not in warmup_sizes:
+                warmup_sizes.append(num_tokens)
+
+        for num_tokens in warmup_sizes:
+            query_start_loc = torch.tensor(
+                [0, num_tokens], dtype=torch.int32, device=self.device
+            )
+            positions = torch.arange(num_tokens, dtype=torch.int64, device=self.device)
+            self.compute_slot_mapping(1, query_start_loc, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
