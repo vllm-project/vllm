@@ -510,6 +510,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         slot_size_bytes = 4096
         self.slot_size_per_layer = [slot_size_bytes]
         self.block_len_per_layer = [slot_size_bytes * self.block_size]
+        self.block_stride_per_layer = list(self.block_len_per_layer)
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
@@ -542,6 +543,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     device_id=remote_tp_rank,
                     num_blocks=1,
                     block_lens=remote_block_lens,
+                    block_strides=remote_block_lens,
                     # `self.kv_cache_layout` is only forced to HND when vllm engine
                     # is started. We mock HND here.
                     kv_cache_layout="HND",
@@ -993,6 +995,7 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 block_lens=worker.block_len_per_layer,
+                block_strides=worker.block_len_per_layer,
                 kv_cache_layout=mismatched_layout,
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
@@ -1043,6 +1046,7 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
             # Metadata with different kv_cache_layout than local worker
+            remote_block_lens = [i * 2 for i in worker.block_len_per_layer]
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
@@ -1050,7 +1054,8 @@ class TestNixlHandshake:
                 device_id=0,
                 num_blocks=1,
                 # prefill TP=1, decode TP=2, remote block_lens is double to local
-                block_lens=[i * 2 for i in worker.block_len_per_layer],
+                block_lens=remote_block_lens,
+                block_strides=remote_block_lens,
                 kv_cache_layout="HND",
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
@@ -2481,13 +2486,15 @@ def test_compatibility_hash_validation(
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
+    prefill_block_lens = [4096 * prefill_block_size]  # slot_size * block_size
     prefill_metadata = NixlAgentMetadata(
         engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
         agent_metadata=FakeNixlWrapper.AGENT_METADATA,
         kv_caches_base_addr=[0],
         device_id=0,
         num_blocks=1,
-        block_lens=[4096 * prefill_block_size],  # slot_size * block_size
+        block_lens=prefill_block_lens,
+        block_strides=prefill_block_lens,
         kv_cache_layout="HND",
         block_size=prefill_block_size,
         ssm_sizes=(0, 0),
