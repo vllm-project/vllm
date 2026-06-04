@@ -424,17 +424,25 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_rms_norm_quant_fusion_pass"
         )
+        # Track registered pattern instances for inspection (e.g., ordering tests)
+        self._pattern_replacements: list = []
 
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
+        mxfp4_pattern_count = 0
         for epsilon in [1e-5, 1e-6]:
             # ── MXFP4 patterns ───────────────────────────────────────────────
             # Guarded so patterns are only registered when the AITER Triton
             # fused kernel is importable.  Fused-add pattern first (larger
             # subgraph, greedy priority).
             if rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant():
-                AiterFusedAddRMSNormMXFP4QuantPattern(epsilon).register(self.patterns)
-                AiterRMSNormMXFP4QuantPattern(epsilon).register(self.patterns)
+                p_add = AiterFusedAddRMSNormMXFP4QuantPattern(epsilon)
+                p_add.register(self.patterns)
+                self._pattern_replacements.append(p_add)
+                p_rms = AiterRMSNormMXFP4QuantPattern(epsilon)
+                p_rms.register(self.patterns)
+                self._pattern_replacements.append(p_rms)
+                mxfp4_pattern_count += 2
 
             #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
             AiterRMSFp8GroupQuantPattern(
@@ -469,6 +477,15 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 AiterFusedAddRMSNormDynamicQuantPattern(
                     epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
                 ).register(self.patterns)
+
+        if mxfp4_pattern_count:
+            logger.info(
+                "RocmAiterRMSNormQuantFusionPass: registered %d MXFP4 fusion "
+                "patterns (AiterRMSNormMXFP4QuantPattern + "
+                "AiterFusedAddRMSNormMXFP4QuantPattern, %d epsilon variants)",
+                mxfp4_pattern_count,
+                mxfp4_pattern_count // 2,
+            )
 
         self.dump_patterns(config, self.patterns)
 

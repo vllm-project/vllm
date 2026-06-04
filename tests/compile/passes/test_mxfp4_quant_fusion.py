@@ -507,7 +507,10 @@ def test_functional_pattern_fires_with_residual(
         residual = torch.randn(
             num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
         )
-        torch._dynamo.mark_dynamic(x, 0)
+        # fused_add_rms_norm has allow_inplace=True; using mark_dynamic on x's
+        # batch dim would force a symbolic shape but the mutating overload
+        # specializes it. Use maybe_mark_dynamic so compilation succeeds.
+        torch._dynamo.maybe_mark_dynamic(x, 0)
 
         compiled = torch.compile(model, backend=backend)
         compiled(x, residual)
