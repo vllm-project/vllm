@@ -136,11 +136,6 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Standardized packed KV cache with logical shape
-    # (num_blocks, num_kv_heads, block_size, 2*head_size): K and V are packed
-    # along the content dim. Build in (num_blocks, block_size, num_kv_heads,
-    # 2*head_size) for easy flat per-token indexing, then transpose to the
-    # canonical logical layout.
     kv_cache = torch.zeros(
         num_blocks, block_size, num_kv_heads, 2 * head_size, dtype=dtype, device=device
     )
@@ -158,9 +153,6 @@ def create_and_prepopulate_kv_cache(
 
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
-
-    # Transpose to canonical logical (num_blocks, num_kv_heads, block_size, 2*hs)
-    kv_cache = kv_cache.transpose(1, 2).contiguous()
 
     blocks_end = start_block_idx
 
@@ -198,7 +190,8 @@ def create_and_prepopulate_kv_cache(
             i, block_indices
         ] * block_size + token_inter_block_offsets.to(device)
 
-    return kv_cache
+    # Transpose to logical (num_blocks, num_kv_heads, block_size, 2*hs)
+    return kv_cache.transpose(1, 2).contiguous()
 
 
 class MockAttentionLayer:
@@ -495,9 +488,6 @@ def _test_backend_correctness(
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
 
-        # Apply stride order like runtime does in
-        # _reshape_kv_cache (attn_utils.py:182-210): permute to physical
-        # layout, make contiguous, then permute to logical layout.
         kv_cache_for_backend = kv_cache
         if backend_cls is not None:
             try:
