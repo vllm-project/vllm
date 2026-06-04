@@ -114,6 +114,15 @@ class P2PClientSession:
         block_ids: Sequence[int],
     ) -> None:
         """Send lookup_fetch to the server."""
+        logger.debug(
+            "P2PClientSession %s: request_blocks job_id=%d kv_request_id=%s "
+            "blocks=%d ready=%s",
+            self.peer_id,
+            job_id,
+            kv_request_id,
+            len(block_ids),
+            self._ready,
+        )
         self._inbound[kv_request_id] = _InboundRequestState(
             job_id=job_id,
             kv_request_id=kv_request_id,
@@ -211,6 +220,11 @@ class P2PClientSession:
         msg_type = msg.get(TYPE_KEY)
         if msg_type == ConnectAckMsg.TYPE:
             ConnectAckMsg.validate(msg)
+            logger.debug(
+                "P2PClientSession %s: connect_ack received, flushing %d queued msg(s)",
+                self.peer_id,
+                len(self._queued),
+            )
             self._ready = True
             for queued in self._queued:
                 self._do_send(queued)
@@ -269,6 +283,12 @@ class P2PClientSession:
 
     def _send(self, msg: dict) -> None:
         if not self._ready:
+            logger.debug(
+                "P2PClientSession %s: queueing %s (not ready, queue_depth=%d)",
+                self.peer_id,
+                msg.get(TYPE_KEY),
+                len(self._queued) + 1,
+            )
             self._queued.append(msg)
             return
         self._do_send(msg)
@@ -276,6 +296,11 @@ class P2PClientSession:
     def _do_send(self, msg: dict) -> None:
         try:
             self._conn.send(msg)
+            logger.debug(
+                "P2PClientSession %s: sent %s",
+                self.peer_id,
+                msg.get(TYPE_KEY),
+            )
         except Exception:
             logger.warning(
                 "P2PClientSession %s: failed to send %s",

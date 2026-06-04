@@ -242,7 +242,7 @@ class ZmqTransport(ControlTransport):
             identity, data = frames
             sender_id = identity.decode()
 
-            logger.info(
+            logger.debug(
                 "ZmqTransport %s: ROUTER recv from %s (%d bytes)",
                 self._local_id,
                 sender_id,

@@ -241,7 +241,10 @@ class P2PServerSession:
         # Poll inflight transfers
         poll_result = self._transport.poll()
 
-        for xfer in (self._inflight.pop(tid) for tid in poll_result.done):
+        for tid in poll_result.done:
+            xfer = self._inflight.pop(tid, None)
+            if xfer is None:
+                continue
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
                 results.append(StoreResult(job_id=job_id, success=True))
@@ -262,7 +265,10 @@ class P2PServerSession:
                     )
 
         failed_kv_request_ids: set[str] = set()
-        for xfer in (self._inflight.pop(tid) for tid in poll_result.failed):
+        for tid in poll_result.failed:
+            xfer = self._inflight.pop(tid, None)
+            if xfer is None:
+                continue
             failed_kv_request_ids.add(xfer.kv_request_id)
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
@@ -364,7 +370,7 @@ class P2PServerSession:
         block_indexes = msg[LookupFetchMsg.BLOCK_INDEXES]
 
         logger.debug(
-            "P2PServerSession %s: lookup_fetch kv_request_id=%s blocks=%d",
+            "P2PServerSession %s: lookup_fetch RECEIVED kv_request_id=%s blocks=%d",
             self.peer_id,
             kv_request_id,
             len(block_hashes),
@@ -375,6 +381,15 @@ class P2PServerSession:
         )
         result = req.add_fetch_demand(self.peer_id, block_hashes, block_indexes)
 
+        logger.debug(
+            "P2PServerSession %s: lookup_fetch kv_request_id=%s "
+            "matched_local=%d will_transfer=%s",
+            self.peer_id,
+            kv_request_id,
+            len(result.local_idxs),
+            bool(result.local_idxs),
+        )
+
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
 
@@ -382,11 +397,11 @@ class P2PServerSession:
         AbortLookupFetchMsg.validate(msg)
         kv_request_id = msg[AbortLookupFetchMsg.KV_REQUEST_ID]
         self._outbound.pop(kv_request_id, None)
-        ids_to_cancel = (
+        ids_to_cancel = [
             tid
             for tid, xfer in self._inflight.items()
             if xfer.kv_request_id == kv_request_id
-        )
+        ]
         for tid in ids_to_cancel:
             del self._inflight[tid]
         self._transport.cancel(ids_to_cancel)
@@ -402,10 +417,26 @@ class P2PServerSession:
     # ------------------------------------------------------------------
 
     def _submit_transfer(self, kv_request_id: str, result) -> None:
+        logger.debug(
+            "P2PServerSession %s: NIXL write_blocks CALL kv_request_id=%s "
+            "local_idxs=%d remote_idxs=%d",
+            self.peer_id,
+            kv_request_id,
+            len(result.local_idxs),
+            len(result.remote_idxs),
+        )
         transfer_id = self._transport.write_blocks(
             self.peer_id, result.local_idxs, result.remote_idxs
         )
         if transfer_id is not None:
+            logger.debug(
+                "P2PServerSession %s: NIXL write_blocks SUBMITTED "
+                "kv_request_id=%s transfer_id=%d blocks=%d",
+                self.peer_id,
+                kv_request_id,
+                transfer_id,
+                len(result.local_idxs),
+            )
             self._inflight[transfer_id] = _InflightXfer(
                 kv_request_id=kv_request_id,
                 block_count=len(result.local_idxs),

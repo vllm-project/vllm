@@ -178,6 +178,7 @@ class TestProtocolCompatibility:
         }
         conn.enqueue(connect_msg)
         return P2PServerSession(
+            peer_id="client:9000",
             conn=conn,  # type: ignore[arg-type]
             local_id="server:8000",
             transport=transport,  # type: ignore[arg-type]
@@ -403,6 +404,7 @@ class TestP2PServerSession:
         }
         conn.enqueue(connect_msg)
         server = P2PServerSession(
+            peer_id="client:9000",
             conn=conn,  # type: ignore[arg-type]
             local_id="server:8000",
             transport=transport,  # type: ignore[arg-type]
@@ -425,6 +427,7 @@ class TestP2PServerSession:
         conn.enqueue(connect_msg)
         with pytest.raises(ValueError, match="block_len mismatch"):
             P2PServerSession(
+                peer_id="client:9000",
                 conn=conn,  # type: ignore[arg-type]
                 local_id="server:8000",
                 transport=transport,  # type: ignore[arg-type]
@@ -447,6 +450,7 @@ class TestP2PServerSession:
         conn.enqueue(connect_msg)
         with pytest.raises(ValueError, match="config fingerprint mismatch"):
             P2PServerSession(
+                peer_id="client:9000",
                 conn=conn,  # type: ignore[arg-type]
                 local_id="server:8000",
                 transport=transport,  # type: ignore[arg-type]
@@ -468,6 +472,7 @@ class TestP2PServerSession:
         }
         conn.enqueue(connect_msg)
         server = P2PServerSession(
+            peer_id="client:9000",
             conn=conn,  # type: ignore[arg-type]
             local_id="server:8000",
             transport=transport,  # type: ignore[arg-type]
@@ -490,6 +495,7 @@ class TestP2PServerSession:
         }
         conn.enqueue(connect_msg)
         server = P2PServerSession(
+            peer_id="client:9000",
             conn=conn,  # type: ignore[arg-type]
             local_id="server:8000",
             transport=transport,  # type: ignore[arg-type]
@@ -822,6 +828,7 @@ class TestAdversarialClient:
         }
         conn.enqueue(connect_msg)
         server = P2PServerSession(
+            peer_id="client:9000",
             conn=conn,  # type: ignore[arg-type]
             local_id="server:8000",
             transport=transport,  # type: ignore[arg-type]
