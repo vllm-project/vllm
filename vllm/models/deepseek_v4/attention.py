@@ -331,19 +331,21 @@ class DeepseekV4MLA(nn.Module):
             self.eps,
         )
 
-        # q is computed here (captured into the cudagraph) for the non-indexer
-        # layers. For indexer layers it stays None and is produced inside
-        # attention_impl, where it overlaps with the (eager) indexer.
-        q = None
+        # self.attention / self.sparse_attn are wrapped with
+        # @eager_break_during_capture: that is where the breakable cudagraph
+        # capture breaks (the attention op runs eagerly between captured graph
+        # segments). Tensors are passed as args so the wrapper weak-refs them
+        # for replay.
         if self.indexer is None:
+            # Non-indexer layers: the eager break is just the MLA attention.
             if self.compressor is not None:
+                compressor = self.compressor
                 # wq_b + kv_insert on default, compressor on aux.
                 aux_stream = (
                     self.aux_stream_list[0]
                     if self.aux_stream_list is not None
                     else None
                 )
-                compressor = self.compressor
 
                 q, _ = maybe_execute_in_parallel(
                     lambda: self._wq_b_kv_insert(qr, kv, positions),
@@ -355,22 +357,20 @@ class DeepseekV4MLA(nn.Module):
             else:
                 # SWA-only layer: no compressor, no overlap.
                 q = self._wq_b_kv_insert(qr, kv, positions)
-
-        # attention_impl is wrapped with @eager_break_during_capture: this is
-        # where the breakable cudagraph capture breaks (the attention op runs
-        # eagerly between captured graph segments). The intermediates computed
-        # above are passed as args so the wrapper weak-refs them for replay.
-        self.attention_impl(
-            hidden_states,
-            positions,
-            qr,
-            kv,
-            q,
-            kv_score,
-            indexer_kv_score,
-            indexer_weights,
-            o_padded,
-        )
+            self.attention(q, kv, positions, o_padded)
+        else:
+            # Indexer layers: q is produced inside the (eager) sparse_attn,
+            # overlapping wq_b+kv_insert with the indexer and MLA compressor.
+            self.sparse_attn(
+                hidden_states,
+                positions,
+                qr,
+                kv,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                o_padded,
+            )
         o = o_padded[:, : self.n_local_heads, :]
 
         # Keep ROCm on the BF16 reference wo_a path util kernel ready.
@@ -477,58 +477,66 @@ class DeepseekV4MLA(nn.Module):
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @eager_break_during_capture
-    def attention_impl(
+    def attention(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], written in place
+    ) -> None:
+        # Non-indexer (SWA-only / compressor) layers. q is computed in forward
+        # (captured); the eager break here is just the MLA attention, which
+        # writes into the pre-allocated `out` buffer.
+        self.mla_attn(q, kv, positions, output=out)
+
+    @eager_break_during_capture
+    def sparse_attn(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         qr: torch.Tensor,
         kv: torch.Tensor,
-        q: torch.Tensor | None,
-        kv_score: torch.Tensor | None,
-        indexer_kv_score: torch.Tensor | None,
-        indexer_weights: torch.Tensor | None,
+        kv_score: torch.Tensor,
+        indexer_kv_score: torch.Tensor,
+        indexer_weights: torch.Tensor,
         out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], written in place
     ) -> None:
-        # Non-indexer layers compute q in forward (captured); only the indexer
-        # path produces q here, overlapping it with the eager indexer.
-        if self.indexer is not None:
-            # wq_b + kv_insert rides on the default stream so q stays on its
-            # consumer stream (mla_attn downstream reads q on default).
-            # Indexer/compressor go on aux for overlap with default's GEMM +
-            # cache write.
-            aux_streams = self.aux_stream_list
-            indexer = self.indexer
-            # Local ref so the closure keeps a non-None type for mypy.
-            assert self.compressor is not None
-            compressor = self.compressor
+        # Indexer layers: q is produced here, overlapping with the (eager)
+        # indexer. wq_b + kv_insert rides on the default stream so q stays on
+        # its consumer stream (mla_attn downstream reads q on default).
+        # Indexer/compressor go on aux for overlap with default's GEMM +
+        # cache write.
+        aux_streams = self.aux_stream_list
+        compressor = self.compressor
+        assert compressor is not None
+        indexer = self.indexer
+        assert indexer is not None
 
-            # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
-            # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
-            # MLA compressor. Slot [2] is reserved for the indexer's inner
-            # overlap. ROCm (aux_streams is None) falls back to sequential.
-            q, _ = execute_in_parallel(
-                lambda: self._wq_b_kv_insert(qr, kv, positions),
-                [
-                    lambda: indexer(
-                        hidden_states,
-                        qr,
-                        indexer_kv_score,
-                        indexer_weights,
-                        positions,
-                        self.indexer_rotary_emb,
-                    ),
-                    lambda: compressor(kv_score, positions, self.rotary_emb),
-                ],
-                self.ln_events[0],
-                [self.ln_events[1], self.ln_events[2]],
-                [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
-                enable=aux_streams is not None,
-            )
+        # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
+        # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
+        # MLA compressor. Slot [2] is reserved for the indexer's inner
+        # overlap. ROCm (aux_streams is None) falls back to sequential.
+        q, _ = execute_in_parallel(
+            lambda: self._wq_b_kv_insert(qr, kv, positions),
+            [
+                lambda: indexer(
+                    hidden_states,
+                    qr,
+                    indexer_kv_score,
+                    indexer_weights,
+                    positions,
+                    self.indexer_rotary_emb,
+                ),
+                lambda: compressor(kv_score, positions, self.rotary_emb),
+            ],
+            self.ln_events[0],
+            [self.ln_events[1], self.ln_events[2]],
+            [aux_streams[0], aux_streams[1]] if aux_streams is not None else None,
+            enable=aux_streams is not None,
+        )
 
         # MLA attention writes into the pre-allocated `out` buffer
-        # ([num_tokens, padded_heads, head_dim]). q is non-None here: indexer
-        # layers set it just above, non-indexer layers pass it in from forward.
-        assert q is not None
+        # ([num_tokens, padded_heads, head_dim]).
         self.mla_attn(q, kv, positions, output=out)
 
     def _wq_b_kv_insert(
