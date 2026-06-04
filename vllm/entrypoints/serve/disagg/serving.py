@@ -36,8 +36,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input

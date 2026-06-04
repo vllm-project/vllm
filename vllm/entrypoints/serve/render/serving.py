@@ -3,15 +3,9 @@
 from typing import Any, cast
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
-)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
@@ -21,7 +15,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.error_response import create_error_response
-from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
