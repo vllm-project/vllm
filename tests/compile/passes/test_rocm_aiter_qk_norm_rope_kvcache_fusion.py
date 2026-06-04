@@ -415,12 +415,6 @@ def test_qk_norm_rope_kvcache_fusion(
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """QK-norm + RoPE + KV-cache fusion for full and partial rotary.
-
-    The ``rotary_dim < head_size`` configs exercise the
-    ``kernel_rotary_dim = 0 if rotary_dim == head_dim else rotary_dim`` branch
-    in ``do_qk_norm_rope_kvcache_update`` for both AITER backends.
-    """
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
