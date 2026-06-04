@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger

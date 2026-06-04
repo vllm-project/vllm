@@ -39,7 +39,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.serve.utils.error_response import create_error_response
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,

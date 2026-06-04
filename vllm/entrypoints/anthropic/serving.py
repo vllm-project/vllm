@@ -44,7 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender

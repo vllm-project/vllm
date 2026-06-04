@@ -38,7 +38,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob

@@ -57,7 +57,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )

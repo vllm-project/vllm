@@ -26,7 +26,7 @@ if TYPE_CHECKING:
         GetHandlerFn,
         RequestType,
     )
-    from vllm.entrypoints.serve.utils.logger import RequestLogger
+    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 else:
     RequestLogger = object

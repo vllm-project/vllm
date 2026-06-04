@@ -41,7 +41,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     log_version_and_model,
     process_lora_modules,
 )
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.server_utils import (
     engine_error_handler,
     exception_handler,

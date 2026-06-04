@@ -19,7 +19,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike

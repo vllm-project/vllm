@@ -32,7 +32,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
 )
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.error_response import create_error_response
-from vllm.entrypoints.serve.utils.logger import RequestLogger
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
