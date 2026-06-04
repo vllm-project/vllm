@@ -71,6 +71,16 @@ class BlockStored(KVCacheEvent):
     """Store events carry cache-spec metadata so consumers can classify and
     filter groups as they are learned. Remove events only need group_idx+hash.
     """
+
+    skipped_parent_block_hash: ExternalBlockHash | None = None
+    """Parent hash for skipped token context preceding this store event."""
+
+    skipped_token_ids: list[int] | None = None
+    """Logical token span for skipped blocks preceding this store event."""
+
+    skipped_extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys for ``skipped_token_ids``, one entry per skipped block."""
+
     group_idx: int | None = None
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
@@ -95,6 +105,9 @@ class BlockStored(KVCacheEvent):
                 self.lora_id,
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,
+                self.skipped_parent_block_hash,
+                tuple(self.skipped_token_ids) if self.skipped_token_ids else None,
+                tuple(self.skipped_extra_keys) if self.skipped_extra_keys else None,
                 self.group_idx,
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
