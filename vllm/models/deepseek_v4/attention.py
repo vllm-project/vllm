@@ -331,7 +331,7 @@ class DeepseekV4MLA(nn.Module):
             self.eps,
         )
 
-        # self.attention / self.sparse_attn are wrapped with
+        # self.attention / self.attention_with_indexer are wrapped with
         # @eager_break_during_capture: that is where the breakable cudagraph
         # capture breaks (the attention op runs eagerly between captured graph
         # segments). Tensors are passed as args so the wrapper weak-refs them
@@ -359,9 +359,10 @@ class DeepseekV4MLA(nn.Module):
                 q = self._wq_b_kv_insert(qr, kv, positions)
             self.attention(q, kv, positions, o_padded)
         else:
-            # Indexer layers: q is produced inside the (eager) sparse_attn,
-            # overlapping wq_b+kv_insert with the indexer and MLA compressor.
-            self.sparse_attn(
+            # Indexer layers: q is produced inside the (eager)
+            # attention_with_indexer, overlapping wq_b+kv_insert with the
+            # indexer and MLA compressor.
+            self.attention_with_indexer(
                 hidden_states,
                 positions,
                 qr,
@@ -490,7 +491,7 @@ class DeepseekV4MLA(nn.Module):
         self.mla_attn(q, kv, positions, output=out)
 
     @eager_break_during_capture
-    def sparse_attn(
+    def attention_with_indexer(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
