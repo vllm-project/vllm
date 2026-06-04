@@ -30,6 +30,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_embedding import (  # noqa: E501
+    CompressedTensorsEmbeddingWNA16Int,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     CompressedTensorsMoEMethod,
 )
@@ -44,6 +47,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
@@ -56,7 +60,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -176,6 +183,24 @@ class CompressedTensorsConfig(QuantizationConfig):
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
                 return CompressedTensorsLinearMethod(self)
+
+        # ParallelLMHead subclasses VocabParallelEmbedding but is handled above as
+        # a linear; only true embedding lookups land here.
+        if isinstance(layer, VocabParallelEmbedding):
+            scheme_dict = self.get_scheme_dict(layer, layer_name=prefix)
+            weight_quant = scheme_dict.get("weights") if scheme_dict else None
+            if weight_quant is None:
+                return None  # unquantized embedding
+            if not (
+                isinstance(weight_quant, QuantizationArgs)
+                and self._is_wNa16_group_channel(weight_quant, None)
+                and weight_quant.type == QuantizationType.INT
+            ):
+                raise ValueError(
+                    "compressed-tensors embeddings only support weight-only INT "
+                    f"group/channel (WNA16) quantization, got: {weight_quant}"
+                )
+            return CompressedTensorsEmbeddingWNA16Int(weight_quant)
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
@@ -324,6 +349,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                                 quant_config.get("input_activations")
                             )
                         )
+
+                # Static output-activation quant is applied as a float fake-quant
+                # on the layer output; capture it when present.
+                target_scheme_map[target]["output_activations"] = None
+                output_activations = quant_config.get("output_activations")
+                if output_activations:
+                    target_scheme_map[target]["output_activations"] = (
+                        QuantizationArgs.model_validate(output_activations)
+                    )
         return target_scheme_map
 
     @classmethod
@@ -604,10 +638,56 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         return is_channel_group and input_quant_none and is_static
 
+    @staticmethod
+    def _is_wNa8o8_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        output_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
+        with static per-tensor INT8 input/output activation quant, applied as a float
+        fake-quant around a weight-only matmul."""
+        is_int_pack_format = format in (
+            CompressionFormat.pack_quantized.value,
+            CompressionFormat.int_quantized.value,
+        )
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_static_int = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_intN_weight = is_static_int and is_channel_group and is_int_pack_format
+        is_static_int8_in = (
+            input_quant is not None
+            and input_quant.type == QuantizationType.INT
+            and input_quant.strategy == QuantizationStrategy.TENSOR.value
+            and input_quant.num_bits == 8
+            and not input_quant.dynamic
+        )
+        is_static_int8_out = (
+            output_quant is not None
+            and output_quant.type == QuantizationType.INT
+            and output_quant.strategy == QuantizationStrategy.TENSOR.value
+            and output_quant.num_bits == 8
+            and not output_quant.dynamic
+        )
+        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
+        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
+        # weight-only (no activations) falls through to WNA16.
+        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
+        needs_wNa8o8 = is_intN_weight and (
+            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
+        )
+        return needs_wNa8o8
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
+        output_quant: QuantizationArgs | None = None,
         format: str | None = None,
         layer_name: str | None = None,
     ) -> "CompressedTensorsScheme":
@@ -639,6 +719,19 @@ class CompressedTensorsConfig(QuantizationConfig):
                 symmetric=weight_quant.symmetric,
                 group_size=weight_quant.group_size,
                 actorder=weight_quant.actorder,
+            )
+
+        # Must come before the WNA16 check; standard 4/8-bit weight-only (no
+        # output-activation scale) still falls through to WNA16.
+        if self._is_wNa8o8_int(weight_quant, input_quant, output_quant, format):
+            return CompressedTensorsWNA8O8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                has_input_act=input_quant is not None,
+                has_output_act=output_quant is not None,
+                layer_name=layer_name,
+                quant_format=format,
             )
 
         if (
@@ -708,7 +801,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                     input_symmetric=input_quant.symmetric,
                 )
 
-        raise NotImplementedError("No compressed-tensors compatible scheme was found.")
+        raise NotImplementedError(
+            f"No compressed-tensors compatible scheme was found for {layer_name=}, "
+            f"{weight_quant=}, {input_quant=}, {output_quant=}, {format=}"
+        )
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
@@ -731,10 +827,12 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         weight_quant = None
         input_quant = None
+        output_quant = None
         format = None
         if scheme_dict:
             weight_quant = scheme_dict.get("weights")
             input_quant = scheme_dict.get("input_activations")
+            output_quant = scheme_dict.get("output_activations")
             format = scheme_dict.get("format")
 
         if weight_quant is None:
@@ -746,6 +844,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             scheme = self._get_scheme_from_parts(  # type: ignore
                 weight_quant=weight_quant,
                 input_quant=input_quant,
+                output_quant=output_quant,
                 format=format,
                 layer_name=layer_name,
             )

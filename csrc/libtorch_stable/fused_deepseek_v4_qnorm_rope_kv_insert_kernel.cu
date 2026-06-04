@@ -102,6 +102,35 @@ constexpr float NUM_TOKEN_CUTOFF = 1024;
 constexpr int kNumLanes = 32;
 constexpr int kElemsPerLane = kHeadDim / kNumLanes;  // 16
 
+// Pack this lane's 16 fp32 elements into per-tensor E4M3 FP8 (one uint4 = 16
+// B), scaling by `scale` (a reciprocal scale) and saturating to ±448.  Used by
+// the FlashInfer full-cache path for both the Q and KV stores.
+__device__ __forceinline__ uint4 packFp8E4M3x16(float const* values,
+                                                float const scale) {
+#ifndef USE_ROCM
+  uint4 out;
+  auto* out2 = reinterpret_cast<__nv_fp8x2_storage_t*>(&out);
+  #pragma unroll
+  for (int i = 0; i < kElemsPerLane / 2; i++) {
+    float2 scaled =
+        make_float2(values[2 * i] * scale, values[2 * i + 1] * scale);
+    scaled.x = fminf(fmaxf(scaled.x, -kFp8Max), kFp8Max);
+    scaled.y = fminf(fmaxf(scaled.y, -kFp8Max), kFp8Max);
+    out2[i] = __nv_cvt_float2_to_fp8x2(scaled, __NV_SATFINITE, __NV_E4M3);
+  }
+  return out;
+#else
+  uint8_t out_bytes[kElemsPerLane];
+  #pragma unroll
+  for (int i = 0; i < kElemsPerLane; i++) {
+    float scaled = values[i] * scale;
+    scaled = fminf(fmaxf(scaled, -kFp8Max), kFp8Max);
+    out_bytes[i] = rocm_cvt_float_to_fp8_e4m3(scaled);
+  }
+  return *reinterpret_cast<uint4 const*>(out_bytes);
+#endif
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Small inline helpers
 // ────────────────────────────────────────────────────────────────────────────
@@ -649,6 +678,257 @@ void launchFusedDeepseekV4QNormRopeKVRopeQuantInsert(
 #undef DISPATCH
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// FlashInfer full-cache kernel
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Sibling to the FlashMLA kernel above, used by the FlashInfer V4 sparse-MLA
+// backend.  Differences from the legacy path:
+//   * No Q head padding — output Q layout matches the input num_heads_q.
+//   * KV is written as a *contiguous* 512-wide row per token (token-strided),
+//     not the legacy UE8M0 paged layout with a separate scale tail.
+//   * Q/KV are stored either as bf16 or as per-tensor E4M3 FP8 (one global
+//     scale), selected by the STORE_Q_FP8 / STORE_KV_FP8 template flags.
+//
+// Grid: 1D, gridDim.x = ceil(num_tokens_full * (num_heads_q + 1) / warps).
+// Each warp handles one (token, slot): slot < num_heads_q → Q, slot ==
+// num_heads_q → KV.
+template <typename scalar_t_in, bool STORE_Q_FP8, bool STORE_KV_FP8>
+__global__ void fusedDeepseekV4FullCacheKernel(
+    scalar_t_in* __restrict__ q_inout,          // [N, H, 512], in place (bf16)
+    uint8_t* __restrict__ q_fp8_out,            // [N, H, 512] fp8, optional
+    int64_t const q_fp8_stride0,                // elements (fp8 == bytes)
+    int64_t const q_fp8_stride1,                // elements (fp8 == bytes)
+    scalar_t_in const* __restrict__ kv_in,      // [N, 512] bf16
+    uint8_t* __restrict__ k_cache,              // contiguous bf16 or fp8 cache
+    int64_t const* __restrict__ slot_mapping,   // [num_tokens_insert] i64
+    int64_t const* __restrict__ position_ids,   // [N] i64
+    float const* __restrict__ cos_sin_cache,    // [max_pos, 64] fp32
+    float const* __restrict__ fp8_scale_ptr,    // scalar, KV fp8 only
+    float const* __restrict__ q_fp8_scale_inv,  // scalar, Q fp8 only
+    float const eps,
+    int const num_tokens_full,      // = q.size(0) = kv.size(0)
+    int const num_tokens_insert,    // = slot_mapping.size(0)
+    int const num_heads_q,          // H (no padding)
+    int const cache_block_size,     // tokens per cache block
+    int64_t const kv_block_stride,  // bytes per cache block
+    int64_t const kv_token_stride) {  // bytes per cache token
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+  if constexpr (std::is_same_v<scalar_t_in, c10::BFloat16>) {
+    return;
+  } else {
+#endif
+    using Converter = vllm::_typeConvert<scalar_t_in>;
+    int const warpsPerBlock = blockDim.x / 32;
+    int const warpId = threadIdx.x / 32;
+    int const laneId = threadIdx.x % 32;
+    int const globalWarpIdx = blockIdx.x * warpsPerBlock + warpId;
+
+    int const slotsPerToken = num_heads_q + 1;
+    int const tokenIdx = globalWarpIdx / slotsPerToken;
+    int const slotIdx = globalWarpIdx % slotsPerToken;
+    if (tokenIdx >= num_tokens_full) return;
+    bool const isKV = (slotIdx == num_heads_q);
+    // KV branch: skip DP-padded tokens (no slot reserved for them).
+    if (isKV && tokenIdx >= num_tokens_insert) return;
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaGridDependencySynchronize();
+#endif
+
+    int const dim_base = laneId * kElemsPerLane;  // in [0, 512) step 16
+    scalar_t_in const* src_ptr;
+    if (isKV) {
+      src_ptr = kv_in + static_cast<int64_t>(tokenIdx) * kHeadDim + dim_base;
+    } else {
+      src_ptr = q_inout +
+                (static_cast<int64_t>(tokenIdx) * num_heads_q + slotIdx) *
+                    kHeadDim +
+                dim_base;
+    }
+    uint4 const v0 = *reinterpret_cast<uint4 const*>(src_ptr);
+    uint4 const v1 = *reinterpret_cast<uint4 const*>(src_ptr + 8);
+
+    // ── Decode bf16 → 16 fp32 registers ───────────────────────────────────
+    float elements[kElemsPerLane];
+    {
+      auto const* p0 =
+          reinterpret_cast<typename Converter::packed_hip_type const*>(&v0);
+      auto const* p1 =
+          reinterpret_cast<typename Converter::packed_hip_type const*>(&v1);
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float2 f2 = Converter::convert(p0[i]);
+        elements[2 * i] = f2.x;
+        elements[2 * i + 1] = f2.y;
+      }
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float2 f2 = Converter::convert(p1[i]);
+        elements[8 + 2 * i] = f2.x;
+        elements[8 + 2 * i + 1] = f2.y;
+      }
+    }
+
+    // ── Q branch: RMSNorm (no weight) ─────────────────────────────────────
+    if (!isKV) {
+      float sumOfSquares = 0.0f;
+#pragma unroll
+      for (int i = 0; i < kElemsPerLane; i++) {
+        sumOfSquares += elements[i] * elements[i];
+      }
+      sumOfSquares = warpSum<float>(sumOfSquares);
+      float const rms_rcp =
+          rsqrtf(sumOfSquares / static_cast<float>(kHeadDim) + eps);
+#pragma unroll
+      for (int i = 0; i < kElemsPerLane; i++) {
+        elements[i] = elements[i] * rms_rcp;
+      }
+    }
+
+    // ── GPT-J RoPE on dims [NOPE_DIM, HEAD_DIM) ───────────────────────────
+    bool const is_rope_lane = dim_base >= kNopeDim;
+    if (is_rope_lane) {
+      int64_t const pos = position_ids[tokenIdx];
+      constexpr int kHalfRope = kRopeDim / 2;
+      float const* cos_ptr = cos_sin_cache + pos * kRopeDim;
+      float const* sin_ptr = cos_ptr + kHalfRope;
+      int const rope_local_base = dim_base - kNopeDim;
+      int const half_base = rope_local_base >> 1;
+      float4 const c0 = *reinterpret_cast<float4 const*>(cos_ptr + half_base);
+      float4 const c1 = *reinterpret_cast<float4 const*>(cos_ptr + half_base + 4);
+      float4 const s0 = *reinterpret_cast<float4 const*>(sin_ptr + half_base);
+      float4 const s1 = *reinterpret_cast<float4 const*>(sin_ptr + half_base + 4);
+      float const cos_arr[8] = {c0.x, c0.y, c0.z, c0.w, c1.x, c1.y, c1.z, c1.w};
+      float const sin_arr[8] = {s0.x, s0.y, s0.z, s0.w, s1.x, s1.y, s1.z, s1.w};
+#pragma unroll
+      for (int p = 0; p < kElemsPerLane / 2; p++) {
+        float const x_even = elements[2 * p];
+        float const x_odd = elements[2 * p + 1];
+        elements[2 * p] = x_even * cos_arr[p] - x_odd * sin_arr[p];
+        elements[2 * p + 1] = x_even * sin_arr[p] + x_odd * cos_arr[p];
+      }
+    }
+
+    // ── Store ─────────────────────────────────────────────────────────────
+    if (!isKV) {
+      if constexpr (STORE_Q_FP8) {
+        float const scale_inv = VLLM_LDG(q_fp8_scale_inv);
+        uint4 const out = packFp8E4M3x16(elements, scale_inv);
+        uint8_t* dst = q_fp8_out +
+                       static_cast<int64_t>(tokenIdx) * q_fp8_stride0 +
+                       static_cast<int64_t>(slotIdx) * q_fp8_stride1 + dim_base;
+        *reinterpret_cast<uint4*>(dst) = out;
+      } else {
+        uint4 out0, out1;
+        auto* po0 = reinterpret_cast<typename Converter::packed_hip_type*>(&out0);
+        auto* po1 = reinterpret_cast<typename Converter::packed_hip_type*>(&out1);
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+          po0[i] = Converter::convert(
+              make_float2(elements[2 * i], elements[2 * i + 1]));
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+          po1[i] = Converter::convert(
+              make_float2(elements[8 + 2 * i], elements[8 + 2 * i + 1]));
+        }
+        scalar_t_in* dst =
+            q_inout +
+            (static_cast<int64_t>(tokenIdx) * num_heads_q + slotIdx) * kHeadDim +
+            dim_base;
+        *reinterpret_cast<uint4*>(dst) = out0;
+        *reinterpret_cast<uint4*>(dst + 8) = out1;
+      }
+    } else {
+      int64_t const slot_id = slot_mapping[tokenIdx];
+      if (slot_id >= 0) {
+        int64_t const block_idx = slot_id / cache_block_size;
+        int64_t const pos_in_block = slot_id % cache_block_size;
+        uint8_t* cache_row =
+            k_cache + block_idx * kv_block_stride + pos_in_block * kv_token_stride;
+        if constexpr (STORE_KV_FP8) {
+          float const inv_scale = 1.0f / VLLM_LDG(fp8_scale_ptr);
+          uint4 const out = packFp8E4M3x16(elements, inv_scale);
+          *reinterpret_cast<uint4*>(cache_row + dim_base) = out;
+        } else {
+          uint4 out0, out1;
+          auto* po0 =
+              reinterpret_cast<typename Converter::packed_hip_type*>(&out0);
+          auto* po1 =
+              reinterpret_cast<typename Converter::packed_hip_type*>(&out1);
+#pragma unroll
+          for (int i = 0; i < 4; i++) {
+            po0[i] = Converter::convert(
+                make_float2(elements[2 * i], elements[2 * i + 1]));
+          }
+#pragma unroll
+          for (int i = 0; i < 4; i++) {
+            po1[i] = Converter::convert(
+                make_float2(elements[8 + 2 * i], elements[8 + 2 * i + 1]));
+          }
+          scalar_t_in* dst = reinterpret_cast<scalar_t_in*>(cache_row) + dim_base;
+          *reinterpret_cast<uint4*>(dst) = out0;
+          *reinterpret_cast<uint4*>(dst + 8) = out1;
+        }
+      }
+    }
+
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+    cudaTriggerProgrammaticLaunchCompletion();
+#endif
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
+  }
+#endif
+}
+
+// Configure + launch helper shared by the bf16 and fp8 full-cache launchers.
+template <typename scalar_t_in, bool STORE_Q_FP8, bool STORE_KV_FP8>
+static void launchFullCacheKernel(
+    scalar_t_in* q_inout, uint8_t* q_fp8_out, int64_t q_fp8_stride0,
+    int64_t q_fp8_stride1, scalar_t_in const* kv_in, uint8_t* k_cache,
+    int64_t const* slot_mapping, int64_t const* position_ids,
+    float const* cos_sin_cache, float const* fp8_scale,
+    float const* q_fp8_scale_inv, float const eps, int const num_tokens_full,
+    int const num_tokens_insert, int const num_heads_q,
+    int const cache_block_size, int64_t const kv_block_stride,
+    int64_t const kv_token_stride, char const* op_name, cudaStream_t stream) {
+  constexpr int kBlockSize = 256;
+  constexpr int kWarpsPerBlock = kBlockSize / 32;
+  int64_t const total_warps =
+      static_cast<int64_t>(num_tokens_full) * (num_heads_q + 1);
+  int const grid =
+      static_cast<int>((total_warps + kWarpsPerBlock - 1) / kWarpsPerBlock);
+  auto* kernel =
+      fusedDeepseekV4FullCacheKernel<scalar_t_in, STORE_Q_FP8, STORE_KV_FP8>;
+#ifndef USE_ROCM
+  static int const sm_version = getSMVersion();
+  STD_TORCH_CHECK(sm_version >= 80, op_name,
+                  " requires sm_80+ (Ampere or newer); got sm_", sm_version);
+  cudaLaunchConfig_t config;
+  config.gridDim = dim3(grid);
+  config.blockDim = dim3(kBlockSize);
+  config.dynamicSmemBytes = 0;
+  config.stream = stream;
+  cudaLaunchAttribute attrs[1];
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  config.attrs = attrs;
+  config.numAttrs = (sm_version >= 90) ? 1 : 0;
+  cudaLaunchKernelEx(&config, kernel, q_inout, q_fp8_out, q_fp8_stride0,
+                     q_fp8_stride1, kv_in, k_cache, slot_mapping, position_ids,
+                     cos_sin_cache, fp8_scale, q_fp8_scale_inv, eps,
+                     num_tokens_full, num_tokens_insert, num_heads_q,
+                     cache_block_size, kv_block_stride, kv_token_stride);
+#else
+  kernel<<<grid, kBlockSize, 0, stream>>>(
+      q_inout, q_fp8_out, q_fp8_stride0, q_fp8_stride1, kv_in, k_cache,
+      slot_mapping, position_ids, cos_sin_cache, fp8_scale, q_fp8_scale_inv,
+      eps, num_tokens_full, num_tokens_insert, num_heads_q, cache_block_size,
+      kv_block_stride, kv_token_stride);
+#endif
+}
+
 }  // namespace deepseek_v4_fused_ops
 }  // namespace vllm
 
@@ -734,4 +1014,168 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 stream);
       });
   return q_out;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FlashInfer full-cache torch ops
+// ────────────────────────────────────────────────────────────────────────────
+void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+    torch::stable::Tensor& q,                    // [N, H, 512] bf16, in place
+    torch::stable::Tensor const& kv,             // [N, 512] bf16, read-only
+    torch::stable::Tensor& k_cache,              // [num_blocks, bs, 512] bf16
+    torch::stable::Tensor const& slot_mapping,   // [num_tokens_insert] int64
+    torch::stable::Tensor const& position_ids,   // [N] int64
+    torch::stable::Tensor const& cos_sin_cache,  // [max_pos, 64] float32
+    double eps, int64_t cache_block_size) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(q.device().is_cuda() && q.is_contiguous(),
+                  "q must be contiguous CUDA");
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
+                  "kv must be contiguous CUDA");
+  STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() == ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                      position_ids.scalar_type() == ScalarType::Long,
+                  "position_ids must be int64 CUDA");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
+                  "cos_sin_cache shape [max_pos, 64] float32");
+  STD_TORCH_CHECK(q.dim() == 3 && q.size(2) == 512, "q shape [N, H, 512]");
+  STD_TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
+  STD_TORCH_CHECK(q.scalar_type() == ScalarType::BFloat16 &&
+                      kv.scalar_type() == ScalarType::BFloat16,
+                  "q and kv must be bfloat16");
+  STD_TORCH_CHECK(k_cache.dim() == 3 && k_cache.size(1) == cache_block_size &&
+                      k_cache.size(2) == 512 && k_cache.stride(2) == 1,
+                  "k_cache shape [num_blocks, cache_block_size, 512] contiguous");
+  STD_TORCH_CHECK(k_cache.scalar_type() == ScalarType::BFloat16,
+                  "k_cache must be bfloat16");
+
+  int const num_tokens_full = static_cast<int>(q.size(0));
+  int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
+  STD_TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_full &&
+                      static_cast<int>(position_ids.size(0)) == num_tokens_full,
+                  "q/kv/position_ids row counts must match");
+  STD_TORCH_CHECK(num_tokens_insert <= num_tokens_full,
+                  "slot_mapping must not exceed q row count");
+  int const num_heads_q = static_cast<int>(q.size(1));
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      q.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(q.get_device_index());
+
+  // bf16 cache: 2 bytes/element -> byte strides for the uint8-addressed kernel.
+  int64_t const kv_block_stride = k_cache.stride(0) * 2;
+  int64_t const kv_token_stride = k_cache.stride(1) * 2;
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      q.scalar_type(),
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert", [&] {
+        vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, false,
+                                                           false>(
+            reinterpret_cast<scalar_t*>(q.mutable_data_ptr()), nullptr, 0, 0,
+            reinterpret_cast<scalar_t const*>(kv.const_data_ptr()),
+            reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+            slot_mapping.const_data_ptr<int64_t>(),
+            position_ids.const_data_ptr<int64_t>(),
+            cos_sin_cache.const_data_ptr<float>(), nullptr, nullptr,
+            static_cast<float>(eps), num_tokens_full, num_tokens_insert,
+            num_heads_q, static_cast<int>(cache_block_size), kv_block_stride,
+            kv_token_stride,
+            "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
+            stream);
+      });
+}
+
+void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+    torch::stable::Tensor const& q,                // [N, H, 512] bf16, read-only
+    torch::stable::Tensor const& kv,               // [N, 512] bf16, read-only
+    torch::stable::Tensor& q_fp8,                  // [N, H, 512] fp8 e4m3
+    torch::stable::Tensor& k_cache,                // [num_blocks, bs, 512] fp8
+    torch::stable::Tensor const& slot_mapping,     // [num_tokens_insert] int64
+    torch::stable::Tensor const& position_ids,     // [N] int64
+    torch::stable::Tensor const& cos_sin_cache,    // [max_pos, 64] float32
+    torch::stable::Tensor const& fp8_scale,        // scalar float32 (KV scale)
+    torch::stable::Tensor const& q_fp8_scale_inv,  // scalar float32 (1 / Q scale)
+    double eps, int64_t cache_block_size) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(q.device().is_cuda() && q.is_contiguous(),
+                  "q must be contiguous CUDA");
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous(),
+                  "kv must be contiguous CUDA");
+  STD_TORCH_CHECK(q_fp8.device().is_cuda() && q_fp8.is_contiguous() &&
+                      q_fp8.scalar_type() == ScalarType::Float8_e4m3fn &&
+                      q_fp8.dim() == 3 && q_fp8.size(0) == q.size(0) &&
+                      q_fp8.size(1) == q.size(1) && q_fp8.size(2) == q.size(2),
+                  "q_fp8 must be a contiguous float8_e4m3fn tensor matching q");
+  STD_TORCH_CHECK(k_cache.device().is_cuda(), "k_cache must be CUDA");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() == ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                      position_ids.scalar_type() == ScalarType::Long,
+                  "position_ids must be int64 CUDA");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
+                  "cos_sin_cache shape [max_pos, 64] float32");
+  STD_TORCH_CHECK(fp8_scale.device().is_cuda() &&
+                      fp8_scale.scalar_type() == ScalarType::Float &&
+                      fp8_scale.size(0) == 1,
+                  "fp8_scale must be a scalar float32 CUDA tensor");
+  STD_TORCH_CHECK(q_fp8_scale_inv.device().is_cuda() &&
+                      q_fp8_scale_inv.scalar_type() == ScalarType::Float &&
+                      q_fp8_scale_inv.size(0) == 1,
+                  "q_fp8_scale_inv must be a scalar float32 CUDA tensor");
+  STD_TORCH_CHECK(q.dim() == 3 && q.size(2) == 512, "q shape [N, H, 512]");
+  STD_TORCH_CHECK(kv.dim() == 2 && kv.size(1) == 512, "kv shape [N, 512]");
+  STD_TORCH_CHECK(q.scalar_type() == kv.scalar_type(),
+                  "q and kv dtype must match");
+  STD_TORCH_CHECK(k_cache.dim() == 3 && k_cache.size(1) == cache_block_size &&
+                      k_cache.size(2) == 512 && k_cache.stride(2) == 1,
+                  "k_cache shape [num_blocks, cache_block_size, 512] contiguous");
+  STD_TORCH_CHECK(k_cache.scalar_type() == ScalarType::Float8_e4m3fn,
+                  "k_cache must be float8_e4m3fn");
+
+  int const num_tokens_full = static_cast<int>(q.size(0));
+  int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
+  STD_TORCH_CHECK(static_cast<int>(kv.size(0)) == num_tokens_full &&
+                      static_cast<int>(position_ids.size(0)) == num_tokens_full,
+                  "q/kv/position_ids row counts must match");
+  STD_TORCH_CHECK(num_tokens_insert <= num_tokens_full,
+                  "slot_mapping must not exceed q row count");
+  int const num_heads_q = static_cast<int>(q.size(1));
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      q.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(q.get_device_index());
+
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
+      q.scalar_type(),
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert", [&] {
+        vllm::deepseek_v4_fused_ops::launchFullCacheKernel<scalar_t, true,
+                                                           true>(
+            // q is read-only in the fp8 path (the kernel writes q_fp8); the
+            // launcher signature is non-const, so cast away const on the ptr.
+            reinterpret_cast<scalar_t*>(
+                const_cast<void*>(q.const_data_ptr())),
+            reinterpret_cast<uint8_t*>(q_fp8.mutable_data_ptr()),
+            q_fp8.stride(0), q_fp8.stride(1),
+            reinterpret_cast<scalar_t const*>(kv.const_data_ptr()),
+            reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+            slot_mapping.const_data_ptr<int64_t>(),
+            position_ids.const_data_ptr<int64_t>(),
+            cos_sin_cache.const_data_ptr<float>(),
+            fp8_scale.const_data_ptr<float>(),
+            q_fp8_scale_inv.const_data_ptr<float>(), static_cast<float>(eps),
+            num_tokens_full, num_tokens_insert, num_heads_q,
+            static_cast<int>(cache_block_size),
+            // fp8 cache: 1 byte/element -> stride already in bytes.
+            k_cache.stride(0), k_cache.stride(1),
+            "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
+            stream);
+      });
 }
