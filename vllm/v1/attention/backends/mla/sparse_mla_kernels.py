@@ -1819,6 +1819,8 @@ def _indexed_d512_split_score_kernel(
     dim_offsets = tl.arange(0, HEAD_DIM)
     head_mask = head_offsets < num_heads
     valid_len = tl.load(lens_ptr + token_idx)
+    if candidate_block * BLOCK_C >= tl.minimum(valid_len, num_candidates):
+        return
     candidate_mask = candidate_offsets < tl.minimum(valid_len, num_candidates)
 
     q = tl.load(
@@ -1944,37 +1946,38 @@ def _indexed_d512_split_value_kernel(
     acc = tl.zeros((HEAD_BLOCK, BLOCK_D), tl.float32)
 
     for candidate_start in range(0, num_candidates, BLOCK_C):
-        candidates = candidate_start + candidate_offsets
-        candidate_mask = candidates < tl.minimum(valid_len, num_candidates)
-        kv_indices = tl.load(
-            indices_ptr
-            + token_idx * stride_indices_t
-            + candidates * stride_indices_c,
-            mask=candidate_mask,
-            other=-1,
-        )
-        valid_kv = kv_indices >= 0
-        scores = tl.load(
-            scores_ptr
-            + token_idx * stride_scores_t
-            + head_offsets[:, None] * stride_scores_h
-            + candidates[None, :] * stride_scores_c,
-            mask=head_mask[:, None] & candidate_mask[None, :],
-            other=-float("inf"),
-        ).to(tl.float32)
-        weights = tl.where(
-            candidate_mask[None, :],
-            tl.exp(scores - safe_max[:, None]),
-            0.0,
-        )
-        values = tl.load(
-            kv_flat_ptr
-            + kv_indices[:, None].to(tl.int64) * stride_kv_t
-            + dim_offsets[None, :] * stride_kv_d,
-            mask=valid_kv[:, None] & dim_mask[None, :],
-            other=0.0,
-        )
-        acc += tl.dot(weights.to(tl.bfloat16), values)
+        if candidate_start < tl.minimum(valid_len, num_candidates):
+            candidates = candidate_start + candidate_offsets
+            candidate_mask = candidates < tl.minimum(valid_len, num_candidates)
+            kv_indices = tl.load(
+                indices_ptr
+                + token_idx * stride_indices_t
+                + candidates * stride_indices_c,
+                mask=candidate_mask,
+                other=-1,
+            )
+            valid_kv = kv_indices >= 0
+            scores = tl.load(
+                scores_ptr
+                + token_idx * stride_scores_t
+                + head_offsets[:, None] * stride_scores_h
+                + candidates[None, :] * stride_scores_c,
+                mask=head_mask[:, None] & candidate_mask[None, :],
+                other=-float("inf"),
+            ).to(tl.float32)
+            weights = tl.where(
+                candidate_mask[None, :],
+                tl.exp(scores - safe_max[:, None]),
+                0.0,
+            )
+            values = tl.load(
+                kv_flat_ptr
+                + kv_indices[:, None].to(tl.int64) * stride_kv_t
+                + dim_offsets[None, :] * stride_kv_d,
+                mask=valid_kv[:, None] & dim_mask[None, :],
+                other=0.0,
+            )
+            acc += tl.dot(weights.to(tl.bfloat16), values)
 
     tl.store(
         acc_ptr
