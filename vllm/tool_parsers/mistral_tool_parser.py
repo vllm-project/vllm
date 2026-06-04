@@ -408,21 +408,6 @@ class MistralToolParser(ToolParser):
             current_token_ids=current_token_ids,
         )
 
-    @staticmethod
-    def build_non_streaming_tool_calls(
-        tool_calls: list[FunctionCall] | None,
-    ) -> list[ToolCall]:
-        r"""Build `MistralToolCall` items for non-streaming responses."""
-        if not tool_calls:
-            return []
-
-        return [
-            MistralToolCall(id=tc.id, function=tc)
-            if tc.id
-            else MistralToolCall(function=tc)
-            for tc in tool_calls
-        ]
-
     def extract_tool_calls(
         self,
         model_output: str,
@@ -536,7 +521,7 @@ class MistralToolParser(ToolParser):
         return ExtractedToolCallInformation(
             tools_called=True,
             tool_calls=mistral_tool_calls,
-            content=content if len(content) > 0 else None,
+            content=content if content.strip() else None,
         )
 
     def extract_tool_calls_streaming(
