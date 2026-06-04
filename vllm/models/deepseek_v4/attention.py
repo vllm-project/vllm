@@ -208,6 +208,12 @@ class DeepseekV4MLA(nn.Module):
 
         self.kv_norm = kv_norm
         self.wo_a = wo_a
+        # Cache wo_a quant state at init so torch.compile does not need to
+        # trace hasattr() on an attribute that may or may not exist.
+        self._wo_a_is_unquantized = (
+            not hasattr(wo_a, "weight_scale_inv")
+            and not hasattr(wo_a, "weight_scale")
+        )
 
         self._wo_a_act_quant = QuantFP8(
             static=False,
@@ -325,7 +331,10 @@ class DeepseekV4MLA(nn.Module):
         o = o_padded[:, : self.n_local_heads, :]
 
         # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
+        # Also use the BF16 reference path when wo_a is unquantized. The
+        # rocm_inv_rope_einsum helper already handles both the quantized and
+        # BF16 wo_a cases via its own hasattr check.
+        if current_platform.is_rocm() or self._wo_a_is_unquantized:
             z = rocm_inv_rope_einsum(
                 self.rotary_emb,
                 o,
@@ -350,7 +359,15 @@ class DeepseekV4MLA(nn.Module):
         )
 
         wo_a_fp8 = self.wo_a.weight
-        wo_a_scale = self.wo_a.weight_scale_inv
+        # CompressedTensorsW8A16Fp8 BLOCK strategy renames `weight_scale` ->
+        # `weight_scale_inv` in process_weights_after_loading
+        # (compressed_tensors_w8a16_fp8.py:130). The W8A8Fp8 BLOCK strategy
+        # delegates to fp8_linear.process_weights_after_loading, which preserves
+        # whichever name was on disk (`weight_scale` or `weight_scale_inv`).
+        # Fall back so both scheme paths reach the same einsum entry point.
+        wo_a_scale = getattr(self.wo_a, "weight_scale_inv", None)
+        if wo_a_scale is None:
+            wo_a_scale = self.wo_a.weight_scale
 
         z = torch.empty(
             (num_tokens, self.n_local_groups, self.o_lora_rank),
