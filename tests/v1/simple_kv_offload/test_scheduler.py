@@ -30,6 +30,9 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    register_all_kvcache_specs,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -68,6 +71,9 @@ def _make_kv_cache_config(
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
+    register_all_kvcache_specs(
+        vllm_config=None
+    )  # Ensure specs are registered for tests
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         groups.append(

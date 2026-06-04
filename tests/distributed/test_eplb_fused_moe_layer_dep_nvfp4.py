@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_test_quant_config
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
@@ -76,6 +76,7 @@ def make_fused_moe_layer(
     )
 
     fml = fml.to(device)
+    re = fml.routed_experts
     w1_q, w2_q, quant_config = make_test_quant_config(
         test_config.num_local_experts,
         test_config.intermediate_size,
@@ -86,7 +87,6 @@ def make_fused_moe_layer(
         per_act_token_quant=False,
     )
 
-    re = fml.routed_experts
     re.w13_weight.data = w1_q
     re.w2_weight.data = w2_q
 
@@ -101,7 +101,7 @@ def make_fused_moe_layer(
         torch.randn(re.w13_weight_scale.data.shape, device=device) / 5
     ).to(re.w13_weight_scale.data.dtype)
 
-    nvfp4_fused_moe.process_weights_after_loading(fml.routed_experts)
+    nvfp4_fused_moe.process_weights_after_loading(re)
 
     fml.maybe_init_modular_kernel()
 
@@ -111,12 +111,9 @@ def make_fused_moe_layer(
 def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     set_env_vars_and_device(env)
 
-    parallel_config = ParallelConfig(
-        data_parallel_size=world_size,
-        enable_expert_parallel=True,
-        enable_eplb=True,
-    )
-    vllm_config = VllmConfig(parallel_config=parallel_config)
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.data_parallel_size = world_size
+    vllm_config.parallel_config.enable_expert_parallel = True
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -176,19 +173,20 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
         for lidx in range(test_config.num_layers):
             shuffled_indices[lidx] = torch.randperm(test_config.num_experts)
 
+        expert_buffer = [torch.empty_like(w) for w in rank_expert_weights[0]]
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
-            backend=vllm_config.parallel_config.eplb_config.communicator,
-            expert_weights=rank_expert_weights[0],
+            backend="torch_nccl",
+            expert_weights=rank_expert_weights,
+            expert_buffer=expert_buffer,
         )
-
         rearrange_expert_weights_inplace(
             indices,
             shuffled_indices,
             rank_expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
-            communicator=communicator,
+            communicator,
         )
 
         num_global_experts = test_config.num_experts

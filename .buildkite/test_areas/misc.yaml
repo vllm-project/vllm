@@ -281,6 +281,7 @@ steps:
   - vllm/model_executor/layers/quantization/quark/
   - vllm/multimodal/
   - vllm/outputs.py
+  - vllm/parser/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/ray/

@@ -450,7 +450,8 @@ class EplbState:
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=self.parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights[0],
+            expert_weights=model.expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         model_state = EplbModelState(
@@ -767,6 +768,7 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
+                    eplb_model_state.expert_buffer,
                     ep_group,
                     eplb_model_state.communicator,
                     is_profile,

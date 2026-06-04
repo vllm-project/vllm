@@ -280,6 +280,7 @@ class GroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group,
             has_e_score_bias=self.e_score_correction_bias is not None,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
