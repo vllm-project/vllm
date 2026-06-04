@@ -108,7 +108,6 @@ class CPUAttentionBackend(AttentionBackend):
 
 @dataclass
 class CPUAttentionMetadata:
-    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -219,7 +218,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
 
         attn_metadata = CPUAttentionMetadata(
-            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -397,7 +395,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
         num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
-        isa = _get_attn_isa(key.dtype, key_cache.shape[2], self.head_size)
+        isa = _get_attn_isa(
+            key.dtype, key_cache.shape[2], self.head_size, self.kv_cache_dtype
+        )
         ops.cpu_attn_reshape_and_cache(
             key,
             value,
