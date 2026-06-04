@@ -90,7 +90,7 @@ plugins:
       handlers:
         python:
           options:
-            filters: "public"
+            filters: []
             show_overloads: true
             signature_crossrefs: true
             # Recommendations from api-autonav

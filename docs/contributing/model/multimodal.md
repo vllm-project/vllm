@@ -23,7 +23,7 @@ Further update the model as follows:
                 raise ValueError("Only image modality is supported")
         ```
 
-- Inside `__init__` method, initialize the language components of the model inside `vllm.model_executor.models.interfaces.SupportsMultiModal._mark_language_model`, and the multimodal components of the model inside `vllm.model_executor.models.interfaces.SupportsMultiModal._mark_tower_model`, e.g.:
+- Inside `__init__` method, initialize the language components of the model inside [_mark_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_language_model], and the multimodal components of the model inside [_mark_tower_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_tower_model], e.g.:
 
     ```python
         def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -508,7 +508,7 @@ to fill in the missing details about HF processing.
 
 ### Multi-modal fields
 
-Override `vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config` to
+Override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] to
 return a schema of the tensors outputted by the HF processor that are related to the input multi-modal items.
 
 === "Basic example: LLaVA"
@@ -528,7 +528,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     return BatchFeature(data=data, tensor_type=return_tensors)
     ```
 
-    So, we override `vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config` as follows:
+    So, we override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
 
     ```python
     def _get_mm_fields_config(
@@ -567,7 +567,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     In order to support the use of
     [MultiModalFieldConfig.batched][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
     like in LLaVA, we remove the extra batch dimension by overriding
-    `vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor`:
+    [BaseMultiModalProcessor._call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor]:
 
     ??? code
 
@@ -612,7 +612,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         processing. `mm_kwargs` is used to both initialize and call the huggingface
         processor, whereas `tok_kwargs` is only used to call the huggingface processor.
 
-    This lets us override `vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config` as follows:
+    This lets us override [_get_mm_fields_config][vllm.multimodal.processing.BaseMultiModalProcessor._get_mm_fields_config] as follows:
 
     ```python
     def _get_mm_fields_config(
@@ -625,7 +625,7 @@ return a schema of the tensors outputted by the HF processor that are related to
 
 ### Prompt updates
 
-Override `vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` to
+Override [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] to
 return a list of [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instances.
 
 Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies an update operation
@@ -644,7 +644,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
     ```
 
     It simply repeats each input `image_token` a number of times equal to the number of placeholder feature tokens (`num_image_tokens`).
-    Based on this, we override `vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` as follows:
+    Based on this, we override [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] as follows:
 
     ??? code
 
@@ -859,7 +859,7 @@ to register them to the multi-modal registry:
 
 ### Inserting feature tokens without replacement
 
-Some HF processors directly insert feature tokens without replacing anything in the original prompt. In that case, you can use [PromptInsertion][vllm.multimodal.processing.PromptInsertion] instead of [PromptReplacement][vllm.multimodal.processing.PromptReplacement] inside `vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates]`
+Some HF processors directly insert feature tokens without replacing anything in the original prompt. In that case, you can use [PromptInsertion][vllm.multimodal.processing.PromptInsertion] instead of [PromptReplacement][vllm.multimodal.processing.PromptReplacement] inside [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates].
 
 Examples:
 
@@ -868,7 +868,7 @@ Examples:
 
 ### Handling prompt updates unrelated to multi-modal data
 
-`vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates` assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override `vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only` so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
+[_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates] assumes that each application of prompt update corresponds to one multi-modal item. If the HF processor performs additional processing regardless of how many multi-modal items there are, you should override [_apply_hf_processor_tokens_only][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_tokens_only] so that the processed token inputs are consistent with the result of applying the HF processor on text inputs. This is because token inputs bypass the HF processor according to [our design](../../design/mm_processing.md).
 
 Examples:
 
@@ -878,7 +878,7 @@ Examples:
 
 ### Custom HF processor
 
-Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to `vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor`.
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
 
 Examples:
 

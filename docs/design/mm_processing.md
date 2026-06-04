@@ -13,7 +13,7 @@ One of the main responsibilities of HF processor is to update the prompt with pl
 
 The information about which tokens have been updated is key to finding the correspondence between placeholder feature tokens and multi-modal inputs.
 
-In vLLM, this information is specified using [PromptUpdate][vllm.multimodal.processing.PromptUpdate] in `vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates`. We can automatically detect whether HF has updated the prompt by checking the existence of the updated tokens.
+In vLLM, this information is specified using [PromptUpdate][vllm.multimodal.processing.PromptUpdate] in [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates]. We can automatically detect whether HF has updated the prompt by checking the existence of the updated tokens.
 
 ## Tokenized Prompt Inputs
 
@@ -48,11 +48,11 @@ We work around the first issue by requiring each model to define how to generate
 ### Automatic prompt updating
 
 We address the second issue by implementing model-agnostic code in
-`vllm.multimodal.processing.BaseMultiModalProcessor._apply_prompt_updates` to automatically update the prompt with feature placeholder tokens based on the specification outputted by `vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates`.
+[_apply_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._apply_prompt_updates] to automatically update the prompt with feature placeholder tokens based on the specification outputted by [_get_prompt_updates][vllm.multimodal.processing.BaseMultiModalProcessor._get_prompt_updates].
 
 ### Summary
 
-With the help of dummy text and automatic prompt updating, our multi-modal processor can finally accept both text and token prompts with multi-modal data. The detailed logic is shown in `vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main`.
+With the help of dummy text and automatic prompt updating, our multi-modal processor can finally accept both text and token prompts with multi-modal data. The detailed logic is shown in [_apply_hf_processor_main][vllm.multimodal.processing.BaseMultiModalProcessor._apply_hf_processor_main].
 
 ## Processor Output Caching
 
