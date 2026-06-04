@@ -614,6 +614,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    speculative_adaptive_verify_config: str | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1471,6 +1472,10 @@ class EngineArgs:
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
         vllm_group.add_argument(
+            "--speculative-adaptive-verify-config",
+            **speculative_kwargs["speculative_adaptive_verify_config"],
+        )
+        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1674,6 +1679,11 @@ class EngineArgs:
             ("--spec-method", "method", self.spec_method),
             ("--spec-model", "model", self.spec_model),
             ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+            (
+                "--speculative-adaptive-verify-config",
+                "speculative_adaptive_verify_config",
+                self.speculative_adaptive_verify_config,
+            ),
         ):
             if value is None:
                 continue

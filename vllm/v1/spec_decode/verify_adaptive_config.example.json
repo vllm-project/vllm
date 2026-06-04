@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "warmup_batch_sizes": [1, 2, 4, 8, 10, 12, 14, 16, 32],
+  "min_warmup_batch_size": 2,
+  "max_warmup_batch_size": null,
+  "query_len_step_per_req": 2,
+  "min_query_len_per_req": 2,
+  "max_query_len_per_req": null,
+  "n_warmup_iters": 3,
+  "n_measure_iters": 5
+}

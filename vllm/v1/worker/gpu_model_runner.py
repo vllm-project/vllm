@@ -176,6 +176,8 @@ from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
+from vllm.v1.spec_decode.verify_adaptive_config import VerifyAdaptiveConfig
+from vllm.v1.spec_decode.verify_adaptive_controller import VerifyAdaptiveController
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
@@ -615,6 +617,35 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(
                 self.sampler, self.speculative_config, self.device
             )
+
+        # VerifyAdaptiveController — enabled via
+        # --speculative-adaptive-verify-config (path to JSON).
+        self._verify_adaptive_controller: VerifyAdaptiveController | None = None
+        _adaptive_cfg_path = (
+            self.speculative_config.speculative_adaptive_verify_config
+            if self.speculative_config is not None
+            else None
+        )
+        if _adaptive_cfg_path:
+            if self.speculative_config is None or not self.speculative_config.use_dflash():
+                logger.warning(
+                    "speculative_adaptive_verify_config is set but speculative "
+                    "method is not dflash; adaptive verifier step-length is "
+                    "disabled."
+                )
+            else:
+                _acfg = VerifyAdaptiveConfig.from_json(_adaptive_cfg_path)
+                self._verify_adaptive_controller = VerifyAdaptiveController(
+                    config=_acfg,
+                    num_spec_tokens=self.speculative_config.num_speculative_tokens,
+                    max_batch_size=self.scheduler_config.max_num_seqs,
+                    device=self.device,
+                )
+                # Enable prob computation in the drafter even for greedy sampling.
+                if hasattr(self, "drafter") and hasattr(
+                    self.drafter, "needs_draft_probs"
+                ):
+                    self.drafter.needs_draft_probs = True
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -1133,6 +1164,8 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            if self._verify_adaptive_controller is not None:
+                self._verify_adaptive_controller.invalidate(req_id)
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -4028,6 +4061,39 @@ class GPUModelRunner(
                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
             )
 
+        # Adaptive spec-length truncation: shorten the verifier's input to the
+        # length recommended by VerifyAdaptiveController from the previous step.
+        if (
+            self._verify_adaptive_controller is not None
+            and scheduler_output.scheduled_spec_decode_tokens
+        ):
+            new_spec = scheduler_output.scheduled_spec_decode_tokens.copy()
+            new_num_sched = scheduler_output.num_scheduled_tokens.copy()
+            tokens_delta = 0
+            for req_id, draft_toks in list(new_spec.items()):
+                adaptive_len = (
+                    self._verify_adaptive_controller.get_adaptive_draft_len(req_id)
+                )
+                if adaptive_len is not None and adaptive_len < len(draft_toks):
+                    diff = len(draft_toks) - adaptive_len
+                    tokens_delta += diff
+                    new_num_sched[req_id] = new_num_sched[req_id] - diff
+                    if adaptive_len == 0:
+                        # No speculation: drop the key so downstream treats it
+                        # as a plain decode rather than an empty-draft request.
+                        del new_spec[req_id]
+                    else:
+                        new_spec[req_id] = draft_toks[:adaptive_len]
+            if tokens_delta > 0:
+                scheduler_output = replace(
+                    scheduler_output,
+                    scheduled_spec_decode_tokens=new_spec,
+                    num_scheduled_tokens=new_num_sched,
+                    total_num_scheduled_tokens=(
+                        scheduler_output.total_num_scheduled_tokens - tokens_delta
+                    ),
+                )
+
         if has_kv_transfer_group():
             kv_connector_metadata = scheduler_output.kv_connector_metadata
             assert kv_connector_metadata is not None
@@ -5065,6 +5131,32 @@ class GPUModelRunner(
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
 
+            # Update adaptive draft lengths for the next step using the
+            # lightweight [B, T] selected-token probabilities from the drafter.
+            if (
+                self._verify_adaptive_controller is not None
+                and hasattr(self.drafter, "take_last_selected_probs")
+            ):
+                selected_probs = self.drafter.take_last_selected_probs()
+                if selected_probs is not None:
+                    num_reqs = self.input_batch.num_reqs
+                    # The sequences actually drafting this step are those past
+                    # prefill; only they receive an adaptive length for the
+                    # next verifier step.
+                    active = {
+                        self.input_batch.req_ids[i]
+                        for i in range(num_reqs)
+                        if self.input_batch.num_computed_tokens_cpu[i]
+                        >= self.input_batch.num_prompt_tokens[i]
+                    }
+                    if active:
+                        self._verify_adaptive_controller.process_draft_output(
+                            selected_probs=selected_probs,
+                            req_ids=self.input_batch.req_ids,
+                            active_draft_req_ids=active,
+                            batch_size=num_reqs,
+                        )
+
         return draft_token_ids
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -5604,6 +5696,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        explicit_scheduled_tokens: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5663,7 +5756,13 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        if create_mixed_batch:
+        if explicit_scheduled_tokens is not None:
+            # VerifyAdaptiveController passes an exact per-request token
+            # distribution for ITL profiling; bypass all other heuristics.
+            num_reqs = len(explicit_scheduled_tokens)
+            num_scheduled_tokens_list = list(explicit_scheduled_tokens)
+            max_query_len = max(explicit_scheduled_tokens)
+        elif create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
@@ -6579,6 +6678,16 @@ class GPUModelRunner(
             cuda_graph_size / (1 << 30),
         )
         return cuda_graph_size
+
+    def profile_adaptive_cost(self) -> None:
+        """Profile verifier ITL for VerifyAdaptiveController.
+
+        Called from gpu_worker.compile_or_warm_up_model after CUDA graph
+        capture / JIT warmup so that cost measurements reflect real
+        post-compilation latency.
+        """
+        if self._verify_adaptive_controller is not None:
+            self._verify_adaptive_controller.profile_cost_table(self)
 
     def _warmup_and_capture(
         self,

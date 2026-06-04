@@ -261,6 +261,13 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
+    speculative_adaptive_verify_config: str | None = None
+    """Path to a JSON file for :class:`~vllm.v1.spec_decode.verify_adaptive_config.
+    VerifyAdaptiveConfig`.  Enables adaptive verifier query lengths for DFlash
+    speculative decoding.  Also settable via
+    ``--speculative-adaptive-verify-config`` or the
+    ``speculative_adaptive_verify_config`` key inside ``--speculative-config``."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

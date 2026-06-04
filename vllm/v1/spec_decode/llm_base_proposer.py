@@ -230,6 +230,12 @@ class SpecDecodeBaseProposer:
             and self.speculative_config.draft_sample_method == "probabilistic"
         )
         self._last_draft_probs: torch.Tensor | None = None
+        # Probability of each *selected* draft token, shape [B, T].  Populated
+        # only when needs_draft_probs is set (by VerifyAdaptiveController).
+        self._last_selected_probs: torch.Tensor | None = None
+        # When True, record selected-token probabilities for the adaptive
+        # verifier regardless of the sampling mode (greedy / probabilistic).
+        self.needs_draft_probs: bool = False
 
         self._slot_mapping_buffer = torch.zeros(
             self.max_positions,
@@ -415,14 +421,62 @@ class SpecDecodeBaseProposer:
         self,
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
-            return self._greedy_sample(hidden_states), None
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """Sample one draft step.
+
+        Returns ``(token_ids, full_probs, selected_probs)``:
+          * ``full_probs``: [N, vocab] distribution, only for probabilistic
+            rejection sampling (else None).
+          * ``selected_probs``: [N] probability of each chosen token, only
+            when ``needs_draft_probs`` is set (for VerifyAdaptiveController).
+        """
+        need_full = (
+            self._enable_probabilistic_draft_probs
+            and not sampling_metadata.all_greedy
+        )
+        # Fast path: neither the rejection sampler nor the adaptive controller
+        # needs probabilities, so a bare argmax avoids computing logits twice.
+        if not need_full and not self.needs_draft_probs:
+            return self._greedy_sample(hidden_states), None, None
+
         logits = self.model.compute_logits(hidden_states)
-        return self._sample_from_logits(logits, sampling_metadata)
+        if need_full:
+            token_ids, full_probs = compute_probs_and_sample_next_token(
+                logits, sampling_metadata
+            )
+        else:
+            token_ids, full_probs = logits.argmax(dim=-1), None
+
+        selected_probs = (
+            self._gather_selected_probs(logits, token_ids, full_probs)
+            if self.needs_draft_probs
+            else None
+        )
+        return token_ids, full_probs, selected_probs
+
+    @staticmethod
+    def _gather_selected_probs(
+        logits: torch.Tensor,
+        token_ids: torch.Tensor,
+        full_probs: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Probability of each chosen token, shape [N].
+
+        Reuses ``full_probs`` when the distribution is already materialized;
+        otherwise derives it from logits via ``logsumexp`` so the full
+        [N, vocab] softmax tensor is never allocated.
+        """
+        idx = token_ids.long().unsqueeze(-1)
+        if full_probs is not None:
+            return full_probs.gather(-1, idx).squeeze(-1)
+        chosen = logits.gather(-1, idx).squeeze(-1)
+        return (chosen - logits.logsumexp(dim=-1)).exp()
 
     def take_last_draft_probs(self) -> torch.Tensor | None:
         return self._last_draft_probs
+
+    def take_last_selected_probs(self) -> torch.Tensor | None:
+        return self._last_selected_probs
 
     def propose(
         self,
@@ -444,6 +498,7 @@ class SpecDecodeBaseProposer:
         | None = None,
     ) -> torch.Tensor:
         self._last_draft_probs = None
+        self._last_selected_probs = None
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
@@ -505,12 +560,16 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids, draft_probs = self._sample_draft_tokens(
+            draft_token_ids, draft_probs, sel_probs = self._sample_draft_tokens(
                 sample_hidden_states, sampling_metadata
             )
             if draft_probs is not None:
                 self._last_draft_probs = draft_probs.view(
                     -1, self.num_speculative_tokens, draft_probs.shape[-1]
+                ).contiguous()
+            if sel_probs is not None:
+                self._last_selected_probs = sel_probs.view(
+                    -1, self.num_speculative_tokens
                 ).contiguous()
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
@@ -526,10 +585,11 @@ class SpecDecodeBaseProposer:
             # (which read via _get_positions) use the correct values.
             self.positions[:batch_size] = positions
 
-        draft_token_ids, draft_probs = self._sample_draft_tokens(
+        draft_token_ids, draft_probs, sel_probs = self._sample_draft_tokens(
             sample_hidden_states, sampling_metadata
         )
         draft_probs_list = None if draft_probs is None else [draft_probs]
+        sel_probs_list = None if sel_probs is None else [sel_probs]
 
         if self.allowed_attn_types is not None:
             for group_md in per_group_attn_metadata:
@@ -629,18 +689,25 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids, draft_probs = self._sample_draft_tokens(
+            draft_token_ids, draft_probs, sel_probs = self._sample_draft_tokens(
                 last_hidden_states[:batch_size], sampling_metadata
             )
             if draft_probs is not None:
                 assert draft_probs_list is not None
                 draft_probs_list.append(draft_probs)
+            if sel_probs is not None:
+                assert sel_probs_list is not None
+                sel_probs_list.append(sel_probs)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         if draft_probs_list is not None:
             self._last_draft_probs = torch.stack(draft_probs_list, dim=1).contiguous()
+        if sel_probs_list is not None:
+            self._last_selected_probs = torch.stack(
+                sel_probs_list, dim=1
+            ).contiguous()
         return draft_token_ids
 
     def _update_positions_dependent_metadata(
