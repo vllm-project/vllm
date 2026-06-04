@@ -130,13 +130,15 @@ def test_align_transfer_regions_supports_pp_layer_subset():
 
     local_regions = [
         TransferRegion(
-            region_id="layers.1.self_attn:0:kv0",
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
             base_addr=0x1000,
             block_len=256,
             kv_block_len=128,
         ),
         TransferRegion(
-            region_id="layers.3.self_attn:0:kv0",
+            layer_name="model.layers.3.self_attn",
+            layer_index=3,
             base_addr=0x3000,
             block_len=256,
             kv_block_len=128,
@@ -144,25 +146,29 @@ def test_align_transfer_regions_supports_pp_layer_subset():
     ]
     remote_regions = [
         TransferRegion(
-            region_id="layers.0.self_attn:0:kv0",
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
             base_addr=0xA000,
             block_len=256,
             kv_block_len=128,
         ),
         TransferRegion(
-            region_id="layers.1.self_attn:0:kv0",
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
             base_addr=0xB000,
             block_len=256,
             kv_block_len=128,
         ),
         TransferRegion(
-            region_id="layers.2.self_attn:0:kv0",
+            layer_name="model.layers.2.self_attn",
+            layer_index=2,
             base_addr=0xC000,
             block_len=256,
             kv_block_len=128,
         ),
         TransferRegion(
-            region_id="layers.3.self_attn:0:kv0",
+            layer_name="model.layers.3.self_attn",
+            layer_index=3,
             base_addr=0xD000,
             block_len=256,
             kv_block_len=128,
@@ -174,15 +180,67 @@ def test_align_transfer_regions_supports_pp_layer_subset():
     )
 
     assert err is None
-    assert [r.region_id for r in aligned_local] == [
-        "layers.1.self_attn:0:kv0",
-        "layers.3.self_attn:0:kv0",
+    assert [r.layer_name for r in aligned_local] == [
+        "model.layers.1.self_attn",
+        "model.layers.3.self_attn",
     ]
-    assert [r.region_id for r in aligned_remote] == [
-        "layers.1.self_attn:0:kv0",
-        "layers.3.self_attn:0:kv0",
+    assert [r.layer_name for r in aligned_remote] == [
+        "model.layers.1.self_attn",
+        "model.layers.3.self_attn",
     ]
     assert [r.base_addr for r in aligned_remote] == [0xB000, 0xD000]
+
+
+def test_align_transfer_regions_uses_layer_name_occurrences():
+    """Repeated layer names should align by occurrence, matching NIXL's shape."""
+
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
+            base_addr=0x1000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
+            base_addr=0x1100,
+            block_len=256,
+            kv_block_len=128,
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=0xA000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
+            base_addr=0xB000,
+            block_len=256,
+            kv_block_len=128,
+        ),
+        TransferRegion(
+            layer_name="model.layers.1.self_attn",
+            layer_index=1,
+            base_addr=0xB100,
+            block_len=256,
+            kv_block_len=128,
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions, remote_regions
+    )
+
+    assert err is None
+    assert [r.base_addr for r in aligned_local] == [0x1000, 0x1100]
+    assert [r.base_addr for r in aligned_remote] == [0xB000, 0xB100]
 
 
 def test_basic_interface():
@@ -848,7 +906,10 @@ def test_register_kv_caches():
         )
         tensor1 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
         tensor2 = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        kv_caches = {"layer0": tensor1, "layer1": tensor2}
+        kv_caches = {
+            "model.layers.0.self_attn": tensor1,
+            "model.layers.1.self_attn": tensor2,
+        }
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -861,14 +922,16 @@ def test_register_kv_caches():
                 expected_tensors = [
                     segment for tensor in kv_caches.values() for segment in tensor
                 ]
-                expected_region_ids = [
-                    f"{layer_name}:{segment_idx}"
+                expected_layer_names = [
+                    layer_name
                     for layer_name, tensor in kv_caches.items()
-                    for segment_idx, _ in enumerate(tensor)
+                    for _ in tensor
                 ]
+                expected_layer_indices = [0, 0, 1, 1]
             else:
                 expected_tensors = list(kv_caches.values())
-                expected_region_ids = ["layer0:0", "layer1:0"]
+                expected_layer_names = list(kv_caches)
+                expected_layer_indices = [0, 1]
 
             expected_ptrs = {tensor.data_ptr() for tensor in expected_tensors}
             expected_lens = {tensor.nbytes for tensor in expected_tensors}
@@ -879,7 +942,8 @@ def test_register_kv_caches():
             assert len(worker.block_len_per_layer) == len(registered_ptrs)
             for bl, tensor in zip(worker.block_len_per_layer, expected_tensors):
                 assert bl == tensor.stride(0) * tensor.element_size()
-            assert worker.kv_cache_region_ids == expected_region_ids
+            assert worker.registered_layer_names == expected_layer_names
+            assert worker.registered_layer_indices == expected_layer_indices
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
@@ -914,7 +978,10 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         mla_cache = torch.zeros((2, 16, 96), dtype=torch.float16)
         # Eagle3/GQA-like cache tensor: shape[-2] is num_kv_heads, not block size.
         eagle_cache = torch.zeros((2, 16, 8, 64), dtype=torch.float16)
-        kv_caches = {"mla_layer": mla_cache, "eagle_layer": eagle_cache}
+        kv_caches = {
+            "model.layers.0.mla_attn": mla_cache,
+            "model.layers.1.eagle_attn": eagle_cache,
+        }
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -929,7 +996,11 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
             mla_cache.nbytes // mla_cache.shape[0],
             eagle_cache.nbytes // eagle_cache.shape[0],
         ]
-        assert worker.kv_cache_region_ids == ["mla_layer:0", "eagle_layer:0"]
+        assert worker.registered_layer_names == [
+            "model.layers.0.mla_attn",
+            "model.layers.1.eagle_attn",
+        ]
+        assert worker.registered_layer_indices == [0, 1]
 
 
 @pytest.mark.asyncio

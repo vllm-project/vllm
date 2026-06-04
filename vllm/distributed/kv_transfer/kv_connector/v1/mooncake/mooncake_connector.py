@@ -47,6 +47,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
@@ -80,7 +81,8 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 
 @dataclass(frozen=True)
 class TransferRegion:
-    region_id: str
+    layer_name: str
+    layer_index: int
     base_addr: int
     block_len: int
     kv_block_len: int
@@ -110,7 +112,8 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 def _expand_transfer_regions(
     base_addrs: list[int],
     block_lens: list[int],
-    region_ids: list[str],
+    layer_names: list[str],
+    layer_indices: list[int],
     is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
@@ -118,18 +121,23 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching numbers of base addresses "
         f"and block lengths, got {len(base_addrs)} and {len(block_lens)}."
     )
-    assert len(base_addrs) == len(region_ids), (
+    assert len(base_addrs) == len(layer_names), (
         "Mooncake transfer regions require matching numbers of base addresses "
-        f"and region IDs, got {len(base_addrs)} and {len(region_ids)}."
+        f"and layer names, got {len(base_addrs)} and {len(layer_names)}."
+    )
+    assert len(base_addrs) == len(layer_indices), (
+        "Mooncake transfer regions require matching numbers of base addresses "
+        f"and layer indices, got {len(base_addrs)} and {len(layer_indices)}."
     )
     regions: list[TransferRegion] = []
-    for base_addr, block_len, region_id in zip(base_addrs, block_lens, region_ids):
+    for base_addr, block_len, layer_name, layer_index in zip(
+        base_addrs, block_lens, layer_names, layer_indices
+    ):
         kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
-                region_id=(
-                    f"{region_id}:kv0" if is_kv_layout_blocks_first else region_id
-                ),
+                layer_name=layer_name,
+                layer_index=layer_index,
                 base_addr=base_addr,
                 block_len=block_len,
                 kv_block_len=kv_block_len,
@@ -138,7 +146,8 @@ def _expand_transfer_regions(
         if is_kv_layout_blocks_first:
             regions.append(
                 TransferRegion(
-                    region_id=f"{region_id}:kv1",
+                    layer_name=layer_name,
+                    layer_index=layer_index,
                     base_addr=base_addr + kv_block_len,
                     block_len=block_len,
                     kv_block_len=kv_block_len,
@@ -258,32 +267,85 @@ def _align_transfer_regions(
     local_regions: list[TransferRegion],
     remote_regions: list[TransferRegion],
 ) -> tuple[list[TransferRegion], list[TransferRegion], str | None]:
-    """Align KV transfer regions by stable layer/segment identity.
+    """Align KV transfer regions by registered layer-name occurrence.
 
     PP shards own different layer subsets. Positional matching is therefore
-    wrong once producer and consumer have different PP layouts. Region IDs are
-    derived from layer names and per-layer segment indices during KV cache
-    registration, so a PP producer can transfer only the layers it owns to a
-    non-PP or differently-sharded consumer.
+    wrong once producer and consumer have different PP layouts. This mirrors
+    NIXL's registered_layer_names approach: multiple registered transfer buffers
+    for the same layer are represented by repeated layer names and matched by
+    occurrence order.
     """
-    local_by_id = {region.region_id: region for region in local_regions}
-    remote_by_id = {region.region_id: region for region in remote_regions}
-    common_ids = sorted(local_by_id.keys() & remote_by_id.keys())
-    if not common_ids:
+
+    def keyed_regions(
+        regions: list[TransferRegion],
+    ) -> tuple[
+        list[tuple[tuple[str, int], TransferRegion]],
+        dict[str, int],
+    ]:
+        counts: dict[str, int] = defaultdict(int)
+        keyed: list[tuple[tuple[str, int], TransferRegion]] = []
+        for region in regions:
+            occurrence = counts[region.layer_name]
+            counts[region.layer_name] += 1
+            keyed.append(((region.layer_name, occurrence), region))
+        return keyed, counts
+
+    local_keyed, local_counts = keyed_regions(local_regions)
+    remote_keyed, remote_counts = keyed_regions(remote_regions)
+    common_layers = local_counts.keys() & remote_counts.keys()
+    if not common_layers:
         return (
             [],
             [],
             (
-                "Mooncake found no common KV transfer regions between producer "
-                f"{sorted(local_by_id)} and consumer {sorted(remote_by_id)}."
+                "Mooncake found no common registered layers between producer "
+                f"{sorted(local_counts)} and consumer {sorted(remote_counts)}."
             ),
         )
 
-    return (
-        [local_by_id[region_id] for region_id in common_ids],
-        [remote_by_id[region_id] for region_id in common_ids],
-        None,
-    )
+    for layer_name in sorted(common_layers):
+        local_count = local_counts[layer_name]
+        remote_count = remote_counts[layer_name]
+        if local_count != remote_count:
+            return (
+                [],
+                [],
+                (
+                    "Mooncake registered layer occurrence mismatch for "
+                    f"{layer_name}: producer has {local_count}, "
+                    f"consumer has {remote_count}."
+                ),
+            )
+
+    remote_by_key = dict(remote_keyed)
+    aligned_local: list[TransferRegion] = []
+    aligned_remote: list[TransferRegion] = []
+    for key, local_region in local_keyed:
+        remote_region = remote_by_key.get(key)
+        if remote_region is None:
+            return (
+                [],
+                [],
+                (
+                    "Mooncake producer registered layer has no matching "
+                    f"consumer occurrence: {key[0]} occurrence {key[1]}."
+                ),
+            )
+        if local_region.layer_index != remote_region.layer_index:
+            return (
+                [],
+                [],
+                (
+                    "Mooncake registered layer index mismatch for "
+                    f"{local_region.layer_name}: producer="
+                    f"{local_region.layer_index}, consumer="
+                    f"{remote_region.layer_index}."
+                ),
+            )
+        aligned_local.append(local_region)
+        aligned_remote.append(remote_region)
+
+    return aligned_local, aligned_remote, None
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -304,7 +366,10 @@ class MooncakeXferMetadata(
     req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
-    kv_cache_region_ids: list[str] = msgspec.field(default_factory=list)
+    registered_layer_names: list[str] = msgspec.field(default_factory=list)
+    registered_layer_indices: list[int] = msgspec.field(default_factory=list)
+    start_layer: int = 0
+    end_layer: int = 0
     remote_pp_size: int = 1
     remote_pp_rank: int = 0
 
@@ -827,7 +892,8 @@ class MooncakeConnectorWorker:
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_blocks = 0
         self.block_len_per_layer: list[int] = []
-        self.kv_cache_region_ids: list[str] = []
+        self.registered_layer_names: list[str] = []
+        self.registered_layer_indices: list[int] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
@@ -836,6 +902,8 @@ class MooncakeConnectorWorker:
         self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
+        self.start_layer = 0
+        self.end_layer = 0
 
         self.kv_caches_base_addr: list[int] = []
         self.device_kv_caches: dict[str, torch.Tensor] = {}
@@ -1065,14 +1133,16 @@ class MooncakeConnectorWorker:
         local_regions = self._get_transfer_regions(
             self.kv_caches_base_addr,
             self.block_len_per_layer,
-            self.kv_cache_region_ids,
+            self.registered_layer_names,
+            self.registered_layer_indices,
         )
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
-            meta.kv_cache_region_ids,
+            meta.registered_layer_names,
+            meta.registered_layer_indices,
         )
-        if meta.kv_cache_region_ids:
+        if meta.registered_layer_names:
             local_regions, remote_regions, align_err = _align_transfer_regions(
                 local_regions, remote_regions
             )
@@ -1462,11 +1532,24 @@ class MooncakeConnectorWorker:
         kv_data_lens = []
         seen_base_addresses = []
         self.block_len_per_layer = []
-        self.kv_cache_region_ids = []
+        self.registered_layer_names = []
+        self.registered_layer_indices = []
+        (
+            self.start_layer,
+            self.end_layer,
+        ) = self.model_config.get_layers_start_end_indices(
+            self.vllm_config.parallel_config
+        )
 
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
+            layer_index = extract_layer_index(layer_name)
+            assert self.start_layer <= layer_index < self.end_layer, (
+                "Mooncake registered layer is outside this PP shard: "
+                f"layer={layer_name}, index={layer_index}, "
+                f"range=[{self.start_layer}, {self.end_layer})."
+            )
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
@@ -1474,7 +1557,7 @@ class MooncakeConnectorWorker:
                 len(cache_list),
             )
 
-            for segment_idx, cache in enumerate(cache_list):
+            for cache in cache_list:
                 self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
                 if base_addr in seen_base_addresses:
@@ -1497,7 +1580,8 @@ class MooncakeConnectorWorker:
                 block_len = cache.stride(0) * cache.element_size()
 
                 self.block_len_per_layer.append(block_len)
-                self.kv_cache_region_ids.append(f"{layer_name}:{segment_idx}")
+                self.registered_layer_names.append(layer_name)
+                self.registered_layer_indices.append(layer_index)
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(self.num_blocks * block_len)
 
@@ -1617,7 +1701,10 @@ class MooncakeConnectorWorker:
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
-            kv_cache_region_ids=self.kv_cache_region_ids,
+            registered_layer_names=self.registered_layer_names,
+            registered_layer_indices=self.registered_layer_indices,
+            start_layer=self.start_layer,
+            end_layer=self.end_layer,
             remote_pp_size=self.pp_size,
             remote_pp_rank=self.pp_rank,
         )
@@ -1836,14 +1923,22 @@ class MooncakeConnectorWorker:
         self,
         base_addrs: list[int],
         block_lens: list[int],
-        region_ids: list[str] | None = None,
+        layer_names: list[str] | None = None,
+        layer_indices: list[int] | None = None,
     ) -> list[TransferRegion]:
-        if region_ids is None or len(region_ids) != len(base_addrs):
-            region_ids = [f"region:{idx}" for idx in range(len(base_addrs))]
+        if (
+            layer_names is None
+            or layer_indices is None
+            or len(layer_names) != len(base_addrs)
+            or len(layer_indices) != len(base_addrs)
+        ):
+            layer_names = [f"positional:{idx}" for idx in range(len(base_addrs))]
+            layer_indices = list(range(len(base_addrs)))
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
-            region_ids=region_ids,
+            layer_names=layer_names,
+            layer_indices=layer_indices,
             is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
         )
 
