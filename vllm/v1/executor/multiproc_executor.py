@@ -852,6 +852,21 @@ class WorkerProc:
                 process_name=f"Worker_{rank}",
             )
 
+            # Set env vars for torchcomms shim in spawned workers.
+            vllm_config = kwargs.get("vllm_config")
+            if vllm_config is not None:
+                world_size = vllm_config.parallel_config.world_size
+                os.environ["RANK"] = str(rank)
+                os.environ["LOCAL_RANK"] = str(kwargs.get("local_rank", rank))
+                os.environ["WORLD_SIZE"] = str(world_size)
+                init_method = kwargs.get("distributed_init_method", "")
+                if init_method.startswith("tcp://"):
+                    addr_port = init_method[len("tcp://"):]
+                    if ":" in addr_port:
+                        addr, port = addr_port.rsplit(":", 1)
+                        os.environ["MASTER_ADDR"] = addr
+                        os.environ["MASTER_PORT"] = port
+
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
             if kwargs["vllm_config"].parallel_config.numa_bind:

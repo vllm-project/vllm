@@ -22,6 +22,13 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.system_utils import update_environment_variables
 
+try:
+    from torch.distributed.distributed_c10d import _use_torchcomms_enabled
+except (ImportError, AttributeError):
+
+    def _use_torchcomms_enabled() -> bool:
+        return False
+
 mp.set_start_method("spawn", force=True)
 
 
@@ -83,7 +90,7 @@ def test_pynccl():
 @worker_fn_wrapper
 def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
         # Eager-init path: parent PG has bound_device_id + a CPU backend,
         # so split_group is supported.
         group = torch.distributed.split_group(
@@ -347,7 +354,7 @@ def test_pynccl_send_recv():
 @worker_fn_wrapper
 def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP or _use_torchcomms_enabled():
         group = torch.distributed.split_group(
             split_ranks=[[0, 2], [1, 3]], backend="cpu:gloo,cuda:nccl"
         )
