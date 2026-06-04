@@ -326,6 +326,7 @@ class FusedTopKBiasRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=None,
             has_e_score_bias=True,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
