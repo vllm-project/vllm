@@ -59,14 +59,26 @@ def normalize_lora_key(key: str) -> str:
         vision_tower.encoder.layers.<N>...      (no leading `model.`)
         embed_vision.embedding_projection       (no leading `model.`)
 
+    For decoder-only models (e.g. Qwen3.5), the trainer saves keys under
+    the standard HF `model.layers.<N>...` prefix, which matches vLLM's
+    module tree exactly — vLLM keeps the `model.` prefix for these models.
+    Example:
+
+        model.layers.0.self_attn.q_proj.lora_A.default.weight
+        → model.layers.0.self_attn.q_proj.lora_A.weight   (step 2 only)
+
     Transformations (applied in order, all idempotent):
 
       1. Top-level prefix fixup:
          - `model.language_model.X` → `language_model.model.X`
            (HF has `.language_model.layers`; vLLM has `.language_model.model.layers`.
            Swap them.)
-         - `model.X` (any other `model.` prefix) → `X`
-           (HF wraps everything under a top `model.`; vLLM doesn't.)
+         - `model.vision_tower.X`, `model.embed_vision.X`, etc.
+           (Gemma4 multimodal sub-modules) → strip leading `model.`
+           because vLLM does not nest these under a top-level `model.`.
+         - `model.layers.X` and other decoder-only keys → leave as-is.
+           vLLM's decoder-only module trees (e.g. Qwen3.5) keep the
+           `model.` prefix, so stripping it would break key matching.
 
       2. PEFT PeftModel adapter-name segment:
          - `.lora_A.default.weight` → `.lora_A.weight`
@@ -78,8 +90,16 @@ def normalize_lora_key(key: str) -> str:
     """
     # Step 1 — fix top-level prefix.
     if key.startswith("model.language_model."):
+        # Gemma4 language tower: HF has `.language_model.layers`;
+        # vLLM has `.language_model.model.layers`.
         key = "language_model.model." + key[len("model.language_model."):]
+    elif key.startswith("model.layers."):
+        # Qwen3.5: trainer saves under `model.layers.*` but this vLLM
+        # build wraps the decoder under `language_model.model.layers.*`.
+        key = "language_model.model." + key[len("model."):]
     elif key.startswith("model."):
+        # Gemma4 multimodal sub-modules (vision_tower, embed_vision, …):
+        # vLLM exposes these without the top-level `model.` wrapper.
         key = key[len("model."):]
 
     # Step 2 — strip PEFT's PeftModel `.default` adapter-name segment.
