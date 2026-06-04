@@ -416,9 +416,6 @@ def select_mxfp4_moe_backend(
 
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    triton_kernels_supported = has_triton_kernels() and (
-        (9, 0) <= current_platform.get_device_capability() < (11, 0)
-        or (12, 0) <= current_platform.get_device_capability() <= (12, 1)
     # If activation_key is explicitly provided (e.g., W4A8), use it
     requested_activation_key = activation_key
     device_capability = current_platform.get_device_capability()
