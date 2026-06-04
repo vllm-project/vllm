@@ -64,9 +64,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
     def _is_vision_model(self) -> bool:
         processor = self.get_hf_processor()
-        return hasattr(processor, "image_token") or hasattr(
-            processor, "boi_token"
-        )
+        return hasattr(processor, "image_token") or hasattr(processor, "boi_token")
 
     def _get_audio_token_id(self) -> int:
         processor = self.get_hf_processor()
@@ -174,9 +172,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
             audio_overrides = mm_options.get("audio")
             sampling_rate = self.info._get_audio_sampling_rate()
             processor = self.info.get_hf_processor()
-            sub = getattr_iter(
-                processor, ("audio_processor", "feature_extractor")
-            )
+            sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
             if chunk_length is None:
                 chunk_length = 30

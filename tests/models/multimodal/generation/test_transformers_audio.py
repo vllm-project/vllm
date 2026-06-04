@@ -129,10 +129,12 @@ def test_transformers_audio_generation(monkeypatch, model_id):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=128)
 
     outputs = llm.generate(
-        prompts=[{
-            "prompt": settings["prompt"],
-            "multi_modal_data": {"audio": AUDIO_ASSET.audio_and_sample_rate},
-        }],
+        prompts=[
+            {
+                "prompt": settings["prompt"],
+                "multi_modal_data": {"audio": AUDIO_ASSET.audio_and_sample_rate},
+            }
+        ],
         sampling_params=sampling_params,
     )
     assert len(outputs) == 1
