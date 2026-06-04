@@ -469,7 +469,10 @@ void _da8w4_linear_impl(
     int64_t num_groups) {
   // weight + compensation shape = [Nc, Kc, BLOCK_N * _block_k / 2 + BLOCK_N*sizeof(int32_t)]
   // scales/qzeros shape = [Nc, G, BLOCK_N]
-  const bool use_brgemm = can_use_brgemm<int8_t>(M);
+  bool use_brgemm = false;
+#if defined(CPU_CAPABILITY_AVX512)
+  use_brgemm = can_use_brgemm<int8_t>(M);
+#endif
   int64_t block_m = [&]() -> long {
     if (M <= 48) {
       return M;
