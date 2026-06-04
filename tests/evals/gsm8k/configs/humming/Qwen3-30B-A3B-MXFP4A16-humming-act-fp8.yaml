@@ -7,5 +7,6 @@ server_args: >-
   --max-model-len 8192
   --tensor-parallel-size 1
   --quantization humming
+  --kernel-config.enable_flashinfer_autotune=False
 env:
   VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'
