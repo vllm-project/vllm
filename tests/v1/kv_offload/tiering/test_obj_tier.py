@@ -197,10 +197,10 @@ def _make_tier(
 def drain(
     tier: ObjectStoreSecondaryTierManager, max_rounds: int = 20
 ) -> list[JobResult]:
-    """Poll get_finished() until all in-flight jobs resolve."""
+    """Poll get_finished_jobs() until all in-flight jobs resolve."""
     results: list[JobResult] = []
     for _ in range(max_rounds):
-        results.extend(tier.get_finished())
+        results.extend(tier.get_finished_jobs())
         if not tier._transfers:
             break
     return results
@@ -266,8 +266,8 @@ class TestMockObjTierBasic:
         self.agent.check_xfer_state = delayed
 
         self.tier.submit_store(make_job(1, [key(1)], [0]))
-        assert list(self.tier.get_finished()) == []
-        results = list(self.tier.get_finished())
+        assert list(self.tier.get_finished_jobs()) == []
+        results = list(self.tier.get_finished_jobs())
         assert len(results) == 1
         assert results[0].success
 
@@ -303,7 +303,7 @@ class TestMockObjTierFailures:
         tier, agent = _make_tier(num_blocks=4)
         agent.register_memory = lambda *a, **k: None
         tier.submit_store(make_job(1, [key(1)], [0]))
-        results = list(tier.get_finished())
+        results = list(tier.get_finished_jobs())
         assert len(results) == 1
         assert results[0].job_id == 1
         assert not results[0].success
@@ -312,7 +312,7 @@ class TestMockObjTierFailures:
         tier, agent = _make_tier(num_blocks=4)
         agent.register_memory = lambda *a, **k: None
         tier.submit_load(make_job(2, [key(1)], [0]))
-        results = list(tier.get_finished())
+        results = list(tier.get_finished_jobs())
         assert len(results) == 1
         assert results[0].job_id == 2
         assert not results[0].success
@@ -321,7 +321,7 @@ class TestMockObjTierFailures:
         tier, agent = _make_tier(num_blocks=4)
         agent.make_prepped_xfer = lambda *a, **k: None
         tier.submit_store(make_job(3, [key(1)], [0]))
-        results = list(tier.get_finished())
+        results = list(tier.get_finished_jobs())
         assert len(results) == 1
         assert results[0].job_id == 3
         assert not results[0].success
