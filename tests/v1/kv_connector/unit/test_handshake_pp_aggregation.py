@@ -32,7 +32,6 @@ class _FakeExecutor:
         del vllm_config
         self.handshake_metadata = self.handshake_metadata_src
         self.handshake_calls = 0
-        self.max_concurrent_batches = 1
         _FakeExecutor.last_instance = self
 
     def get_kv_connector_handshake_metadata(
@@ -104,6 +103,7 @@ def _run_engine_core_handshake(
         ),
         speculative_config=None,
         ec_transfer_config=None,
+        max_concurrent_batches=1,
         model_config=SimpleNamespace(runner_type="generate"),
         cache_config=SimpleNamespace(
             enable_prefix_caching=False,
