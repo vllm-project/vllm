@@ -333,38 +333,11 @@ def make_unquantized_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Create Prepare/Finalize
-    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
+    from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
+
+    return MoEKernelOracle.make_moe_kernel(
         quant_config=quant_config,
+        moe_config=moe_config,
+        experts_cls=experts_cls,
         routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel

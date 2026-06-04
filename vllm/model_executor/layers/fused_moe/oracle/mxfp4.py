@@ -1666,45 +1666,17 @@ def make_mxfp4_moe_kernel(
     layer: "RoutedExperts | None" = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
-    is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
-
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=is_monolithic,
-    )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 
     extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         assert layer is not None
         extra_kwargs["layer"] = layer
 
-    # Create Experts.
-    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
-        assert max_num_tokens is not None
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_kwargs,
-        )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
+    return MoEKernelOracle.make_moe_kernel(
+        quant_config=moe_quant_config,
+        moe_config=moe_config,
+        experts_cls=experts_cls,
+        routing_tables=routing_tables,
+        experts_extra_kwargs=extra_kwargs,
     )
-
-    return kernel
