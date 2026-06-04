@@ -302,11 +302,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
 
-        # RMS norm variants are no longer iterated: after the vLLM IR migration (#33825)
-        # AITER rope variants are also not iterated: `MatcherRotaryEmbedding`
-        # auto-detects via `rocm_aiter_ops.is_triton_rotary_embed_enabled()`
-        # and selects the right rotary op. flashinfer rotary is also not
-        # iterated since the standard RotaryEmbedding never enables it.
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
                 continue
@@ -319,10 +314,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                         is_neox=neox,
                     ).register(self.patterns)
 
-        # NOTE: part 2 (ROCM_ATTN integration) will need to auto-raise
-        # `self.max_token_num` to `max_num_batched_tokens` so fusion covers
-        # ALL compile ranges and the interleaved V-cache layout stays
-        # consistent between fused writes and the attention kernel's reads.
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
