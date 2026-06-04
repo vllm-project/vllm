@@ -467,6 +467,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
 #endif
 
+#if defined(__riscv)
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
+      "scales, int quant_method_4bit) -> (Tensor, "
+      "Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
+#endif
+
   // Adapted from sglang: GDN kernels
   ops.def(
       "chunk_gated_delta_rule_cpu(Tensor query, Tensor key, Tensor value, "
