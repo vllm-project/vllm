@@ -3,10 +3,13 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from transformers import Qwen3Config
 
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
+from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_BOS_TOKEN,
     MOSS_AUDIO_BOS_TOKEN_ID,
@@ -17,9 +20,12 @@ from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_TOKEN_ID,
     GatedMLP,
     MossAudioConfig,
+    MossAudioDummyInputsBuilder,
     MossAudioEncoder,
     MossAudioEncoderConfig,
     MossAudioModel,
+    MossAudioMultiModalProcessor,
+    MossAudioProcessingInfo,
     MossAudioProcessor,
     MossQwen3ForCausalLM,
     MossQwen3Model,
@@ -39,6 +45,63 @@ class _Tokenizer:
 
     def batch_decode(self, batch_token_ids, **kwargs):
         return [self.decode(token_ids, **kwargs) for token_ids in batch_token_ids]
+
+
+class _MMConfig:
+    enable_mm_embeds = False
+    mm_processor_cache_gb = 1
+
+    def merge_mm_processor_kwargs(self, kwargs):
+        return dict(kwargs)
+
+    def get_limit_per_prompt(self, modality):
+        del modality
+        return 3
+
+
+class _ModelConfig:
+    def __init__(self):
+        self.model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
+        self.revision = None
+        self.max_model_len = 4096
+        self.encoder_config = {}
+        self.dtype = torch.float32
+        self.hf_config = MossAudioConfig(language_config=Qwen3Config())
+        self.multimodal_config = _MMConfig()
+
+    def get_multimodal_config(self):
+        return self.multimodal_config
+
+    def get_inputs_embeds_size(self):
+        return None
+
+
+class _ProcessingContext:
+    def __init__(self):
+        self.model_config = _ModelConfig()
+        self.tokenizer = _Tokenizer()
+
+    def get_tokenizer(self):
+        return self.tokenizer
+
+    def get_hf_config(self):
+        return self.model_config.hf_config
+
+    def get_mm_config(self):
+        return self.model_config.get_multimodal_config()
+
+    def get_merged_mm_kwargs(self, kwargs):
+        return self.get_mm_config().merge_mm_processor_kwargs(kwargs)
+
+    def call_hf_processor(self, hf_processor, data, kwargs):
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.setdefault("return_tensors", "pt")
+        return hf_processor(**data, **merged_kwargs)
+
+
+class _TestMossAudioProcessingInfo(MossAudioProcessingInfo):
+    def _get_processor_config_defaults(self):
+        return {}
 
 
 def _vllm_config(tensor_parallel_size=1, pipeline_parallel_size=1, hf_config=None):
@@ -99,6 +162,35 @@ def _patch_tensor_parallel_for_linear_layers(monkeypatch, tp_size=1, tp_rank=0):
     )
 
 
+def _build_moss_audio_processor(cache=None):
+    ctx = _ProcessingContext()
+    info = _TestMossAudioProcessingInfo(ctx)
+    return (
+        MossAudioMultiModalProcessor(
+            info,
+            MossAudioDummyInputsBuilder(info),
+            cache=cache,
+        ),
+        ctx,
+    )
+
+
+def _assert_mm_inputs_equal(left, right):
+    assert left["prompt_token_ids"] == right["prompt_token_ids"]
+    assert left["mm_hashes"] == right["mm_hashes"]
+
+    left_placeholder = left["mm_placeholders"]["audio"][0]
+    right_placeholder = right["mm_placeholders"]["audio"][0]
+    assert left_placeholder.offset == right_placeholder.offset
+    assert left_placeholder.length == right_placeholder.length
+    assert left_placeholder.is_embed.tolist() == right_placeholder.is_embed.tolist()
+
+    assert batched_tensors_equal(
+        left["mm_kwargs"].get_data(),
+        right["mm_kwargs"].get_data(),
+    )
+
+
 @pytest.mark.parametrize(
     ("prompt", "prefix"),
     [
@@ -145,6 +237,57 @@ def test_moss_audio_processor_preserves_placeholder_without_audio():
     ]
     assert "audio_data" not in processed
     assert "audio_data_seqlens" not in processed
+
+
+def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
+    raw_mel_len = 17
+    audio = np.zeros(160 * raw_mel_len, dtype=np.float32)
+    prompt = f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe this audio."
+
+    baseline_processor, ctx = _build_moss_audio_processor()
+    mm_items = baseline_processor.info.parse_mm_data({"audio": [audio]})
+    token_prompt = ctx.get_tokenizer().encode(prompt, add_special_tokens=False)
+
+    baseline_text = baseline_processor(
+        prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+    baseline_token = baseline_processor(
+        token_prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+
+    cache = MultiModalProcessorOnlyCache(ctx.model_config)
+    cached_processor, _ = _build_moss_audio_processor(cache=cache)
+    cached_text_miss = cached_processor(
+        prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+    cached_text_hit = cached_processor(
+        prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+    cached_token_hit = cached_processor(
+        token_prompt,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+
+    expected_audio_tokens = MossAudioEncoder.compute_num_audio_tokens(raw_mel_len)
+    prompt_token_ids = baseline_text["prompt_token_ids"]
+    assert prompt_token_ids.count(MOSS_AUDIO_TOKEN_ID) == expected_audio_tokens
+    assert baseline_text["mm_placeholders"]["audio"][0].length == (
+        expected_audio_tokens + 2
+    )
+
+    _assert_mm_inputs_equal(baseline_text, baseline_token)
+    _assert_mm_inputs_equal(baseline_text, cached_text_miss)
+    _assert_mm_inputs_equal(baseline_text, cached_text_hit)
+    _assert_mm_inputs_equal(baseline_text, cached_token_hit)
 
 
 def test_moss_audio_error_paths():

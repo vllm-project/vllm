@@ -85,8 +85,7 @@ def _assert_mentions_mary_had_lamb(text: str | None) -> None:
     assert text is not None
     text_lower = text.lower()
     assert any(word in text_lower for word in MARY_HAD_LAMB_KEYWORDS), (
-        "Expected MOSS-Audio to mention one of "
-        f"{MARY_HAD_LAMB_KEYWORDS}, got {text!r}"
+        f"Expected MOSS-Audio to mention one of {MARY_HAD_LAMB_KEYWORDS}, got {text!r}"
     )
 
 

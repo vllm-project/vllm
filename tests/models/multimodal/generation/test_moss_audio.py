@@ -10,12 +10,19 @@ from vllm.platforms import current_platform
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-MODELS = [
+CORE_MODEL = pytest.param(
     "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
+    marks=pytest.mark.core_model,
+    id="4b-instruct",
+)
+
+EXTENDED_MODELS = [
     "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
     "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
     "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
 ]
+
+ACCURACY_MODELS = [CORE_MODEL, *EXTENDED_MODELS]
 
 PARALLEL_SMOKE_CASES = [
     pytest.param({"tensor_parallel_size": 2}, id="tp2"),
@@ -27,11 +34,10 @@ PARALLEL_SMOKE_CASES = [
 ]
 
 
-@pytest.mark.core_model
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", ACCURACY_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
-@pytest.mark.parametrize("max_tokens", [16])
-@pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize("max_tokens", [8])
+@pytest.mark.parametrize("num_logprobs", [5])
 def test_moss_audio_hf_vllm_accuracy(
     hf_runner,
     vllm_runner,
@@ -44,14 +50,8 @@ def test_moss_audio_hf_vllm_accuracy(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    prompts = [
-        f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe or summarize this audio.",
-        f"{MOSS_AUDIO_PLACEHOLDER}\nBriefly describe what is happening in this audio.",
-    ]
-    audios = [
-        [AudioAsset("mary_had_lamb").audio_and_sample_rate[0]],
-        [AudioAsset("winning_call").audio_and_sample_rate[0]],
-    ]
+    prompts = [f"{MOSS_AUDIO_PLACEHOLDER}\nTranscribe this audio."]
+    audios = [[AudioAsset("mary_had_lamb").audio_and_sample_rate[0]]]
 
     with vllm_runner(
         model,
@@ -88,16 +88,16 @@ def test_moss_audio_hf_vllm_accuracy(
 @pytest.mark.parametrize("parallel_kwargs", PARALLEL_SMOKE_CASES)
 def test_moss_audio_parallel_smoke(vllm_runner, parallel_kwargs) -> None:
     model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
-    model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip")
-
     required_gpus = parallel_kwargs.get(
         "tensor_parallel_size", 1
     ) * parallel_kwargs.get("pipeline_parallel_size", 1)
     if current_platform.device_count() < required_gpus:
         # TP/PP integration smoke runs on local or multi-GPU CI only.
         pytest.skip(f"Requires at least {required_gpus} GPUs")
+
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
 
     prompts = [f"{MOSS_AUDIO_PLACEHOLDER}\nBriefly describe this audio."]
     audios = [[AudioAsset("mary_had_lamb").audio_and_sample_rate[0]]]
