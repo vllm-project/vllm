@@ -1,0 +1,36 @@
+[
+  {
+    "key": {},
+    "config": {
+      "block_sizes": [256, 128, 128],
+      "l2_groupings": [1],
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor"
+      ],
+      "pid_type": "persistent_blocked",
+      "cute_vector_widths": [1, 1, 1],
+      "tcgen05_ab_stages": 8,
+      "tcgen05_acc_stages": 2,
+      "tcgen05_c_stages": 2,
+      "tcgen05_cluster_m": 2,
+      "tcgen05_cluster_n": 1,
+      "tcgen05_l2_swizzle_size": 2,
+      "tcgen05_layout_strategy": "default",
+      "tcgen05_num_epi_warps": 4,
+      "tcgen05_persistence_model": "static_persistent",
+      "tcgen05_strategy": "role_local_monolithic",
+      "tcgen05_warp_spec_ab_load_warps": 1,
+      "tcgen05_warp_spec_c_input_warps": 0,
+      "tcgen05_warp_spec_epi_load_warps": 0,
+      "tcgen05_warp_spec_mma_warps": 1,
+      "tcgen05_warp_spec_register_decrease": 120,
+      "tcgen05_warp_spec_register_increase": 256,
+      "tcgen05_warp_spec_scheduler_warps": 0,
+      "tcgen05_warp_spec_register_realloc": false
+    }
+  }
+]
