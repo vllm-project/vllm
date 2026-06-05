@@ -422,9 +422,8 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return (
-            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
-            and len(packed_modules_list) == 1
+        return type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear) and (
+            len(packed_modules_list) == 1 or source_layer.checkpoint_format == "fused"
         )
 
 
@@ -483,9 +482,8 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return (
-            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
-            and len(packed_modules_list) == 3
+        return type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear) and (
+            len(packed_modules_list) == 3 or source_layer.checkpoint_format == "sharded"
         )
 
 

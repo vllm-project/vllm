@@ -305,18 +305,6 @@ class OlmoForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     Extremely barebones HF model wrapper.
     """
 
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".q_proj": ".qkv_proj.q",

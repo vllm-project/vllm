@@ -34,7 +34,11 @@ from vllm.lora.layers import (
     VocabParallelEmbeddingWithLoRA,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+)
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -219,11 +223,18 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
             for name in embedding_modules:
                 supported_lora_modules.add(name)
 
-        # get all the linear subfixes.
-        if isinstance(module, (LinearBase,)):
-            supported_lora_modules.add(name.split(".")[-1])
-
-        if isinstance(module, (FusedMoE,)):
+        if (
+            isinstance(module, QKVParallelLinear)
+            and module.checkpoint_format == "sharded"
+        ):
+            supported_lora_modules.update(["q", "k", "v"])
+        elif (
+            isinstance(module, MergedColumnParallelLinear)
+            and module.checkpoint_format == "sharded"
+        ):
+            shard_ids = [str(i) for i in range(len(module.output_sizes))]
+            supported_lora_modules.update(shard_ids)
+        elif isinstance(module, (LinearBase, FusedMoE)):
             supported_lora_modules.add(name.split(".")[-1])
 
     return list(supported_lora_modules)

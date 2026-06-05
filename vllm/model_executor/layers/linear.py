@@ -4,6 +4,7 @@
 import itertools
 from abc import abstractmethod
 from collections.abc import Iterable
+from typing import Literal
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -645,8 +646,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.output_sizes = output_sizes
         self.tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
-
         assert all(output_size % self.tp_size == 0 for output_size in output_sizes)
+        self.checkpoint_format: Literal["sharded", "fused"] | None = None
         super().__init__(
             input_size=input_size,
             output_size=sum(output_sizes),
@@ -977,8 +978,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # If the shard_id is not an integer, the weight is not sharded
             try:
                 shard_id = int(shard_id_str)
+                self.checkpoint_format = "sharded"
             except ValueError:
                 shard_id = None
+                self.checkpoint_format = "fused"
             # If param_name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, param_name, self)
             param.weight_loader(param, loaded_weight, shard_id)
@@ -1056,6 +1059,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
             self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
         ]
+        self.checkpoint_format: Literal["fused", "sharded"] | None = None
 
         super().__init__(
             input_size=input_size,
@@ -1408,8 +1412,10 @@ class QKVParallelLinear(ColumnParallelLinear):
             try:
                 self.validate_shard_id(shard_id_str)
                 shard_id = shard_id_str
+                self.checkpoint_format = "sharded"
             except ValueError:
                 shard_id = None
+                self.checkpoint_format = "fused"
             # If param_name is "bias" get it from self, otherwise load into self
             param: Parameter = getattr(self, param_name, self)
             param.weight_loader(param, loaded_weight, shard_id)

@@ -325,10 +325,6 @@ class OPTModel(nn.Module):
 
 
 class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-    }
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".q_proj": ".qkv_proj.q",
