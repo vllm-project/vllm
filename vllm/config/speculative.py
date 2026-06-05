@@ -143,6 +143,12 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+    prompt_lookup_cache_scope: Literal["local", "global"] = "local"
+    """Cache scope used by the ngram proposer."""
+    prompt_lookup_global_branch_length: int | None = Field(default=None, ge=1)
+    """Maximum visible suffix length inserted into the global ngram cache."""
+    prompt_lookup_global_max_entries: int | None = Field(default=None, ge=1)
+    """Maximum number of ngram keys retained by the global prompt lookup cache."""
 
     # Alternative drafting strategies
     parallel_drafting: bool = False
@@ -618,6 +624,18 @@ class SpeculativeConfig:
                     f"prompt_lookup_min={self.prompt_lookup_min} must "
                     f"be <= prompt_lookup_max={self.prompt_lookup_max}"
                 )
+            if (
+                self.prompt_lookup_cache_scope == "global"
+                and self.prompt_lookup_global_branch_length is None
+            ):
+                self.prompt_lookup_global_branch_length = (
+                    self.prompt_lookup_max + self.num_speculative_tokens
+                )
+            if (
+                self.prompt_lookup_cache_scope == "global"
+                and self.prompt_lookup_global_max_entries is None
+            ):
+                self.prompt_lookup_global_max_entries = 100000
 
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
@@ -1008,6 +1026,33 @@ class SpeculativeConfig:
             raise ValueError(
                 "synthetic_acceptance_rates / synthetic_acceptance_length "
                 "are only valid with rejection_sample_method='synthetic'."
+            )
+
+        if self.prompt_lookup_cache_scope != "local" and self.method != "ngram":
+            raise ValueError(
+                "prompt_lookup_cache_scope is only supported with method='ngram'."
+            )
+        if (
+            self.prompt_lookup_global_branch_length is not None
+            and self.method != "ngram"
+        ):
+            raise ValueError(
+                "prompt_lookup_global_branch_length is only supported with "
+                "method='ngram'."
+            )
+        if self.prompt_lookup_global_max_entries is not None and self.method != "ngram":
+            raise ValueError(
+                "prompt_lookup_global_max_entries is only supported with "
+                "method='ngram'."
+            )
+        if self.prompt_lookup_cache_scope != "global" and (
+            self.prompt_lookup_global_branch_length is not None
+            or self.prompt_lookup_global_max_entries is not None
+        ):
+            raise ValueError(
+                "prompt_lookup_global_branch_length and "
+                "prompt_lookup_global_max_entries require "
+                "prompt_lookup_cache_scope='global'."
             )
 
         if self.draft_model_config:

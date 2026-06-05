@@ -1,12 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from collections import OrderedDict
 
 import numpy as np
 import torch
 from numba import get_num_threads, jit, njit, prange, set_num_threads
 
 from vllm.config import VllmConfig
+
+
+class _GlobalNgramCache:
+    def __init__(
+        self,
+        min_n: int,
+        max_n: int,
+        k: int,
+        branch_length: int,
+        max_entries: int,
+        max_continuations_per_key: int = 8,
+    ) -> None:
+        self.min_n = min_n
+        self.max_n = max_n
+        self.k = k
+        self.branch_length = branch_length
+        self.max_entries = max_entries
+        self.max_continuations_per_key = max_continuations_per_key
+        self._continuations: OrderedDict[tuple[int, ...], list[tuple[int, ...]]] = (
+            OrderedDict()
+        )
+
+    def put(self, token_ids: np.ndarray, branch_length: int | None = None) -> None:
+        if token_ids.shape[0] <= self.min_n:
+            return
+        branch_length = branch_length or self.branch_length
+        tokens = token_ids[-branch_length:].tolist()
+        num_tokens = len(tokens)
+        min_n = self.min_n
+        max_n_limit = self.max_n
+        k = self.k
+        put_one = self._put_one
+        for start in range(num_tokens):
+            max_n = min(max_n_limit, num_tokens - start - 1)
+            for ngram_len in range(min_n, max_n + 1):
+                continuation_start = start + ngram_len
+                put_one(
+                    tuple(tokens[start:continuation_start]),
+                    tuple(tokens[continuation_start : continuation_start + k]),
+                )
+
+    def _put_one(self, key: tuple[int, ...], continuation: tuple[int, ...]) -> None:
+        if not continuation:
+            return
+        continuations = self._continuations
+        values = continuations.get(key)
+        if values is None:
+            values = []
+            continuations[key] = values
+        elif continuation in values:
+            values.remove(continuation)
+        values.insert(0, continuation)
+        if len(values) > self.max_continuations_per_key:
+            del values[self.max_continuations_per_key :]
+        continuations.move_to_end(key)
+        if len(continuations) > self.max_entries:
+            continuations.popitem(last=False)
+
+    def get(self, token_ids: np.ndarray) -> list[int]:
+        total_tokens = token_ids.shape[0]
+        if total_tokens < self.min_n:
+            return []
+        max_n = min(self.max_n, total_tokens)
+        tokens = token_ids[-max_n:].tolist()
+        continuations = self._continuations
+        for ngram_len in range(max_n, self.min_n - 1, -1):
+            key = tuple(tokens[-ngram_len:])
+            values = continuations.get(key)
+            if values:
+                continuations.move_to_end(key)
+                return list(values[0])
+        return []
 
 
 class NgramProposer:
@@ -25,6 +98,25 @@ class NgramProposer:
         self.k = vllm_config.speculative_config.num_speculative_tokens
         # Maximum length of the model.
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.prompt_lookup_cache_scope = (
+            vllm_config.speculative_config.prompt_lookup_cache_scope
+        )
+        branch_length = (
+            vllm_config.speculative_config.prompt_lookup_global_branch_length
+        )
+        max_entries = vllm_config.speculative_config.prompt_lookup_global_max_entries
+        self.global_ngram_cache: _GlobalNgramCache | None = None
+        if self.prompt_lookup_cache_scope == "global":
+            assert branch_length is not None
+            assert max_entries is not None
+            self.global_ngram_cache = _GlobalNgramCache(
+                self.min_n,
+                self.max_n,
+                self.k,
+                branch_length,
+                max_entries,
+            )
+        self.global_ngram_last_put_lens: dict[str, int] = {}
 
         # Pre-allocate buffers for numba batch propose.
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -133,6 +225,7 @@ class NgramProposer:
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
+        req_ids: list[str] | None = None,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
@@ -152,12 +245,79 @@ class NgramProposer:
 
             valid_ngram_requests.append(i)
 
+        if self.global_ngram_cache is not None:
+            return self.batch_propose_global(
+                len(sampled_token_ids),
+                valid_ngram_requests,
+                num_tokens_no_spec,
+                token_ids_cpu,
+                req_ids,
+            )
+
         draft_token_ids = self.batch_propose(
             len(sampled_token_ids),
             valid_ngram_requests,
             num_tokens_no_spec,
             token_ids_cpu,
         )
+
+        return draft_token_ids
+
+    def _global_initial_branch_length(self, num_tokens: int) -> int | None:
+        cache = self.global_ngram_cache
+        assert cache is not None
+        ngram_range = self.max_n - self.min_n + 1
+        max_full_context_tokens = cache.branch_length
+        if ngram_range > 0:
+            # Avoid full-context inserts that would churn the global LRU cache.
+            max_full_context_tokens = max(
+                max_full_context_tokens,
+                2 * (cache.max_entries // ngram_range),
+            )
+        if num_tokens <= max_full_context_tokens:
+            return num_tokens
+        return None
+
+    def batch_propose_global(
+        self,
+        num_requests: int,
+        valid_ngram_requests: list,
+        num_tokens_no_spec: np.ndarray,
+        token_ids_cpu: np.ndarray,
+        req_ids: list[str] | None,
+    ) -> list[list[int]]:
+        cache = self.global_ngram_cache
+        assert cache is not None
+
+        draft_token_ids = [[] for _ in range(num_requests)]
+        active_req_ids = (
+            set(req_ids)
+            if req_ids is not None
+            else {str(i) for i in range(num_requests)}
+        )
+        for req_id in list(self.global_ngram_last_put_lens):
+            if req_id not in active_req_ids:
+                self.global_ngram_last_put_lens.pop(req_id, None)
+
+        for i in valid_ngram_requests:
+            num_tokens = int(num_tokens_no_spec[i])
+            req_id = req_ids[i] if req_ids is not None else str(i)
+            last_put_len = self.global_ngram_last_put_lens.get(req_id, 0)
+            if num_tokens < last_put_len:
+                last_put_len = 0
+            if num_tokens > last_put_len:
+                branch_length = (
+                    self._global_initial_branch_length(num_tokens)
+                    if last_put_len == 0
+                    else None
+                )
+                cache.put(token_ids_cpu[i, :num_tokens], branch_length)
+                self.global_ngram_last_put_lens[req_id] = num_tokens
+
+            draft = cache.get(token_ids_cpu[i, :num_tokens])
+            if draft:
+                max_draft_tokens = self.max_model_len - num_tokens
+                draft_token_ids[i] = draft[:max_draft_tokens]
 
         return draft_token_ids
 
