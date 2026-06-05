@@ -126,18 +126,9 @@ class CustomAllreduce:
                     CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
-        from vllm.platforms.interface import get_assigned_gpu_ids
-
-        assigned = get_assigned_gpu_ids()
-        if assigned is not None:
-            physical_device_id = device.index
-        else:
-            cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-            if cuda_visible_devices:
-                device_ids = list(map(int, cuda_visible_devices.split(",")))
-            else:
-                device_ids = list(range(current_platform.device_count()))
-            physical_device_id = device_ids[device.index]
+        physical_device_id = current_platform.device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu") for _ in range(world_size)

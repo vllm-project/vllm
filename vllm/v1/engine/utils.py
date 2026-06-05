@@ -159,36 +159,28 @@ class CoreEngineProcManager:
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for platforms that cannot rely
-                # on torch.accelerator.set_device_index(), and for Ray launchers.
-                device_control_context: contextlib.AbstractContextManager[None] = (
-                    contextlib.nullcontext()
-                )
+                # Populate assigned_gpu_ids in DP for platforms that cannot
+                # rely on torch.accelerator.set_device_index(), and for Ray.
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
                 if is_dp and (
                     needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
-                    device_control_context = set_device_control_env_var(
-                        vllm_config, local_dp_rank
-                    )
+                    set_device_control_env_var(vllm_config, local_dp_rank)
 
-                with (
-                    device_control_context,
-                    numa_utils.configure_subprocess(
-                        # EngineCore itself does not have a TP/PP-local rank.
-                        # When DP is enabled, set_device_control_env_var()
-                        # narrows visible devices to this DP shard first, so
-                        # local_rank=0 means "the first local GPU in this
-                        # shard". The actual TP/PP worker processes spawned by
-                        # the executor are bound separately with their own
-                        # local_rank values.
-                        vllm_config,
-                        local_rank=0,
-                        dp_local_rank=local_dp_rank,
-                        process_kind="EngineCore",
-                    ),
+                with numa_utils.configure_subprocess(
+                    # EngineCore itself does not have a TP/PP-local rank.
+                    # When DP is enabled, set_device_control_env_var()
+                    # populates assigned_gpu_ids for this DP shard, so
+                    # local_rank=0 means "the first local GPU in this
+                    # shard". The actual TP/PP worker processes spawned by
+                    # the executor are bound separately with their own
+                    # local_rank values.
+                    vllm_config,
+                    local_rank=0,
+                    dp_local_rank=local_dp_rank,
+                    process_kind="EngineCore",
                 ):
                     proc.start()
         finally:
@@ -263,10 +255,7 @@ class SignalCallback:
         self._event.set()
 
 
-@contextlib.contextmanager
-def set_device_control_env_var(
-    vllm_config: VllmConfig, local_dp_rank: int
-) -> Iterator[None]:
+def set_device_control_env_var(vllm_config: VllmConfig, local_dp_rank: int) -> None:
     """
     Populate assigned_gpu_ids on the config for the given DP rank.
     """
@@ -276,7 +265,6 @@ def set_device_control_env_var(
 
     gpu_ids = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
     vllm_config.parallel_config.assigned_gpu_ids = gpu_ids
-    yield
 
 
 def get_device_indices(

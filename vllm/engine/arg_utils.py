@@ -1717,8 +1717,15 @@ class EngineArgs:
         # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
         # --device-ids values as indices into the CVD-visible set.
         cvd = os.environ.get(current_platform.device_control_env_var)
-        if cvd and cvd != "":
+        if cvd:
             cvd_ids = [int(x) for x in cvd.split(",")]
+            for i in ids:
+                if i >= len(cvd_ids):
+                    raise ValueError(
+                        f"--device-ids index {i} is out of range for "
+                        f"{current_platform.device_control_env_var}"
+                        f"={cvd} ({len(cvd_ids)} devices visible)"
+                    )
             ids = [cvd_ids[i] for i in ids]
         return ids
 
