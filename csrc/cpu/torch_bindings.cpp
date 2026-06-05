@@ -378,7 +378,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
 // SHM CCL
-#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
+#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
+    defined(__powerpc64__)
   ops.def(
       "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
       "int",
