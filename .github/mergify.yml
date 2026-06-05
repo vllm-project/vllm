@@ -15,31 +15,29 @@ pull_request_rules:
     comment:
       message: "Documentation preview: https://vllm--{{number}}.org.readthedocs.build/en/{{number}}/"
 
-# The comment below became spammy when we added `on: pull_request: types: [labeled]` to trigger pre-commit.
-# This is because there is often a pre-commit job ongoing when labels are added or removed, causing the
-# ongoing job to be cancelled. Mergify considers a cancelled job as a failure, which triggers the comment.
-# We may be able to turn this back on if https://github.com/Mergifyio/mergify/issues/5172 is resolved.
+- name: comment-pre-commit-failure
+  description: Comment on PR when pre-commit check fails
+  conditions:
+    - check-failure=pre-commit
+    - -closed
+    - -draft
+    - or:
+      - label=ready
+      - label=verified
+  actions:
+    comment:
+      message: |
+        Hi @{{author}}, the pre-commit checks have failed. Please run:
 
-# - name: comment-pre-commit-failure
-#   description: Comment on PR when pre-commit check fails
-#   conditions:
-#     - check-failure=pre-commit
-#     - -closed
-#     - -draft
-#   actions:
-#     comment:
-#       message: |
-#         Hi @{{author}}, the pre-commit checks have failed. Please run:
+        ```bash 
+        uv pip install pre-commit>=4.5.1
+        pre-commit install
+        pre-commit run --all-files
+        ```
 
-#         ```bash 
-#         uv pip install pre-commit>=4.5.1
-#         pre-commit install
-#         pre-commit run --all-files
-#         ```
+        Then, commit the changes and push to your branch.
 
-#         Then, commit the changes and push to your branch.
-
-#         For future commits, `pre-commit` will run automatically on changed files before each commit.
+        For future commits, `pre-commit` will run automatically on changed files before each commit.
 
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
