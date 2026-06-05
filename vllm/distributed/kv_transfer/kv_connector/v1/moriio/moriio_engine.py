@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -156,7 +157,6 @@ class MoRIIOWriter:
         defer_timeout = self._defer_timeout
         now = time.perf_counter()
         still_deferred: list[WriteTask] = []
-
         for task in self._deferred_tasks:
             if now - task.enqueue_time > defer_timeout:
                 logger.error(
@@ -406,9 +406,9 @@ class MoRIIOWrapper:
         self.paths: dict[str, zmq.Socket] = {}
 
     def set_moriio_engine(self, moriio_engine):
-        assert moriio_engine is not None, (
-            "You Cannot pass None engine to MoRIIOWrapper!"
-        )
+        assert (
+            moriio_engine is not None
+        ), "You Cannot pass None engine to MoRIIOWrapper!"
         self.moriio_engine = moriio_engine
 
     def set_backend_type(
@@ -464,9 +464,9 @@ class MoRIIOWrapper:
             self.local_memory_metadata = self.moriio_engine.register_torch_tensor(
                 tensor
             )
-            assert self.local_memory_metadata is not None, (
-                "register_torch_tensor returned None"
-            )
+            assert (
+                self.local_memory_metadata is not None
+            ), "register_torch_tensor returned None"
             local_memory_metadata_packed = self.local_memory_metadata.pack()
         except Exception as e:
             raise MoRIIOError(f"Failed to register local memory: {e}") from e
@@ -624,9 +624,9 @@ class MoRIIOWrapper:
         transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
-        assert len(block_notify_list) > 0, (
-            "block_notify_list cannot be empty in remote allocate message"
-        )
+        assert (
+            len(block_notify_list) > 0
+        ), "block_notify_list cannot be empty in remote allocate message"
 
         with self.lock:
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
@@ -657,18 +657,35 @@ class MoRIIOWrapper:
         req_list = req_ids if isinstance(req_ids, list) else [req_ids]
 
         sock = self.paths[path]
-        try:
-            for req_id in req_list:
-                if not isinstance(req_id, str):
-                    logger.warning(
-                        "Invalid req_id type: %s, expected str", type(req_id)
-                    )
-                    continue
-                sock.send(req_id.encode("utf-8"))
-        except Exception as e:
-            logger.error("Failed to send notification to %s: %s", path, e)
-            self.paths.pop(path, None)
-            raise
+        _MAX_RETRIES = 3
+        for req_id in req_list:
+            if not isinstance(req_id, str):
+                logger.warning("Invalid req_id type: %s, expected str", type(req_id))
+                continue
+            for _attempt in range(_MAX_RETRIES):
+                try:
+                    sock.send(req_id.encode("utf-8"), zmq.NOBLOCK)
+                    break
+                except zmq.Again:
+                    if _attempt < _MAX_RETRIES - 1:
+                        time.sleep(0.01 * (_attempt + 1))
+                        logger.warning(
+                            "ZMQ send retry %d for req %s to %s",
+                            _attempt + 1,
+                            req_id,
+                            path,
+                        )
+                    else:
+                        logger.error(
+                            "ZMQ send FAILED after %d retries " "for req %s to %s",
+                            _MAX_RETRIES,
+                            req_id,
+                            path,
+                        )
+                except Exception as e:
+                    logger.error("Failed to send notification to %s: %s", path, e)
+                    self.paths.pop(path, None)
+                    raise
 
     def pop_finished_req_ids(self):
         # producer invocation: get the set of completed requests at the decode

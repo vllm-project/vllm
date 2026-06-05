@@ -87,7 +87,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = int(os.environ.get("VLLM_HANDSHAKE_TIMEOUT_MINS", "5"))
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1139,10 +1139,11 @@ class EngineCoreProc(EngineCore):
                 numa_utils.log_current_affinity_state(process_title)
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
+                # Use the global dp_rank (not local_dp_rank) to ensure
+                # engine_ids are globally unique across all nodes in
+                # multi-node data parallel deployments.
                 vllm_config.kv_transfer_config.engine_id = (
-                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
                 )
                 logger.debug(
                     "Setting kv_transfer_config.engine_id to %s",
@@ -1712,9 +1713,9 @@ class DPEngineCoreProc(EngineCoreProc):
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        assert vllm_config.model_config.is_moe, (
-            "DPEngineCoreProc should only be used for MoE models"
-        )
+        assert (
+            vllm_config.model_config.is_moe
+        ), "DPEngineCoreProc should only be used for MoE models"
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
