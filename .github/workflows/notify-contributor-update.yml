@@ -1,0 +1,21 @@
+name: Notify Contributor Leaderboard Update
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    # Only trigger on merge commits (PR merges) to avoid noise from direct pushes
+    if: >-
+      github.event.head_commit.message != null &&
+      startsWith(github.event.head_commit.message, 'Merge pull request')
+    steps:
+      - name: Trigger contributor leaderboard refresh
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.ORG_DISPATCH_TOKEN || github.token }}
+          repository: vLLM-HUST/.github
+          event-type: contributor-update
+          client-payload: '{"source_repo": "${{ github.repository }}", "commit": "${{ github.sha }}"}'
