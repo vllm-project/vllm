@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
@@ -32,6 +34,10 @@ from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
+# Pattern body / replacement body return tuples of varying arity (4 or 5
+# tensors depending on ``attn_output_gate``); typed as ``tuple[Tensor, ...]``.
+_PatternFn = Callable[..., tuple[torch.Tensor, ...]]
+
 
 # ---------------------------------------------------------------------------
 # Custom op: Triton-based fused QKV split + QK-norm + RoPE + KV cache update
@@ -59,6 +65,15 @@ def fused_triton_qk_norm_rope_kvcache_update_impl(
     dummy = torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
     if layer_slot_mapping is None:
+        # Profiling / dummy-run path: there is no real KV cache to write into,
+        # so we return uninitialized output tensors that just satisfy the
+        # downstream graph's shape/dtype expectations. The values are never
+        # read (callers gate on profile mode upstream); ``empty`` is used
+        # over ``zeros`` to avoid a needless device kernel during profiling.
+        # ``gate`` is always materialized -- even when ``attn_output_gate``
+        # is False the replacement returns it as a 5-tuple element which
+        # downstream consumers ignore -- to keep the kernel signature
+        # invariant across ``Qwen3NextQkNormRopeKvCachePattern`` variants.
         q = torch.empty(T, num_heads, head_dim, device=qkv.device, dtype=qkv.dtype)
         k = torch.empty(T, num_kv_heads, head_dim, device=qkv.device, dtype=qkv.dtype)
         v = torch.empty(T, num_kv_heads, head_dim, device=qkv.device, dtype=qkv.dtype)
@@ -229,6 +244,24 @@ class Qwen3NextQkNormRopeKvCachePattern:
             f"{self.head_size} for layer {self.layer_name}. The AITER "
             f"kernel has no separate head_dim_v argument."
         )
+        # The traced pattern (``MatcherRotaryEmbedding`` + the AITER fused
+        # kernel below) assumes ``rotary_dim == head_size`` -- i.e. fully
+        # rotary. A partial-rotary layer (``rotary_dim < head_size``, e.g.
+        # GLM-style models with rotary applied only to the first half of
+        # the head) would produce a different rope op that does not match
+        # the registered pattern and would also be miscomputed by the
+        # fused kernel (it has no ``rotary_dim`` parameter). Fail loud at
+        # registration so a future model added to ``_QK_NORM_MODEL_TYPES``
+        # is forced to either provide a partial-rotary variant or stay off
+        # this fusion.
+        rotary_emb = getattr(layer, "rotary_emb", None)
+        rotary_dim = getattr(rotary_emb, "rotary_dim", self.head_size)
+        assert rotary_dim == self.head_size, (
+            f"fused_triton_qk_norm_rope_kvcache_update assumes fully-rotary "
+            f"layers (rotary_dim == head_size); got rotary_dim={rotary_dim} "
+            f"!= head_size={self.head_size} for layer {self.layer_name}. The "
+            f"AITER kernel has no rotary_dim argument."
+        )
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
@@ -247,7 +280,7 @@ class Qwen3NextQkNormRopeKvCachePattern:
             match_rocm_aiter=match_rocm_aiter_rope,
         )
 
-    def get_inputs(self) -> list:
+    def get_inputs(self) -> list[torch.Tensor]:
         T = 5
         L = 4096
         q_portion = self.q_size * 2 if self.attn_output_gate else self.q_size
@@ -259,7 +292,7 @@ class Qwen3NextQkNormRopeKvCachePattern:
             cos_sin_cache = empty_fp32(L, self.head_size)
         else:
             cos_sin_cache = empty_bf16(L, self.head_size)
-        inputs: list = [qkv, positions, q_weight, k_weight, cos_sin_cache]
+        inputs: list[torch.Tensor] = [qkv, positions, q_weight, k_weight, cos_sin_cache]
         if _USE_LAYERNAME:
             inputs.append(_encode_layer_name(self.layer_name))
         return inputs
@@ -280,8 +313,8 @@ class Qwen3NextQkNormRopeKvCachePattern:
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-        layer_name,
-    ):
+        layer_name: LayerNameType,
+    ) -> tuple[torch.Tensor, ...]:
         num_heads = self.num_heads
         num_kv_heads = self.num_kv_heads
         head_dim = self.head_size
@@ -298,9 +331,17 @@ class Qwen3NextQkNormRopeKvCachePattern:
 
             # ``chunk`` produces a non-contiguous view; the model emits a
             # ``clone(memory_format=contiguous_format)`` here. Use
-            # ``contiguous`` so the trace records the same clone op,
-            # then call rms_norm directly on the 3D tensor (no reshape
-            # round-trip and no dtype cast -- the model has neither).
+            # ``contiguous`` so the trace records the same clone op.
+            #
+            # The model uses ``GemmaRMSNorm`` whose forward path on the live
+            # graph is ``chunk -> reshape(2D) -> norm -> view(3D)``, but
+            # ``view_to_reshape`` (applied at registration via
+            # ``fwd_and_view_to_reshape``) and the inductor's reshape
+            # canonicalization rewrite both legs to the equivalent
+            # ``view``-of-3D form recorded here. Calling ``ir.ops.rms_norm``
+            # directly on the 3D tensor (no explicit ``reshape`` round-trip,
+            # no ``.float()/.bf16()`` cast pair) matches that canonical form
+            # for both NeoX and AITER rope variants.
             q_3d = q_3d.contiguous()
             q_w = q_weight.float() + 1.0
             q_normed = ir.ops.rms_norm(q_3d, q_w, self.eps)
@@ -346,8 +387,8 @@ class Qwen3NextQkNormRopeKvCachePattern:
         q_weight: torch.Tensor,
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-        layer_name,
-    ):
+        layer_name: LayerNameType,
+    ) -> tuple[torch.Tensor, ...]:
         results = self.FUSED_OP(
             qkv=qkv,
             positions=positions,
@@ -383,7 +424,9 @@ class Qwen3NextQkNormRopeKvCachePattern:
     # Pattern / replacement variants for the two ``_USE_LAYERNAME`` modes
     # ------------------------------------------------------------------
 
-    def _mk_pattern_with_layer_name_input(self):
+    def _mk_pattern_with_layer_name_input(
+        self,
+    ) -> tuple[_PatternFn, _PatternFn]:
         """Pattern/replacement with layer_name as an explicit graph input.
 
         Used when ``_USE_LAYERNAME`` is True (torch >= 2.11): layer names
@@ -403,7 +446,9 @@ class Qwen3NextQkNormRopeKvCachePattern:
 
         return pattern, replacement
 
-    def _mk_pattern_with_layer_name_closure(self, _ln):
+    def _mk_pattern_with_layer_name_closure(
+        self, _ln: LayerNameType
+    ) -> tuple[_PatternFn, _PatternFn]:
         """Pattern/replacement with layer_name as a closure constant.
 
         Used when ``_USE_LAYERNAME`` is False (torch < 2.11 or
@@ -495,7 +540,12 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
-            logger.warning_once(
+            # Most fp32 / int dtype configurations are intentional (e.g.
+            # debug / accuracy investigations on small CPU runs), so this
+            # is debug rather than warning -- the auto-enable callable in
+            # ``enable_qk_norm_rope_kvcache`` already considers this and
+            # will not flip the gate on for unsupported dtypes.
+            logger.debug(
                 "QK Norm+RoPE+KVCache fusion not enabled: unsupported dtype %s", dtype
             )
             return
@@ -574,7 +624,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         logger.info(
             "QK-Norm+RoPE+KVCache fusion: replaced %s pattern(s) "
-            "with AITER fused_qk_norm_rope_cache_pts_quant_shuffle",
+            "with AITER fused_qkv_split_qk_norm_rope_cache",
             self.matched_count,
         )
 

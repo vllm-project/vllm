@@ -153,8 +153,11 @@ class PassConfig:
     fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
     """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER Triton
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
-    for layers that support it. Auto-enabled at O1+ on ROCm for models
-    with QK-norm (e.g. Qwen3-MoE)."""
+    for layers that support it. Auto-enabled at O1+ on ROCm + AITER for
+    Qwen3-Next (the only model the bundled pattern currently matches; the
+    auto-enable callable in ``vllm/config/vllm.py`` checks for the AITER
+    fused kernel and gates on ``model_type == 'qwen3_next'``). Other models
+    with QK-norm need a separate pattern registration."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
