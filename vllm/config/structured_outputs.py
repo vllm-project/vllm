@@ -28,6 +28,11 @@ class StructuredOutputsConfig:
     If `False`, the model may generate whitespace between JSON fields,
     which is still valid JSON. This is only supported for xgrammar
     and guidance backends."""
+    max_whitespace_cnt: int | None = 2
+    """The maximum number of whitespace characters allowed between JSON tokens.
+    Defaults to 2 to prevent runaway whitespace generation while allowing
+    readable JSON output. Set to `None` for unbounded (not recommended) or `1`
+    for more restrictive output. Only supported for the xgrammar backend."""
     disable_additional_properties: bool = False
     """If `True`, the `guidance` backend will not use `additionalProperties`
     in the JSON schema. This is only supported for the `guidance` backend and
