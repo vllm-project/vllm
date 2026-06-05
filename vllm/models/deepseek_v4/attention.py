@@ -347,8 +347,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # attention_impl is wrapped with @eager_break_during_capture: this is
         # where the breakable cudagraph capture breaks (the attention op runs
-        # eagerly between captured graph segments). Tensors are passed as args
-        # so the wrapper weak-refs them for replay.
+        # eagerly between captured graph segments).
         self.attention_impl(
             hidden_states,
             qr,
@@ -436,9 +435,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         positions: torch.Tensor,
         out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], written in place
     ) -> None:
-        # qr/kv (post-RMSNorm) and the input-GEMM scores are computed in the
-        # captured forward; everything from here is metadata-dependent and runs
-        # in this eager break (re-executed every replay with live metadata).
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
