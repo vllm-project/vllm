@@ -1,15 +1,15 @@
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationErrors};
-use vllm_chat::{ChatOptions, ChatRequest, ChatTool, ChatToolChoice, SamplingParams};
+use vllm_chat::{ChatOptions, ChatRequest, ChatToolChoice, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
 
 use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
-    convert_message, normalize_generation_prompt_mode,
+    convert_message, convert_tools, normalize_generation_prompt_mode,
 };
 use crate::routes::openai::utils::types::{
-    ChatMessage, Normalizable, default_true, validate_messages,
+    ChatMessage, Normalizable, Tool, default_true, validate_messages,
 };
 
 /// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
@@ -49,7 +49,7 @@ pub struct TokenizeChatRequest {
     #[serde(default)]
     pub chat_template_kwargs: Option<std::collections::HashMap<String, serde_json::Value>>,
     #[serde(default)]
-    pub tools: Option<Vec<ChatTool>>,
+    pub tools: Option<Vec<Tool>>,
 }
 
 impl TokenizeChatRequest {
@@ -78,7 +78,7 @@ impl TokenizeChatRequest {
                 reasoning_effort: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
-            tools: self.tools.unwrap_or_default(),
+            tools: convert_tools(self.tools)?,
             tool_choice: ChatToolChoice::Auto,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
@@ -87,6 +87,7 @@ impl TokenizeChatRequest {
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
+            lora_request: None,
         })
     }
 }
@@ -132,6 +133,50 @@ impl Normalizable for DetokenizeRequest {}
 mod tests {
     use super::*;
     use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
+    use serde_json::json;
+    use vllm_chat::ChatTool;
+
+    #[test]
+    fn tokenize_request_converts_openai_tools() {
+        // The untagged `TokenizeRequest` must resolve a messages+tools body to
+        // the chat variant and accept standard OpenAI tool objects
+        // (`{"type":"function",...}`), then convert them to `ChatTool`.
+        let request: TokenizeRequest = serde_json::from_value(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }],
+        }))
+        .expect("OpenAI tool JSON deserializes to the chat variant");
+
+        let TokenizeRequest::Chat(req) = request else {
+            panic!("messages+tools body should parse as the chat variant");
+        };
+
+        let chat_request =
+            req.into_chat_request("tokenize-test".to_string()).expect("request is valid");
+
+        assert_eq!(
+            chat_request.tools,
+            vec![ChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                }),
+                strict: None,
+            }]
+        );
+    }
 
     #[test]
     fn into_chat_request_rejects_conflicting_generation_flags() {

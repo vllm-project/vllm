@@ -311,7 +311,7 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
     tools
         .unwrap_or_default()
         .into_iter()
