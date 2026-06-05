@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
+    get_parallel_tool_call_excluded_token_ids,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
@@ -442,6 +443,16 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
+
+            if self.use_harmony and request.tools:
+                excluded = get_parallel_tool_call_excluded_token_ids()
+                sampling_params.excluded_eos_token_ids = excluded
+                if sampling_params.stop_token_ids:
+                    sampling_params.stop_token_ids = [
+                        t
+                        for t in sampling_params.stop_token_ids
+                        if t not in excluded
+                    ]
 
             trace_headers = (
                 None

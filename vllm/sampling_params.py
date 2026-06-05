@@ -275,6 +275,13 @@ class SamplingParams(
     is guaranteed to be dedicated to a single request and won't be modified
     in ways that would affect other uses."""
 
+    # Token IDs that should NOT cause generation to stop even if they
+    # appear in the model's eos_token_id list (generation_config.json).
+    # Set by the serving layer to allow the model to generate past
+    # within-turn delimiters (e.g. Harmony <|call|> between parallel
+    # tool calls).
+    excluded_eos_token_ids: set[int] | None = None
+
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
@@ -576,6 +583,8 @@ class SamplingParams(
                 # stop_token_ids since it's handled separately for stopping
                 # purposes.
                 eos_ids.discard(eos_token_id)
+            if self.excluded_eos_token_ids:
+                eos_ids -= self.excluded_eos_token_ids
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:

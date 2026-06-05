@@ -369,6 +369,18 @@ def get_stop_tokens_for_assistant_actions() -> list[int]:
     return get_encoding().stop_tokens_for_assistant_actions()
 
 
+# Harmony protocol token IDs.  <|call|> is the delimiter between
+# parallel tool calls within a single turn.  It is NOT an end-of-turn
+# signal and should not stop generation when tool calling is active.
+HARMONY_CALL_TOKEN_ID = 200012
+
+
+def get_parallel_tool_call_excluded_token_ids() -> set[int]:
+    """Token IDs to exclude from eos/stop when parallel tool calls
+    are expected.  Currently only <|call|> (200012)."""
+    return {HARMONY_CALL_TOKEN_ID}
+
+
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
 
