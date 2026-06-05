@@ -15,7 +15,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     REQUIREMENTS_PATH=requirements/dev.txt
 elif command -v rocm-smi >/dev/null 2>&1; then
     PLATFORM="amd"
-    REQUIREMENTS_PATH=requirements/rocm-test.txt
+    REQUIREMENTS_PATH=requirements/test/rocm.txt
     # see `run-amd-test.sh`, this adds the repo root to python path
     # and is needed because rocm defaults to spawn
     export PYTHONPATH='..'
