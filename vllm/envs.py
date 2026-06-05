@@ -404,13 +404,6 @@ class ServerSettings(BaseSettings):
         default=False,
         description="Whether to log responses from API Server for debugging.",
     )
-    rpc_timeout: int = Field(
-        default=10000,
-        description=(
-            "Time in ms for the zmq client to wait for a response from the "
-            "backend server for simple data operations."
-        ),
-    )
     http_timeout_keep_alive: int = Field(
         default=5,
         description=(
@@ -509,6 +502,18 @@ class ServerSettings(BaseSettings):
             "enable it if they want to (to save on kv-cache memory usage and "
             "enable longer contexts). "
             "TODO(lucas): Remove this flag once latency regression is resolved."
+        ),
+    )
+    prefix_cache_retention_interval: int | None = Field(
+        default=None,
+        description=(
+            "Retain local sliding-window KV checkpoints for prefix caching. "
+            "Unset (default) preserves the dense local checkpointing behavior. "
+            "`0` retains only the latest completed prompt boundary. Positive "
+            "values retain checkpoints at the specified interval boundaries "
+            "(rounded up to the prefix-cache alignment). Applies to "
+            "sliding-window attention for now but not yet Mamba/linear "
+            "attention."
         ),
     )
     process_name_prefix: str = Field(
@@ -800,6 +805,16 @@ class DistributedSettings(BaseSettings):
             "data-parallel-backend is not Ray."
         ),
     )
+    ray_dp_placement_node_ips: str = Field(
+        default="",
+        description=(
+            "Optional comma-separated list of node IPs that Ray data-parallel "
+            "placement groups may use. When set, create_dp_placement_groups "
+            "only considers these nodes (the DP master node is always "
+            "included). This environment variable is ignored if "
+            "data-parallel-backend is not Ray."
+        ),
+    )
     ray_extra_env_var_prefixes_to_copy: str = Field(
         default="",
         description=(
@@ -866,6 +881,15 @@ class DistributedSettings(BaseSettings):
             'When True and distributed_executor_backend="ray", use '
             "RayExecutorV2 (MQ-based) instead of RayDistributedExecutor "
             "(compiled-graph backend)."
+        ),
+    )
+    distributed_use_split_group: bool = Field(
+        default=False,
+        description=(
+            "When True, GroupCoordinator constructs its CPU/device subgroups "
+            "via `torch.distributed.split_group(backend=...)` and "
+            "`init_distributed_environment` initializes the default PG with "
+            "mixed `cpu:gloo,cuda:nccl` backend + eager `device_id` binding."
         ),
     )
     worker_multiproc_method: Literal["spawn", "fork"] = Field(
@@ -1334,6 +1358,13 @@ class RocmSettings(BaseSettings):
             "Use aiter linear op if aiter ops are enabled. The following "
             "list of related ops -- scaled_mm (per-tensor / rowwise) -- use "
             "aiter tuned gemms for unquantized gemms."
+        ),
+    )
+    rocm_use_aiter_linear_hipbmm: bool = Field(
+        default=False,
+        description=(
+            "Whether to use aiter hipBLASLt online-tuning path for linear "
+            "ops. By default is disabled."
         ),
     )
     rocm_use_aiter_moe: bool = Field(

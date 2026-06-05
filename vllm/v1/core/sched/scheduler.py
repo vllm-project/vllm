@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -103,7 +104,7 @@ class Scheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
-            if self.scheduler_config.max_num_scheduled_tokens
+            if self.scheduler_config.max_num_scheduled_tokens is not None
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -248,6 +249,9 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
+        # cadence (`next_decode_eligible_step`).
+        self.current_step = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -289,9 +293,6 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -333,6 +334,7 @@ class Scheduler(SchedulerInterface):
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
+        self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -385,6 +387,12 @@ class Scheduler(SchedulerInterface):
                 # Async scheduling: Avoid scheduling an extra step when we are sure that
                 # the previous step has reached request.max_tokens. We don't schedule
                 # partial draft tokens since this prevents uniform decode optimizations.
+                req_index += 1
+                continue
+
+            if self.current_step < request.next_decode_eligible_step:
+                # V2+PP+async: enforce `pp_size` steps between same-req decodes
+                # to match worker-side sampled-tokens broadcast slot ring cadence.
                 req_index += 1
                 continue
 
@@ -705,7 +713,8 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_block_aligned_split:
+                # Skip block alignment when setting up async receive (no local work).
+                if self.need_mamba_block_aligned_split and not load_kv_async:
                     num_new_tokens = self._mamba_block_aligned_split(
                         request,
                         num_new_tokens,
@@ -1153,21 +1162,22 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
-        for i, mm_feature in enumerate(mm_features):
+
+        lo, hi = get_mm_features_in_window(
+            mm_features,
+            start=num_computed_tokens,
+            end=num_computed_tokens + num_new_tokens + shift_computed_tokens,
+        )
+        # For encoder-decoder, all inputs sit at start_pos=0, so lo=0 always.
+        if self.is_encoder_decoder:
+            lo = 0
+
+        for i in range(lo, hi):
+            mm_feature = mm_features[i]
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
             num_encoder_embeds = mm_feature.mm_position.get_num_embeds()
             item_identifier = mm_feature.identifier
-
-            # The encoder output is needed if the two ranges overlap:
-            # [num_computed_tokens, num_computed_tokens + num_new_tokens) and
-            # [start_pos, start_pos + num_encoder_tokens)
-            if (
-                start_pos
-                >= num_computed_tokens + num_new_tokens + shift_computed_tokens
-            ):
-                # The encoder input is not needed in this step.
-                break
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
                 assert start_pos == 0, (
@@ -1183,10 +1193,6 @@ class Scheduler(SchedulerInterface):
                 # inputs before running the decoder.  Once we've calculated some
                 # decoder tokens (num_computed_tokens > 0), then we know we
                 # already calculated encoder inputs and can skip here.
-                continue
-            elif start_pos + num_encoder_tokens <= num_computed_tokens:
-                # The encoder input is already computed and stored
-                # in the decoder's KV cache.
                 continue
 
             if not self.is_encoder_decoder:
@@ -2050,12 +2056,16 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        logger.debug_once("[shutdown] Scheduler: start")
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
+
+        logger.debug_once("[shutdown] Scheduler: complete")
 
     ########################################################################
     # KV Connector Related Methods

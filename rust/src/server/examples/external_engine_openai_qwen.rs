@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
         renderer: RendererSelection::Auto,
+        language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
