@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+from .BlockScaledMMLinearKernel import FP8BlockParams, Fp8BlockScaledMMLinearKernel
 from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
 
@@ -115,7 +115,22 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         # actual group_size derived from scale tensor shapes.
         if scale.dtype == torch.float8_e8m0fnu:
             scale = scale.to(torch.float32)
-        replace_parameter(layer, scale_attr, scale.data.t().contiguous())
+        layer._xpu_scale = scale.t().contiguous()
+
+    def _get_layer_params(self, layer: torch.nn.Module) -> FP8BlockParams:
+        params = super()._get_layer_params(layer)
+        # _xpu_scale is set at end of process_weights_after_loading.
+        # Guard here because base-class process_weights calls self._get_layer_params
+        # (Python dynamic dispatch) before _xpu_scale exists.
+        if not hasattr(layer, "_xpu_scale"):
+            return params
+        # Use transposed scale [K//bs, N//bs].
+        # layer.weight_scale_inv is left untouched for MLA dequant.
+        if params.weight_scale_inv is not None:
+            params.weight_scale_inv = layer._xpu_scale
+        else:
+            params.weight_scale = layer._xpu_scale
+        return params
 
     def apply_block_scaled_mm(
         self,
