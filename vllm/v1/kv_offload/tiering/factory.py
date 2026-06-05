@@ -63,3 +63,9 @@ SecondaryTierFactory.register_tier(
     "vllm.v1.kv_offload.tiering.fs.manager",
     "FileSystemTierManager",
 )
+
+SecondaryTierFactory.register_tier(
+    "pd_connector",
+    "vllm.v1.kv_offload.tiering.p2p.manager",
+    "P2PSecondaryTierManager",
+)
