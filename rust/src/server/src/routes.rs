@@ -8,6 +8,7 @@ mod metrics;
 pub(crate) mod openai;
 mod server_info;
 mod sleep;
+mod tokenize;
 mod version;
 
 use std::sync::Arc;
@@ -67,6 +68,8 @@ fn build_router_with_options(
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
+        // Tokenization APIs
+        .route("/tokenize", post(tokenize::tokenize))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
