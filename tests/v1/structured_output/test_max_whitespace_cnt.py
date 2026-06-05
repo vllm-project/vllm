@@ -132,7 +132,8 @@ class TestMaxWhitespaceCnt:
     def test_disable_any_whitespace_overrides(
         self, mock_xgr, mock_vllm_config
     ):
-        """Verify disable_any_whitespace=True sets any_whitespace=False."""
+        """Verify disable_any_whitespace=True is syntactic sugar for
+        any_whitespace=False + max_whitespace_cnt=0."""
         mock_compiled = Mock()
         mock_xgr.GrammarCompiler.return_value.compile_json_schema.return_value = (
             mock_compiled
@@ -142,7 +143,7 @@ class TestMaxWhitespaceCnt:
         mock_vllm_config.structured_outputs_config = StructuredOutputsConfig(
             backend="xgrammar",
             disable_any_whitespace=True,
-            max_whitespace_cnt=2,
+            max_whitespace_cnt=2,  # should be overridden to 0
         )
         backend = XgrammarBackend(
             vllm_config=mock_vllm_config,
@@ -155,4 +156,4 @@ class TestMaxWhitespaceCnt:
         call = mock_xgr.GrammarCompiler.return_value.compile_json_schema
         call.assert_called_once()
         assert call.call_args.kwargs.get("any_whitespace") is False
-        assert call.call_args.kwargs.get("max_whitespace_cnt") == 2
+        assert call.call_args.kwargs.get("max_whitespace_cnt") == 0
