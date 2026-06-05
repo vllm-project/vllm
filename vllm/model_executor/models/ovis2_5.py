@@ -12,6 +12,7 @@ from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.ovis import VisualEmbedding
@@ -24,7 +25,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -465,7 +465,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                 config=config.vit_config,
                 visual_vocab_size=config.visual_vocab_size,
                 quant_config=quant_config,
-                prefix=f"{prefix}.visual_tokenizer",
+                prefix=maybe_prefix(prefix, "visual_tokenizer"),
             )
             self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
 

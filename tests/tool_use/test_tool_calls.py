@@ -10,23 +10,30 @@ from .utils import (
     MESSAGES_ASKING_FOR_TOOLS,
     MESSAGES_WITH_TOOL_RESPONSE,
     SEARCH_TOOL,
+    SEED,
     WEATHER_TOOL,
+    ServerConfig,
+    ensure_system_prompt,
 )
 
 
 # test: request a chat completion that should return tool calls, so we know they
 # are parsable
 @pytest.mark.asyncio
-async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
+async def test_tool_call_and_choice(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
     models = await client.models.list()
     model_name: str = models.data[0].id
+    messages = ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config)
     chat_completion = await client.chat.completions.create(
-        messages=MESSAGES_ASKING_FOR_TOOLS,
+        messages=messages,
         temperature=0,
         max_completion_tokens=100,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -66,11 +73,12 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     # make the same request, streaming
     stream = await client.chat.completions.create(
         model=model_name,
-        messages=MESSAGES_ASKING_FOR_TOOLS,
+        messages=messages,
         temperature=0,
         max_completion_tokens=100,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 
@@ -154,6 +162,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -171,6 +180,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 

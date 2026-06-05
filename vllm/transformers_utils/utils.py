@@ -23,8 +23,12 @@ def is_gcs(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("gs://")
 
 
+def is_azure(model_or_path: str) -> bool:
+    return model_or_path.lower().startswith("az://")
+
+
 def is_cloud_storage(model_or_path: str) -> bool:
-    return is_s3(model_or_path) or is_gcs(model_or_path)
+    return is_s3(model_or_path) or is_gcs(model_or_path) or is_azure(model_or_path)
 
 
 def without_trust_remote_code(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -80,8 +84,11 @@ def maybe_model_redirect(model: str) -> str:
     """
     Use model_redirect to redirect the model name to a local folder.
 
-    :param model: hf model name
-    :return: maybe redirect to a local folder
+    Args:
+        model: hf model name
+
+    Returns:
+        maybe redirect to a local folder
     """
 
     model_redirect_path = envs.VLLM_MODEL_REDIRECT_PATH

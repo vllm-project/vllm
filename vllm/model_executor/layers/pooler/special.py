@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from collections.abc import Mapping, Set
 from itertools import groupby
 
@@ -52,13 +53,6 @@ class DispatchPooler(Pooler):
                     pooler_config,
                     pooling=pooling,
                     classifier=classifier,
-                    act_fn="classify",
-                ),
-                "score": pooler_for_classify(
-                    pooler_config,
-                    pooling=pooling,
-                    classifier=classifier,
-                    act_fn="score",
                 ),
             }
         )
@@ -87,9 +81,11 @@ class DispatchPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
+        cursor = pooling_metadata.pooling_cursor
 
         outputs = list[torch.Tensor | None]()
         offset = 0
+        token_offset = 0
         for task, group in groupby(pooling_metadata.tasks):
             if not (pooler := poolers_by_task.get(task)):
                 raise ValueError(
@@ -98,10 +94,38 @@ class DispatchPooler(Pooler):
                 )
 
             num_items = len(list(group))
-            group_output: PoolerOutput = pooler(
-                hidden_states,
-                pooling_metadata[offset : offset + num_items],
-            )
+            group_metadata = pooling_metadata[offset : offset + num_items]
+            if cursor is None:
+                group_hidden_states = hidden_states
+            else:
+                # Slice out this group's tokens so sub-poolers see only their
+                # portion of the batch. Token offset is computed from the CPU
+                # `num_scheduled_tokens_cpu` to avoid a GPU->CPU sync.
+                group_cursor = group_metadata.pooling_cursor
+                assert group_cursor is not None
+                num_group_tokens = int(group_cursor.num_scheduled_tokens_cpu.sum())
+                group_hidden_states = hidden_states[
+                    token_offset : token_offset + num_group_tokens
+                ]
+                if token_offset:
+                    # Shift first/last indices to be relative to the slice
+                    # so seqwise poolers (which index `hidden_states` directly)
+                    # remain correct.
+                    pooling_cursor = dataclasses.replace(
+                        group_cursor,
+                        first_token_indices_gpu=(
+                            group_cursor.first_token_indices_gpu - token_offset
+                        ),
+                        last_token_indices_gpu=(
+                            group_cursor.last_token_indices_gpu - token_offset
+                        ),
+                    )
+                    group_metadata = dataclasses.replace(
+                        group_metadata, pooling_cursor=pooling_cursor
+                    )
+                token_offset += num_group_tokens
+
+            group_output: PoolerOutput = pooler(group_hidden_states, group_metadata)
 
             outputs.extend(group_output)
             offset += num_items
@@ -115,7 +139,7 @@ class DispatchPooler(Pooler):
 
 class IdentityPooler(Pooler):
     def get_supported_tasks(self) -> Set[PoolingTask]:
-        return {"plugin", "score"}
+        return {"plugin"}
 
     def forward(
         self,
@@ -153,21 +177,61 @@ class BOSEOSFilter(Pooler):
     ) -> PoolerOutput:
         pooled_outputs = self.pooler(hidden_states, pooling_metadata)
         assert isinstance(pooled_outputs, list)
+        prompt_token_ids = pooling_metadata.get_prompt_token_ids_cpu()
 
-        for i, prompt_len in enumerate(pooling_metadata.prompt_lens):
+        for i, (prompt_len, token_ids) in enumerate(
+            zip(pooling_metadata.prompt_lens, prompt_token_ids)
+        ):
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)
                 and pooled_data.shape[0] == prompt_len
             )
-            token_ids = pooling_metadata.prompt_token_ids[i, :prompt_len]
-            if token_ids[0] == self.bos_token_id:
+            if int(token_ids[0]) == self.bos_token_id:
                 pooled_data = pooled_data[1:]
-            if token_ids[-1] == self.eos_token_id:
+            if int(token_ids[-1]) == self.eos_token_id:
                 pooled_data = pooled_data[:-1]
             pooled_outputs[i] = pooled_data.squeeze(-1)
 
         return pooled_outputs
 
 
-__all__ = ["BOSEOSFilter", "DispatchPooler", "IdentityPooler"]
+class BgeM3Pooler(Pooler):
+    def __init__(self, token_classify_pooler: Pooler, embed_pooler: Pooler) -> None:
+        super().__init__()
+        self.token_classify_pooler = token_classify_pooler
+        self.embed_pooler = embed_pooler
+
+    def forward(
+        self, hidden_states: torch.Tensor, pooling_metadata: PoolingMetadata
+    ) -> PoolerOutput:
+        embed_outputs = self.embed_pooler(hidden_states, pooling_metadata)
+        token_classify_outputs = self.token_classify_pooler(
+            hidden_states, pooling_metadata
+        )
+        pooler_outputs: list[torch.Tensor] = []
+        for embed_output, token_classify_output in zip(
+            embed_outputs, token_classify_outputs
+        ):
+            pooler_outputs.append(
+                torch.cat(
+                    [embed_output.view(-1), token_classify_output.view(-1)], dim=-1
+                )
+            )
+
+        return pooler_outputs
+
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"embed&token_classify"}
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return self.embed_pooler.get_pooling_updates(
+            "embed"
+        ) | self.token_classify_pooler.get_pooling_updates("token_classify")
+
+    def extra_repr(self) -> str:
+        s = f"supported_task={self.get_supported_tasks()}"
+        return s
+
+
+__all__ = ["BOSEOSFilter", "DispatchPooler", "IdentityPooler", "BgeM3Pooler"]
