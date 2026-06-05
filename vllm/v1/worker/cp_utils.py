@@ -17,21 +17,19 @@ logger = init_logger(__name__)
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
     dcp_size = vllm_config.parallel_config.decode_context_parallel_size
+    interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
         for layer_name, layer in layers.items():
-            if hasattr(layer, "supports_dcp") and not layer.supports_dcp:
-                logger.debug(
-                    "Layer %s does not support DCP. "
-                    "DCP will only be applied to supported layers.",
-                    layer_name,
-                )
-                continue
-
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
                 continue
+            if vllm_config.speculative_config is not None and interleave_size > 1:
+                assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
+                    "MTP with cp_kv_cache_interleave_size > 1 is not "
+                    f"supported in {layer_impl.__class__.__name__}."
+                )
             if dcp_size > 1:
                 if hasattr(layer_impl, "supports_dcp") and not layer_impl.supports_dcp:
                     logger.debug(
