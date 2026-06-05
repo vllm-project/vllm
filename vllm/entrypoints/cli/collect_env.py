@@ -16,6 +16,9 @@ class CollectEnvSubcommand(CLISubcommand):
     """The `collect-env` subcommand for the vLLM CLI."""
 
     name = "collect-env"
+    help = "Start collecting environment information."
+    description = help
+    usage = "vllm collect-env"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -28,10 +31,10 @@ class CollectEnvSubcommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         return subparsers.add_parser(
-            "collect-env",
-            help="Start collecting environment information.",
-            description="Start collecting environment information.",
-            usage="vllm collect-env",
+            self.name,
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
 
 

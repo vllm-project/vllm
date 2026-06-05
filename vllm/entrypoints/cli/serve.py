@@ -5,9 +5,10 @@ import argparse
 import signal
 import time
 
+import uvloop
+
 import vllm
 import vllm.envs as envs
-from vllm.entrypoints.cli import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -27,6 +28,11 @@ class ServeSubcommand(CLISubcommand):
     """The `serve` subcommand for the vLLM CLI."""
 
     name = "serve"
+    help = (
+        "Launch a local OpenAI-compatible API server to serve LLM completions via HTTP."
+    )
+    description = DESCRIPTION
+    usage = "vllm serve [model_tag] [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -35,8 +41,6 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "grpc", False):
-            import uvloop
-
             from vllm.entrypoints.grpc_server import serve_grpc
 
             uvloop.run(serve_grpc(args))
@@ -129,8 +133,6 @@ class ServeSubcommand(CLISubcommand):
         elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
             run_multi_api_server(args)
         else:
-            import uvloop
-
             from vllm.entrypoints.openai.api_server import run_server
 
             # Single API server (this process).
@@ -147,18 +149,15 @@ class ServeSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         serve_parser = subparsers.add_parser(
             self.name,
-            help="Launch a local OpenAI-compatible API server to serve LLM "
-            "completions via HTTP.",
-            description=DESCRIPTION,
-            usage="vllm serve [model_tag] [options]",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
-        if not is_cli_subcommand(self.name):
-            return serve_parser
 
         from vllm.entrypoints.openai.cli_args import make_arg_parser
 
         serve_parser = make_arg_parser(serve_parser)
-        serve_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+        serve_parser.epilog = self.SUBCMD_EPILOG.format(subcmd=self.name)
         return serve_parser
 
 

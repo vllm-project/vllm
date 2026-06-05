@@ -124,6 +124,9 @@ class ChatCommand(CLISubcommand):
     """The `chat` subcommand for the vLLM CLI."""
 
     name = "chat"
+    help = "Generate chat completions via the running API server."
+    description = help
+    usage = "vllm chat [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -184,10 +187,10 @@ class ChatCommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
-            "chat",
-            help="Generate chat completions via the running API server.",
-            description="Generate chat completions via the running API server.",
-            usage="vllm chat [options]",
+            self.name,
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
         return ChatCommand.add_cli_args(parser)
 
@@ -196,6 +199,12 @@ class CompleteCommand(CLISubcommand):
     """The `complete` subcommand for the vLLM CLI."""
 
     name = "complete"
+    help = (
+        "Generate text completions based on the given prompt "
+        "via the running API server."
+    )
+    description = help
+    usage = "vllm complete [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -244,16 +253,10 @@ class CompleteCommand(CLISubcommand):
         self, subparsers: argparse._SubParsersAction
     ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
-            "complete",
-            help=(
-                "Generate text completions based on the given prompt "
-                "via the running API server."
-            ),
-            description=(
-                "Generate text completions based on the given prompt "
-                "via the running API server."
-            ),
-            usage="vllm complete [options]",
+            self.name,
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
         return CompleteCommand.add_cli_args(parser)
 

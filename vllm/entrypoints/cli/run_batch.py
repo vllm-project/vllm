@@ -6,7 +6,6 @@ import asyncio
 import importlib.metadata
 import typing
 
-from vllm.entrypoints.cli import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.logger import init_logger
 
@@ -22,6 +21,12 @@ class RunBatchSubcommand(CLISubcommand):
     """The `run-batch` subcommand for vLLM CLI."""
 
     name = "run-batch"
+    help = "Run batch prompts and write results to file."
+    description = (
+        "Run batch prompts using vLLM's OpenAI-compatible API.\n"
+        "Supports local or HTTP input/output files."
+    )
+    usage = "vllm run-batch -i INPUT.jsonl -o OUTPUT.jsonl --model <model>"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -50,20 +55,15 @@ class RunBatchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         run_batch_parser = subparsers.add_parser(
             self.name,
-            help="Run batch prompts and write results to file.",
-            description=(
-                "Run batch prompts using vLLM's OpenAI-compatible API.\n"
-                "Supports local or HTTP input/output files."
-            ),
-            usage="vllm run-batch -i INPUT.jsonl -o OUTPUT.jsonl --model <model>",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
-        if not is_cli_subcommand(self.name):
-            return run_batch_parser
 
         from vllm.entrypoints.openai.run_batch import make_arg_parser
 
         run_batch_parser = make_arg_parser(run_batch_parser)
-        run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(subcmd=self.name)
+        run_batch_parser.epilog = self.SUBCMD_EPILOG.format(subcmd=self.name)
         return run_batch_parser
 
 

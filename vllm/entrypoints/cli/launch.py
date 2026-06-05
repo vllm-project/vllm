@@ -4,10 +4,8 @@
 import argparse
 import signal
 
-from vllm.entrypoints.cli import (
-    VLLM_SUBCMD_PARSER_EPILOG,
-    is_cli_subcommand,
-)
+import uvloop
+
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -46,8 +44,6 @@ class RenderSubcommand(LaunchSubcommandBase):
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
-        import uvloop
-
         uvloop.run(run_launch_fastapi(args))
 
 
@@ -59,6 +55,9 @@ class LaunchSubcommand(CLISubcommand):
     """
 
     name = "launch"
+    help = DESCRIPTION
+    description = DESCRIPTION
+    usage = "vllm launch <component> [options]"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -77,12 +76,10 @@ class LaunchSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         launch_parser = subparsers.add_parser(
             self.name,
-            help=DESCRIPTION,
-            description=DESCRIPTION,
-            usage=f"vllm {self.name} <component> [options]",
+            help=self.help,
+            description=self.description,
+            usage=self.usage,
         )
-        if not is_cli_subcommand(self.name):
-            return launch_parser
 
         launch_subparsers = launch_parser.add_subparsers(
             required=True, dest="launch_component"
@@ -97,7 +94,7 @@ class LaunchSubcommand(CLISubcommand):
             )
             cmd_subparser.set_defaults(launch_command=cmd_cls.cmd)
             cmd_cls.add_cli_args(cmd_subparser)
-            cmd_subparser.epilog = VLLM_SUBCMD_PARSER_EPILOG.format(
+            cmd_subparser.epilog = self.SUBCMD_EPILOG.format(
                 subcmd=f"{self.name} {cmd_cls.name}"
             )
 
