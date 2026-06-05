@@ -1381,7 +1381,7 @@ def use_cascade_attention(
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
     num_reqs = len(query_lens)
-    if num_reqs < 8:
+    if num_reqs <= 32:
         return False
     # disable cascade attention for DCP
     if dcp_world_size > 1:
