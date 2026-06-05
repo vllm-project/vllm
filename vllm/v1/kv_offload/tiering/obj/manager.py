@@ -11,6 +11,7 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -47,6 +48,38 @@ class TransferEntry(NamedTuple):
     xfer_handle: "nixl_xfer_handle"
     files_desc: object
     obj_handle: "nixl_prepped_dlist_handle"
+
+
+class ObjAsyncLookupWorker(AsyncLookupWorker):
+    """Async lookup worker for ObjectStoreSecondaryTierManager.
+
+    Batches existence probes into a single query_memory() call so the worker
+    thread issues one round-trip per step instead of one per key.
+    """
+
+    def __init__(
+        self,
+        tier: "ObjectStoreSecondaryTierManager",
+        tier_idx: int,
+        max_results: int = 1_000_000,
+    ) -> None:
+        super().__init__(tier_idx=tier_idx, max_results=max_results)
+        self._tier = tier
+
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        descriptors = [
+            (
+                _PROBE_ADDR,
+                _PROBE_LEN,
+                _PROBE_DEV_ID,
+                self._tier._file_mapper.get_file_name(k),
+            )
+            for k in keys
+        ]
+        results = self._tier._agent.query_memory(descriptors, "OBJ", "OBJ")
+        return [r is not None for r in results]
 
 
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
@@ -184,6 +217,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         except Exception as e:
             logger.warning("lookup failed for key %s: %s", key, e)
             return False
+
+    def create_lookup_worker(
+        self, tier_idx: int, max_results: int = 1_000_000
+    ) -> ObjAsyncLookupWorker:
+        return ObjAsyncLookupWorker(
+            tier=self, tier_idx=tier_idx, max_results=max_results
+        )
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
