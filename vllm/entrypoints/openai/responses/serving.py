@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import json
 import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy
+from copy import copy, deepcopy
 from http import HTTPStatus
 from typing import Any, Final
 
 from fastapi import Request
 from openai.types.responses import (
+    FunctionTool,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -22,7 +24,7 @@ from openai.types.responses import (
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from vllm import envs
 from vllm.config.utils import replace
@@ -31,11 +33,13 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
+    make_tool_call_id,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
+    FunctionDefinition,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.engine.serving import (
@@ -45,6 +49,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_developer_message,
+    get_encoding,
     get_system_message,
     get_user_message,
     has_custom_tools,
@@ -105,10 +110,14 @@ from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
+from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+_HARMONY_FINAL_MESSAGE_PREFILL = "<|channel|>final<|message|>"
 
 
 def _extract_allowed_tools_from_mcp_requests(
@@ -313,6 +322,52 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        if (
+            self.use_harmony
+            and request.tool_choice == "required"
+            and request.tools
+            and not all(isinstance(tool, FunctionTool) for tool in request.tools)
+        ):
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "tool_choice='required' for Harmony Responses currently "
+                    "supports function tools only."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="tool_choice",
+            )
+        if self._use_harmony_required_tool_json_shim(request):
+            if request.max_tool_calls is not None and request.max_tool_calls < 1:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "max_tool_calls must be greater than 0 when "
+                        "tool_choice='required' for Harmony Responses."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param="max_tool_calls",
+                )
+            if request.text is not None and request.text.format is not None:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "text.format cannot be combined with "
+                        "tool_choice='required' for Harmony Responses."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param="text.format",
+                )
+            if request.structured_outputs is not None:
+                return self.create_error_response(
+                    err_type="invalid_request_error",
+                    message=(
+                        "structured_outputs cannot be combined with "
+                        "tool_choice='required' for Harmony Responses."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param="structured_outputs",
+                )
         return None
 
     async def create_responses(
@@ -435,6 +490,7 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
+            self._apply_harmony_required_tool_json_schema(request, sampling_params)
 
             trace_headers = (
                 None
@@ -444,7 +500,9 @@ class OpenAIServingResponses(OpenAIServing):
 
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
-            if self.use_harmony:
+            if self._use_harmony_required_tool_json_shim(request):
+                context = SimpleContext()
+            elif self.use_harmony:
                 if request.stream:
                     context = StreamingHarmonyContext(
                         messages, available_tools, function_tool_names
@@ -730,7 +788,10 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
+        use_required_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
+        if request.tool_choice not in ("auto", "none") and (
+            not use_required_tool_json_shim
+        ):
             raise NotImplementedError(
                 "Only 'auto' or 'none' tool_choice is supported "
                 "in response API with Harmony"
@@ -739,10 +800,140 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
+        if use_required_tool_json_shim:
+            prompt_token_ids += get_encoding().encode(
+                _HARMONY_FINAL_MESSAGE_PREFILL, allowed_special="all"
+            )
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 
         return messages, [engine_input]
+
+    def _use_harmony_required_tool_json_shim(
+        self,
+        request: ResponsesRequest,
+    ) -> bool:
+        return (
+            self.use_harmony
+            and request.tool_choice == "required"
+            and bool(request.tools)
+            and all(isinstance(tool, FunctionTool) for tool in request.tools)
+        )
+
+    @staticmethod
+    def _required_tool_json_schema(request: ResponsesRequest) -> str | dict:
+        json_schema = get_json_schema_from_tools(
+            tool_choice=request.tool_choice,
+            tools=deepcopy(request.tools),
+        )
+        if json_schema is None:
+            raise ValueError("tool_choice='required' requires function tools.")
+        if isinstance(json_schema, dict):
+            max_items = request.max_tool_calls
+            if request.parallel_tool_calls is False:
+                max_items = min(max_items, 1) if max_items is not None else 1
+            if max_items is not None:
+                json_schema["maxItems"] = max_items
+        return json_schema
+
+    def _apply_harmony_required_tool_json_schema(
+        self,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+    ) -> None:
+        if not self._use_harmony_required_tool_json_shim(request):
+            return
+        sampling_params.structured_outputs = StructuredOutputsParams(
+            json=self._required_tool_json_schema(request)
+        )
+
+    @staticmethod
+    def _parse_required_tool_json_output(
+        request: ResponsesRequest,
+        text: str,
+    ) -> list[FunctionDefinition]:
+        try:
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(text)
+        except ValidationError as exc:
+            raise ValueError(
+                "Failed to parse required tool-choice output as tool-call JSON."
+            ) from exc
+        if not tool_calls:
+            raise ValueError(
+                "Required tool-choice output did not contain any tool calls."
+            )
+
+        allowed_tool_names = {
+            tool.name for tool in request.tools if isinstance(tool, FunctionTool)
+        }
+        for tool_call in tool_calls:
+            if tool_call.name not in allowed_tool_names:
+                raise ValueError(
+                    "Required tool-choice output referenced an unknown tool: "
+                    f"{tool_call.name!r}."
+                )
+            if tool_call.parameters is None:
+                raise ValueError(
+                    "Required tool-choice output did not include object "
+                    f"parameters for tool {tool_call.name!r}."
+                )
+        return tool_calls
+
+    def _make_harmony_required_tool_json_output_items(
+        self,
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+    ) -> list[ResponseOutputItem]:
+        if self.enable_log_outputs and self.request_logger:
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=False,
+                delta=False,
+            )
+
+        tool_calls = self._parse_required_tool_json_output(
+            request=request,
+            text=final_output.text,
+        )
+        output_items: list[ResponseOutputItem] = []
+        for idx, tool_call in enumerate(tool_calls):
+            output_items.append(
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=make_tool_call_id(
+                        id_type=self.tool_call_id_type,
+                        func_name=tool_call.name,
+                        idx=idx,
+                    ),
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=json.dumps(
+                        tool_call.parameters,
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+        self._append_required_tool_json_output_to_harmony_store(
+            request,
+            output_items,
+        )
+        return output_items
+
+    def _append_required_tool_json_output_to_harmony_store(
+        self,
+        request: ResponsesRequest,
+        output_items: list[ResponseOutputItem],
+    ) -> None:
+        if not request.store or request.request_id not in self.msg_store:
+            return
+        for item in output_items:
+            msg = response_input_to_harmony(item, [])
+            if msg is not None:
+                self.msg_store[request.request_id].append(msg)
 
     async def _initialize_tool_sessions(
         self,
@@ -789,7 +980,31 @@ class OpenAIServingResponses(OpenAIServing):
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
-        if self.use_harmony:
+        if self.use_harmony and self._use_harmony_required_tool_json_shim(request):
+            assert isinstance(context, SimpleContext)
+            final_res = context.final_output
+            assert final_res is not None
+            assert len(final_res.outputs) == 1
+            final_output = final_res.outputs[0]
+
+            self._raise_if_error(final_output.finish_reason, request.request_id)
+
+            if final_output.finish_reason == "length":
+                status = "incomplete"
+                output = []
+            else:
+                output = self._make_harmony_required_tool_json_output_items(
+                    request,
+                    final_output,
+                )
+
+            if request.enable_response_messages:
+                input_messages = context.input_messages
+                output_messages = context.output_messages
+
+            assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
+        elif self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             if request.enable_response_messages:
@@ -1370,15 +1585,17 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = (
-            self.parser(
+        use_required_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
+        previous_tool_json_text = ""
+        history_tool_call_cnt = 0
+        function_name_returned = False
+        parser = None
+        if not use_required_tool_json_shim and self.parser:
+            parser = self.parser(
                 tokenizer,
                 request.tools,
                 chat_template_kwargs=self._effective_chat_template_kwargs(request),
             )
-            if self.parser
-            else None
-        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1402,7 +1619,39 @@ class OpenAIServingResponses(OpenAIServing):
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
-            if parser:
+            if use_required_tool_json_shim:
+                current_tool_json_text = previous_tool_json_text + delta_text
+                delta_message, function_name_returned = (
+                    extract_required_tool_call_streaming(
+                        previous_text=previous_tool_json_text,
+                        current_text=current_tool_json_text,
+                        delta_text=delta_text,
+                        function_name_returned=function_name_returned,
+                        tool_call_idx=history_tool_call_cnt,
+                        tool_call_id_type=self.tool_call_id_type,
+                    )
+                )
+                if (
+                    delta_message
+                    and delta_message.tool_calls
+                    and delta_message.tool_calls[0].id is not None
+                ):
+                    history_tool_call_cnt += 1
+                previous_tool_json_text = current_tool_json_text
+                if (
+                    output.finish_reason is not None
+                    and output.finish_reason != "length"
+                ):
+                    try:
+                        self._parse_required_tool_json_output(
+                            request,
+                            previous_tool_json_text,
+                        )
+                    except ValueError as exc:
+                        raise GenerationError(
+                            "Failed to parse required tool-choice output."
+                        ) from exc
+            elif parser:
                 delta_message = parser.parse_delta(
                     delta_text=delta_text,
                     delta_token_ids=delta_token_ids,
@@ -1501,7 +1750,9 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            if self.use_harmony:
+            if self.use_harmony and (
+                not self._use_harmony_required_tool_json_shim(request)
+            ):
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import AsyncExitStack
 from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    FunctionTool,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -51,7 +53,8 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 
 
 class MockConversationContext(ConversationContext):
@@ -152,6 +155,254 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
         "code_interpreter",
         "web_search_preview",
     }
+
+
+def _function_tool() -> FunctionTool:
+    return FunctionTool(
+        type="function",
+        name="get_weather",
+        description="Get weather.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"},
+            },
+            "required": ["location"],
+            "additionalProperties": False,
+        },
+        strict=True,
+    )
+
+
+def _harmony_required_tool_serving() -> OpenAIServingResponses:
+    serving = object.__new__(OpenAIServingResponses)
+    serving.use_harmony = True
+    serving.enable_log_outputs = False
+    serving.enable_store = True
+    serving.request_logger = None
+    serving.tool_call_id_type = "random"
+    serving.msg_store = {}
+    return serving
+
+
+def test_harmony_required_tool_json_output_becomes_function_call() -> None:
+    serving = _harmony_required_tool_serving()
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        store=True,
+    )
+    serving.msg_store[request.request_id] = []
+    output = CompletionOutput(
+        index=0,
+        text='[{"name":"get_weather","parameters":{"location":"Paris"}}]',
+        token_ids=[],
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+
+    items = serving._make_harmony_required_tool_json_output_items(request, output)
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.type == "function_call"
+    assert item.name == "get_weather"
+    assert json.loads(item.arguments) == {"location": "Paris"}
+
+    stored_msg = serving.msg_store[request.request_id][0]
+    assert stored_msg.channel == "commentary"
+    assert stored_msg.recipient == "functions.get_weather"
+    assert stored_msg.content[0].text == '{"location": "Paris"}'
+
+
+def test_harmony_required_tool_json_rejects_missing_parameters() -> None:
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+    )
+
+    with pytest.raises(ValueError, match="did not include object parameters"):
+        OpenAIServingResponses._parse_required_tool_json_output(
+            request,
+            '[{"name":"get_weather"}]',
+        )
+
+
+def test_harmony_required_tool_json_rejects_unknown_tool() -> None:
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+    )
+
+    with pytest.raises(ValueError, match="unknown tool"):
+        OpenAIServingResponses._parse_required_tool_json_output(
+            request,
+            '[{"name":"get_time","parameters":{}}]',
+        )
+
+
+def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
+    single_tool_request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        parallel_tool_calls=False,
+    )
+    limited_request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        max_tool_calls=3,
+    )
+
+    single_tool_schema = OpenAIServingResponses._required_tool_json_schema(
+        single_tool_request
+    )
+    limited_schema = OpenAIServingResponses._required_tool_json_schema(limited_request)
+
+    assert isinstance(single_tool_schema, dict)
+    assert single_tool_schema["maxItems"] == 1
+    assert isinstance(limited_schema, dict)
+    assert limited_schema["maxItems"] == 3
+
+
+def test_harmony_required_tool_json_store_replays_function_call() -> None:
+    serving = _harmony_required_tool_serving()
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        store=True,
+    )
+    serving.msg_store[request.request_id] = []
+    output = CompletionOutput(
+        index=0,
+        text='[{"name":"get_weather","parameters":{"location":"Paris"}}]',
+        token_ids=[],
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    serving._make_harmony_required_tool_json_output_items(request, output)
+
+    prev_response = MagicMock()
+    prev_response.id = request.request_id
+    next_request = ResponsesRequest(
+        input="Continue.",
+        tools=[_function_tool()],
+    )
+
+    messages = serving._construct_input_messages_with_harmony(
+        next_request,
+        prev_response,
+    )
+
+    assert messages[0].channel == "commentary"
+    assert messages[0].recipient == "functions.get_weather"
+    assert messages[0].content[0].text == '{"location": "Paris"}'
+    assert messages[-1].author.role == "user"
+    assert messages[-1].content[0].text == "Continue."
+
+
+def test_harmony_required_tool_json_rejects_text_format_conflict() -> None:
+    serving = _harmony_required_tool_serving()
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        text=ResponseTextConfig(
+            format=ResponseFormatTextJSONSchemaConfig(
+                type="json_schema",
+                name="weather_answer",
+                schema={"type": "object"},
+            )
+        ),
+    )
+
+    error = serving._validate_create_responses_input(request)
+
+    assert error is not None
+    assert error.error.type == "invalid_request_error"
+    assert error.error.param == "text.format"
+
+
+def test_harmony_required_tool_json_rejects_zero_max_tool_calls() -> None:
+    serving = _harmony_required_tool_serving()
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        max_tool_calls=0,
+    )
+
+    error = serving._validate_create_responses_input(request)
+
+    assert error is not None
+    assert error.error.type == "invalid_request_error"
+    assert error.error.param == "max_tool_calls"
+
+
+def test_harmony_required_tool_json_rejects_structured_outputs_conflict() -> None:
+    serving = _harmony_required_tool_serving()
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        structured_outputs=StructuredOutputsParams(json={"type": "object"}),
+    )
+
+    error = serving._validate_create_responses_input(request)
+
+    assert error is not None
+    assert error.error.type == "invalid_request_error"
+    assert error.error.param == "structured_outputs"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ['[{"name":"get_weather","parameters":{"location":"Paris"}}]'],
+        [
+            '[{"name":"get_weather",',
+            '"parameters":{"location":"Paris"}}]',
+        ],
+    ],
+)
+def test_harmony_required_tool_json_streaming_reconstructs_arguments(
+    chunks: list[str],
+) -> None:
+    previous_text = ""
+    function_name_returned = False
+    name = None
+    arguments = ""
+
+    for chunk in chunks:
+        current_text = previous_text + chunk
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=chunk,
+            function_name_returned=function_name_returned,
+            tool_call_idx=0,
+            tool_call_id_type="random",
+        )
+        previous_text = current_text
+
+        if delta_message is None:
+            continue
+        tool_call = delta_message.tool_calls[0]
+        if tool_call.function.name:
+            name = tool_call.function.name
+        arguments += tool_call.function.arguments or ""
+
+    assert name == "get_weather"
+    assert json.loads(arguments) == {"location": "Paris"}
 
 
 @pytest.mark.skip_global_cleanup
