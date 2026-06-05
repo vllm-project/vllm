@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import contextlib
 from collections import UserDict
 from dataclasses import dataclass
 
@@ -7,6 +9,8 @@ import msgspec
 import numpy as np
 import pytest
 import torch
+import zmq
+import zmq.asyncio
 
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
@@ -423,3 +427,85 @@ def test_multiple_senders_single_receiver_ipc():
         assert torch.allclose(decoded.prompt_embeds, original_tensor), (
             f"Value mismatch for sender {sender_idx} msg {msg_idx}"
         )
+
+
+def test_output_socket_drops_undecodable_frame():
+    """A malformed frame on the engine output socket must not crash the engine.
+
+    Regression test for issue #44486: an external port scanner injected junk
+    bytes onto the engine->client output socket, msgspec raised a
+    ``ValidationError`` ("Expected array, got int"), and that exception was
+    forwarded to ``outputs_queue`` and re-raised, killing the engine.
+
+    This drives the real ``AsyncMPClient._ensure_output_queue_task`` loop with a
+    lightweight fake ``self`` and an in-process ZMQ socket pair. A garbage frame
+    (an ``int`` where ``EngineCoreOutputs`` is expected, reproducing the exact
+    error from the issue) is sent first, followed by a valid
+    ``EngineCoreOutputs``. The loop must drop the bad frame and still deliver the
+    valid one.
+    """
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.engine.core_client import AsyncMPClient
+    from vllm.v1.metrics.stats import SchedulerStats
+
+    class _FakeResources:
+        def __init__(self, output_socket):
+            self.output_queue_task = None
+            self.output_socket = output_socket
+
+        def validate_alive(self, frames):
+            # The real implementation only raises on the single-frame
+            # ENGINE_CORE_DEAD sentinel; an arbitrary junk frame cannot
+            # masquerade as it, so a no-op faithfully models that here.
+            pass
+
+    class _FakeClient:
+        # Deliberately has no ``process_engine_outputs`` /
+        # ``eep_process_engine_core_notification`` attributes, so the loop
+        # takes the plain "enqueue outputs" path.
+        def __init__(self, output_socket):
+            self.resources = _FakeResources(output_socket)
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
+            self.utility_results: dict = {}
+            self.outputs_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _run():
+        ctx = zmq.asyncio.Context()
+        addr = "inproc://test-44486-output"
+        recv_socket = ctx.socket(zmq.PULL)
+        recv_socket.bind(addr)
+        send_socket = ctx.socket(zmq.PUSH)
+        send_socket.connect(addr)
+
+        fake = _FakeClient(recv_socket)
+
+        encoder = MsgpackEncoder()
+
+        try:
+            # Start the real output-handling loop under test.
+            AsyncMPClient._ensure_output_queue_task(fake)
+
+            # 1) garbage frame (int where an array is expected), then
+            # 2) a valid EngineCoreOutputs.
+            await send_socket.send_multipart(list(encoder.encode(123)))
+            valid = EngineCoreOutputs(engine_index=7, scheduler_stats=SchedulerStats())
+            await send_socket.send_multipart(list(encoder.encode(valid)))
+
+            return await asyncio.wait_for(fake.outputs_queue.get(), timeout=5.0)
+        finally:
+            task = fake.resources.output_queue_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            recv_socket.close(linger=0)
+            send_socket.close(linger=0)
+            ctx.term()
+
+    received = asyncio.run(_run())
+
+    # Without the fix, the queue's first item would be the forwarded
+    # ValidationError instead of our valid output.
+    assert not isinstance(received, Exception), received
+    assert isinstance(received, EngineCoreOutputs)
+    assert received.engine_index == 7
