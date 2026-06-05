@@ -1,17 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FP8 block-scaled GEMM with LL kernel for M<=16 decode shapes.
-
-Requires SM100+ because transform_sf_into_required_layout produces
-packed ue8m0 int32 scales on SM100 (arch_major==10) but fp32 scales
-on SM90 (arch_major==9). The kernel's ue8m0_to_f32 byte extraction
-only handles the packed int32 format.
-
-Dispatch to the LL kernel happens inside a custom op (opaque to
-torch.compile). apply_block_scaled_mm always calls this single op
-with no branches, so the compiled graph is identical in structure
-to DeepGemm's (one output alloc + one custom op call).
-"""
 
 from __future__ import annotations
 
@@ -29,11 +17,10 @@ from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
-# ── CuTe DSL availability ────────────────────────────────────────────
-
 _cutedsl_available: bool | None = None
 
 
+# Called once per process.
 def is_available() -> bool:
     global _cutedsl_available
     if _cutedsl_available is not None:
@@ -45,13 +32,16 @@ def is_available() -> bool:
         _cutedsl_available = True
     except ImportError:
         _cutedsl_available = False
-        logger.info("cuteDSL not available, ll_fp8_block_gemm disabled")
+        logger.info(
+            "cuteDSL (CUTLASS Python) not available, ll_fp8_block_gemm disabled"
+        )
     return _cutedsl_available
 
 
-# ── Compile cache ─────────────────────────────────────────────────────
-
+# Warp-specialized: keyed on (tile_n, tile_k, num_stages) -> compiled callable, fully shape-dynamic.
 _compiled_cache: dict[tuple, object] = {}
+
+# lazy import helper - deferred until first actual kernel call.
 _cute_ctx = None
 
 
@@ -75,18 +65,23 @@ def _stream():
 
 def _get_compiled(a_bf16, b_bf16, out, sa_flat, sb_flat):
     cute, from_dlpack, _, _ = _cute()
-    from ._ll_fp8_block_warpspecialized import LLFp8BlockGemm
 
-    # TODO (roberto): add tile_n, tile_k, num_stages to autotuning space
     cache_key = ("fp8_block",)
     if cache_key in _compiled_cache:
         return _compiled_cache[cache_key]
 
+    # cache check before any expensive work.
+    from ._ll_fp8_block_warpspecialized import LLFp8BlockGemm
+
     div = 8
     mA = (
         from_dlpack(a_bf16, assumed_align=16, enable_tvm_ffi=True)
-        .mark_layout_dynamic(leading_dim=1)
-        .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
+        .mark_layout_dynamic(leading_dim=1)  # dimension 1 (K) has a dynamic stride
+        .mark_compact_shape_dynamic(
+            mode=1,  # mode 1 (K) is dynamic but guaranteed divisible by div=8
+            stride_order=(0, 1),  # row-major
+            divisibility=div,
+        )  # This lets the compiler generate more efficient address math knowing K alignment.
     )
     mB = (
         from_dlpack(b_bf16, assumed_align=16, enable_tvm_ffi=True)
@@ -105,12 +100,15 @@ def _get_compiled(a_bf16, b_bf16, out, sa_flat, sb_flat):
         sb_flat, assumed_align=4, enable_tvm_ffi=True
     ).mark_layout_dynamic()
 
+    # TODO (roberto): add tile_n, tile_k, num_stages, num_dma_warps to autotuning space
     gemm = LLFp8BlockGemm(tile_n=16, tile_k=256, num_stages=2, num_dma_warps=4)
     compiled = cute.compile(
         gemm, mA, mB, mC, mSA, mSB, _stream(), options="--enable-tvm-ffi"
     )
     _compiled_cache[cache_key] = compiled
-    logger.info("Compiled ll_fp8_block_gemm")
+    logger.info(
+        "Compiled ll_fp8_block_gemm tile_n=16 tile_k=256 num_stages=2 num_dma_warps=4"
+    )
     return compiled
 
 
@@ -130,15 +128,7 @@ def _ll_fp8_block_gemm(
     compiled(a_bf16, b_bf16, output, sa_flat, sb_flat, _stream())
 
 
-# ── Kernel class (registered in scaled_mm registry) ───────────────────
-
-
 class LLFp8BlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel):
-    """FP8 block-scaled kernel that dispatches to LL kernel for M<=16.
-
-    SM100+ only: scale format is packed ue8m0 int32 (not fp32 like SM90).
-    """
-
     def __init__(self, config: FP8ScaledMMLinearLayerConfig):
         super().__init__(config)
 
