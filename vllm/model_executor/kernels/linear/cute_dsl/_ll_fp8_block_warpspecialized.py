@@ -264,7 +264,7 @@ class LLFp8BlockGemm:
             grid=[cute.size(grid_m), cute.size(grid_n), 1],
             block=[self.num_threads, 1, 1],
             stream=stream,
-            use_pdl=True,
+            # use_pdl=True,
         )
 
     @cute.kernel
@@ -313,6 +313,12 @@ class LLFp8BlockGemm:
             b: cute.struct.Align[
                 cute.struct.MemRange[mB.element_type, cute.cosize(sB_layout)], 16
             ]
+            sa_scale: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int32, bM * num_stages], 4
+            ]
+            sb_scale: cute.struct.Align[
+                cute.struct.MemRange[cutlass.Int32, num_stages], 4
+            ]
             mbar: cute.struct.Align[
                 cute.struct.MemRange[cutlass.Int64, num_stages * 2], 8
             ]
@@ -337,6 +343,11 @@ class LLFp8BlockGemm:
         )
 
         k_tile_count = cute.size(gA, mode=[2])
+        sSA_ptr = storage.sa_scale.data_ptr()
+        sSB_ptr = storage.sb_scale.data_ptr()
+        n_block_idx = bid_n * bN // 128
+        TILE_K_FP8_C: cutlass.Constexpr = self.tile_k_fp8
+        num_packed_k = (k_tile_count * TILE_K_FP8_C // 128) // 4
 
         if is_dma:
             cute.arch.setmaxregister_decrease(40)
@@ -387,27 +398,53 @@ class LLFp8BlockGemm:
                 pipeline.PipelineUserType.Producer, num_stages
             )
 
-            # Peeled first iteration: preload B (weights) before
-            # waiting for quant to finish producing A (activations).
+            # Pre-create scale tensors (like A/B tile tensors)
+            n_repr = n_block_idx * 128
+            m_slot = dma_tidx % bM
+            global_m = bid_m * bM + m_slot
+            safe_m = global_m if global_m < M_out else M_out - 1
+            gSA = cute.make_tensor(
+                (mSA.iterator + safe_m * num_packed_k).align(4),
+                cute.make_layout((num_packed_k,)),
+            )
+            gSB = cute.make_tensor(
+                (mSB.iterator + n_repr).align(4),
+                cute.make_layout((num_packed_k,), stride=(N_out,)),
+            )
+            sSA = cute.make_tensor(
+                sSA_ptr,
+                cute.make_layout((bM, num_stages), stride=(1, bM)),
+            )
+            sSB = cute.make_tensor(
+                sSB_ptr,
+                cute.make_layout((num_stages,)),
+            )
+
+            # Peeled first iteration: B data + B scale before wait,
+            # A data after wait, A scale overlaps with cp.async A.
             mainloop_pipeline.producer_acquire(producer_state)
+            packed_k = cutlass.Int32(0)
             cute.copy(
                 tiled_copy_B,
                 tBgB[None, None, None, 0],
                 tBsB[None, None, None, producer_state.index],
                 pred=tBpB,
             )
-            cute.arch.griddepcontrol_wait()
+            sSB[producer_state.index] = gSB[packed_k]
+            # cute.arch.griddepcontrol_wait()
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, 0],
                 tAsA[None, None, None, producer_state.index],
                 pred=tApA,
             )
+            sSA[m_slot, producer_state.index] = gSA[packed_k]
             mainloop_pipeline.producer_commit(producer_state)
             producer_state.advance()
 
             for k_tile in range(1, k_tile_count):
                 mainloop_pipeline.producer_acquire(producer_state)
+                packed_k = (k_tile * TILE_K_FP8_C // 128) // 4
                 cute.copy(
                     tiled_copy_A,
                     tAgA[None, None, None, k_tile],
@@ -420,6 +457,8 @@ class LLFp8BlockGemm:
                     tBsB[None, None, None, producer_state.index],
                     pred=tBpB,
                 )
+                sSA[m_slot, producer_state.index] = gSA[packed_k]
+                sSB[producer_state.index] = gSB[packed_k]
                 mainloop_pipeline.producer_commit(producer_state)
                 producer_state.advance()
 
@@ -466,7 +505,16 @@ class LLFp8BlockGemm:
 
             m_row_0 = lane_id // 4
             m_row_1 = m_row_0 + 8
-            n_block_idx = bid_n * bN // 128
+
+            # Pre-create smem scale tensors for reading
+            sSA_mma = cute.make_tensor(
+                sSA_ptr,
+                cute.make_layout((bM, num_stages), stride=(1, bM)),
+            )
+            sSB_mma = cute.make_tensor(
+                sSB_ptr,
+                cute.make_layout((num_stages,)),
+            )
 
             for k_tile in range(k_tile_count):
                 mainloop_pipeline.consumer_wait(consumer_state)
@@ -477,38 +525,18 @@ class LLFp8BlockGemm:
                 a_s = tCrA[None, None, 0]
                 b_s = tCrB[None, None, 0]
 
-                TILE_K_FP8: cutlass.Constexpr = self.tile_k_fp8
-                packed_k_tile = (k_tile * TILE_K_FP8 // 128) // 4
-                # Number of packed int32 scale groups along K for activation
-                num_packed_k_a = (k_tile_count * TILE_K_FP8 // 128) // 4
-
-                global_m0 = bid_m * bM + m_row_0
-                global_m1 = bid_m * bM + m_row_1
-                safe_m0 = global_m0 if global_m0 < M_out else M_out - 1
-                safe_m1 = global_m1 if global_m1 < M_out else M_out - 1
-
-                sa0_p = (mSA.iterator + safe_m0 * num_packed_k_a + packed_k_tile).align(
-                    4
-                )
-                sa0_t = cute.make_tensor(sa0_p, cute.make_layout((1,)))
+                # A+B scales from smem (loaded by DMA warps this iteration)
+                stage = consumer_state.index
                 sa0_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
-                cute.autovec_copy(sa0_t, sa0_packed)
-                sa1_p = (mSA.iterator + safe_m1 * num_packed_k_a + packed_k_tile).align(
-                    4
-                )
-                sa1_t = cute.make_tensor(sa1_p, cute.make_layout((1,)))
+                sa0_packed[0] = sSA_mma[m_row_0, stage]
                 sa1_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
-                cute.autovec_copy(sa1_t, sa1_packed)
-
-                n_repr = n_block_idx * 128
-                sb_p = (mSB.iterator + packed_k_tile * N_out + n_repr).align(4)
-                sb_t = cute.make_tensor(sb_p, cute.make_layout((1,)))
+                sa1_packed[0] = sSA_mma[m_row_1, stage]
                 sb_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
-                cute.autovec_copy(sb_t, sb_packed)
+                sb_packed[0] = sSB_mma[stage]
 
                 for sg in cutlass.range(SCALE_GROUPS_PER_WARP, unroll_full=True):
                     sg_global = mma_warp_idx * SCALE_GROUPS_PER_WARP + sg
-                    k_fp8_base = k_tile * TILE_K_FP8 + sg_global * 128
+                    k_fp8_base = k_tile * TILE_K_FP8_C + sg_global * 128
                     scale_k_idx = k_fp8_base // 128
                     packed_k = scale_k_idx // 4
                     byte_k = scale_k_idx - packed_k * 4
@@ -580,7 +608,8 @@ class LLFp8BlockGemm:
 
             # Signal dependent kernels after GEMM is done
             if mma_tidx == 0:
-                cute.arch.griddepcontrol_launch_dependents()
+                # cute.arch.griddepcontrol_launch_dependents()
+                pass
             cute.arch.sync_threads()
 
             # Epilogue: warp reduction + global store
