@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde_json::Value;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
@@ -8,6 +9,8 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+
+use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -22,6 +25,8 @@ pub struct AppState {
     pub enable_log_requests: bool,
     /// Whether to set X-Request-Id on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// Runtime server information returned by `/server_info`, when available.
+    server_info: Option<ServerInfoSnapshot>,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
@@ -47,6 +52,7 @@ impl AppState {
             chat,
             enable_log_requests: false,
             enable_request_id_headers: false,
+            server_info: None,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -62,6 +68,20 @@ impl AppState {
     pub fn with_request_id_headers(mut self, enabled: bool) -> Self {
         self.enable_request_id_headers = enabled;
         self
+    }
+
+    /// Attach the runtime server information snapshot used by `/server_info`.
+    pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
+        self.server_info = Some(server_info);
+        self
+    }
+
+    /// Build a `/server_info` response payload.
+    pub(crate) fn server_info_response(
+        &self,
+        config_format: ServerInfoConfigFormat,
+    ) -> Option<Value> {
+        self.server_info.as_ref().map(|server_info| server_info.response(config_format))
     }
 
     /// The primary model name echoed back in API responses (the first served
