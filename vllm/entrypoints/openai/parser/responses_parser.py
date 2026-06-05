@@ -79,6 +79,8 @@ class ResponsesParser:
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
             )
+            if not getattr(self.request, "include_reasoning", True):
+                reasoning = None
             output_items = build_response_output_items(
                 reasoning=reasoning,
                 content=content,
