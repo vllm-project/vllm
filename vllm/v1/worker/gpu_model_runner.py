@@ -153,10 +153,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVQuantMode,
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
@@ -200,10 +202,8 @@ from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_chang
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.cp_utils import (
-    check_attention_cp_compatibility,
-    get_total_cp_world_size,
-)
+from vllm.v1.worker.block_table import SlotMappingMode
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
@@ -681,6 +681,9 @@ class GPUModelRunner(
         placeholder_block_size = (
             self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
         )
+        placeholder_max_num_blocks = cdiv(
+            max(self.max_model_len, self.max_encoder_len), placeholder_block_size
+        )
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
         self.input_batch = InputBatch(
@@ -693,6 +696,7 @@ class GPUModelRunner(
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
+            max_num_blocks_per_req=[placeholder_max_num_blocks],
             num_spec_tokens=self.num_spec_tokens,
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -7111,6 +7115,52 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
+    def _set_mm_prefix_range_for_metadata(
+        self,
+        attn_metadata: Any,
+        req_doc_ranges: dict[int, list[tuple[int, int]]],
+    ) -> None:
+        """Set mm_prefix_range for all attention metadata objects.
+
+        This method handles both list and non-list attention metadata,
+        computing mm_prefix_range_tensor once and sharing it across all
+        metadata objects to avoid redundant host-to-device transfers.
+        """
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionMetadata,
+        )
+
+        # Get all metadata objects from either list or dict structure
+        metadata_list = []
+        if isinstance(attn_metadata, list):
+            for ub_metadata in attn_metadata:
+                metadata_list.extend(ub_metadata.values())
+        else:
+            metadata_list.extend(attn_metadata.values())
+
+        # Set mm_prefix_range for all metadata and compute tensor once
+        shared_tensor = None
+        for metadata in metadata_list:
+            metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+
+            # Only compute tensor for TritonAttentionMetadata
+            if isinstance(metadata, TritonAttentionMetadata):
+                if shared_tensor is None:
+                    shared_tensor = (
+                        TritonAttentionMetadata.compute_mm_prefix_range_tensor(
+                            req_doc_ranges,
+                            metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
+                            metadata.seq_lens.device,  # type: ignore[attr-defined]
+                        )
+                    )
+                metadata.mm_prefix_range_tensor = shared_tensor
+
+    def _get_max_num_blocks_per_req(self, kv_cache_spec: KVCacheSpec) -> int:
+        return cdiv(
+            kv_cache_spec.max_memory_usage_bytes(self.vllm_config),
+            kv_cache_spec.page_size_bytes,
+        )
+
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
@@ -7127,26 +7177,20 @@ class GPUModelRunner(
         """
         block_sizes = []
         max_num_blocks = []
-        use_dcp_list = []
+        slot_mapping_modes = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+            kv_cache_spec = kv_cache_group.kv_cache_spec
+            kv_cache_spec_kind = get_kv_cache_spec_kind(kv_cache_spec)
+            if kv_cache_spec_kind == KVCacheSpecKind.ENCODER_ONLY_ATTENTION:
                 continue
-            block_size = kv_cache_group.kv_cache_spec.block_size
+            block_size = kv_cache_spec.block_size
             block_sizes.append(block_size)
-            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                use_dcp_list.append(False)
-                max_num_blocks_per_req = cdiv(max_model_len, block_size)
-                max_num_blocks_per_req = (
-                    max_num_blocks_per_req
-                    if self.cache_config.enable_prefix_caching
-                    else 1
-                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+            if kv_cache_spec_kind == KVCacheSpecKind.MAMBA:
+                slot_mapping_modes.append(SlotMappingMode.NONE)
             else:
-                use_dcp_list.append(True)
-                max_num_blocks_per_req = cdiv(
-                    max_model_len, block_size * get_total_cp_world_size()
-                )
+                slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
+            max_num_blocks_per_req = self._get_max_num_blocks_per_req(kv_cache_spec)
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (
@@ -7170,7 +7214,7 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
-                use_dcp_list=use_dcp_list,
+                slot_mapping_modes=slot_mapping_modes,
             )
 
         assert self._init_block_sizes == block_sizes, (

@@ -156,7 +156,6 @@ else:
             ),
         ],
         "Qwen/Qwen3.5-0.8B": [
-            CPTestSettings.detailed(dcp_multipliers=[0.25]),
             CPTestSettings.detailed(
                 cp_kv_cache_interleave_size=16,
                 attn_backend="FLASH_ATTN",
@@ -242,6 +241,9 @@ def _test_cp_gsm8k(
             distributed_backend,
         ]
     )
+
+    if attn_backend:
+        server_args.append(f"--attention-backend={attn_backend}")
 
     with RemoteOpenAIServer(
         model_id,

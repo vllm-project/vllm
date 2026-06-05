@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum
+
 import numpy as np
 import torch
 
@@ -10,9 +12,13 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+class SlotMappingMode(Enum):
+    TOKEN_TO_KV_SLOT = "token_to_kv_slot"
+    NONE = "none"
 
 
 class BlockTable:
@@ -26,7 +32,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
-        use_dcp: bool = True,
+        slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
     ):
         """
         Args:
@@ -39,8 +45,9 @@ class BlockTable:
             kernel_block_size: The block_size of underlying attention kernel.
                 Will be the same as `block_size` if `block_size` is supported
                 by the attention kernel.
-            use_dcp: Whether to apply DCP transformations. Mamba-like layers
-                use TP and keep full state per rank, so this should be False.
+            slot_mapping_mode: How this cache group maps scheduled tokens to
+                cache slots. Mamba-like state caches do not use token slot
+                mappings and should use SlotMappingMode.NONE.
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -102,7 +109,7 @@ class BlockTable:
             self.dcp_world_size = 1
             self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
-        self.use_dcp = use_dcp
+        self.slot_mapping_mode = slot_mapping_mode
 
     def append_row(
         self,
@@ -150,12 +157,11 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        if not self.use_dcp:
-            # Mamba/GDN groups store recurrent state blocks rather than
-            # per-token KV blocks. Their metadata uses the block table
-            # directly, so token slot mappings should stay padded.
-            self.slot_mapping.gpu.fill_(PAD_SLOT_ID)
+        if self.slot_mapping_mode == SlotMappingMode.NONE:
+            # Mamba/GDN groups consume the block table as recurrent state
+            # indices and do not use per-token slot mappings.
             return
+        assert self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT
 
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
@@ -243,41 +249,33 @@ class MultiGroupBlockTable:
     def __init__(
         self,
         max_num_reqs: int,
-        max_model_len: int,
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
         block_sizes: list[int],
         kernel_block_sizes: list[int],
-        max_num_blocks: list[int] | None = None,
+        max_num_blocks: list[int],
         cp_kv_cache_interleave_size: int = 1,
-        use_dcp_list: list[bool] | None = None,
+        slot_mapping_modes: list[SlotMappingMode] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
-        if max_num_blocks is None:
-            # Note(hc): each dcp rank only store
-            # (max_model_len//dcp_world_size) tokens in kvcache,
-            # so the block_size which used for calc max_num_blocks_per_req
-            # must be multiplied by dcp_world_size.
-            dcp_list = (
-                use_dcp_list if use_dcp_list is not None else [True] * len(block_sizes)
+        if slot_mapping_modes is None:
+            slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT] * len(block_sizes)
+        if len(slot_mapping_modes) != len(block_sizes):
+            raise ValueError(
+                f"slot_mapping_modes length ({len(slot_mapping_modes)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
             )
-            max_num_blocks = []
-            for block_size, use_dcp in zip(block_sizes, dcp_list):
-                cp_world_size = get_total_cp_world_size() if use_dcp else 1
-                max_num_blocks.append(cdiv(max_model_len, block_size * cp_world_size))
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
                 f"max_num_blocks length ({len(max_num_blocks)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
-        if use_dcp_list is None:
-            use_dcp_list = [True] * len(block_sizes)
 
         # Align to a multiple of (128 / block_size) as required
         # by some attention backends such as TRTLLM (#39324)
@@ -296,10 +294,15 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
-                use_dcp=use_dcp,
+                slot_mapping_mode=slot_mapping_mode,
             )
-            for block_size, kernel_block_size, max_num_blocks_per_req, use_dcp in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks, use_dcp_list
+            for (
+                block_size,
+                kernel_block_size,
+                max_num_blocks_per_req,
+                slot_mapping_mode,
+            ) in zip(
+                block_sizes, kernel_block_sizes, max_num_blocks, slot_mapping_modes
             )
         ]
 
