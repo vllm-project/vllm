@@ -14,6 +14,29 @@ namespace {
 
 #ifndef USE_ROCM
 template <int TopK>
+bool should_use_filtered_topk(int64_t num_rows, int64_t stride,
+                              int64_t max_seq_len,
+                              int max_smem_per_block) {
+  if (max_smem_per_block < 128 * 1024) {
+    return false;
+  }
+
+  const auto effective_max_len = static_cast<uint32_t>(
+      std::max<int64_t>(1, std::min(stride, max_seq_len)));
+  if (effective_max_len <= static_cast<uint32_t>(TopK)) {
+    return false;
+  }
+
+  // FilteredTopK wins for short decode rows on SM90-class GPUs. Keep the
+  // long-context path conservative because the filtered kernel has a fixed
+  // setup cost that is not reliably amortized for small decode batches.
+  if (effective_max_len <= vllm::persistent::RADIX_THRESHOLD) {
+    return true;
+  }
+  return num_rows > 32;
+}
+
+template <int TopK>
 void launch_persistent_topk(const torch::stable::Tensor& logits,
                             const torch::stable::Tensor& lengths,
                             torch::stable::Tensor& output,
@@ -33,7 +56,8 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     max_smem_per_block = device_prop->sharedMemPerBlockOptin;
   }
 
-  if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
+  if (should_use_filtered_topk<TopK>(num_rows, stride, max_seq_len,
+                                     max_smem_per_block)) {
     cudaError_t status =
         vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
             logits.const_data_ptr<float>(), output.mutable_data_ptr<int32_t>(),
