@@ -120,15 +120,12 @@ class KVOutputAggregator:
                 # Use the first worker's kv_connector_stats as accumulator.
                 aggregated_kv_connector_stats = kv_output.kv_connector_stats
             elif kv_connector_stats := kv_output.kv_connector_stats:
-                if aggregated_kv_connector_stats is None:
-                    aggregated_kv_connector_stats = kv_connector_stats
-                else:
-                    assert isinstance(
-                        aggregated_kv_connector_stats, type(kv_connector_stats)
-                    )
-                    aggregated_kv_connector_stats = (
-                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
-                    )
+                assert isinstance(
+                    aggregated_kv_connector_stats, type(kv_connector_stats)
+                )
+                aggregated_kv_connector_stats = aggregated_kv_connector_stats.aggregate(
+                    kv_connector_stats
+                )
 
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
