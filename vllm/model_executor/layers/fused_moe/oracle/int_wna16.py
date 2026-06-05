@@ -81,6 +81,7 @@ def _get_priority_backends(
     may_have_zp: bool,
     may_have_bias: bool,
     group_size: int,
+    allow_marlin: bool,
 ) -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
@@ -94,7 +95,7 @@ def _get_priority_backends(
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
 
     # Marlin supports ZP and bias but only certain problem/group sizes.
-    if check_moe_marlin_supports_config(moe_config, group_size):
+    if allow_marlin and check_moe_marlin_supports_config(moe_config, group_size):
         _AVAILABLE_BACKENDS += [
             WNA16MoEBackend.MARLIN,
             WNA16MoEBackend.BATCHED_MARLIN,
@@ -112,6 +113,7 @@ def select_wna16_moe_backend(
     weight_key: QuantKey,
     may_have_zp: bool,
     may_have_bias: bool,
+    allow_marlin: bool = True,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -167,6 +169,7 @@ def select_wna16_moe_backend(
         may_have_zp,
         may_have_bias,
         group_size=weight_key.scale.group_shape[1],
+        allow_marlin=allow_marlin,
     )
 
     for backend in AVAILABLE_BACKENDS:
@@ -278,35 +281,17 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if experts_cls is XPUExpertsWNA16:
-        assert (
-            prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard
-        ), (
-            "XPUExpertsWNA16 only supports the Standard activation format; "
-            "xpu_fused_moe(is_int4=True) does not implement BatchedExperts."
-        )
-        experts: mk.FusedMoEExperts = XPUExpertsWNA16(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    elif (
-        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts = experts_cls(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
+        extra_args["max_num_tokens"] = max_num_tokens
+        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
+
+    experts = experts_cls(
+        moe_config=moe_config,
+        quant_config=moe_quant_config,
+        **extra_args,
+    )
 
     return mk.FusedMoEKernel(
         prepare_finalize,
@@ -905,21 +890,34 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.quantization.awq_marlin import (
             AWQMarlinConfig,
         )
-        from vllm.model_executor.layers.quantization.moe_wna16 import (
-            MoeWNA16Config,
-        )
+
+        if isinstance(quant_config, AWQMarlinConfig):
+            num_bits = quant_config.weight_bits
+            pack_factor = quant_config.pack_factor
+            group_size = quant_config.group_size
+        elif isinstance(quant_config, AutoGPTQConfig):
+            num_bits = quant_config.quant_type.size_bits
+            pack_factor = quant_config.pack_factor
+            group_size = quant_config.group_size
+            actorder = "group" if quant_config.desc_act else None
+        elif isinstance(quant_config, QuantizationArgs):
+            num_bits = quant_config.num_bits
+            pack_factor = 32 // quant_config.num_bits
+            group_size = quant_config.group_size
+            actorder = quant_config.actorder
+        else:
+            raise TypeError(
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
+                f"QuantizationArgs, got {type(quant_config).__name__}."
+            )
 
         if isinstance(quant_config, AWQMarlinConfig):
             if w13_qzeros is None or w2_qzeros is None:
                 raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
 
-            weight_bits = quant_config.weight_bits
-            pack_factor = quant_config.pack_factor
-            group_size = quant_config.group_size
-
             return _process_awq_weights_marlin(
                 layer,
-                weight_bits,
+                num_bits,
                 pack_factor,
                 group_size,
                 input_dtype,
@@ -932,47 +930,28 @@ def convert_to_wna16_moe_kernel_format(
                 w13_bias,
                 w2_bias,
             )
-        elif isinstance(quant_config, AutoGPTQConfig):
-            num_bits = quant_config.quant_type.size_bits
-            pack_factor = quant_config.pack_factor
-            group_size = quant_config.group_size
-            actorder = "group" if quant_config.desc_act else None
-        elif isinstance(quant_config, QuantizationArgs):
-            num_bits = quant_config.num_bits
-            pack_factor = 32 // quant_config.num_bits
-            group_size = quant_config.group_size
-            actorder = quant_config.actorder
-        elif isinstance(quant_config, MoeWNA16Config):
-            num_bits = quant_config.weight_bits
-            pack_factor = quant_config.bit8_pack_factor
-            group_size = quant_config.group_size
-            actorder = None
         else:
-            raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
-                f"QuantizationArgs, got {type(quant_config).__name__}."
-            )
+            if w13_g_idx is None or w2_g_idx is None:
+                raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
 
-        if w13_g_idx is None or w2_g_idx is None:
-            raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
-        return _process_weights_marlin(
-            layer,
-            input_dtype,
-            num_bits,
-            pack_factor,
-            group_size,
-            actorder,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_qzeros,
-            w2_qzeros,
-            w13_bias,
-            w2_bias,
-        )
+            return _process_weights_marlin(
+                layer,
+                input_dtype,
+                num_bits,
+                pack_factor,
+                group_size,
+                actorder,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_g_idx,
+                w2_g_idx,
+                w13_qzeros,
+                w2_qzeros,
+                w13_bias,
+                w2_bias,
+            )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
             w13,

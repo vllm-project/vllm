@@ -253,6 +253,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             weight_key=weight_key,
             may_have_zp=self.quant_config.has_zp,
             may_have_bias=False,
+            allow_marlin=False,
         )
 
     def create_weights(
@@ -375,17 +376,17 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         has_zp = self.quant_config.has_zp
         (
             w13_qweight,
             w2_qweight,
             w13_scales,
             w2_scales,
-            w13_g_idx_processed,
-            w2_g_idx_processed,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
+            _,
+            _,
+            _,
+            _,
             w13_qzeros,
             w2_qzeros,
             w13_input_global_scale,
@@ -401,8 +402,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
-            w13_g_idx=getattr(layer, "w13_g_idx", None),
-            w2_g_idx=getattr(layer, "w2_g_idx", None),
+            w13_g_idx=None,
+            w2_g_idx=None,
             w13_qzeros=layer.w13_qzeros if has_zp else None,
             w2_qzeros=layer.w2_qzeros if has_zp else None,
         )
@@ -420,11 +421,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
         # Marlin-specific parameters (not needed for Flashinfer)
         if self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM:
-            replace_parameter(layer, "w13_g_idx", w13_g_idx_processed)
-            replace_parameter(layer, "w2_g_idx", w2_g_idx_processed)
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-
             # Register input global scales if present
             if w13_input_global_scale is not None:
                 layer.register_parameter(
@@ -496,8 +492,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            layer.w13_qweight,
+            layer.w2_qweight,
             router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
