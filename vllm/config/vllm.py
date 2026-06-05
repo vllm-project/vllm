@@ -76,6 +76,13 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
+DEEPSEEK_V4_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+    }
+)
+
 
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
@@ -102,6 +109,20 @@ IS_DENSE = False
 #     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
 #     IS_DENSE = lambda c: not c.model_config.is_model_moe()
 # See https://github.com/vllm-project/vllm/issues/25689.
+
+
+def _should_auto_enable_deepseek_v4_breakable_cudagraph(
+    model_config: ModelConfig,
+) -> bool:
+    if not any(
+        arch in DEEPSEEK_V4_CUDAGRAPH_ARCHITECTURES
+        for arch in model_config.architectures
+    ):
+        return False
+
+    from vllm.platforms import current_platform
+
+    return not current_platform.is_device_capability(121)
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
@@ -1073,21 +1094,27 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile —
-        # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
-        # it unless the user has explicitly opted out via the env var.
+        # DeepSeek V4's model classes don't carry @support_torch_compile.
+        # On SM120 the breakable cudagraph is the supported PIECEWISE path;
+        # on tested SM121/GB10 Ray configs the compiled PIECEWISE path is
+        # required for correctness (breakable can corrupt graph replay).
+        # Auto-enable only for the known-good DeepSeek V4 device path; MiniMax
+        # M3 retains its upstream unconditional auto-enable.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and any(
-                a
-                in (
-                    "DeepseekV4ForCausalLM",
-                    "DeepSeekV4MTPModel",
-                    "MiniMaxM3SparseForCausalLM",
-                    "MiniMaxM3SparseForConditionalGeneration",
+            and (
+                _should_auto_enable_deepseek_v4_breakable_cudagraph(
+                    self.model_config
                 )
-                for a in self.model_config.architectures
+                or any(
+                    a
+                    in (
+                        "MiniMaxM3SparseForCausalLM",
+                        "MiniMaxM3SparseForConditionalGeneration",
+                    )
+                    for a in self.model_config.architectures
+                )
             )
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
