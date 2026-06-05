@@ -28,13 +28,13 @@ int64_t product_integers(torch::headeronly::IntHeaderOnlyArrayRef sizes) {
 torch::stable::Tensor maybe_allocate_tensor(
     const std::optional<torch::stable::Tensor>& maybe_tensor,
     torch::headeronly::IntHeaderOnlyArrayRef expected_sizes,
-    torch::headeronly::ScalarType dtype,
-    const torch::stable::Tensor& device_ref, char const* name) {
+    torch::headeronly::ScalarType dtype, torch::stable::Device device,
+    char const* name) {
   auto expected_numel = product_integers(expected_sizes);
   if (maybe_tensor.has_value()) {
     auto tensor = maybe_tensor.value();
-    STD_TORCH_CHECK(tensor.get_device_index() == device_ref.get_device_index(),
-                    name, " must be on the same device");
+    STD_TORCH_CHECK(tensor.device() == device, name,
+                    " must be on the same device");
     STD_TORCH_CHECK(tensor.scalar_type() == dtype, name,
                     " has incorrect dtype");
     STD_TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
@@ -45,8 +45,7 @@ torch::stable::Tensor maybe_allocate_tensor(
         torch::stable::narrow(flat_tensor, 0, 0, expected_numel),
         expected_sizes);
   }
-  return torch::stable::empty(expected_sizes, dtype, std::nullopt,
-                              device_ref.device());
+  return torch::stable::empty(expected_sizes, dtype, std::nullopt, device);
 }
 
 }  // namespace
@@ -86,8 +85,7 @@ void moe_permute_impl(
       inv_permuted_idx.sizes() == token_expert_indices.sizes(),
       "token_expert_indices shape must be same as inv_permuted_idx");
 
-  torch::stable::accelerator::DeviceGuard device_guard(
-      input.get_device_index());
+  auto device = input.device();
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
   auto expanded_rows = n_token * topk;
@@ -96,13 +94,13 @@ void moe_permute_impl(
   auto sorter_size = moe_permute_sort_workspace_size(expanded_rows, n_expert);
   auto sort_workspace = maybe_allocate_tensor(
       maybe_sort_workspace, {sorter_size}, torch::headeronly::ScalarType::Char,
-      input, "sort_workspace");
+      device, "sort_workspace");
   auto permuted_experts_id = maybe_allocate_tensor(
       maybe_permuted_experts_id, topk_ids.sizes(),
-      torch::headeronly::ScalarType::Int, input, "permuted_experts_id");
+      torch::headeronly::ScalarType::Int, device, "permuted_experts_id");
   auto sorted_row_idx = maybe_allocate_tensor(
       maybe_sorted_row_idx, inv_permuted_idx.sizes(),
-      torch::headeronly::ScalarType::Int, input, "sorted_row_idx");
+      torch::headeronly::ScalarType::Int, device, "sorted_row_idx");
 
   CubKeyValueSorter sorter{};
   int64_t* valid_num_ptr = nullptr;
@@ -114,7 +112,7 @@ void moe_permute_impl(
         get_ptr<int64_t>(expert_first_token_offset) + n_local_expert;
     topk_ids_for_sort = maybe_allocate_tensor(
         maybe_topk_ids_for_sort, topk_ids.sizes(),
-        torch::headeronly::ScalarType::Int, input, "topk_ids_for_sort");
+        torch::headeronly::ScalarType::Int, device, "topk_ids_for_sort");
     torch::stable::copy_(topk_ids_for_sort, topk_ids);
     preprocessTopkIdLauncher(get_ptr<int>(topk_ids_for_sort), n_token * topk,
                              expert_map_ptr, n_expert, stream);
@@ -135,15 +133,16 @@ void moe_permute_impl(
   });
 }
 
-void moe_permute(const torch::stable::Tensor& input,
-                 const torch::stable::Tensor& topk_ids,
-                 const torch::stable::Tensor& token_expert_indices,
-                 const std::optional<torch::stable::Tensor>& expert_map,
-                 int64_t n_expert, int64_t n_local_expert, int64_t topk,
-                 torch::stable::Tensor& permuted_input,
-                 torch::stable::Tensor& expert_first_token_offset,
-                 torch::stable::Tensor& inv_permuted_idx,
-                 torch::stable::Tensor& permuted_idx) {
+void moe_permute(
+    const torch::stable::Tensor& input,                 // [n_token, hidden]
+    const torch::stable::Tensor& topk_ids,              // [n_token, topk]
+    const torch::stable::Tensor& token_expert_indices,  // [n_token, topk]
+    const std::optional<torch::stable::Tensor>& expert_map,  // [n_expert]
+    int64_t n_expert, int64_t n_local_expert, int64_t topk,
+    torch::stable::Tensor& permuted_input,  // [permuted_size, hidden]
+    torch::stable::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
+    torch::stable::Tensor& inv_permuted_idx,           // [n_token, topk]
+    torch::stable::Tensor& permuted_idx) {             // [permute_size]
   moe_permute_impl(input, topk_ids, token_expert_indices, expert_map, n_expert,
                    n_local_expert, topk, permuted_input,
                    expert_first_token_offset, inv_permuted_idx, permuted_idx,
@@ -169,17 +168,18 @@ void moe_permute_with_scratch(
 }
 
 void moe_unpermute(
-    const torch::stable::Tensor& permuted_hidden_states,
-    const torch::stable::Tensor& topk_weights,
-    const torch::stable::Tensor& inv_permuted_idx,
-    const std::optional<torch::stable::Tensor>& expert_first_token_offset,
-    int64_t topk, torch::stable::Tensor& hidden_states) {
+    const torch::stable::Tensor&
+        permuted_hidden_states,                     // [n_token * topk, hidden]
+    const torch::stable::Tensor& topk_weights,      // [n_token, topk]
+    const torch::stable::Tensor& inv_permuted_idx,  // [n_token, topk]
+    const std::optional<torch::stable::Tensor>&
+        expert_first_token_offset,  // [n_local_expert+1]
+    int64_t topk,
+    torch::stable::Tensor& hidden_states) {  // [n_token, hidden]
   STD_TORCH_CHECK(
       permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
       "permuted_hidden_states dtype must be same as hidden_states");
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      hidden_states.get_device_index());
   const auto n_token = hidden_states.size(0);
   const auto n_hidden = hidden_states.size(1);
   const cudaStream_t stream =
@@ -187,7 +187,7 @@ void moe_unpermute(
 
   int64_t const* valid_ptr = nullptr;
   if (expert_first_token_offset.has_value()) {
-    const int n_local_expert = expert_first_token_offset.value().size(0) - 1;
+    int n_local_expert = expert_first_token_offset.value().size(0) - 1;
     valid_ptr =
         get_ptr<int64_t>(expert_first_token_offset.value()) + n_local_expert;
   }
@@ -237,8 +237,6 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
   STD_TORCH_CHECK(input_tensor.scalar_type() == output_tensor.scalar_type(),
                   "Input and output tensors must have the same data type");
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      output_tensor.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(output_tensor.get_device_index());
   const int64_t blocks = output_tensor.size(0);
@@ -249,7 +247,7 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
 
   STD_TORCH_CHECK(!(num_cols % (128 / input_tensor.element_size() / 8)),
                   "num_cols must be divisible by 128 / "
-                  "sizeof(input_tensor.scalar_type()) / 8");
+                  "input_tensor.element_size() / 8");
 
   MOE_DISPATCH(input_tensor.scalar_type(), [&] {
     shuffleInputRowsKernel<scalar_t><<<blocks, threads, 0, stream>>>(

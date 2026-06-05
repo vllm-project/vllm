@@ -182,6 +182,6 @@ void dsv3_router_gemm(
   }
 }
 
-STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("dsv3_router_gemm", TORCH_BOX(&dsv3_router_gemm));
 }

@@ -17,7 +17,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "moe/moeTopKFuncs.cuh"
+#include "moeTopKFuncs.cuh"
 
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/core/ScalarType.h>
@@ -1007,9 +1007,9 @@ INSTANTIATE_NOAUX_TC(__nv_bfloat16, __nv_bfloat16, int32_t, SCORING_NONE);
 }  // namespace vllm
 
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
-    const torch::stable::Tensor& scores, int64_t n_group, int64_t topk_group,
+    torch::stable::Tensor const& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
-    const torch::stable::Tensor& bias, int64_t scoring_func = 0) {
+    torch::stable::Tensor const& bias, int64_t scoring_func = 0) {
   const auto data_type = scores.scalar_type();
   const auto bias_type = bias.scalar_type();
   STD_TORCH_CHECK(scores.dim() == 2, "scores must be a 2D Tensor");

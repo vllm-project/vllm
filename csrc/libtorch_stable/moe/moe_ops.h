@@ -58,54 +58,29 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   const torch::stable::Tensor& dst2src_map,
                   torch::stable::Tensor& output_tensor);
 
-void moe_permute(const torch::stable::Tensor& input,
-                 const torch::stable::Tensor& topk_ids,
-                 const torch::stable::Tensor& token_expert_indices,
-                 const std::optional<torch::stable::Tensor>& expert_map,
-                 int64_t n_expert, int64_t n_local_expert, int64_t topk,
-                 torch::stable::Tensor& permuted_input,
-                 torch::stable::Tensor& expert_first_token_offset,
-                 torch::stable::Tensor& inv_permuted_idx,
-                 torch::stable::Tensor& permuted_idx);
-
-void moe_permute_with_scratch(
-    const torch::stable::Tensor& input, const torch::stable::Tensor& topk_ids,
-    const torch::stable::Tensor& token_expert_indices,
-    const std::optional<torch::stable::Tensor>& expert_map, int64_t n_expert,
-    int64_t n_local_expert, int64_t topk, torch::stable::Tensor& permuted_input,
-    torch::stable::Tensor& expert_first_token_offset,
-    torch::stable::Tensor& inv_permuted_idx,
-    torch::stable::Tensor& permuted_idx, torch::stable::Tensor& sort_workspace,
-    torch::stable::Tensor& permuted_experts_id,
-    torch::stable::Tensor& sorted_row_idx,
-    torch::stable::Tensor& topk_ids_for_sort);
-
-void moe_unpermute(
-    const torch::stable::Tensor& permuted_hidden_states,
-    const torch::stable::Tensor& topk_weights,
-    const torch::stable::Tensor& inv_permuted_idx,
-    const std::optional<torch::stable::Tensor>& expert_first_token_offset,
-    int64_t topk, torch::stable::Tensor& hidden_states);
-
 #ifndef USE_ROCM
+torch::stable::Tensor moe_wna16_gemm(
+    torch::stable::Tensor input, torch::stable::Tensor output,
+    torch::stable::Tensor b_qweight, torch::stable::Tensor b_scales,
+    std::optional<torch::stable::Tensor> b_qzeros,
+    std::optional<torch::stable::Tensor> topk_weights,
+    torch::stable::Tensor sorted_token_ids, torch::stable::Tensor expert_ids,
+    torch::stable::Tensor num_tokens_post_pad, int64_t top_k,
+    int64_t BLOCK_SIZE_M, int64_t BLOCK_SIZE_N, int64_t BLOCK_SIZE_K,
+    int64_t bit);
+
 std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
     const torch::stable::Tensor& scores, int64_t n_group, int64_t topk_group,
     int64_t topk, bool renormalize, double routed_scaling_factor,
     const torch::stable::Tensor& bias, int64_t scoring_func = 0);
 
-void mxfp8_experts_quant(const torch::stable::Tensor& input,
-                         const torch::stable::Tensor& problem_sizes,
-                         const torch::stable::Tensor& expert_offsets,
-                         const torch::stable::Tensor& blockscale_offsets,
-                         torch::stable::Tensor& quant_output,
-                         torch::stable::Tensor& scale_factor);
-
-void cutlass_mxfp8_grouped_mm(const torch::stable::Tensor& a,
-                              const torch::stable::Tensor& b,
-                              const torch::stable::Tensor& sfa,
-                              const torch::stable::Tensor& sfb,
-                              torch::stable::Tensor& d,
-                              const torch::stable::Tensor& problem_sizes,
-                              const torch::stable::Tensor& expert_offsets,
-                              const torch::stable::Tensor& blockscale_offsets);
+// DeepSeek V3 optimized router GEMM kernel for SM90+
+// Computes output = mat_a @ mat_b.T where:
+//   mat_a: [num_tokens, hidden_dim] in bf16
+//   mat_b: [num_experts, hidden_dim] in bf16
+//   output: [num_tokens, num_experts] in bf16 or fp32
+// Supports num_tokens in [1, 16], num_experts in {256, 384}, hidden_dim = 7168
+void dsv3_router_gemm(torch::stable::Tensor& output,
+                      const torch::stable::Tensor& mat_a,
+                      const torch::stable::Tensor& mat_b);
 #endif

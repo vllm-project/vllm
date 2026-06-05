@@ -50,11 +50,6 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C_stable_libtorch with %r", e)
 
 try:
-    import vllm._moe_C_stable_libtorch  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._moe_C_stable_libtorch with %r", e)
-
-try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)

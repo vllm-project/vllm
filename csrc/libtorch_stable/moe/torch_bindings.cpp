@@ -43,6 +43,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "                     Tensor !adapter_enabled,"
       "                     Tensor !lora_ids,"
       "                     Tensor? maybe_expert_map) -> () ");
+#ifndef USE_ROCM
+  m.def(
+      "moe_wna16_gemm(Tensor input, Tensor! output, Tensor b_qweight, "
+      "Tensor b_scales, Tensor? b_qzeros, "
+      "Tensor? topk_weights, Tensor sorted_token_ids, "
+      "Tensor expert_ids, Tensor num_tokens_post_pad, "
+      "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
+      "int bit) -> Tensor");
   m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
@@ -69,12 +77,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
       "output_tensor) -> ()");
-#ifndef USE_ROCM
   m.def(
       "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
+  // DeepSeek V3 optimized router GEMM for SM90+
+  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+  // conditionally compiled so impl registration is in source file
 #endif
 }
 
@@ -87,35 +97,20 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("batched_moe_align_block_size",
          TORCH_BOX(&batched_moe_align_block_size));
   m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
-  m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
 #ifndef USE_ROCM
+  m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
+  m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
 #endif
 }
 
+#ifndef USE_ROCM
 // Primitive-only ops have no tensor to dispatch on.
 STABLE_TORCH_LIBRARY_IMPL(_moe_C, CompositeExplicitAutograd, m) {
   m.impl("moe_permute_unpermute_supported",
          TORCH_BOX(&moe_permute_unpermute_supported));
   m.impl("moe_permute_sort_workspace_size",
          TORCH_BOX(&moe_permute_sort_workspace_size));
-}
-
-#ifndef USE_ROCM
-
-// torch.ops._C.* — built in _moe_C_stable_libtorch; impl in mxfp8 .cu
-// (arch-gated).
-STABLE_TORCH_LIBRARY_FRAGMENT(_C, mxfp8_moe) {
-  mxfp8_moe.def(
-      "mxfp8_experts_quant("
-      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
-      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
-      " -> ()");
-  mxfp8_moe.def(
-      "cutlass_mxfp8_grouped_mm("
-      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
-      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
-      " -> ()");
 }
 #endif
 

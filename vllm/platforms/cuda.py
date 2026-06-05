@@ -20,7 +20,6 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
-import vllm._moe_C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
