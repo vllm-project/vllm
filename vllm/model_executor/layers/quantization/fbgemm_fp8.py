@@ -84,6 +84,7 @@ class FBGEMMFp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignore_list,
                 fused_mapping=self.packed_modules_mapping,
+                skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
             return FBGEMMFp8LinearMethod(self)
