@@ -184,8 +184,8 @@ class OutlinesDiskCache:
     deserialization.
     """
 
-    _TYPE_INDEX = b"I"
-    _TYPE_STRING = b"S"
+    _TYPE_INDEX = "I"
+    _TYPE_STRING = "S"
 
     def __init__(self, path: str):
         os.makedirs(path, exist_ok=True)
@@ -209,16 +209,16 @@ class OutlinesDiskCache:
         if row is None:
             raise KeyError(key)
         type_tag, data = row
-        if type_tag == "S":
+        if type_tag == self._TYPE_STRING:
             return data.decode("utf-8")
         return oc.Index.from_binary(data)
 
     def __setitem__(self, key: str, value):
         if isinstance(value, str):
-            type_tag = "S"
+            type_tag = self._TYPE_STRING
             data = value.encode("utf-8")
         else:
-            type_tag = "I"
+            type_tag = self._TYPE_INDEX
             data = value.__reduce__()[1][0]
         self._db.execute(
             "INSERT OR REPLACE INTO cache (key, type_tag, value) VALUES (?, ?, ?)",
