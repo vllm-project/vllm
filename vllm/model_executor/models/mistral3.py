@@ -1,31 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeVar
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
-from transformers import (
-    BatchFeature,
-    Mistral3Config,
-    PixtralVisionConfig,
-    PretrainedConfig,
-)
+from transformers import BatchFeature, Mistral3Config, PixtralVisionConfig
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -34,7 +27,6 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -44,6 +36,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -177,27 +170,15 @@ class Mistral3MultiModalProjector(nn.Module):
         return hidden_states
 
 
-class LlavaLikeConfig(Protocol):
-    vision_config: Final[PretrainedConfig]
-    image_token_index: Final[int]
-    vision_feature_select_strategy: Final[str]
-    vision_feature_layer: Final[int | list[int]]
-
-
-class LlavaLikeProcessor(Protocol):
-    image_token: Final[str]
-
-
-class BaseLlavaProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> LlavaLikeConfig:
+class Mistral3ProcessingInfo(BaseProcessingInfo):
+    def get_hf_config(self) -> Mistral3Config:
         return self.ctx.get_hf_config(Mistral3Config)
 
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
-    @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
-        raise NotImplementedError
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -220,10 +201,7 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=width, height=height)
 
 
-_I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
-
-
-class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[Mistral3ProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -252,11 +230,6 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 overrides=image_overrides,
             )
         }
-
-
-class Mistral3ProcessingInfo(BaseLlavaProcessingInfo):
-    def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
@@ -338,29 +311,7 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         ]
 
 
-def _build_mistral3_info(
-    ctx: InputProcessingContext,
-) -> BaseLlavaProcessingInfo:
-    hf_config = ctx.get_hf_config(Mistral3Config)
-    assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-    return Mistral3ProcessingInfo(ctx)
-
-
-def _build_mistral3_processor(
-    info: _I,
-    dummy_inputs: BaseDummyInputsBuilder[_I],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    assert isinstance(info, Mistral3ProcessingInfo)
-    return Mistral3MultiModalProcessor(
-        info,
-        dummy_inputs,  # type: ignore
-        cache=cache,
-    )
-
-
-def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
+def _get_num_hidden_layers(hf_config: Mistral3Config) -> int:
     """Determine the number of hidden layers to initialize up to in the
     visual encoder.
 
@@ -380,8 +331,8 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     )
 
 
-def init_vision_tower_for_llava(
-    hf_config: LlavaLikeConfig,
+def init_vision_tower_for_mistral3(
+    hf_config: Mistral3Config,
     quant_config: QuantizationConfig | None,
     *,
     require_post_norm: bool | None = None,
@@ -404,12 +355,17 @@ def init_vision_tower_for_llava(
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_mistral3_processor,
-    info=_build_mistral3_info,
+    Mistral3MultiModalProcessor,
+    info=Mistral3ProcessingInfo,
     dummy_inputs=Mistral3DummyInputsBuilder,
 )
 class Mistral3ForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -423,7 +379,17 @@ class Mistral3ForConditionalGeneration(
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "lm_head.": "language_model.lm_head.",
-        }
+            # Some PEFT LoRAs are trained against the text submodule directly
+            # and produce names like `base_model.model.model.layers.*`.
+            "model.": "language_model.model.",
+        },
+        orig_to_new_suffix={
+            # FP8 quantized HF checkpoints use "activation_scale" and
+            # "weight_scale_inv" but vLLM's FP8 linear layers register
+            # them as "input_scale" and "weight_scale"
+            ".activation_scale": ".input_scale",
+            ".weight_scale_inv": ".weight_scale",
+        },
     )
 
     @classmethod
@@ -432,13 +398,6 @@ class Mistral3ForConditionalGeneration(
             return None
 
         raise ValueError("Only image modality is supported")
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.get_language_model().model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.get_language_model().model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -450,13 +409,8 @@ class Mistral3ForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # NOTE: These are special cases for Pixtral-12B in the HF-format
+        # NOTE: This is a special case for Pixtral-12B in the HF-format
         # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
-        if (
-            config.text_config.architectures is None
-            and config.text_config.model_type == "mistral"
-        ):
-            config.text_config.architectures = ["MistralForCausalLM"]
         if (
             config.projector_hidden_act is None
             and config.vision_config.hidden_act == "gelu"
@@ -464,7 +418,7 @@ class Mistral3ForConditionalGeneration(
             config.projector_hidden_act = "gelu"
 
         with self._mark_tower_model(vllm_config, "image"):
-            self.vision_tower = init_vision_tower_for_llava(
+            self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
                 require_post_norm=False,

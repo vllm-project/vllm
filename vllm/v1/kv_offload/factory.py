@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -33,7 +33,7 @@ class OffloadingSpecFactory:
     def create_spec(
         cls,
         config: "VllmConfig",
-        kv_cache_config: "KVCacheConfig | None",
+        kv_cache_config: "KVCacheConfig",
     ) -> OffloadingSpec:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
@@ -54,5 +54,10 @@ class OffloadingSpecFactory:
 
 # Register various specs here.
 OffloadingSpecFactory.register_spec(
-    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu", "CPUOffloadingSpec"
+    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu.spec", "CPUOffloadingSpec"
+)
+OffloadingSpecFactory.register_spec(
+    "TieringOffloadingSpec",
+    "vllm.v1.kv_offload.tiering.spec",
+    "TieringOffloadingSpec",
 )

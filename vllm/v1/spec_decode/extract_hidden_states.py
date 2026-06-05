@@ -3,26 +3,23 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 PADDING_SLOT_ID = -1
@@ -47,11 +44,20 @@ class ExtractHiddenStatesProposer:
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.kv_cache_gid: int = -1
 
         # Maximum number of tokens for buffers
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
+        )
+
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -79,11 +85,10 @@ class ExtractHiddenStatesProposer:
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
-        scheduler_output: SchedulerOutput,
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
-    ) -> tuple[torch.Tensor, KVConnectorOutput | None]:
+    ) -> torch.Tensor:
         """Propose draft tokens by calling the ExtractHiddenStatesModel model.
 
         The ExtractHiddenStatesModel caches the hidden states in the KV cache
@@ -99,7 +104,6 @@ class ExtractHiddenStatesProposer:
             target_hidden_states: List of hidden state tensors from target model
                                 (one per aux hidden state layer)
             common_attn_metadata: Attention metadata
-            scheduler_output: Scheduler output for KV connector
             slot_mappings: Slot mappings for KV cache (unused, provided for
                           interface compatibility)
 
@@ -136,22 +140,15 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
-        with (
-            set_forward_context(
-                per_layer_attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                slot_mapping=self._get_slot_mapping(
-                    num_input_tokens, common_attn_metadata.slot_mapping
-                ),
+        with set_forward_context(
+            per_layer_attn_metadata,
+            self.vllm_config,
+            num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=self._get_slot_mapping(
+                num_input_tokens, common_attn_metadata.slot_mapping
             ),
-            (
-                KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
-                if has_kv_transfer_group()
-                else nullcontext()
-            ) as kv_connector_output,
         ):
             self.model(
                 hidden_states=self.hidden_states[:num_input_tokens],
@@ -159,7 +156,10 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids.unsqueeze(-1), kv_connector_output
+        # On decode steps with spec tokens, sampled_token_ids may have
+        # shape [batch_size, 2] (target + spec verification); slice to
+        # return only the target-sampled column.
+        return sampled_token_ids[:, :1]
 
     def _get_slot_mapping(
         self,
@@ -300,7 +300,6 @@ class ExtractHiddenStatesProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        common_attn_metadata: CommonAttentionMetadata,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -314,19 +313,15 @@ class ExtractHiddenStatesProposer:
         (if valid and not discarded) or a backup token from the request state.
         """
         num_reqs = gpu_input_batch.num_reqs
-        device = sampled_token_ids.device
 
-        # Compute backup tokens for discarded / invalid requests
-        backup_tokens_gpu = torch.tensor(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
-                )
-                for i in range(num_reqs)
-            ],
-            dtype=torch.int32,
-            device=device,
-        )
+        # Precompute backup token IDs for discarded requests.
+        num_reqs = gpu_input_batch.num_reqs
+        for i in range(num_reqs):
+            self.backup_next_token_ids.np[i] = requests[
+                gpu_input_batch.req_ids[i]
+            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
 
         assert discard_request_mask.dtype == torch.bool
 
@@ -387,9 +382,12 @@ class ExtractHiddenStatesProposer:
         )
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """Validate all drafting layers belong to the same KV cache group.
-
-        With exactly one attention layer (asserted in load_model), this is
-        trivially satisfied.
-        """
+        """Validate all drafting layers belong to the same KV cache group
+        and record the group index for common_attn_metadata selection."""
         assert len(self.attn_layer_names) == 1
+        layer = self.attn_layer_names[0]
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if layer in group.layer_names:
+                self.kv_cache_gid = gid
+                return
+        raise ValueError(f"Cache-only layer {layer!r} not in any KV cache group")

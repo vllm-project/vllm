@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
@@ -27,6 +28,7 @@ SKIP_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
+    "e_score_correction_bias",
 }
 
 
@@ -54,11 +56,45 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _is_non_persistent_parameter_alias_buffer(
+    layer: torch.nn.Module,
+    name: str,
+    buffer: torch.Tensor,
+    parameter_storage_ptrs: set[int],
+) -> bool:
+    if name not in layer._non_persistent_buffers_set:
+        return False
+
+    buffer_storage_ptr = _tensor_storage_ptr(buffer)
+    return (
+        buffer_storage_ptr is not None and buffer_storage_ptr in parameter_storage_ptrs
+    )
+
+
+def _tensor_storage_ptr(tensor: torch.Tensor) -> int | None:
+    if isinstance(tensor, UninitializedParameter):
+        return None
+
+    try:
+        return tensor.untyped_storage().data_ptr()
+    except (RuntimeError, ValueError):
+        return None
+
+
+def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
+    return {
+        storage_ptr
+        for param in layer.parameters(recurse=True)
+        if (storage_ptr := _tensor_storage_ptr(param)) is not None
+    }
+
+
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
+    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
@@ -69,6 +105,9 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
+            and not _is_non_persistent_parameter_alias_buffer(
+                layer, name, buffer, parameter_storage_ptrs
+            )
         },
     )
 
@@ -94,17 +133,18 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
             layer.register_buffer(name, buffer)
 
 
-def materialize_layer(layer: torch.nn.Module) -> None:
+def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Materialize all meta tensors in a layer to actual tensors."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    for name, tensor in get_layer_tensors(layer).items():
-        if name not in SKIP_TENSORS:
-            setattr(layer, name, materialize_meta_tensor(tensor))
+    with info.restore_device:
+        for name, tensor in get_layer_tensors(layer).items():
+            if name not in SKIP_TENSORS and tensor.is_meta:
+                setattr(layer, name, materialize_meta_tensor(tensor))
 
 
-class MetaCopyCounter(TorchDispatchMode):
+class CopyCounter(TorchDispatchMode):
     """
     Tracks total number of elements modified with `copy_`.
 
@@ -122,7 +162,7 @@ class MetaCopyCounter(TorchDispatchMode):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default and args[0].device.type == "meta":
+        if func is torch.ops.aten.copy_.default:
             assert args[0].numel() == args[1].numel()
             self.copied_numel += args[0].numel()
 
@@ -140,7 +180,6 @@ def get_numel_loaded(
     :return: number of elements loaded by the weight loader, the return value of the
         weight loader
     """
-    assert args.arguments["param"].device.type == "meta"
-    with MetaCopyCounter() as counter:
+    with CopyCounter() as counter:
         return_value = weight_loader(*args.args, **args.kwargs)
     return counter.copied_numel, return_value
