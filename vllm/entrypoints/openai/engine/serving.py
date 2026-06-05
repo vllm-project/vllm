@@ -16,7 +16,6 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
@@ -39,12 +38,13 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -153,7 +153,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
         # omit it to avoid per-chunk overhead.
-        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+        from vllm.entrypoints.serve.utils.fingerprint import get_system_fingerprint
 
         try:
             self.system_fingerprint: str | None = get_system_fingerprint(
