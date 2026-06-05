@@ -454,7 +454,6 @@ class OpenAIServingChat(OpenAIServing):
             or reasoning_parser
         ):
             all_previous_token_ids = [[] for _ in range(num_choices)]
-            prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -588,16 +587,6 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     parser = parsers[i]
-                    if (
-                        reasoning_parser
-                        and res.prompt_token_ids
-                        and prompt_is_reasoning_end_arr[i] is None
-                    ):
-                        # only check once per choice, because prompt_token_ids
-                        # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
-                        )
                     if finish_reason_sent[i]:
                         continue
 
