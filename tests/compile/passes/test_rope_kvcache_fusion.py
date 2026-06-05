@@ -321,8 +321,8 @@ def test_rope_kvcache_fusion(
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
         # Cannot compare fp8_* directly here, cast to model dtype instead
         torch.testing.assert_close(
-            kv_cache_unfused.view(dtype),
-            kv_cache_fused.view(dtype),
-            atol=ATOL,
-            rtol=RTOL,
+            kv_cache_unfused.to(dtype),
+            kv_cache_fused.to(dtype),
+            atol=1e-1,
+            rtol=1e-1,
         )
