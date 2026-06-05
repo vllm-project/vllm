@@ -103,7 +103,7 @@ def create_vllm_config(
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
     kv_connector_module_path: str | None = None,
-    kv_role: str = "kv_both",
+    kv_role: str = "kv_consumer",
     disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
