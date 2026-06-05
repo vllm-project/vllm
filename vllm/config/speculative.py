@@ -188,6 +188,14 @@ class SpeculativeConfig:
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
 
+    # SSD (Speculative Speculative Decoding) configuration
+    ssd_outcome_predictor_path: str | None = None
+    """Path to trained OutcomePredictor weights for Speculative Speculative
+    Decoding (SSD, AAAI 2026). When provided, enables async overlap between
+    target verification and draft pre-speculation using two CUDA streams.
+    Without this path, SSD falls back to standard spec decode.
+    See vllm/v1/spec_decode/outcome_predictor.py for the training script."""
+
     rejection_sample_method: RejectionSampleMethod = "standard"
     """The rejection sampling method to use. 'standard' uses probabilistic
     rejection sampling (with or without cached draft logits, controlled by
