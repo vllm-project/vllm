@@ -8,10 +8,6 @@ license.workspace = true
 name = "_rust_tool_parser"
 crate-type = ["cdylib", "rlib"]
 
-[features]
-default = []
-extension-module = ["pyo3/extension-module"]
-
 [dependencies]
 pyo3.workspace = true
 pythonize = { workspace = true, features = ["serde_json"] }
