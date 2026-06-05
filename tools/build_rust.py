@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Shared setuptools-rust build entry for the vllm-rs binary."""
+"""Shared setuptools-rust build entry for Rust artifacts."""
 
 from __future__ import annotations
 
@@ -25,7 +25,27 @@ def rust_extensions(*, optional: bool) -> list[RustExtension]:
             binding=Binding.Exec,
             optional=optional,
         ),
+        RustExtension(
+            target="vllm._rust_tool_parser",
+            path="rust/src/tool-parser/python/Cargo.toml",
+            features=["extension-module"],
+            binding=Binding.PyO3,
+            optional=optional,
+        ),
     ]
+
+
+def rust_py_extension_module_names(extensions: list[RustExtension]) -> list[str]:
+    module_names = []
+    for extension in extensions:
+        if extension.binding != Binding.PyO3:
+            continue
+
+        for target_name in extension.target.values():
+            if target_name.startswith("vllm._rust_"):
+                module_names.append(target_name.rsplit(".", 1)[-1])
+
+    return module_names
 
 
 def build_binary(build_rust_args: list[str]) -> None:
