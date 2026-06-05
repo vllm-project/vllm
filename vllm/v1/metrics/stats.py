@@ -238,11 +238,6 @@ class FinishedRequestStats:
     is_corrupted: bool = False
     num_cached_tokens: int = 0
 
-    @property
-    def num_prefill_kv_computed_tokens(self) -> int:
-        """Tokens computed for prefill KV, excluding cached tokens."""
-        return max(self.num_prompt_tokens - max(self.num_cached_tokens, 0), 0)
-
 
 @dataclass
 class PrefillStats:

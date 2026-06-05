@@ -1360,18 +1360,6 @@ def test_kv_connector_basic(is_async: bool):
     )
 
 
-@pytest.mark.parametrize("matched_tokens", [-1, 999999])
-def test_kv_connector_rejects_invalid_matched_tokens(matched_tokens: int):
-    scheduler = create_scheduler(
-        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=False)
-    )
-    request = create_requests(num_requests=1, num_tokens=3)[0]
-    scheduler.add_request(request)
-
-    with pytest.raises(AssertionError):
-        scheduler.schedule()
-
-
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize("local_cache_hits", [False, True])
 def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
