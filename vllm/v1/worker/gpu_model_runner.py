@@ -152,6 +152,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -2466,6 +2467,8 @@ class GPUModelRunner(
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
                 for mm_feature in req_state.mm_features:
+                    if mm_feature.modality == "audio":
+                        continue
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
@@ -5784,6 +5787,9 @@ class GPUModelRunner(
                     num_scheduled_tokens, self.query_pos.np
                 )
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.np[num_reqs + 1 : num_reqs_padded + 1].fill(
+                    cum_num_tokens[-1]
+                )
                 self.query_start_loc.copy_to_gpu()
 
                 # Sync block table CPU->GPU so cleared rows from
@@ -6235,6 +6241,7 @@ class GPUModelRunner(
         )
 
         kv_cache_spec = self.get_kv_cache_spec()
+        KVCacheSpecRegistry.check_kv_cache_spec_registry(kv_cache_spec)
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
 
