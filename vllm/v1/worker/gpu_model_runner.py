@@ -6781,6 +6781,23 @@ class GPUModelRunner(
             self.query_start_loc.copy_to_gpu()
             self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
+            # Mark every sequence as a spec-decode (draft_len = query_len - 1)
+            # so hybrid GDN/Mamba backends take the cheap incremental
+            # spec-decode path instead of the expensive prefill chunk-scan.
+            # Without this, num_decode_draft_tokens stays -1 and the backend
+            # classifies these (query_len > 1) sequences as prefills, producing
+            # a large fixed cost that does not scale with batch size — far from
+            # a real verify step.
+            if self.speculative_config is not None:
+                draft_len = max_query_len - 1
+                self.num_decode_draft_tokens.np[:num_reqs] = draft_len
+                self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
+                self.num_decode_draft_tokens.copy_to_gpu()
+                # Representative full-acceptance count (== query_len); always
+                # within [1, num_spec_tokens + 1] so state indexing is safe.
+                self.num_accepted_tokens.gpu[:num_reqs] = max_query_len
+                self.num_accepted_tokens.gpu[num_reqs:].fill_(1)
+
             pad_attn = _cudagraph_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,

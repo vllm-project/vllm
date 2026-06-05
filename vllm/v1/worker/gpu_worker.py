@@ -724,7 +724,9 @@ class Worker(WorkerBase):
 
         # Profile verifier ITL cost table after all JIT warmup is complete
         # so that measured latency reflects real post-compilation performance.
-        self.model_runner.profile_adaptive_cost()
+        # Only V1 GPUModelRunner implements adaptive verify profiling.
+        if hasattr(self.model_runner, "profile_adaptive_cost"):
+            self.model_runner.profile_adaptive_cost()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
