@@ -1051,7 +1051,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             labelnames=metrics_info.keys(),
         )
         for engine_index in self.engine_indexes:
-            metrics_info = config_obj.metrics_info()
+            metrics_info = {
+                k: v if len(v) < 10240 else ""
+                for k, v in config_obj.metrics_info().items()
+            }
             metrics_info["engine"] = str(engine_index)
             info_gauge.labels(**metrics_info).set(1)
 
