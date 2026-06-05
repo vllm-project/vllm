@@ -406,6 +406,10 @@ _MULTIMODAL_MODELS = {
         "Gemma3nForConditionalGeneration",
     ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
+    "Gemma4UnifiedForConditionalGeneration": (
+        "gemma4_unified",
+        "Gemma4UnifiedForConditionalGeneration",
+    ),
     "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
@@ -414,6 +418,10 @@ _MULTIMODAL_MODELS = {
     "GraniteSpeechForConditionalGeneration": (
         "granite_speech",
         "GraniteSpeechForConditionalGeneration",
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": (
+        "granite_speech_plus",
+        "GraniteSpeechPlusForConditionalGeneration",
     ),
     "Granite4VisionForConditionalGeneration": (
         "granite4_vision",

@@ -35,24 +35,26 @@ class SharedOffloadRegion:
     File path: /dev/shm/vllm_offload_{instance_id}.mmap
     """
 
+    BLOCK_SIZE_ALIGNMENT: int = mmap.PAGESIZE
+
     def __init__(
         self,
         instance_id: str,
-        total_size_bytes: int,
         num_blocks: int,
         rank: int | None,
-        num_workers: int,
+        kv_bytes_per_block: int,
         cpu_page_size: int,
     ) -> None:
         self.page_size = mmap.PAGESIZE
+        assert kv_bytes_per_block % self.page_size == 0
 
-        self.total_size_bytes = total_size_bytes
+        self.num_blocks = num_blocks
+        self._row_stride = kv_bytes_per_block
+        self.total_size_bytes = self.num_blocks * self._row_stride
+
         self.mmap_path = f"/dev/shm/vllm_offload_{instance_id}.mmap"
         self._creator = False  # set True only if this worker creates the file
-        self.num_blocks = num_blocks
         self.rank = rank
-        # interleaved-layout stride: one row = all workers' data for one block
-        self._row_stride = cpu_page_size * num_workers
         if rank is not None:
             # byte offset to this worker's first slot within each block row
             self._worker_offset = rank * cpu_page_size
