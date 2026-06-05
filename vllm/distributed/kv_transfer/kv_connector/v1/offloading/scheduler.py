@@ -556,6 +556,9 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        if request.skip_reading_prefix_cache:
+            return 0, False
+
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
