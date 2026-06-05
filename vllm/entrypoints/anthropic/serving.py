@@ -163,26 +163,26 @@ class AnthropicServingMessages(OpenAIServingChat):
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
     @classmethod
+    def _extract_system_text(cls, msg) -> str | None:
+        """Extract text from a system message, stripping billing headers."""
+        if isinstance(msg.content, str):
+            text = msg.content
+            if text.startswith("x-anthropic-billing-header"):
+                return None
+            return text
+        parts: list[str] = []
+        for block in msg.content:
+            if block.type == "text" and block.text:
+                if block.text.startswith("x-anthropic-billing-header"):
+                    continue
+                parts.append(block.text)
+        return "".join(parts) if parts else None
+
+    @classmethod
     def _convert_messages(
         cls, messages: list, openai_messages: list[dict[str, Any]]
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
-
-        def _extract_system_text(msg) -> str | None:
-            """Extract text from a system message, stripping billing headers."""
-            if isinstance(msg.content, str):
-                text = msg.content
-                if text.startswith("x-anthropic-billing-header"):
-                    return None
-                return text
-            parts: list[str] = []
-            for block in msg.content:
-                if block.type == "text" and block.text:
-                    if block.text.startswith("x-anthropic-billing-header"):
-                        continue
-                    parts.append(block.text)
-            return "".join(parts) if parts else None
-
         for msg in messages:
             # Handle system messages in-place: extract text, strip billing
             # headers, and only emit if there is real content.  This avoids
@@ -190,7 +190,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             # doesn't strip billing headers and may produce messages with
             # no "content" key.
             if msg.role == "system":
-                text = _extract_system_text(msg)
+                text = cls._extract_system_text(msg)
                 if text:
                     openai_messages.append({"role": "system", "content": text})
                 continue
