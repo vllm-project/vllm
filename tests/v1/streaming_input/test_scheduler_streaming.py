@@ -53,6 +53,9 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    # MagicMock attributes are truthy by default; pin this so Scheduler.__init__
+    # does not take the encoder-decoder assertion path (added in #33900).
+    vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -146,6 +149,49 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.sampling_params.max_tokens == 10
         # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
         assert session.max_tokens == 10
+
+    def test_add_request_session_finishes_at_max_model_len(self):
+        # Guard in add_request: when a streaming chunk pushes a live session's
+        # accumulated tokens to max_model_len, the session must finish as
+        # FINISHED_LENGTH_CAPPED instead of crashing later in the model runner.
+        scheduler = create_scheduler()  # max_model_len = 1024
+        session = DummyRequest(
+            request_id="session", prompt_token_ids=list(range(1020))
+        )
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler.add_request(session)
+        # Put the session into the "waiting for next chunk" state so the next
+        # add_request commences the chunk (the guarded branch).
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+
+        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(10)))
+        chunk.sampling_params = SamplingParams(max_tokens=10)
+        scheduler.add_request(chunk)  # 1020 + 10 = 1030 >= 1024
+
+        assert session.num_tokens >= scheduler.max_model_len
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    def test_handle_stopped_request_finishes_at_max_model_len(self):
+        # Guard in _handle_stopped_request: applying a queued streaming chunk
+        # that crosses max_model_len finishes the session gracefully.
+        scheduler = create_scheduler()  # max_model_len = 1024
+        session = DummyRequest(
+            request_id="session", prompt_token_ids=list(range(1020))
+        )
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler.add_request(session)
+        # Session still WAITING (not WAITING_FOR_STREAMING_REQ), so add_request
+        # enqueues the chunk onto the streaming queue.
+        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(10)))
+        chunk.sampling_params = SamplingParams(max_tokens=10)
+        scheduler.add_request(chunk)
+        assert len(session.streaming_queue) == 1
+
+        finished = scheduler._handle_stopped_request(session)
+
+        assert finished is True
+        assert session.num_tokens >= scheduler.max_model_len
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
