@@ -48,6 +48,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
 )
 from vllm.platforms import current_platform
@@ -542,6 +543,7 @@ class Worker(WorkerBase):
         raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
         decoder_reserved_bytes = (
             PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
             if self._uses_pynvvideocodec_video_backend(mm_config)
             else 0
         )

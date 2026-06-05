@@ -138,3 +138,8 @@ def test_global_pool_splits_budget_across_api_processes():
         assert pool.total_bytes == GiB_bytes // 2
     finally:
         set_mm_gpu_ipc_pool(None)
+
+
+def test_global_pool_rejects_invalid_api_process_count():
+    with pytest.raises(ValueError):
+        maybe_init_mm_gpu_ipc_pool(2, api_process_count=0)

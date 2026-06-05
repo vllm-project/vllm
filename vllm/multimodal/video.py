@@ -657,6 +657,18 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
         )
 
     @staticmethod
+    @contextmanager
+    def _torch_stream_context(stream):
+        import torch
+
+        previous_stream = torch.accelerator.current_stream()
+        torch.accelerator.set_stream(stream)
+        try:
+            yield
+        finally:
+            torch.accelerator.set_stream(previous_stream)
+
+    @staticmethod
     def _drop_decoder_slot_decoder(decoder_slot: PyNvVideoCodecDecoderSlot) -> None:
         decoder = decoder_slot.decoder
         decoder_slot.decoder = None
@@ -764,7 +776,7 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
 
         with cls._borrow_decoder_slot() as decoder_slot:
             stream = decoder_slot.stream
-            with torch.cuda.stream(stream):
+            with cls._torch_stream_context(stream):
                 decoder = decoder_slot.decoder
                 if decoder is not None and decoder_slot.source_path != file_path:
                     try:
