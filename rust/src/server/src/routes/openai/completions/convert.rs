@@ -17,6 +17,8 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Number of completion choices requested by the caller.
+    pub n: u32,
     /// Lowered text request for the shared `vllm-text` facade.
     pub text_request: TextRequest,
     /// Original text prompt that should be echoed back northbound when
@@ -64,6 +66,7 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let n = request.n.unwrap_or(1);
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -117,6 +120,7 @@ pub(crate) fn prepare_completion_request(
         request_id,
         response_model,
         include_usage,
+        n,
         text_request,
         echo,
         return_token_ids: request.return_token_ids.unwrap_or(false),

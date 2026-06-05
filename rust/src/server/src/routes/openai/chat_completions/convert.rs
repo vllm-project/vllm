@@ -25,6 +25,8 @@ pub struct PreparedRequest {
     pub response_model: String,
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Number of chat completion choices requested by the caller.
+    pub n: u32,
     /// Whether the caller requested output logprobs on chat choices.
     pub requested_logprobs: bool,
     /// Whether the caller requested top-level prompt logprobs.
@@ -73,6 +75,7 @@ pub(crate) fn prepare_chat_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let n = request.n.unwrap_or(1);
     let requested_logprobs = request.logprobs;
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
@@ -144,6 +147,7 @@ pub(crate) fn prepare_chat_request(
         request_id,
         response_model,
         include_usage,
+        n,
         requested_logprobs,
         include_prompt_logprobs,
         chat_request,

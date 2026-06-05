@@ -3,6 +3,7 @@ mod types;
 mod validate;
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::result::Result;
 use std::sync::Arc;
 
@@ -12,6 +13,8 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
+use futures::future::try_join_all;
+use futures::stream::SelectAll;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -40,6 +43,30 @@ use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
 use crate::utils::{resolve_request_context, unix_timestamp};
 
+type ChatCompletionEventStream =
+    Pin<Box<dyn Stream<Item = Result<ChatCompletionStreamEvent, ApiError>> + Send>>;
+
+#[derive(Debug, Clone, Copy)]
+struct ChoiceUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+}
+
+#[derive(Debug)]
+struct ChatChoiceOutput {
+    choice: ChatCompletionChoice,
+    usage: ChoiceUsage,
+    prompt_logprobs: Option<Vec<Option<std::collections::HashMap<String, f32>>>>,
+    prompt_token_ids: Option<Vec<u32>>,
+    kv_transfer_params: Option<Value>,
+}
+
+#[derive(Debug)]
+enum ChatCompletionStreamEvent {
+    Chunk(ChatCompletionStreamResponse),
+    Finished(ChoiceUsage),
+}
+
 /// Validate one chat completion request and proxy it into the shared
 /// `vllm-chat` stack.
 pub async fn chat_completions(
@@ -64,52 +91,98 @@ pub async fn chat_completions(
     let created = unix_timestamp();
     let log_request = state.enable_log_requests;
 
-    let chat_stream =
-        match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                return server_error!(
-                    "failed to submit chat request: {}",
-                    error.to_report_string()
-                )
-                .into_response();
-            }
-        };
-
     if stream {
-        let chunk_stream = chat_completion_chunk_stream(
-            chat_stream,
+        let mut event_streams: SelectAll<ChatCompletionEventStream> = SelectAll::new();
+        for choice_index in 0..prepared.n {
+            let chat_request = match child_chat_request(
+                &prepared.chat_request,
+                &prepared.request_id,
+                choice_index,
+                prepared.n,
+            ) {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            let chat_stream =
+                match state.chat.chat(chat_request).instrument(request_span.clone()).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        return server_error!(
+                            "failed to submit chat request: {}",
+                            error.to_report_string()
+                        )
+                        .into_response();
+                    }
+                };
+            event_streams.push(Box::pin(chat_completion_choice_event_stream(
+                chat_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                choice_index,
+                log_request,
+                prepared.requested_logprobs,
+                prepared.echo.clone(),
+                prepared.return_token_ids,
+                prepared.return_tokens_as_token_ids,
+            )));
+        }
+
+        let chunk_stream = chat_completion_parallel_chunk_stream(
+            event_streams,
             prepared.request_id,
             prepared.response_model,
             created,
-            log_request,
             prepared.include_usage,
-            prepared.requested_logprobs,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
         Sse::new(sse_stream).into_response()
     } else {
-        let response = match collect_chat_completion(
-            chat_stream,
+        let mut choice_futures = Vec::with_capacity(prepared.n as usize);
+        for choice_index in 0..prepared.n {
+            let chat_request = match child_chat_request(
+                &prepared.chat_request,
+                &prepared.request_id,
+                choice_index,
+                prepared.n,
+            ) {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            let chat_stream =
+                match state.chat.chat(chat_request).instrument(request_span.clone()).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        return server_error!(
+                            "failed to submit chat request: {}",
+                            error.to_report_string()
+                        )
+                        .into_response();
+                    }
+                };
+            choice_futures.push(collect_chat_completion_choice(
+                chat_stream,
+                choice_index,
+                prepared.requested_logprobs,
+                prepared.include_prompt_logprobs,
+                prepared.echo.clone(),
+                prepared.return_token_ids,
+                prepared.return_tokens_as_token_ids,
+            ));
+        }
+
+        let choices = match try_join_all(choice_futures).instrument(request_span.clone()).await {
+            Ok(choices) => choices,
+            Err(error) => return error.into_response(),
+        };
+
+        let response = chat_completion_response_from_choices(
             prepared.request_id,
             prepared.response_model,
             created,
-            prepared.requested_logprobs,
-            prepared.include_prompt_logprobs,
-            prepared.echo,
-            prepared.return_token_ids,
-            prepared.return_tokens_as_token_ids,
-        )
-        .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+            choices,
+        );
 
         if log_request {
             let usage = response.usage.as_ref();
@@ -127,17 +200,39 @@ pub async fn chat_completions(
     }
 }
 
-async fn collect_chat_completion(
+fn child_chat_request(
+    base: &vllm_chat::ChatRequest,
+    parent_request_id: &str,
+    choice_index: u32,
+    choice_count: u32,
+) -> Result<vllm_chat::ChatRequest, ApiError> {
+    let mut request = base.clone();
+    if choice_count > 1 {
+        request.request_id = format!("{choice_index}_{parent_request_id}");
+    } else {
+        request.request_id = parent_request_id.to_string();
+    }
+    if let Some(seed) = request.sampling_params.seed {
+        request.sampling_params.seed =
+            Some(seed.checked_add(i64::from(choice_index)).ok_or_else(|| {
+                ApiError::invalid_request(
+                    "`seed + choice index` must fit within a signed 64-bit integer.".to_string(),
+                    Some("seed"),
+                )
+            })?);
+    }
+    Ok(request)
+}
+
+async fn collect_chat_completion_choice(
     stream: ChatEventStream,
-    request_id: String,
-    response_model: String,
-    created: u64,
+    choice_index: u32,
     requested_logprobs: bool,
     include_prompt_logprobs: bool,
     echo: Option<String>,
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
-) -> Result<ChatCompletionResponse, ApiError> {
+) -> Result<ChatChoiceOutput, ApiError> {
     let collected = stream.collect_message().await.map_err(|error| {
         server_error!(
             "failed to collect chat completion response: {}",
@@ -191,15 +286,9 @@ async fn collect_chat_completion(
     } else {
         None
     };
-    let usage = Usage::from_counts(prompt_token_count as u32, output_token_count as u32);
-
-    Ok(ChatCompletionResponse {
-        id: request_id,
-        object: "chat.completion".to_string(),
-        created,
-        model: response_model,
-        choices: vec![ChatCompletionChoice {
-            index: 0,
+    Ok(ChatChoiceOutput {
+        choice: ChatCompletionChoice {
+            index: choice_index,
             message: ChatCompletionMessage {
                 role: AssistantRole,
                 content: match &echo {
@@ -213,22 +302,51 @@ async fn collect_chat_completion(
             finish_reason: Some(finish_reason),
             stop_reason,
             token_ids: return_token_ids.then_some(token_ids),
-        }],
-        usage: Some(usage),
-        system_fingerprint: None,
+        },
+        usage: ChoiceUsage {
+            prompt_tokens: prompt_token_count as u32,
+            completion_tokens: output_token_count as u32,
+        },
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
         kv_transfer_params,
     })
 }
 
-/// Convert one internal chat event stream into OpenAI chat-completion chunks.
-#[try_stream]
-async fn chat_completion_chunk_stream(
-    mut stream: impl ChatEventStreamTrait + Unpin,
+fn chat_completion_response_from_choices(
     request_id: String,
     response_model: String,
     created: u64,
+    outputs: Vec<ChatChoiceOutput>,
+) -> ChatCompletionResponse {
+    let prompt_tokens = outputs.first().map_or(0, |output| output.usage.prompt_tokens);
+    let completion_tokens = outputs.iter().map(|output| output.usage.completion_tokens).sum();
+    let prompt_logprobs = outputs.iter().find_map(|output| output.prompt_logprobs.clone());
+    let prompt_token_ids = outputs.iter().find_map(|output| output.prompt_token_ids.clone());
+    let kv_transfer_params = outputs.iter().find_map(|output| output.kv_transfer_params.clone());
+
+    ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion".to_string(),
+        created,
+        model: response_model,
+        choices: outputs.into_iter().map(|output| output.choice).collect(),
+        usage: Some(Usage::from_counts(prompt_tokens, completion_tokens)),
+        system_fingerprint: None,
+        prompt_logprobs,
+        prompt_token_ids,
+        kv_transfer_params,
+    }
+}
+
+/// Convert one internal chat event stream into OpenAI chat-completion chunks.
+#[try_stream]
+async fn chat_completion_chunk_stream(
+    stream: impl ChatEventStreamTrait + Unpin,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    choice_index: u32,
     log_request: bool,
     include_usage: bool,
     requested_logprobs: bool,
@@ -236,6 +354,91 @@ async fn chat_completion_chunk_stream(
     return_token_ids: bool,
     return_tokens_as_token_ids: bool,
     mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
+) -> Result<(), ApiError> {
+    let events = chat_completion_choice_event_stream(
+        stream,
+        request_id.clone(),
+        response_model.clone(),
+        created,
+        choice_index,
+        log_request,
+        requested_logprobs,
+        echo,
+        return_token_ids,
+        return_tokens_as_token_ids,
+    );
+    pin_mut!(events);
+
+    while let Some(next) = events.next().await {
+        match next? {
+            ChatCompletionStreamEvent::Chunk(chunk) => y.yield_ok(chunk).await,
+            ChatCompletionStreamEvent::Finished(usage) => {
+                if include_usage {
+                    y.yield_ok(usage_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        Usage::from_counts(usage.prompt_tokens, usage.completion_tokens),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[try_stream]
+async fn chat_completion_parallel_chunk_stream(
+    stream: impl Stream<Item = Result<ChatCompletionStreamEvent, ApiError>>,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    include_usage: bool,
+    mut y: TryYielder<ChatCompletionStreamResponse, ApiError>,
+) -> Result<(), ApiError> {
+    pin_mut!(stream);
+    let mut prompt_tokens = None;
+    let mut completion_tokens = 0_u32;
+
+    while let Some(next) = stream.next().await {
+        match next? {
+            ChatCompletionStreamEvent::Chunk(chunk) => y.yield_ok(chunk).await,
+            ChatCompletionStreamEvent::Finished(usage) => {
+                prompt_tokens.get_or_insert(usage.prompt_tokens);
+                completion_tokens = completion_tokens.saturating_add(usage.completion_tokens);
+            }
+        }
+    }
+
+    if include_usage {
+        y.yield_ok(usage_chunk(
+            &request_id,
+            &response_model,
+            created,
+            Usage::from_counts(prompt_tokens.unwrap_or(0), completion_tokens),
+        ))
+        .await;
+    }
+
+    Ok(())
+}
+
+/// Convert one internal chat event stream into indexed OpenAI chat-completion events.
+#[try_stream]
+async fn chat_completion_choice_event_stream(
+    mut stream: impl ChatEventStreamTrait + Unpin,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    choice_index: u32,
+    log_request: bool,
+    requested_logprobs: bool,
+    echo: Option<String>,
+    return_token_ids: bool,
+    return_tokens_as_token_ids: bool,
+    mut y: TryYielder<ChatCompletionStreamEvent, ApiError>,
 ) -> Result<(), ApiError> {
     let mut saw_tool_calls = false;
 
@@ -250,20 +453,21 @@ async fn chat_completion_chunk_stream(
             Ok(ChatEvent::Start {
                 prompt_token_ids, ..
             }) => {
-                let mut chunk = start_chunk(&request_id, &response_model, created);
+                let mut chunk = start_chunk(&request_id, &response_model, created, choice_index);
                 if return_token_ids {
                     chunk.prompt_token_ids = Some(prompt_token_ids.to_vec());
                 }
-                y.yield_ok(chunk).await;
+                y.yield_ok(ChatCompletionStreamEvent::Chunk(chunk)).await;
                 // When echo=true, emit the last assistant message content as a delta chunk.
                 if let Some(echo_text) = &echo {
-                    y.yield_ok(block_delta_chunk(
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(block_delta_chunk(
                         &request_id,
                         &response_model,
                         created,
+                        choice_index,
                         AssistantBlockKind::Text,
                         echo_text.clone(),
-                    ))
+                    )))
                     .await;
                 }
             }
@@ -271,13 +475,14 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_block_delta(kind, delta);
                 } else {
-                    y.yield_ok(block_delta_chunk(
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(block_delta_chunk(
                         &request_id,
                         &response_model,
                         created,
+                        choice_index,
                         kind,
                         delta,
-                    ))
+                    )))
                     .await;
                 }
             }
@@ -294,18 +499,22 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.logprobs = openai_logprobs;
                     pending_chunk.token_ids = openai_token_ids;
-                    if let Some(chunk) =
-                        pending_chunk.take_chunk(&request_id, &response_model, created)
-                    {
-                        y.yield_ok(chunk).await;
-                    }
-                } else if let Some(logprobs) = openai_logprobs {
-                    y.yield_ok(logprobs_only_chunk(
+                    if let Some(chunk) = pending_chunk.take_chunk(
                         &request_id,
                         &response_model,
                         created,
+                        choice_index,
+                    ) {
+                        y.yield_ok(ChatCompletionStreamEvent::Chunk(chunk)).await;
+                    }
+                } else if let Some(logprobs) = openai_logprobs {
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(logprobs_only_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        choice_index,
                         logprobs,
-                    ))
+                    )))
                     .await;
                 }
             }
@@ -326,14 +535,15 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_start(tool_index, id, name);
                 } else {
-                    y.yield_ok(tool_call_start_chunk(
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(tool_call_start_chunk(
                         &request_id,
                         &response_model,
                         created,
+                        choice_index,
                         tool_index,
                         id,
                         name,
-                    ))
+                    )))
                     .await;
                 }
             }
@@ -342,13 +552,14 @@ async fn chat_completion_chunk_stream(
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
                     pending_chunk.push_tool_call_arguments(tool_index, delta);
                 } else {
-                    y.yield_ok(tool_call_arguments_chunk(
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(tool_call_arguments_chunk(
                         &request_id,
                         &response_model,
                         created,
+                        choice_index,
                         tool_index,
                         delta,
-                    ))
+                    )))
                     .await;
                 }
             }
@@ -373,20 +584,25 @@ async fn chat_completion_chunk_stream(
                 }
 
                 if let Some(pending_chunk) = pending_chunk.as_mut()
-                    && let Some(chunk) =
-                        pending_chunk.take_chunk(&request_id, &response_model, created)
+                    && let Some(chunk) = pending_chunk.take_chunk(
+                        &request_id,
+                        &response_model,
+                        created,
+                        choice_index,
+                    )
                 {
-                    y.yield_ok(chunk).await;
+                    y.yield_ok(ChatCompletionStreamEvent::Chunk(chunk)).await;
                 }
 
                 match final_chunk(
                     &request_id,
                     &response_model,
                     created,
+                    choice_index,
                     finish_reason,
                     saw_tool_calls,
                 ) {
-                    Ok(chunk) => y.yield_ok(chunk).await,
+                    Ok(chunk) => y.yield_ok(ChatCompletionStreamEvent::Chunk(chunk)).await,
                     Err(error) => {
                         error!(
                             error = %error.to_error_response().error.message,
@@ -396,15 +612,11 @@ async fn chat_completion_chunk_stream(
                     }
                 }
 
-                if include_usage {
-                    y.yield_ok(usage_chunk(
-                        &request_id,
-                        &response_model,
-                        created,
-                        Usage::from_counts(prompt_token_count as u32, output_token_count as u32),
-                    ))
-                    .await;
-                }
+                y.yield_ok(ChatCompletionStreamEvent::Finished(ChoiceUsage {
+                    prompt_tokens: prompt_token_count as u32,
+                    completion_tokens: output_token_count as u32,
+                }))
+                .await;
 
                 return Ok(());
             }
@@ -508,6 +720,7 @@ impl PendingChatChunk {
         request_id: &str,
         response_model: &str,
         created: u64,
+        choice_index: u32,
     ) -> Option<ChatCompletionStreamResponse> {
         let has_delta = self.delta.content.is_some()
             || self.delta.reasoning.is_some()
@@ -520,6 +733,7 @@ impl PendingChatChunk {
 
         let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
         chunk.choices.push(ChatCompletionStreamChoice {
+            index: choice_index,
             delta: self.take_delta(),
             logprobs,
             token_ids,
@@ -602,9 +816,11 @@ fn start_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         delta: ChatMessageDelta {
             role: Some(AssistantRole),
             ..Default::default()
@@ -619,6 +835,7 @@ fn block_delta_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     kind: AssistantBlockKind,
     delta: String,
 ) -> ChatCompletionStreamResponse {
@@ -638,6 +855,7 @@ fn block_delta_chunk(
 
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         delta,
         ..Default::default()
     });
@@ -648,12 +866,14 @@ fn tool_call_start_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     tool_index: u32,
     id: String,
     name: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
                 index: tool_index,
@@ -675,11 +895,13 @@ fn tool_call_arguments_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     tool_index: u32,
     delta: String,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         delta: ChatMessageDelta {
             tool_calls: Some(vec![ToolCallDelta {
                 index: tool_index,
@@ -701,10 +923,12 @@ fn logprobs_only_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     logprobs: ChatLogProbs,
 ) -> ChatCompletionStreamResponse {
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         logprobs: Some(logprobs),
         ..Default::default()
     });
@@ -716,6 +940,7 @@ fn final_chunk(
     request_id: &str,
     response_model: &str,
     created: u64,
+    choice_index: u32,
     finish_reason: FinishReason,
     saw_tool_calls: bool,
 ) -> Result<ChatCompletionStreamResponse, ApiError> {
@@ -730,6 +955,7 @@ fn final_chunk(
 
     let mut chunk = ChatCompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(ChatCompletionStreamChoice {
+        index: choice_index,
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
         ..Default::default()
@@ -775,6 +1001,7 @@ mod tests {
             "chatcmpl-1",
             "model",
             1,
+            0,
             AssistantBlockKind::Text,
             "hello".to_string(),
         );
@@ -789,6 +1016,7 @@ mod tests {
             "chatcmpl-1",
             "model",
             1,
+            0,
             AssistantBlockKind::Reasoning,
             "thinking".to_string(),
         );
@@ -806,6 +1034,7 @@ mod tests {
             "chatcmpl-1",
             "model",
             1,
+            0,
             FinishReason::Stop(Some(StopReason::Text("stop".to_string()))),
             false,
         )
@@ -817,7 +1046,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Length, false)
+        let chunk = final_chunk("chatcmpl-1", "model", 1, 0, FinishReason::Length, false)
             .expect("finish reason is valid");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
@@ -826,7 +1055,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, false)
+        let chunk = final_chunk("chatcmpl-1", "model", 1, 0, FinishReason::Abort, false)
             .expect("abort is a valid finish reason");
 
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
@@ -835,12 +1064,12 @@ mod tests {
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, false).is_err());
+        assert!(final_chunk("chatcmpl-1", "model", 1, 0, FinishReason::Error, false).is_err());
     }
 
     #[test]
     fn final_chunk_maps_stop_to_tool_calls_when_tool_calls_were_streamed() {
-        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::stop_eos(), true)
+        let chunk = final_chunk("chatcmpl-1", "model", 1, 0, FinishReason::stop_eos(), true)
             .expect("finish reason is valid");
 
         assert_eq!(
@@ -892,6 +1121,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            0,
             false,
             false,
             true,
@@ -955,6 +1185,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            0,
             false,
             false,
             true,
@@ -1014,6 +1245,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            0,
             false,
             false,
             false,

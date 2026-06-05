@@ -18,10 +18,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
-    }
-
     if request.top_logprobs.is_some() && !request.logprobs {
         bail_invalid_request!(
             param = "top_logprobs",
@@ -215,6 +211,17 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("stop strings should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_n_greater_than_one() {
+        let request = ChatCompletionRequest {
+            n: Some(2),
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("n>1 should be accepted");
     }
 
     #[test]

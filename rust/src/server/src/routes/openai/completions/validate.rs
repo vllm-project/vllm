@@ -22,8 +22,8 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if request.n.unwrap_or(1) > 1 {
-        bail_invalid_request!(param = "n", "Only n=1 is supported.");
+    if request.n == Some(0) {
+        bail_invalid_request!(param = "n", "n must be at least 1.");
     }
 
     if request.max_tokens == Some(0) {
@@ -132,6 +132,28 @@ mod tests {
         };
         assert!(
             validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_n_greater_than_one() {
+        let request = CompletionRequest {
+            n: Some(2),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_zero_n() {
+        let request = CompletionRequest {
+            n: Some(0),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
         );
     }
 
