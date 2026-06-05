@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for vllm.entrypoints.openai.responses.harmony."""
 
+import pytest
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -13,8 +14,10 @@ from openai_harmony import Author, Message, Role, TextContent
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     parser_state_to_response_output,
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 class TestResponsePreviousInputToHarmony:
@@ -631,3 +634,179 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestResponseInputToHarmony:
+    """
+    Tests for response_input_to_harmony with multi-part chat-format content.
+
+    The OpenAI Responses API spec defines several content item types
+    (input_text, input_image, input_file, etc.). gpt-oss is a text-only
+    model so the Harmony adapter only supports text-bearing types. Other
+    types raise :class:`VLLMValidationError` -> HTTP 400 with a clear
+    "not supported" message, replacing the previous unconditional
+    ``c["text"]`` access that crashed with ``KeyError: 'text'`` -> HTTP 500.
+    """
+
+    def test_input_text_only_content_accepted(self):
+        """Single input_text content item should round-trip without error."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Summarize this letter."},
+            ],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert len(msg.content) == 1
+        assert msg.content[0].text == "Summarize this letter."
+
+    def test_text_type_alias_accepted(self):
+        """The legacy 'text' type alias is also accepted."""
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "hello"
+
+    def test_output_text_type_accepted(self):
+        """output_text (echoed assistant content) is also accepted."""
+        chat_msg = {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "answer"}],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "answer"
+
+    def test_input_file_rejected_as_unsupported_type(self):
+        """input_file is a valid Responses-API type but the Harmony adapter
+        does not support file inputs. Reject with a clear 400 citing the
+        unsupported type, not a misleading 'missing text' message."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_file", "file_url": "https://example.com/x.pdf"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_file" in message
+        assert "not supported" in message
+
+    def test_input_image_rejected_as_unsupported_type(self):
+        """input_image is a valid Responses-API type but the Harmony adapter
+        does not support image inputs (gpt-oss is text-only)."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": "https://example.com/x.png"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_image" in message
+        assert "not supported" in message
+
+    def test_mixed_text_and_file_content_rejected_on_non_text_item(self):
+        """Mixed input_text + input_file is rejected on the non-text item.
+        The presence of a valid text item earlier in the list does not
+        excuse a later unsupported item; the whole request is rejected."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "Read this:"},
+                {"type": "input_file", "file_url": "https://example.com/x.pdf"},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+        assert "input_file" in str(exc_info.value)
+
+    def test_input_text_with_missing_text_field_rejected(self):
+        """If type is supported but the text field is missing or non-string,
+        raise a separate clear error rather than a generic crash."""
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "input_text"}],  # no text field
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        assert exc_info.value.parameter == "input"
+        message = str(exc_info.value)
+        assert "input_text" in message
+        assert "string 'text'" in message
+
+    def test_validation_error_message_does_not_leak_payload_fields(self):
+        """The 400 error must cite the item type without echoing url/data
+        fields, which can be customer-sensitive (signed URLs, base64 file
+        contents, etc.)."""
+        sensitive_url = "https://customer-bucket.example.com/secret-token"
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "input_file", "file_url": sensitive_url},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(chat_msg, [])
+
+        message = str(exc_info.value)
+        assert "input_file" in message
+        assert sensitive_url not in message
+        assert "file_url" not in message
+
+    def test_developer_prefix_only_on_first_multipart_item(self):
+        """Developer messages with multi-part content prepend the
+        'Instructions:\\n' prefix only to the first item, not every item."""
+        chat_msg = {
+            "role": "developer",
+            "content": [
+                {"type": "input_text", "text": "First instruction."},
+                {"type": "input_text", "text": "Second instruction."},
+                {"type": "input_text", "text": "Third instruction."},
+            ],
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert len(msg.content) == 3
+        assert msg.content[0].text == "Instructions:\nFirst instruction."
+        assert msg.content[1].text == "Second instruction."
+        assert msg.content[2].text == "Third instruction."
+
+    def test_developer_prefix_on_string_content_unchanged(self):
+        """String (non-list) developer content keeps the existing single
+        prefix behavior."""
+        chat_msg = {
+            "role": "developer",
+            "content": "Be concise.",
+        }
+
+        msg = response_input_to_harmony(chat_msg, [])
+
+        assert msg is not None
+        assert msg.content[0].text == "Instructions:\nBe concise."

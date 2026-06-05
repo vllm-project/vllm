@@ -39,6 +39,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -157,7 +158,26 @@ def response_input_to_harmony(
         if isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            _SUPPORTED_TEXT_TYPES = ("input_text", "text", "output_text")
+            contents = []
+            for i, c in enumerate(content):
+                item_type = c.get("type", "<missing>")
+                if item_type not in _SUPPORTED_TEXT_TYPES:
+                    raise VLLMValidationError(
+                        f"Content item type {item_type!r} is not supported "
+                        f"by the Harmony Responses path; supported types: "
+                        f"{', '.join(repr(t) for t in _SUPPORTED_TEXT_TYPES)}",
+                        parameter="input",
+                    )
+                text = c.get("text")
+                if not isinstance(text, str):
+                    raise VLLMValidationError(
+                        f"Content item type {item_type!r} requires a string "
+                        f"'text' field",
+                        parameter="input",
+                    )
+                prefix = text_prefix if i == 0 else ""
+                contents.append(TextContent(text=prefix + text))
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
