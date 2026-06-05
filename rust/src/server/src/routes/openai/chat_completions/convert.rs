@@ -145,7 +145,6 @@ pub(crate) fn prepare_chat_request(
         return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
     })
 }
-//share util with tokenize
 pub(crate) fn normalize_generation_prompt_mode(
     add_generation_prompt: Option<bool>,
     continue_final_message: bool,
