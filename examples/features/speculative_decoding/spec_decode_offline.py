@@ -131,6 +131,8 @@ def main(args):
             "num_speculative_tokens": args.num_spec_tokens,
             "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
             "parallel_drafting": args.parallel_drafting,
+            # Match target TRITON_ATTN on MI300x; draft autoselect can pick ROCM_ATTN.
+            "attention_backend": "TRITON_ATTN",
         }
     elif args.method == "ngram":
         speculative_config = {
