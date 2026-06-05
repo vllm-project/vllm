@@ -197,13 +197,6 @@ class FakeNixlWrapper:
     def get_xfer_telemetry(self, handle: int) -> dict:
         return get_default_xfer_telemetry()
 
-    ############################################################
-    # Follow are for changing the behavior during testing.
-    ############################################################
-
-    def set_cycles_before_xfer_done(self, cycles: int):
-        """Set the number of cycles before a transfer is considered done."""
-
 
 @contextlib.contextmanager
 def _make_fake_nixl_pkg():
@@ -578,10 +571,7 @@ class TestNixlHandshake:
         """Test case where multiple xfers are initiated to the same engine.
 
         This test triggers the connector to load remote KV for the same
-        `request_id`. The transfer is not done immediately due to
-        `set_cycles_before_xfer_done`, so there is a state where there are
-        multiple transfer states for the same `request_id`, and `get_finished`
-        should handle it correctly (wait for all transfers to be done).
+        `request_id`.
         """
         vllm_config = create_vllm_config()
 
@@ -598,7 +588,6 @@ class TestNixlHandshake:
         )
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
-        worker.nixl_wrapper.set_cycles_before_xfer_done(3)
         # simulate handshake
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
@@ -1304,7 +1293,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     # Worker stats with transfer metrics
     worker_stats = NixlKVConnectorStats()
     worker_stats.record_transfer(get_default_xfer_telemetry())
-    worker_stats.data["remote_tokens"] = []
 
     # Scheduler stats with custom metric (needs dummy transfer to avoid being skipped)
     scheduler_stats = NixlKVConnectorStats()
@@ -1314,7 +1302,6 @@ def test_scheduler_kv_connector_stats_aggregation():
             "post_duration": [0],
             "bytes_transferred": [0],
             "num_descriptors": [0],
-            "remote_tokens": [128],
         }
     )
 
@@ -1355,7 +1342,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     ).scheduler_stats.kv_connector_stats
     nixl_stats = final_stats["NixlConnector"]
     assert nixl_stats.num_successful_transfers == 2
-    assert nixl_stats.data["remote_tokens"] == [128]
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
@@ -1377,7 +1363,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     timeout = 6
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
-        kv_role="kv_both",
+        kv_role="kv_consumer",
         kv_connector_extra_config={"kv_lease_duration": timeout},
     )
     llm_kwargs = {
@@ -2751,3 +2737,50 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+def test_kv_both_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_both' should emit a deprecation log warning."""
+    from unittest.mock import patch
+
+    from vllm.logger import _print_warning_once
+
+    _print_warning_once.cache_clear()
+
+    vllm_config = create_vllm_config(kv_role="kv_both")
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+    ) as mock_logger:
+        mock_logger.warning_once = mock_logger.warning_once
+        NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+
+    mock_logger.warning_once.assert_called_once()
+    msg = mock_logger.warning_once.call_args[0][0]
+    assert "kv_role='kv_both'" in msg
+    assert "deprecated" in msg
+
+
+def test_explicit_kv_role_no_deprecation_warning(default_vllm_config, dist_init):
+    """kv_role='kv_consumer' or 'kv_producer' should NOT emit a warning."""
+    from unittest.mock import patch
+
+    for role in ("kv_consumer", "kv_producer"):
+        vllm_config = create_vllm_config(kv_role=role)
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector.logger"
+        ) as mock_logger:
+            NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+
+        (
+            mock_logger.warning_once.assert_not_called(),
+            (f"kv_role={role!r} should not emit deprecation warning"),
+        )

@@ -495,18 +495,6 @@ class GraniteMoeHybridModel(nn.Module):
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(n)
-            ):
-                # Loading kv cache quantization scales
-                loaded_weight = p
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                _load(scale_name, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if _load_quant_expert(n, p):
                 continue
 
