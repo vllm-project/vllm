@@ -251,12 +251,72 @@ class TestFunctionWithMutatedArgsAndReturn(torch.nn.Module):
         return []
 
 
+class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
+    OP_REGISTERED = False
+
+    def __init__(self):
+        super().__init__()
+        self.register_test_custom_op()
+
+    @classmethod
+    def register_test_custom_op(cls):
+        if not cls.OP_REGISTERED:
+
+            def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_impl(
+                q: torch.Tensor,
+                kv: torch.Tensor,
+                k_cache: torch.Tensor,
+            ) -> None:
+                q.add_(kv)
+                k_cache.add_(kv)
+
+            def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake(
+                q: torch.Tensor,
+                kv: torch.Tensor,
+                k_cache: torch.Tensor,
+            ) -> None:
+                return None
+
+            direct_register_custom_op(
+                op_name="fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+                op_func=fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_impl,
+                mutates_args=["q", "k_cache"],
+                fake_impl=fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_fake,
+            )
+
+            cls.OP_REGISTERED = True
+
+    def forward(
+        self, q: torch.Tensor, kv: torch.Tensor, k_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+            q, kv, k_cache
+        )
+        return q, k_cache
+
+    def example_inputs(self, num_tokens=32, hidden_size=128):
+        return (
+            torch.rand(num_tokens, hidden_size),
+            torch.rand(num_tokens, hidden_size),
+            torch.rand(num_tokens, hidden_size),
+        )
+
+    def ops_in_model(self, do_fusion):
+        return [
+            torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
+        ]
+
+    def ops_not_in_model(self):
+        return []
+
+
 MODELS_AND_DO_FUSION = {
     TestSiluMul: [True, False],
     TestFusedAddRMSNorm: [True, False],
     TestRotaryEmbedding: [False],
     TestRotaryEmbeddingSliceScatter: [False],
     TestFunctionWithMutatedArgsAndReturn: [False],
+    TestFusedDeepseekV4QnormRopeKvInsert: [False],
 }
 
 
