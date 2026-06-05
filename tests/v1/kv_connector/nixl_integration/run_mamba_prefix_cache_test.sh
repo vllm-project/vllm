@@ -5,8 +5,8 @@ set -xe
 # Spins up a 1P1D setup with a Mamba hybrid model and verifies
 # repeated prompts yield non-zero D-side prefix cache hits.
 
-PREFILL_GPU_ID=${PREFILL_GPU_ID:-4}
-DECODE_GPU_ID=${DECODE_GPU_ID:-5}
+PREFILL_GPU_ID=${PREFILL_GPU_ID:-0}
+DECODE_GPU_ID=${DECODE_GPU_ID:-1}
 MODEL=${MODEL:-"ibm-granite/granite-4.0-h-tiny"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 
@@ -29,6 +29,7 @@ wait_for_server() {
 }
 
 cleanup_instances() {
+  echo "Cleaning up any running vLLM instances..."
   pkill -f "vllm serve" || true
   sleep 2
 }
@@ -49,7 +50,7 @@ vllm serve $MODEL \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode align \
+  --mamba-cache-mode all \
   --kv-transfer-config "$KV_CONFIG" &
 
 # Start decode instance
@@ -66,7 +67,7 @@ vllm serve $MODEL \
   --block-size 128 \
   --trust-remote-code \
   --enable-prefix-caching \
-  --mamba-cache-mode align \
+  --mamba-cache-mode all \
   --kv-transfer-config "$KV_CONFIG" &
 
 echo "Waiting for prefill instance on port $PREFILL_PORT..."

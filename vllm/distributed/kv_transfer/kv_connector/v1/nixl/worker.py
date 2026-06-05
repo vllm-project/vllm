@@ -2305,7 +2305,8 @@ class NixlConnectorWorker:
         logical block rounding in heterogeneous TP.
         """
         # Partial prefix cache hit: just read uncomputed blocks.
-        # local_block_ids are *unhashed* blocks (need data), remote are all.
+        # Skip mamba groups — their blocks represent full state (conv+ssm),
+        # not per-token data, so trimming would corrupt the transfer.
         remote_block_ids = list(remote_block_ids)
         if not self._has_mamba:
             for i, remote_group in enumerate(remote_block_ids):
@@ -2314,8 +2315,8 @@ class NixlConnectorWorker:
                 if num_local_blocks < len(remote_group):
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
         else:
-            # Mamba hybrid: HeteroTP can cause different kernel block
-            # counts due to logical block rounding.
+            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support so far.HeteroTP
+            # can cause different kernel block counts due to logical block rounding.
             # Example: 640 prompt tokens, kernel_block_size=64
             #   remote physical_per_logical=10, local physical_per_logical=6
             #   remote logical ids from kv_transfer_params = [0]
@@ -2362,7 +2363,6 @@ class NixlConnectorWorker:
                     num_blocks = min(num_local_blocks, num_remote_blocks)
                     local_block_ids[i] = local_block_ids[i][:num_blocks]
                     remote_block_ids[i] = remote_group[:num_blocks]
-
         return local_block_ids, remote_block_ids
 
     def _logical_to_remote_kernel_block_ids(

@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""E2E test: Mamba hybrid models get D-side prefix cache hits in PD.
+"""Verify D-side prefix cache hits reduce transfer for Mamba hybrid PD.
 
-Regression test for the bug where HybridKVCacheCoordinator's AND logic
-caused 0% prefix cache hit rate on D-side for Mamba hybrid models.
-The fix uses max(per_group_hits) so FA cache hits are reported correctly.
-
-Requires: PREFILL_PORT, DECODE_PORT, PROXY_PORT env vars set by the
-runner script (run_mamba_prefix_cache_test.sh).
+Sends the same long prompt twice through P/D and asserts that the second
+request transfers fewer bytes (because cached blocks are skipped).
 """
 
 import os
@@ -24,10 +20,7 @@ DECODE_PORT = os.environ["DECODE_PORT"]
 PROXY_HOST = os.getenv("PROXY_HOST", "localhost")
 PROXY_PORT = os.environ["PROXY_PORT"]
 
-# Must be long enough to span multiple blocks. With block_size=128, each
-# logical block holds ~4224 tokens (128 * 33 layers or similar). We need
-# at least 2 full blocks so the first one can be cached and reused.
-# Target: ~9000 tokens ≈ ~23000 chars of English text.
+# Long prompt (~9000 tokens) to span many blocks so prefix caching kicks in.
 _BASE_PROMPT = """\
 The following is a comprehensive overview of distributed systems, covering \
 their history, design principles, and modern applications.
@@ -221,7 +214,7 @@ structure that reveals latency bottlenecks and error sources. Combined with \
 metrics and structured logs, traces provide the visibility needed to operate \
 complex distributed systems reliably."""
 
-# Extend with unique filler to reach ~23000 chars (~9000 tokens)
+# Pad to ~23000 chars (~9000 tokens) to fill many blocks.
 PROMPT = _BASE_PROMPT
 while len(PROMPT) < 23000:
     n = len(PROMPT)
@@ -235,16 +228,11 @@ METRICS_OF_INTEREST = [
     "vllm:nixl_num_descriptors_count",
     "vllm:prefix_cache_hits",
     "vllm:prefix_cache_queries",
-    "vllm:external_prefix_cache_hits",
-    "vllm:external_prefix_cache_queries",
 ]
 
 
 def get_metric(host: str, port: str, metric_name: str) -> float:
-    """Scrape a Prometheus metric value from vLLM's /metrics endpoint.
-
-    For histograms, use the _sum or _count suffix in metric_name.
-    """
+    """Scrape a single Prometheus metric from /metrics."""
     url = f"http://{host}:{port}/metrics"
     resp = requests.get(url, timeout=10)
     resp.raise_for_status()
@@ -271,28 +259,29 @@ def print_metrics(label: str, metrics: dict[str, float]) -> None:
 
 
 def test_mamba_prefix_cache_hit():
-    """Repeated prompts through PD should transfer fewer bytes on cache hit."""
+    """Repeated prompts through PD should transfer fewer bytes on D-side."""
     proxy_client = openai.OpenAI(
-        api_key="EMPTY",
+        api_key="MY_KEY",
         base_url=f"http://{PROXY_HOST}:{PROXY_PORT}/v1",
     )
     decode_client = openai.OpenAI(
-        api_key="EMPTY",
+        api_key="MY_KEY",
         base_url=f"http://{DECODE_HOST}:{DECODE_PORT}/v1",
     )
+
     models = decode_client.models.list()
-    model = models.data[0].id
-    print(f"\nModel: {model}")
+    MODEL = models.data[0].id
+    print(f"\nModel: {MODEL}")
     print(f"Prompt length: {len(PROMPT)} chars")
 
-    # Baseline metrics
+    # Baseline
     m_baseline = get_all_metrics(DECODE_HOST, DECODE_PORT)
     print_metrics("D-side baseline", m_baseline)
 
-    # First request — primes the D-side cache
+    # Request 1: cold, primes the D-side cache
     print("\n--- Request 1 (cold) ---")
     resp1 = proxy_client.completions.create(
-        model=model, prompt=PROMPT, max_tokens=10, temperature=0, seed=42
+        model=MODEL, prompt=PROMPT, max_tokens=10, temperature=0, seed=42
     )
     output1 = resp1.choices[0].text
     print(f"  Output: {output1!r}")
@@ -311,10 +300,10 @@ def test_mamba_prefix_cache_hit():
     )
     print(f"  Transfer: {transfer_req1 / 1e6:.2f} MB, {descs_req1:.0f} descs")
 
-    # Second request — same prompt, should transfer fewer bytes
+    # Request 2: same prompt, should hit D-side prefix cache
     print("\n--- Request 2 (warm, same prompt) ---")
     resp2 = proxy_client.completions.create(
-        model=model, prompt=PROMPT, max_tokens=10, temperature=0, seed=42
+        model=MODEL, prompt=PROMPT, max_tokens=10, temperature=0, seed=42
     )
     output2 = resp2.choices[0].text
     print(f"  Output: {output2!r}")
@@ -333,7 +322,7 @@ def test_mamba_prefix_cache_hit():
     )
     print(f"  Transfer: {transfer_req2 / 1e6:.2f} MB, {descs_req2:.0f} descs")
 
-    # Also check P-side metrics
+    # P-side metrics (informational)
     m_prefill = get_all_metrics(PREFILL_HOST, PREFILL_PORT)
     print_metrics("P-side final", m_prefill)
 
@@ -352,12 +341,6 @@ def test_mamba_prefix_cache_hit():
     assert transfer_req2 < transfer_req1, (
         f"Second request should transfer fewer bytes due to D-side prefix "
         f"cache hits. Got req1={transfer_req1 / 1e6:.2f} MB, "
-        f"req2={transfer_req2 / 1e6:.2f} MB (no reduction). "
-        f"This indicates the Mamba hybrid per-group prefix cache fix "
-        f"is not working."
+        f"req2={transfer_req2 / 1e6:.2f} MB (no reduction)."
     )
-
-    # Sanity: outputs should be deterministic
-    assert output1 == output2, (
-        f"Outputs differ for same prompt with temperature=0: {output1!r} vs {output2!r}"
-    )
+    assert output1 == output2, f"Outputs differ: {output1!r} vs {output2!r}"

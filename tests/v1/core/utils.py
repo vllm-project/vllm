@@ -58,7 +58,6 @@ def create_scheduler(
     pipeline_parallel_size: int = 1,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
-    kv_cache_config: KVCacheConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -146,22 +145,21 @@ def create_scheduler(
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
     )
-    if kv_cache_config is None:
-        kv_cache_config = KVCacheConfig(
-            num_blocks=num_blocks,  # A large number of blocks to hold all requests
-            kv_cache_tensors=[],
-            kv_cache_groups=[
-                KVCacheGroupSpec(
-                    ["layer"],
-                    FullAttentionSpec(
-                        block_size=block_size,
-                        num_kv_heads=1,
-                        head_size=1,
-                        dtype=torch.float32,
-                    ),
-                )
-            ],
-        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,  # A large number of blocks to hold all requests
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
+    )
     cache_config.num_gpu_blocks = num_blocks
     register_all_kvcache_specs(vllm_config)
     scheduler_cls = AsyncScheduler if async_scheduling else Scheduler

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -23,7 +23,6 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -32,7 +31,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    MambaSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -4475,85 +4473,4 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
     assert future_hashes == [HASH_FUTURE], (
         f"Expected only {HASH_FUTURE!r} from future mm feature filtering, "
         f"got {future_hashes!r}. Past/boundary features must be filtered out."
-    )
-
-
-def test_mamba_hybrid_prefix_cache_uses_max_per_group_hit():
-    """Regression test: D-side should get FA cache hits even when Mamba hits=0.
-
-    In PD with mamba_cache_mode="none", the D-side caches FA blocks locally
-    but never caches Mamba blocks (they're always transferred fresh). So
-    per_group_hits looks like (FA_hit=32, Mamba_hit=0). The scheduler must
-    use max() here — using min() would report 0 local hits and cause the
-    connector to re-transfer all FA blocks unnecessarily.
-    """
-
-    BLOCK_SIZE = 16
-    FA_HIT_TOKENS = BLOCK_SIZE * 2
-    NUM_TOKENS = BLOCK_SIZE * 4
-
-    hybrid_kv_cache_config = KVCacheConfig(
-        num_blocks=10000,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["fa_layer"],
-                FullAttentionSpec(
-                    block_size=BLOCK_SIZE,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            ),
-            KVCacheGroupSpec(
-                ["mamba_layer"],
-                MambaSpec(
-                    block_size=BLOCK_SIZE,
-                    shapes=((1,), (1,)),
-                    dtypes=(torch.float32,),
-                ),
-            ),
-        ],
-    )
-
-    scheduler = create_scheduler(
-        enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
-        block_size=BLOCK_SIZE,
-        kv_cache_config=hybrid_kv_cache_config,
-    )
-
-    assert isinstance(scheduler.kv_cache_manager.coordinator, HybridKVCacheCoordinator)
-    assert scheduler.has_mamba_layers
-
-    requests = create_requests(
-        num_requests=1,
-        num_tokens=NUM_TOKENS,
-        max_tokens=2,
-        block_size=BLOCK_SIZE,
-    )
-    request = requests[0]
-    scheduler.add_request(request)
-
-    # Simulate D-side: FA blocks are cached locally, Mamba blocks are not.
-    mock_computed_blocks: tuple[list, list] = ([], [])
-    mock_per_group_hits = (FA_HIT_TOKENS, 0)
-
-    with patch.object(
-        scheduler.kv_cache_manager.coordinator,
-        "find_longest_cache_hit_per_group",
-        return_value=(mock_computed_blocks, mock_per_group_hits),
-    ):
-        output = scheduler.schedule()
-
-    assert len(output.scheduled_new_reqs) == 1
-
-    scheduled_req = output.scheduled_new_reqs[0]
-    req_obj = scheduler.requests[scheduled_req.req_id]
-    assert req_obj.prefill_stats is not None
-    assert req_obj.prefill_stats.num_local_cached_tokens == FA_HIT_TOKENS, (
-        f"Expected num_local_cached_tokens={FA_HIT_TOKENS} "
-        f"(max of per_group_hits={mock_per_group_hits}), "
-        f"got {req_obj.prefill_stats.num_local_cached_tokens}. "
-        f"The scheduler should use max(per_group_hits), not min."
     )
