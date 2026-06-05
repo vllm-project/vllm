@@ -4,23 +4,26 @@ import torch
 import torch.nn as nn
 
 from vllm.models.deepseek_v4.common.ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.nvidia.ops.fp8_einsum import (
+    deepseek_v4_fp8_einsum,
+    deepseek_v4_fp8_einsum_config,
+)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_einsum
 
 
 def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
     """fp8_einsum recipe + scale layout for the current GPU arch.
 
     SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128.
-    SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
+    SM100/SM110: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
+    SM12x: RTX PRO / GB10 does not expose the same TMA/TCGEN05 path, so keep
+    the legacy FP32 block-scale layout expected by DeepGEMM.
 
     Returns ``(einsum_recipe, tma_aligned_scales)`` for ``deep_gemm_fp8_o_proj``.
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-    einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-    tma_aligned_scales = cap.major >= 10
-    return einsum_recipe, tma_aligned_scales
+    return deepseek_v4_fp8_einsum_config(cap.major)
 
 
 def deep_gemm_fp8_o_proj(
@@ -63,11 +66,13 @@ def deep_gemm_fp8_o_proj(
     wo_a_scale = getattr(wo_a, "weight_scale_inv", None)
     if wo_a_scale is None:
         wo_a_scale = wo_a.weight_scale
-    fp8_einsum(
-        "bhr,hdr->bhd",
-        (o_fp8, o_scale),
-        (wo_a.weight, wo_a_scale),
+    deepseek_v4_fp8_einsum(
+        o_fp8,
+        o_scale,
+        wo_a.weight,
+        wo_a_scale,
         z,
-        recipe=einsum_recipe,
+        "bhr,hdr->bhd",
+        list(einsum_recipe),
     )
     return wo_b(z.flatten(1))
