@@ -10,7 +10,6 @@ from vllm.v1.context_parallel.collectives import (
 from vllm.v1.context_parallel.layout import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
-    InterleavedCPLayout,
     get_dcp_local_seq_lens,
 )
 
@@ -18,7 +17,6 @@ __all__ = [
     "AttentionOutputReducer",
     "ContextParallelLayout",
     "DEFAULT_CP_LAYOUT",
-    "InterleavedCPLayout",
     "dcp_global_topk",
     "dcp_lse_reduce",
     "dcp_softmax_reduce",

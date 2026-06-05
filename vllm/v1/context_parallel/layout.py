@@ -113,7 +113,6 @@ class ContextParallelLayout:
 
 
 DEFAULT_CP_LAYOUT = ContextParallelLayout()
-InterleavedCPLayout = ContextParallelLayout
 
 
 def get_dcp_local_seq_lens(
