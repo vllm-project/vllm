@@ -46,6 +46,10 @@ from vllm.distributed.weight_transfer import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
+)
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
@@ -514,32 +518,55 @@ class Worker(WorkerBase):
             int(self.available_kv_cache_memory_bytes)
         )
 
+    @staticmethod
+    def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
+        video_backend = mm_config.media_io_kwargs.get("video", {}).get("video_backend")
+        return (
+            video_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+            or envs.VLLM_VIDEO_LOADER_BACKEND == PYNVVIDEOCODEC_VIDEO_BACKEND
+        )
+
     def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
-        """Carve the frontend multimodal GPU-IPC budget out of the KV cache.
+        """Carve frontend multimodal GPU memory out of the KV cache.
 
         The frontend (API-server) process allocates GPU memory for hardware
-        multimodal decoding bounded by ``mm_ipc_gpu_memory_gb``. We subtract
-        that amount here so the engine leaves it physically unallocated on the
-        device. Returns the reduced KV-cache memory in bytes.
+        multimodal decoding. Raw decoded frames are bounded by
+        ``mm_ipc_gpu_memory_gb`` and acquired by the frontend semaphore. Some
+        decoders also keep persistent surfaces around; reserve a fixed upper
+        bound for those when the corresponding backend is configured.
         """
         mm_config = self.model_config.multimodal_config
-        if mm_config is None or mm_config.mm_ipc_gpu_memory_gb <= 0:
+        if mm_config is None:
             return available_kv_cache_memory_bytes
 
-        reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
+        raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
+        decoder_reserved_bytes = (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            if self._uses_pynvvideocodec_video_backend(mm_config)
+            else 0
+        )
+        reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
+        if reserved_bytes <= 0:
+            return available_kv_cache_memory_bytes
+
         remaining = available_kv_cache_memory_bytes - reserved_bytes
         if remaining <= 0:
             raise ValueError(
-                f"mm_ipc_gpu_memory_gb={mm_config.mm_ipc_gpu_memory_gb} reserves "
-                f"{format_gib(reserved_bytes)} GiB for frontend multimodal GPU "
-                f"decoding, but only {format_gib(available_kv_cache_memory_bytes)} "
-                "GiB is available for the KV cache. Reduce mm_ipc_gpu_memory_gb or "
-                "increase gpu_memory_utilization."
+                f"frontend multimodal GPU decoding reserves "
+                f"{format_gib(reserved_bytes)} GiB "
+                f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
+                f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
+                f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
+                "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
+                "different video backend, or increase gpu_memory_utilization."
             )
         logger.info_once(
-            "Reserving %s GiB of GPU memory for frontend multimodal GPU-IPC "
-            "decoding; KV cache memory reduced to %s GiB.",
+            "Reserving %s GiB of GPU memory for frontend multimodal decoding "
+            "(%s GiB raw-frame semaphore budget, %s GiB decoder cache budget); "
+            "KV cache memory reduced to %s GiB.",
             format_gib(reserved_bytes),
+            format_gib(raw_frame_reserved_bytes),
+            format_gib(decoder_reserved_bytes),
             format_gib(remaining),
         )
         return remaining

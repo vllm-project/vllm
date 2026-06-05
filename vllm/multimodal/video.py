@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import math
+import tempfile
+import threading
 from abc import abstractmethod
+from contextlib import contextmanager
 from io import BytesIO
 from typing import Any, ClassVar, Literal, NamedTuple, cast
 
@@ -10,6 +14,7 @@ import numpy.typing as npt
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.registry import ExtensionManager
 
 try:
@@ -129,6 +134,14 @@ class VideoSourceMetadata(NamedTuple):
     duration: float
 
 
+class PyNvVideoCodecSourceMetadata(NamedTuple):
+    """Metadata needed before GPU video decode."""
+
+    source: VideoSourceMetadata
+    width: int
+    height: int
+
+
 class VideoLoader:
     @classmethod
     def compute_frames_index_to_sample(
@@ -168,6 +181,21 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+
+PYNVVIDEOCODEC_VIDEO_BACKEND = "pynvvideocodec"
+# Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
+PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
+PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
+PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
+
+
+class PyNvVideoCodecDecoderSlot:
+    """A retained PyNv decoder slot and its CUDA stream."""
+
+    def __init__(self, stream) -> None:
+        self.stream = stream
+        self.decoder = None
+        self.source_path: str | None = None
 
 
 class OpenCVVideoBackendMixin:
@@ -604,51 +632,202 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         )
 
 
-def gpu_decode_roundtrip(frames: npt.NDArray) -> npt.NDArray:
-    """Route decoded frames through device memory under the GPU memory pool.
+@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND)
+class PyNvVideoCodecVideoBackend(VideoBackend):
+    """Hardware-accelerated video backend using PyNvVideoCodec.
 
-    This acquires ``frames.nbytes`` from the process-global
-    :class:`~vllm.multimodal.gpu_ipc_memory.MultiModalGPUMemoryPool` (blocking
-    until the budget is free), moves the frames to the GPU, then copies them
-    straight back to host so the device buffer can be released immediately.
-
-    It is a stand-in for true hardware decoding (e.g. NVDEC): it exercises the
-    acquire -> VRAM -> CPU -> release admission-control flow and the byte
-    accounting, while leaving downstream preprocessing on the existing CPU
-    path. When the pool is disabled (``mm_ipc_gpu_memory_gb=0``) it is a no-op.
+    The backend first opens the stream only to read metadata and compute the
+    sampled frame indices. It then acquires the raw decoded RGB byte count from
+    the process-local multimodal GPU memory pool before decoding the selected
+    frames into VRAM. Decoded frames are copied into pinned host memory before
+    the lease is released, so downstream preprocessing continues to receive a
+    CPU ``np.ndarray`` in NHWC RGB format.
     """
-    from vllm.multimodal.gpu_ipc_memory import get_mm_gpu_ipc_pool
 
-    pool = get_mm_gpu_ipc_pool()
-    if pool is None or frames.size == 0:
-        return frames
+    _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
+    _active_decoder_slots: ClassVar[int] = 0
+    _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
 
-    import torch
+    @classmethod
+    def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
+        import torch
 
-    with pool.acquire(int(frames.nbytes)):
-        device_frames = torch.from_numpy(np.ascontiguousarray(frames)).to("cuda")
+        return PyNvVideoCodecDecoderSlot(
+            torch.cuda.Stream(device=torch.accelerator.current_device_index())
+        )
+
+    @staticmethod
+    def _drop_decoder_slot_decoder(decoder_slot: PyNvVideoCodecDecoderSlot) -> None:
+        decoder = decoder_slot.decoder
+        decoder_slot.decoder = None
+        decoder_slot.source_path = None
+        if decoder is None:
+            return
         try:
-            # Copy back to host immediately so the VRAM buffer is freed before
-            # the lease is released on exiting the context.
-            host_frames = device_frames.cpu().numpy()
+            decoder.stop()
+        except Exception:
+            logger.debug("Stopping PyNvVideoCodec decoder", exc_info=True)
+        del decoder
+        gc.collect()
+
+    @classmethod
+    @contextmanager
+    def _borrow_decoder_slot(cls):
+        create_slot = False
+        with cls._decoder_slot_cond:
+            while True:
+                if cls._decoder_slots:
+                    slot = cls._decoder_slots.pop()
+                    break
+                if cls._active_decoder_slots < PYNVVIDEOCODEC_MAX_RETAINED_DECODERS:
+                    cls._active_decoder_slots += 1
+                    create_slot = True
+                    break
+                cls._decoder_slot_cond.wait()
+
+        if create_slot:
+            try:
+                slot = cls._create_decoder_slot()
+            except Exception:
+                with cls._decoder_slot_cond:
+                    cls._active_decoder_slots -= 1
+                    cls._decoder_slot_cond.notify()
+                raise
+
+        try:
+            yield slot
         finally:
-            del device_frames
-    return host_frames
+            with cls._decoder_slot_cond:
+                cls._decoder_slots.append(slot)
+                cls._decoder_slot_cond.notify()
 
+    @staticmethod
+    def _metadata_value(metadata, *names: str, default=None):
+        for name in names:
+            value = getattr(metadata, name, None)
+            if value is not None:
+                return value
+        return default
 
-@VIDEO_LOADER_REGISTRY.register("gpu")
-class GPUVideoBackend(VideoBackend):
-    """Stub GPU-decode video backend.
+    @classmethod
+    def _read_source_metadata(
+        cls,
+        file_path: str,
+        nvc,
+    ) -> PyNvVideoCodecSourceMetadata:
+        metadata_decoder = nvc.SimpleDecoder(
+            file_path,
+            output_color_type=nvc.OutputColorType.RGB,
+            use_device_memory=False,
+            need_scanned_stream_metadata=True,
+            decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+        )
+        metadata = metadata_decoder.get_stream_metadata()
+        total_frames_num = len(metadata_decoder)
+        width = int(cls._metadata_value(metadata, "width", default=0))
+        height = int(cls._metadata_value(metadata, "height", default=0))
+        original_fps = float(
+            cls._metadata_value(
+                metadata,
+                "average_fps",
+                "avg_frame_rate",
+                "frame_rate",
+                "frameRate",
+                default=0.0,
+            )
+        )
+        duration = float(
+            cls._metadata_value(metadata, "duration", default=0.0)
+            or (total_frames_num / original_fps if original_fps > 0 else 0.0)
+        )
+        if total_frames_num <= 0:
+            raise ValueError("Could not determine video frame count")
+        if width <= 0 or height <= 0:
+            raise ValueError("Could not determine video dimensions")
+        return PyNvVideoCodecSourceMetadata(
+            source=VideoSourceMetadata(total_frames_num, original_fps, duration),
+            width=width,
+            height=height,
+        )
 
-    Decodes frames on CPU (reusing :class:`VideoBackend`'s uniform sampling),
-    then routes them through device memory via :func:`gpu_decode_roundtrip`
-    under the multimodal GPU memory pool before returning a host array. This
-    exercises the GPU memory admission-control flow that a real hardware
-    decoder will use; it is opt-in (select via
-    ``VLLM_VIDEO_LOADER_BACKEND=gpu`` or
-    ``--media-io-kwargs '{"video": {"video_backend": "gpu"}}'``) and is not yet
-    a true GPU decoder.
-    """
+    @classmethod
+    def _decode_to_pinned_host(
+        cls,
+        file_path: str,
+        frame_idx: list[int],
+        nvc,
+    ) -> npt.NDArray:
+        import torch
+
+        if not frame_idx:
+            return np.empty((0,), dtype=np.uint8)
+
+        with cls._borrow_decoder_slot() as decoder_slot:
+            stream = decoder_slot.stream
+            with torch.cuda.stream(stream):
+                decoder = decoder_slot.decoder
+                if decoder is not None and decoder_slot.source_path != file_path:
+                    try:
+                        decoder.reconfigure_decoder(file_path)
+                        decoder_slot.source_path = file_path
+                    except Exception:
+                        logger.debug("Recreating PyNvVideoCodec decoder", exc_info=True)
+                        cls._drop_decoder_slot_decoder(decoder_slot)
+                        decoder = None
+                if decoder is None:
+                    decoder = nvc.SimpleDecoder(
+                        file_path,
+                        output_color_type=nvc.OutputColorType.RGB,
+                        use_device_memory=True,
+                        need_scanned_stream_metadata=False,
+                        gpu_id=torch.accelerator.current_device_index(),
+                        cuda_stream=stream.cuda_stream,
+                        decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+                    )
+                    decoder_slot.decoder = decoder
+                    decoder_slot.source_path = file_path
+
+                try:
+                    decoded_frames = decoder.get_batch_frames_by_index(frame_idx)
+                except Exception:
+                    cls._drop_decoder_slot_decoder(decoder_slot)
+                    raise
+                if len(decoded_frames) < len(frame_idx):
+                    logger.warning(
+                        "pynvvideocodec video loading: expected %d frames but got %d.",
+                        len(frame_idx),
+                        len(decoded_frames),
+                    )
+                torch_frames = [torch.from_dlpack(frame) for frame in decoded_frames]
+                if not torch_frames:
+                    return np.empty((0,), dtype=np.uint8)
+                device_frames = torch.stack(torch_frames)
+                if device_frames.ndim != 4:
+                    raise ValueError(
+                        "PyNvVideoCodec returned frames with unexpected shape "
+                        f"{tuple(device_frames.shape)}"
+                    )
+                if device_frames.shape[-1] == 3:
+                    device_frames = device_frames.contiguous()
+                elif device_frames.shape[1] == 3:
+                    device_frames = device_frames.permute(0, 2, 3, 1).contiguous()
+                else:
+                    raise ValueError(
+                        "PyNvVideoCodec returned RGB frames with unexpected shape "
+                        f"{tuple(device_frames.shape)}"
+                    )
+                host_frames = torch.empty(
+                    device_frames.shape,
+                    dtype=device_frames.dtype,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                host_frames.copy_(device_frames, non_blocking=True)
+                stream.synchronize()
+                host_array = host_frames.numpy()
+                del decoded_frames, torch_frames, device_frames
+                torch.accelerator.empty_cache()
+                return host_array
 
     @classmethod
     def load_bytes(
@@ -658,20 +837,44 @@ class GPUVideoBackend(VideoBackend):
         fps: int = -1,
         max_duration: int = 300,
         frame_recovery: bool = False,
-        *,
-        backend: Literal["opencv", "pyav"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        frames, metadata = super().load_bytes(
-            data,
-            num_frames=num_frames,
-            fps=fps,
-            max_duration=max_duration,
-            frame_recovery=frame_recovery,
-            backend=backend,
-            **kwargs,
+        if frame_recovery:
+            raise ValueError(
+                "frame_recovery is not supported for "
+                f"`{PYNVVIDEOCODEC_VIDEO_BACKEND}` backend"
+            )
+
+        import PyNvVideoCodec as nvc
+
+        from vllm.multimodal.gpu_ipc_memory import get_mm_gpu_ipc_pool
+
+        target = VideoTargetMetadata(
+            num_frames=num_frames, fps=fps, max_duration=max_duration
         )
-        return gpu_decode_roundtrip(frames), metadata
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as temp_file:
+            temp_file.write(data)
+            temp_file.flush()
+
+            gpu_source = cls._read_source_metadata(temp_file.name, nvc)
+            source = gpu_source.source
+            frame_idx = cls.compute_frames_index_to_sample(
+                source=source, target=target, **kwargs
+            )
+            raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
+            pool = get_mm_gpu_ipc_pool()
+            if pool is None or raw_frame_bytes == 0:
+                frames = cls._decode_to_pinned_host(temp_file.name, frame_idx, nvc)
+            else:
+                with pool.acquire(raw_frame_bytes):
+                    frames = cls._decode_to_pinned_host(temp_file.name, frame_idx, nvc)
+
+        valid_frame_indices = frame_idx[: int(frames.shape[0])]
+        return frames, cls.create_hf_metadata(
+            source=source,
+            video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+            valid_frame_indices=valid_frame_indices,
+        )
 
 
 @VIDEO_LOADER_REGISTRY.register(
