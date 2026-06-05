@@ -7,7 +7,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy
+from copy import copy, deepcopy
 from http import HTTPStatus
 from typing import Any, Final, cast
 
@@ -351,16 +351,6 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     status_code=HTTPStatus.BAD_REQUEST,
                     param="max_tool_calls",
-                )
-            if request.text is not None and request.text.format is not None:
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message=(
-                        "text.format cannot be combined with "
-                        "tool_choice='required' for Harmony Responses."
-                    ),
-                    status_code=HTTPStatus.BAD_REQUEST,
-                    param="text.format",
                 )
             if request.structured_outputs is not None:
                 return self.create_error_response(
@@ -834,7 +824,7 @@ class OpenAIServingResponses(OpenAIServing):
         """Build the JSON schema used to force required function calls."""
         json_schema = get_json_schema_from_tools(
             tool_choice=request.tool_choice,
-            tools=request.tools,
+            tools=deepcopy(request.tools),
         )
         if json_schema is None:
             raise ValueError("tool_choice='required' requires function tools.")
