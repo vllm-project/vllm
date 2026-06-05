@@ -67,7 +67,7 @@ def apply_rope_gptj_last_k(
     head_dim = x.shape[-1]
     nope_dim = head_dim - rope_dim
 
-    cs = cos_sin_cache[positions].to(torch.float32)
+    cs = cos_sin_cache[positions.long()].to(torch.float32)
     cos = cs[..., :half]
     sin = cs[..., half:]
 
@@ -114,15 +114,37 @@ def _op_available() -> bool:
     return hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert")
 
 
+def _full_cache_fp8_op_available() -> bool:
+    return hasattr(
+        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert"
+    )
+
+
+def _full_cache_bf16_op_available() -> bool:
+    return hasattr(
+        torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert"
+    )
+
+
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
     reason="CUDA not available or fused DeepseekV4 op not built in",
 )
 
 
-def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs):
-    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-        q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+def _call_fused(
+    q_in, q_head_padded, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+):
+    return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        q_in,
+        kv,
+        k_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        q_head_padded,
+        eps,
+        bs,
     )
 
 
@@ -130,8 +152,23 @@ def _call_fused(q, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 64, 2048])
-@pytest.mark.parametrize("n_heads", [8, 64])
-def test_q_path_matches_reference(num_tokens: int, n_heads: int):
+@pytest.mark.parametrize(
+    "n_heads,padded_heads",
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
+)
+def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: int):
     torch.manual_seed(0)
     device = "cuda"
     dtype = torch.bfloat16
@@ -156,10 +193,16 @@ def test_q_path_matches_reference(num_tokens: int, n_heads: int):
         num_blocks, bs, HEAD_BYTES, dtype=torch.uint8, device=device
     ).view(num_blocks, -1)
     slot_mapping = torch.full((num_tokens,), -1, dtype=torch.int64, device=device)
-    q_fused = q.clone()
-    _call_fused(q_fused, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs)
+    q_out = _call_fused(
+        q, padded_heads, kv, k_cache, slot_mapping, positions, cos_sin_cache, eps, bs
+    )
 
-    torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)
+    if n_heads < padded_heads:
+        pad_region = q_out[:, n_heads:padded_heads]
+        assert pad_region.abs().max().item() == 0.0, (
+            "padded head slots must be exact zero"
+        )
 
 
 # ── Test 2: KV path round-trip byte/value parity ─────────────────────────────
@@ -201,11 +244,12 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         kv_ref, k_cache_ref, slot_mapping, block_size=block_size
     )
 
-    # ── Fused path (dummy q, single head) ──────────────────────────────────
+    # ── Fused path (dummy q, padded to FlashMLA's min head count 64) ───────
     k_cache_fused = torch.zeros_like(k_cache_ref)
     q_dummy = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
-    _call_fused(
+    _ = _call_fused(
         q_dummy,
+        64,
         kv,
         k_cache_fused,
         slot_mapping,
@@ -298,8 +342,9 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
     # Fused: pass full-sized q/kv/positions, shorter slot_mapping.
     q_dummy = torch.zeros(total, 1, HEAD_DIM, dtype=dtype, device=device)
     k_cache_fused = torch.zeros_like(k_cache_ref)
-    _call_fused(
+    _ = _call_fused(
         q_dummy,
+        64,
         kv,
         k_cache_fused,
         slot_mapping,
@@ -316,9 +361,26 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 2048])
-@pytest.mark.parametrize("n_heads", [8, 64])
+@pytest.mark.parametrize(
+    "n_heads,padded_heads",
+    [
+        # Each supported padded_heads instantiation: padded (n_heads <
+        # padded_heads) and unpadded (n_heads == padded_heads).
+        (1, 8),
+        (8, 8),
+        (8, 16),
+        (16, 16),
+        (16, 32),
+        (32, 32),
+        (8, 64),
+        (64, 64),
+        (64, 128),
+    ],
+)
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
+def test_combined_q_and_kv(
+    num_tokens: int, n_heads: int, padded_heads: int, block_size: int
+):
     torch.manual_seed(2)
     device = "cuda"
     dtype = torch.bfloat16
@@ -345,9 +407,249 @@ def test_combined_q_and_kv(num_tokens: int, n_heads: int, block_size: int):
     )
 
     # Fused single call.
-    q_fused = q.clone()
     k_cache_fused = torch.zeros_like(k_cache_ref)
-    _call_fused(
+    q_out = _call_fused(
+        q,
+        padded_heads,
+        kv,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+    )
+
+    torch.testing.assert_close(q_out[:, :n_heads], q_ref, rtol=1e-2, atol=1e-2)
+    if n_heads < padded_heads:
+        pad_region = q_out[:, n_heads:padded_heads]
+        assert pad_region.abs().max().item() == 0.0, (
+            "padded head slots must be exact zero"
+        )
+    torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+# ── Full-cache (FlashInfer) path parity ──────────────────────────────────────
+
+
+def _call_full_cache_fp8_fused(
+    q,
+    kv,
+    q_fp8,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    fp8_scale,
+    q_fp8_scale_inv,
+    eps,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+        q,
+        kv,
+        q_fp8,
+        k_cache,
+        slot_mapping,
+        positions.long(),
+        cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
+        eps,
+        bs,
+    )
+
+
+def _call_full_cache_bf16_fused(
+    q,
+    kv,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    eps,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+        q,
+        kv,
+        k_cache,
+        slot_mapping,
+        positions.long(),
+        cos_sin_cache,
+        eps,
+        bs,
+    )
+
+
+def _fp8_full_cache_reference(
+    q,
+    kv,
+    k_cache,
+    q_fp8,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    eps,
+    block_size,
+    fp8_scale,
+    q_fp8_scale_inv,
+):
+    q_ref = rmsnorm_no_weight(q, eps)
+    q_ref = apply_rope_gptj_last_k(q_ref, positions, cos_sin_cache)
+    q_fp8.copy_(
+        torch.clamp(q_ref.float() * q_fp8_scale_inv, -FP8_MAX, FP8_MAX).to(
+            torch.float8_e4m3fn
+        )
+    )
+
+    kv_ref = apply_rope_gptj_last_k(kv, positions, cos_sin_cache)
+    valid = slot_mapping >= 0
+    slots = slot_mapping[valid]
+    block_idx = slots // block_size
+    pos_in_block = slots % block_size
+    k_cache[block_idx, pos_in_block] = torch.clamp(
+        kv_ref[valid].float() / fp8_scale, -FP8_MAX, FP8_MAX
+    ).to(torch.float8_e4m3fn)
+
+
+def _bf16_full_cache_reference(
+    q,
+    kv,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    eps,
+    block_size,
+):
+    q_ref = rmsnorm_no_weight(q, eps)
+    # Kernel keeps RMSNorm+RoPE in fp32 and rounds to bf16 once at the store.
+    q_ref = apply_rope_gptj_last_k(q_ref, positions, cos_sin_cache).to(q.dtype)
+
+    kv_ref = apply_rope_gptj_last_k(kv, positions, cos_sin_cache)
+    valid = slot_mapping >= 0
+    slots = slot_mapping[valid]
+    block_idx = slots // block_size
+    pos_in_block = slots % block_size
+    k_cache[block_idx, pos_in_block] = kv_ref[valid]
+    return q_ref
+
+
+@pytest.mark.skipif(
+    not _full_cache_fp8_op_available(),
+    reason="full-cache per-tensor FP8 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 17])
+@pytest.mark.parametrize("n_heads", [8, 17])
+@pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
+def test_full_cache_per_tensor_fp8_matches_reference(
+    num_tokens: int,
+    n_heads: int,
+    positions_dtype: torch.dtype,
+):
+    torch.manual_seed(4)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    block_size = 16
+    max_pos = 4096
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=positions_dtype, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    fp8_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    q_fp8_scale_inv = torch.tensor([1.0], dtype=torch.float32, device=device)
+
+    q_fp8_ref = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    q_fp8_fused = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    k_cache_ref = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
+    )
+    k_cache_fused = torch.zeros_like(k_cache_ref)
+
+    _fp8_full_cache_reference(
+        q,
+        kv,
+        k_cache_ref,
+        q_fp8_ref,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+        fp8_scale,
+        q_fp8_scale_inv,
+    )
+    _call_full_cache_fp8_fused(
+        q.clone(),
+        kv,
+        q_fp8_fused,
+        k_cache_fused,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        fp8_scale,
+        q_fp8_scale_inv,
+        eps,
+        block_size,
+    )
+
+    torch.testing.assert_close(
+        q_fp8_fused.float(), q_fp8_ref.float(), rtol=0, atol=0.25
+    )
+    torch.testing.assert_close(
+        k_cache_fused.float(), k_cache_ref.float(), rtol=0, atol=0.25
+    )
+
+
+@pytest.mark.skipif(
+    not _full_cache_bf16_op_available(),
+    reason="full-cache BF16 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 17])
+@pytest.mark.parametrize("n_heads", [8, 17])
+@pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
+def test_full_cache_bf16_matches_reference(
+    num_tokens: int,
+    n_heads: int,
+    positions_dtype: torch.dtype,
+):
+    torch.manual_seed(5)
+    device = "cuda"
+    dtype = torch.bfloat16
+    eps = 1e-6
+    block_size = 16
+    max_pos = 4096
+
+    q = torch.randn(num_tokens, n_heads, HEAD_DIM, dtype=dtype, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=positions_dtype, device=device)
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+
+    q_fused = q.clone()
+    k_cache_ref = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    k_cache_fused = torch.zeros_like(k_cache_ref)
+    q_ref = _bf16_full_cache_reference(
+        q,
+        kv,
+        k_cache_ref,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        eps,
+        block_size,
+    )
+    _call_full_cache_bf16_fused(
         q_fused,
         kv,
         k_cache_fused,
