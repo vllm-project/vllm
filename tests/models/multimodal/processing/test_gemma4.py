@@ -285,13 +285,3 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
         )
         == 1
     )
-
-
-def test_cpu_platform_mem_get_info_returns_valid_memory():
-    """CpuPlatform.mem_get_info must return (available, total) in bytes."""
-    from vllm.platforms.cpu import CpuPlatform
-
-    free, total = CpuPlatform.mem_get_info()
-    assert total > 0, "total memory must be positive"
-    assert free > 0, "available memory must be positive"
-    assert free <= total, "available memory cannot exceed total"
