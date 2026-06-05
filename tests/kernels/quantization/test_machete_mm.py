@@ -33,12 +33,13 @@ CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
 
-# TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
-#  unit tests to a common utility function. Currently the use of
-#  `is_quant_method_supported` conflates kernels with quantization methods
-#  an assumption which is breaking down as quantizations methods can have
-#  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+# Machete kernels are Hopper-only by design — see CMakeLists.txt
+# (MACHETE_ARCHS = "9.0a" + "the machete kernels only work on hopper"
+# comment). `is_device_capability_family(90)` matches Hopper family only.
+# Prior gates (`>= 9` here, `has_device_capability(90)` below) caught
+# SM_10x (Blackwell, etc.) because 100 >= 90 — but machete has no
+# SM_10x kernel image, so dispatch failed with cudaErrorNoKernelImage.
+IS_SUPPORTED_BY_GPU = current_platform.is_device_capability_family(90)
 
 MNK_SHAPES = [
     (1, 128, 128),
@@ -130,13 +131,6 @@ TEST_TYPES = [
     #              token_scale_type=torch.float)
     #   for group_scale_type in [None, torch.float16]),
 ]
-
-# TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
-#  unit tests to a common utility function. Currently the use of
-#  `is_quant_method_supported` conflates kernels with quantization methods
-#  an assumption which is breaking down as quantizations methods can have
-#  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 
 def rand_data(shape, dtype=torch.float16, scale=1, offset=0):
