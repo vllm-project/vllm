@@ -97,7 +97,26 @@ def fused_triton_qk_norm_rope_kvcache_update_impl(
         else torch.tensor(v_scale_f, dtype=torch.float32, device=qkv.device)
     )
 
-    kv_layout = "HND" if key_cache.shape[1] == num_kv_heads else "NHD"
+    # This fusion pass is gated to ROCm + AITER + Qwen3-Next, where
+    # ``RocmAiterUnifiedAttentionBackend.get_kv_cache_shape`` returns
+    # ``(num_blocks, 2, block_size, num_kv_heads, head_size)``. After
+    # ``_split_kv_cache`` (split on dim 1), each of ``key_cache`` and
+    # ``value_cache`` has shape
+    # ``(num_blocks, block_size, num_kv_heads, head_size)`` -- i.e. NHD.
+    # Assert the invariant rather than inferring layout from a shape
+    # coincidence (the previous heuristic ``shape[1] == num_kv_heads``
+    # silently picks the wrong layout if a backend's ``block_size``
+    # happens to equal ``num_kv_heads``). If a future backend with HND
+    # storage is added to the gate, this will fail loud at first
+    # invocation and the layout-determination needs to be revisited
+    # (e.g. via a ``kv_cache_layout`` accessor on the attention impl).
+    assert key_cache.shape[-2] == num_kv_heads, (
+        f"QK-Norm+RoPE+KVCache fusion expects NHD KV layout "
+        f"(.., num_kv_heads, head_size); got shape "
+        f"{tuple(key_cache.shape)} with num_kv_heads={num_kv_heads} "
+        f"for layer {layer_name}."
+    )
+    kv_layout = "NHD"
 
     # Qwen3-Next uses GemmaRMSNorm which applies ``(1 + weight)`` to the
     # weight before the norm. The traced pattern matches the ``.float() +
