@@ -1607,12 +1607,6 @@ def _get_nvfp4_launch_config(
     tile_size = min(default_tile_size, max_tile_size)
     if head_size == 128:
         return tile_size, 8, 2
-    if head_size in (320, 512):
-        return tile_size, 8, 1
-    if head_size >= 512:
-        return tile_size, 8, 3
-    if head_size_padded >= 512:
-        return tile_size, 8, 2
     return tile_size, 8, 1
 
 
