@@ -29,6 +29,8 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
+    UsageInfo,
+    build_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
@@ -64,6 +66,20 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def resolve_num_cached_tokens(
+    kv_transfer_params: dict[str, Any] | None,
+    num_cached_tokens: int | None,
+) -> int | None:
+    """PD decode: prefer prefill APC stats from kv_transfer_params."""
+    if (
+        kv_transfer_params
+        and kv_transfer_params.get("do_remote_prefill")
+        and "num_cached_tokens" in kv_transfer_params
+    ):
+        return kv_transfer_params["num_cached_tokens"]
+    return num_cached_tokens
 
 
 class RendererRequest(Protocol):
@@ -149,6 +165,11 @@ class OpenAIServing(BeamSearchOnlineMixin):
         vllm_config = getattr(engine_client, "vllm_config", None)
         kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         self.has_kv_connector = kv_transfer_config is not None
+        self.enable_prefix_caching = (
+            bool(vllm_config.cache_config.enable_prefix_caching)
+            if vllm_config is not None
+            else False
+        )
 
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
@@ -162,6 +183,33 @@ class OpenAIServing(BeamSearchOnlineMixin):
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
+
+    def resolve_num_cached_tokens(
+        self,
+        kv_transfer_params: dict[str, Any] | None,
+        num_cached_tokens: int | None,
+    ) -> int | None:
+        return resolve_num_cached_tokens(kv_transfer_params, num_cached_tokens)
+
+    def make_usage_info(
+        self,
+        *,
+        enable_prompt_tokens_details: bool,
+        num_cached_tokens: int | None,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> UsageInfo:
+        return UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=build_prompt_tokens_details(
+                enable_prompt_tokens_details=enable_prompt_tokens_details,
+                enable_prefix_caching=self.enable_prefix_caching,
+                num_cached_tokens=num_cached_tokens,
+                prompt_tokens=prompt_tokens,
+            ),
+        )
 
     @staticmethod
     def create_error_response(
