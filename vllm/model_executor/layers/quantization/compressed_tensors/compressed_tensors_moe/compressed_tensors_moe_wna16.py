@@ -288,7 +288,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             HybridW4A16MoEExperts(
                 moe_config=self.moe, quant_config=self.moe_quant_config
             ),
-            inplace=not self.moe.disable_inplace,
         )
 
     def get_fused_moe_quant_config(
@@ -365,7 +364,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
