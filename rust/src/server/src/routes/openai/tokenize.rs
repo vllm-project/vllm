@@ -12,7 +12,6 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
-use tracing::debug;
 
 use crate::error::{ApiError, server_error};
 use crate::routes::openai::tokenize::types::{
@@ -59,9 +58,7 @@ pub async fn tokenize(
 
     let result = match body {
         // Completion form: encode the raw `prompt` string (no chat template).
-        TokenizeRequest::Completion(req) => {
-            tokenize_completion(&state, &tokenizer, &request_id, req)
-        }
+        TokenizeRequest::Completion(req) => tokenize_completion(&state, &tokenizer, req),
         // Chat form: render `messages` through the template, then encode (see `tokenize_chat`).
         TokenizeRequest::Chat(req) => tokenize_chat(&state, &request_id, req).await,
     };
@@ -84,10 +81,8 @@ pub async fn tokenize(
 fn tokenize_completion(
     state: &AppState,
     tokenizer: &vllm_text::tokenizer::DynTokenizer,
-    request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    debug!(%request_id, "tokenize completion");
     check_model(state, req.model.as_deref())?;
     let tokens = tokenizer
         .encode(&req.prompt, req.add_special_tokens)
@@ -104,7 +99,6 @@ async fn tokenize_chat(
     request_id: &str,
     req: TokenizeChatRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    debug!(%request_id, "tokenize chat");
     check_model(state, req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
@@ -119,11 +113,8 @@ async fn tokenize_chat(
 
 pub async fn detokenize(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
 ) -> Response {
-    let request_id = tokenize_request_id(&headers);
-    debug!(%request_id, "detokenize");
     if let Err(error) = check_model(&state, body.model.as_deref()) {
         return error.into_response();
     }
