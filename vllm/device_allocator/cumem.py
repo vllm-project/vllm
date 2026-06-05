@@ -180,8 +180,9 @@ class CuMemAllocator:
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
-        :param offload_tags: The tags of the memory allocation that will be
-            offloaded. The rest of the memory allocation will be discarded.
+        Args:
+            offload_tags: The tags of the memory allocation that will be
+                offloaded. The rest of the memory allocation will be discarded.
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -230,9 +231,10 @@ class CuMemAllocator:
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
 
-        :param tags: The tags of the memory allocation that will be loaded
-            back to GPU memory. If None, all memory allocation will be loaded
-            back to GPU memory.
+        Args:
+            tags: The tags of the memory allocation that will be loaded
+                back to GPU memory. If None, all memory allocation will be loaded
+                back to GPU memory.
         """
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
@@ -255,8 +257,9 @@ class CuMemAllocator:
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
-        :param tag: The tag of the memory allocation. If None, the default tag
-            will be used.
+        Args:
+            tag: The tag of the memory allocation. If None, the default tag
+                will be used.
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
