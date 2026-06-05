@@ -192,7 +192,6 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
 }
 
 /// Lower one OpenAI chat message into the `vllm-chat` message shape.
-/// share util with tokenize
 pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
     match message {
         ChatMessage::System { content, .. } => {
