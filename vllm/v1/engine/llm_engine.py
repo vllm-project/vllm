@@ -56,7 +56,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
@@ -351,6 +350,8 @@ class LLMEngine:
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        if level >= 1:
+            self.renderer.clear_mm_cache()
         self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:
