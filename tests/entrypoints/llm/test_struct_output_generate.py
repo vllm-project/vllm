@@ -1025,3 +1025,87 @@ def test_structured_output_with_structural_tag(backend: str):
         assert "hello_flag" in generated_text, (
             f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
         )
+
+
+def test_max_whitespace_cnt_e2e():
+    """E2E test for max_whitespace_cnt bounded whitespace fix (issue #38696).
+
+    The prompt instructs the model to output JSON with multiple spaces after
+    colons. With max_whitespace_cnt=2, the grammar FSM limits whitespace to
+    at most 2 consecutive characters between tokens, preventing runaway
+    whitespace that would otherwise hit max_tokens with finish_reason='length'.
+    """
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "answer": {"type": "integer"},
+        },
+        "required": ["question", "answer"],
+        "additionalProperties": False,
+    }
+
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        enforce_eager=True,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            max_whitespace_cnt=2,
+        ),
+        seed=42,
+    )
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=256,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompt = (
+        "Output a JSON object with exactly this schema: "
+        '{"question": "What is 2+2?", "answer": 4}. '
+        "Add multiple spaces (at least 3 spaces) after each colon "
+        "and after commas in the JSON output. Do not add any extra text."
+    )
+    outputs = llm.generate([prompt], sampling_params=sampling_params, use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+
+        # Verify output is valid JSON
+        try:
+            parsed = json.loads(generated_text)
+        except json.JSONDecodeError as e:
+            pytest.fail(
+                f"Output is not valid JSON: {generated_text!r}\nError: {e}"
+            )
+        jsonschema.validate(instance=parsed, schema=json_schema)
+
+        # Verify finish_reason is not 'length' (runaway whitespace symptom)
+        finish_reason = output.outputs[0].finish_reason
+        assert finish_reason != "length", (
+            f"finish_reason was 'length', indicating runaway whitespace: "
+            f"{generated_text!r}"
+        )
+
+        # Verify no sequence of whitespace exceeds max_whitespace_cnt=2
+        # between JSON structural tokens (after : or ,)
+        max_consecutive_space = 0
+        current_run = 0
+        for ch in generated_text:
+            if ch == " ":
+                current_run += 1
+                max_consecutive_space = max(max_consecutive_space, current_run)
+            else:
+                current_run = 0
+
+        assert max_consecutive_space <= 2, (
+            f"Found {max_consecutive_space} consecutive spaces in output, "
+            f"exceeding max_whitespace_cnt=2. Output: {generated_text!r}"
+        )
