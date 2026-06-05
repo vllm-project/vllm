@@ -11,13 +11,13 @@ import importlib.metadata
 import importlib.util
 import os
 import sys
-import tomllib
 from functools import cache
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import regex as re
+import tomllib
 from typing_extensions import Never
 
 from vllm.logger import init_logger
