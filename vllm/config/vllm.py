@@ -181,18 +181,20 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
-_QK_NORM_MODEL_TYPES = frozenset(
-    {
-        "qwen3",
-        "qwen3_moe",
-        "qwen3_next",
-    }
-)
+_QK_NORM_MODEL_TYPES = frozenset({"qwen3_next"})
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE + KV cache update for models with
     QK-norm on ROCm with AITER.
+
+    The pattern in ``Qwen3NextQkNormRopeKvCachePattern`` is currently
+    Qwen3-Next-specific (gated/ungated attention layouts as emitted by
+    ``Qwen3NextAttention``); other QK-norm architectures (qwen3,
+    qwen3_moe, ...) need their own pattern variant and should opt in by
+    being added to ``_QK_NORM_MODEL_TYPES`` only when their pattern
+    lands. We therefore gate strictly on ``model_type`` membership and
+    do not fall back to the generic ``hf_config.qk_norm`` attribute.
 
     Both ``+rotary_embedding`` and ``use_inductor_graph_partition`` are
     auto-enabled by ``CompilationConfig.__post_init__`` when this flag is
@@ -215,10 +217,8 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
         return False
     if cfg.model_config is None:
         return False
-    hf_config = cfg.model_config.hf_text_config
-    has_qk_norm = getattr(hf_config, "qk_norm", False)
-    model_type = getattr(hf_config, "model_type", "")
-    return has_qk_norm or model_type in _QK_NORM_MODEL_TYPES
+    model_type = getattr(cfg.model_config.hf_text_config, "model_type", "")
+    return model_type in _QK_NORM_MODEL_TYPES
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
