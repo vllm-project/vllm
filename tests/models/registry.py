@@ -239,7 +239,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2MoeForCausalLM": _HfExamplesInfo(
-        "CohereLabs/command-a-plus-05-2026",
+        "CohereLabs/North-Mini-Code",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -844,7 +844,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/command-a-vision-07-2025"
+        "CohereLabs/command-a-vision-07-2025",
+        extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
     ),
     "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Nano",
