@@ -203,6 +203,52 @@ class TestExtractResponseOutputsIncludeReasoning:
 
         assert all(o.type != "reasoning" for o in outputs)
 
+    def test_include_reasoning_false_suppresses_logprobs(self, tokenizer):
+        """Logprobs are suppressed to avoid leaking reasoning tokens."""
+        from openai.types.responses.response_output_text import Logprob
+
+        parser = make_parser(tokenizer, reasoning=True)
+        request = make_responses_request(include_reasoning=False)
+        fake_logprobs = [
+            Logprob(token="<think>", bytes=[], logprob=-0.1, top_logprobs=[]),
+        ]
+
+        outputs = parser.extract_response_outputs(
+            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
+            model_output_token_ids=tokenizer.encode(
+                MODEL_OUTPUT_REASONING_AND_CONTENT,
+                add_special_tokens=False,
+            ),
+            request=request,
+            logprobs=fake_logprobs,
+        )
+
+        message = next(o for o in outputs if o.type == "message")
+        assert message.content[0].logprobs is None
+
+    def test_include_reasoning_true_preserves_logprobs(self, tokenizer):
+        """Logprobs are preserved when reasoning is included."""
+        from openai.types.responses.response_output_text import Logprob
+
+        parser = make_parser(tokenizer, reasoning=True)
+        request = make_responses_request(include_reasoning=True)
+        fake_logprobs = [
+            Logprob(token="hello", bytes=[], logprob=-0.5, top_logprobs=[]),
+        ]
+
+        outputs = parser.extract_response_outputs(
+            model_output=MODEL_OUTPUT_REASONING_AND_CONTENT,
+            model_output_token_ids=tokenizer.encode(
+                MODEL_OUTPUT_REASONING_AND_CONTENT,
+                add_special_tokens=False,
+            ),
+            request=request,
+            logprobs=fake_logprobs,
+        )
+
+        message = next(o for o in outputs if o.type == "message")
+        assert message.content[0].logprobs is not None
+
 
 # ── Streaming: parse_delta ───────────────────────────────────────────
 
