@@ -692,7 +692,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value, z, b, a
 
-    @torch.compile(fullgraph=True)
     def prepare_gdn_attention_core_inputs(
         self,
         mixed_qkvz: torch.Tensor,
