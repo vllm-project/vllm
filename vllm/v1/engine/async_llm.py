@@ -154,6 +154,7 @@ class AsyncLLM(EngineClient):
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
+        self.sleeping_tags: set[str] = set()
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
@@ -943,13 +944,22 @@ class AsyncLLM(EngineClient):
 
         if self.logger_manager is not None:
             sleep_level = 0 if tags is not None else level
-            self.logger_manager.record_sleep_state(1, sleep_level)
+            if tags is not None:
+                self.sleeping_tags.update(tags)
+            elif level >= 1:
+                self.sleeping_tags.update(("weights", "kv_cache"))
+            self.logger_manager.record_sleep_state(1, sleep_level, self.sleeping_tags)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(0, 0)
+            if tags is None:
+                self.sleeping_tags.clear()
+            else:
+                self.sleeping_tags.difference_update(tags)
+            sleep = int(bool(self.sleeping_tags))
+            self.logger_manager.record_sleep_state(sleep, 0, self.sleeping_tags)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

@@ -67,7 +67,12 @@ class StatLoggerBase(ABC):
     def log(self):  # noqa
         pass
 
-    def record_sleep_state(self, is_awake: int, level: int):  # noqa
+    def record_sleep_state(  # noqa
+        self,
+        is_awake: int = 0,
+        level: int = 0,
+        sleeping_tags: set[str] | None = None,
+    ):
         pass
 
 
@@ -509,6 +514,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_engine_sleep_state[s] = {
                 idx: gauge_engine_sleep_state.labels(
                     engine=idx, model_name=model_name, sleep_state=s
+                )
+                for idx in engine_indexes
+            }
+
+        gauge_engine_sleep_tag_state = self._gauge_cls(
+            name="vllm:engine_sleep_tag_state",
+            documentation=(
+                "Engine memory sleep tag state; 1 means the memory tag is "
+                "sleeping/released, 0 means the memory tag is awake/allocated."
+            ),
+            labelnames=labelnames + ["sleep_tag"],
+            multiprocess_mode="mostrecent",
+        )
+
+        self.gauge_engine_sleep_tag_state = {}
+        for tag in ("weights", "kv_cache"):
+            self.gauge_engine_sleep_tag_state[tag] = {
+                idx: gauge_engine_sleep_tag_state.labels(
+                    engine=idx, model_name=model_name, sleep_tag=tag
                 )
                 for idx in engine_indexes
             }
@@ -1216,10 +1240,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
-    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+    def record_sleep_state(
+        self,
+        sleep: int = 0,
+        level: int = 0,
+        sleeping_tags: set[str] | None = None,
+    ):
         awake = 1
         discard_all = 0
         weights_offloaded = 0
+        sleeping_tags = sleeping_tags or set()
 
         if sleep == 1:
             awake = 0
@@ -1234,6 +1264,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 weights_offloaded
             )
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
+            for tag in ("weights", "kv_cache"):
+                self.gauge_engine_sleep_tag_state[tag][engine_idx].set(
+                    int(tag in sleeping_tags)
+                )
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
@@ -1347,9 +1381,14 @@ class StatLoggerManager:
                 engine_idx=engine_idx,
             )
 
-    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+    def record_sleep_state(
+        self,
+        sleep: int = 0,
+        level: int = 0,
+        sleeping_tags: set[str] | None = None,
+    ):
         for logger in self.stat_loggers:
-            logger.record_sleep_state(sleep, level)
+            logger.record_sleep_state(sleep, level, sleeping_tags)
 
     def log(self):
         for logger in self.stat_loggers:
