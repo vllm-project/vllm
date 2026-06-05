@@ -26,4 +26,10 @@ SHAPE_CONFIGS: dict[str, list[dict]] = {
         for d in COMMON_HIDDEN_SIZES
         for n in NUM_TOKENS
     ],
+    "fused_add_rms_norm": [
+        {"num_tokens": n, "hidden_size": d, "dtype": dtype}
+        for dtype in [torch.float16, torch.bfloat16, torch.float32]
+        for d in COMMON_HIDDEN_SIZES
+        for n in NUM_TOKENS
+    ],
 }
