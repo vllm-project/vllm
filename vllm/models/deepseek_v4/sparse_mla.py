@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 FlashMLA sparse backend, metadata, and metadata builder.
-
-Platform-neutral: shared by the CUDA FlashMLA / FlashInfer attention impls
-(``nvidia/``) and the ROCm impl (``amd/``), so the ROCm path does not import
-from ``nvidia/``.
-
-The builder here subclasses ``AttentionMetadataBuilder`` directly rather than
-the DeepSeek-V3.2 ``FlashMLASparseMetadataBuilder``: DeepSeek-V4 runs its own
-attention impl (``DeepseekV4Attention``) that never consumes the V3.2 FP8
-decode/prefill metadata, so the only logic it needs is the per-token request
-ids, the compressed slot mapping, and the C128A (compress_ratio == 128) top-k
-metadata.
-"""
+"""DeepSeek-V4 FlashMLA sparse backend, metadata, and metadata builder."""
 
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -43,6 +31,79 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 # Padded slots stay -1 and decode_lens caps them via topk_length, so the pad is a
 # no-op at kernel level. Mirrors _SPARSE_PREFILL_TOPK_ALIGNMENT in cache_utils.py.
 _C128A_TOPK_ALIGNMENT = 128
+
+
+class DeepseekV4FlashMLABackend(AttentionBackend):
+    """DeepSeek-V4 sparse-MLA backend.
+
+    Subclasses ``AttentionBackend`` directly (not the V3.2
+    ``FlashMLASparseBackend``): DeepSeek-V4 runs its own attention layer
+    (``DeepseekV4Attention``), so it does not reuse the V3.2 builder or impl, and
+    only needs to declare its own metadata builder, KV-cache layout, and the
+    sparse-MLA capability flags.
+    """
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+        "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [256]
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_builder_cls() -> type["DeepseekV4FlashMLAMetadataBuilder"]:
+        return DeepseekV4FlashMLAMetadataBuilder
+
+    @staticmethod
+    def get_impl_cls() -> type[Any]:
+        # DeepSeek-V4 runs its attention through ``DeepseekV4Attention.forward``,
+        # not the generic ``Attention``/``MLAAttention`` layer, so the backend's
+        # impl class is never instantiated.
+        raise NotImplementedError(
+            "DeepseekV4FlashMLABackend has no separate impl class; DeepSeek-V4 "
+            "attention runs through DeepseekV4Attention."
+        )
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # DeepSeek V4 layout: 448 NoPE + 64 RoPE = 512.
+        return [512]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major in [9, 10]
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        if cache_dtype_str == "fp8_ds_mla":
+            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
+            # head_size passed in is the semantic head_dim (512).
+            return (num_blocks, block_size, 584)
+        else:
+            return (num_blocks, block_size, head_size)
 
 
 @dataclass
@@ -233,79 +294,6 @@ class DeepseekV4FlashMLAMetadataBuilder(
         if num_prefill_tokens > 0:
             result["c128a_prefill_topk_indices"] = prefill_local
         return result
-
-
-class DeepseekV4FlashMLABackend(AttentionBackend):
-    """DeepSeek-V4 sparse-MLA backend.
-
-    Subclasses ``AttentionBackend`` directly (not the V3.2
-    ``FlashMLASparseBackend``): DeepSeek-V4 runs its own attention layer
-    (``DeepseekV4Attention``), so it does not reuse the V3.2 builder or impl, and
-    only needs to declare its own metadata builder, KV-cache layout, and the
-    sparse-MLA capability flags.
-    """
-
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
-        "bfloat16",
-        "fp8_ds_mla",
-        "fp8",  # alias for fp8_ds_mla
-    ]
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "FLASHMLA_SPARSE_DSV4"
-
-    @staticmethod
-    def get_builder_cls() -> type["DeepseekV4FlashMLAMetadataBuilder"]:
-        return DeepseekV4FlashMLAMetadataBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[Any]:
-        # DeepSeek-V4 runs its attention through ``DeepseekV4Attention.forward``,
-        # not the generic ``Attention``/``MLAAttention`` layer, so the backend's
-        # impl class is never instantiated.
-        raise NotImplementedError(
-            "DeepseekV4FlashMLABackend has no separate impl class; DeepSeek-V4 "
-            "attention runs through DeepseekV4Attention."
-        )
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V4 layout: 448 NoPE + 64 RoPE = 512.
-        return [512]
-
-    @classmethod
-    def is_mla(cls) -> bool:
-        return True
-
-    @classmethod
-    def is_sparse(cls) -> bool:
-        return True
-
-    @classmethod
-    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
-        else:
-            return (num_blocks, block_size, head_size)
 
 
 def build_c128a_topk_metadata(
