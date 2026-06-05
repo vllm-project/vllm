@@ -1102,9 +1102,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
         trust_remote_code=True,
-        max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": "Custom processor code is not compatible with Transformers v5."
+            "vllm": "Custom processor code is not compatible with Transformers v5."
         },
     ),
     "MiniCPMV": _HfExamplesInfo(
@@ -1114,7 +1113,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
         },
-        max_transformers_version="4.57",
         transformers_version_reason={
             "vllm": (
                 "MiniCPMVBatchFeature is incompatible with its base class in "
