@@ -834,6 +834,8 @@ class KVCacheTensor:
 
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor
+    offset: int = 0  # byte offset within a shared backing allocation
+    backing_size: int = 0  # total backing size (0 = independent allocation)
 
 
 @dataclass

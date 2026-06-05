@@ -149,10 +149,25 @@ def init_attn_backend(
 
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
-):
+) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+    packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
+        if kv_cache_tensor.backing_size > 0:
+            if packed_backing is None:
+                packed_backing = torch.zeros(
+                    kv_cache_tensor.backing_size,
+                    dtype=torch.int8,
+                    device=device,
+                )
+            tensor = packed_backing[
+                kv_cache_tensor.offset
+                : kv_cache_tensor.offset + kv_cache_tensor.size
+            ]
+        else:
+            tensor = torch.zeros(
+                kv_cache_tensor.size, dtype=torch.int8, device=device
+            )
         for layer_name in kv_cache_tensor.shared_by:
             kv_cache_raw_tensors[layer_name] = tensor
 
@@ -163,7 +178,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors
+    return kv_cache_raw_tensors, packed_backing
 
 
 def _reshape_kv_cache(
@@ -349,9 +364,9 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], torch.Tensor | None]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
+    kv_cache_raw_tensors, packed_backing = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
@@ -363,7 +378,7 @@ def init_kv_cache(
         shared_kv_cache_layers=shared_kv_cache_layers,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
-    return kv_caches
+    return kv_caches, packed_backing
 
 
 def build_slot_mappings_by_layer(

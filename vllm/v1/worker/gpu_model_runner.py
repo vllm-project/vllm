@@ -6998,7 +6998,7 @@ class GPUModelRunner(
 
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
-    ) -> dict[str, torch.Tensor]:
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
         to be reshaped to the desired shape before being used by the models.
@@ -7006,14 +7006,28 @@ class GPUModelRunner(
         Args:
             kv_cache_config: The KV cache config
         Returns:
-            dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
+            A tuple (raw_tensors, packed_backing) where raw_tensors maps layer
+            names to their memory buffers, and packed_backing is a single
+            contiguous tensor when all layers share a backing allocation.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
+            if kv_cache_tensor.backing_size > 0:
+                if packed_backing is None:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.backing_size,
+                        dtype=torch.int8,
+                        device=self.device,
+                    )
+                tensor = packed_backing[
+                    kv_cache_tensor.offset
+                    : kv_cache_tensor.offset + kv_cache_tensor.size
+                ]
+            else:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
 
@@ -7026,7 +7040,7 @@ class GPUModelRunner(
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
             "Some layers are not correctly initialized"
         )
-        return kv_cache_raw_tensors
+        return kv_cache_raw_tensors, packed_backing
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
@@ -7230,7 +7244,9 @@ class GPUModelRunner(
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            kv_cache_raw_tensors, _packed_backing = (
+                self._allocate_kv_cache_tensors(kv_cache_config)
+            )
 
             # Change the memory buffer to the desired shape
             kv_caches = self._reshape_kv_cache_tensors(
