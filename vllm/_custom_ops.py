@@ -494,6 +494,7 @@ def silu_and_mul_per_block_quant(
     quant_dtype: torch.dtype,
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    use_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
@@ -532,6 +533,7 @@ def silu_and_mul_per_block_quant(
         group_size,  # Pass directly as int
         scale_ub,
         is_scale_transposed,
+        use_ue8m0,
     )
 
     return output, scales

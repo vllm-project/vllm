@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
@@ -52,6 +53,7 @@ def unfused_fp8_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     group_size: int,  # Changed from list[int]
+    use_ue8m0: bool,
 ):
     """Unfused: SiLU+Mul then per-tensor quantize."""
     hidden = x.shape[-1] // 2
@@ -68,6 +70,7 @@ def unfused_groupwise_fp8_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     group_size: int,  # Changed from list[int]
+    use_ue8m0: bool,
 ):
     """Unfused: SiLU+Mul then group-wise quantize."""
     hidden = x.shape[-1] // 2
@@ -78,7 +81,7 @@ def unfused_groupwise_fp8_impl(
 
     # Group quantize - use group_size directly
     silu_out, _ = per_token_group_quant_fp8(
-        silu_out, group_size=group_size, use_ue8m0=False
+        silu_out, group_size=group_size, use_ue8m0=use_ue8m0
     )
 
 
@@ -86,6 +89,7 @@ def fused_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     group_size: int,
+    use_ue8m0: bool,
 ):
     """Fused: SiLU+Mul+Block Quantization in single kernel."""
     out, _ = ops.silu_and_mul_per_block_quant(
@@ -93,6 +97,7 @@ def fused_impl(
         group_size=group_size,
         quant_dtype=quant_dtype,
         is_scale_transposed=False,
+        use_ue8m0=use_ue8m0,
     )
 
 
@@ -105,6 +110,7 @@ def bench_fn(
     sub_label: str,
     fn: Callable,
     description: str,
+    use_ue8m0: bool,
 ) -> TMeasurement:
     min_run_time = 1
 
@@ -112,10 +118,11 @@ def bench_fn(
         "x": x,
         "quant_dtype": quant_dtype,
         "group_size": group_size,
+        "use_ue8m0": use_ue8m0,
         "fn": fn,
     }
     return TBenchmark.Timer(
-        stmt="fn(x, quant_dtype, group_size)",
+        stmt="fn(x, quant_dtype, group_size, use_ue8m0)",
         globals=globals,
         label=label,
         sub_label=sub_label,
@@ -123,7 +130,12 @@ def bench_fn(
     ).blocked_autorange(min_run_time=min_run_time)
 
 
-def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasurement]:
+def bench(
+    params: bench_params_t,
+    label: str,
+    sub_label: str,
+    use_ue8m0: bool,
+) -> Iterable[TMeasurement]:
     """Run benchmarks for all implementations."""
     # Make inputs: [num_tokens, hidden_size * 2] for [gate || up]
     scale = 1 / params.hidden_size
@@ -139,18 +151,20 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
 
     timers = []
 
-    # Unfused per-tensor FP8
-    timers.append(
-        bench_fn(
-            x,
-            torch.float8_e4m3fn,
-            params.group_size,
-            label,
-            sub_label,
-            unfused_fp8_impl,
-            "unfused_fp8_impl",
+    if not use_ue8m0:
+        # Unfused per-tensor FP8
+        timers.append(
+            bench_fn(
+                x,
+                torch.float8_e4m3fn,
+                params.group_size,
+                label,
+                sub_label,
+                unfused_fp8_impl,
+                "unfused_fp8_impl",
+                use_ue8m0,
+            )
         )
-    )
 
     # Unfused group-wise FP8
     timers.append(
@@ -161,7 +175,10 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             label,
             sub_label,
             unfused_groupwise_fp8_impl,
-            "unfused_groupwise_fp8_impl",
+            "unfused_groupwise_fp8_impl"
+            if not use_ue8m0
+            else "unfused_groupwise_fp8_ue8m0_impl",
+            use_ue8m0,
         )
     )
 
@@ -174,7 +191,10 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             label,
             sub_label,
             fused_impl,
-            "fused_groupwise_fp8_impl",
+            "fused_groupwise_fp8_impl"
+            if not use_ue8m0
+            else "fused_groupwise_fp8_ue8m0_impl",
+            use_ue8m0,
         )
     )
 
@@ -187,18 +207,34 @@ def print_timers(timers: Iterable[TMeasurement]):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--use-ue8m0",
+        action="store_true",
+        help="Benchmark UE8M0-rounded FP32 scales for groupwise FP8 paths.",
+    )
+    args = parser.parse_args()
+
     torch.set_default_device("cuda")
     bench_params = get_bench_params()
+    variants_per_config = 2 if args.use_ue8m0 else 3
+    label = (
+        "silu-mul-block-quant-ue8m0"
+        if args.use_ue8m0
+        else "silu-mul-block-quant"
+    )
 
     print(f"Running {len(bench_params)} benchmark configurations...")
     print(
-        f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)"
+        "This will take approximately "
+        f"{len(bench_params) * variants_per_config} seconds (1s per variant)"
     )
+    print(f"UE8M0 scales: {args.use_ue8m0}")
     print()
 
     timers = []
     for bp in tqdm(bench_params):
-        result_timers = bench(bp, "silu-mul-block-quant", bp.description())
+        result_timers = bench(bp, label, bp.description(), args.use_ue8m0)
         timers.extend(result_timers)
 
     print("\n" + "=" * 80)

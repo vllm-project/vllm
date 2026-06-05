@@ -274,6 +274,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
                 group_size=self.group_size,
                 scale_ub=None,
                 is_scale_transposed=self.is_scale_transposed,
+                use_ue8m0=self.is_e8m0,
             )
             return at[1], at[2]
 

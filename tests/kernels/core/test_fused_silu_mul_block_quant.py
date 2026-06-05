@@ -35,6 +35,7 @@ def ref_silu_and_mul_per_block_quant(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     group_size: int,
+    use_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation: unfused SiLU+Mul then group quantization."""
     hidden = x.shape[-1] // 2
@@ -43,7 +44,7 @@ def ref_silu_and_mul_per_block_quant(
 
     if quant_dtype == current_platform.fp8_dtype():
         return per_token_group_quant_fp8(
-            silu_out, group_size=group_size, use_ue8m0=False
+            silu_out, group_size=group_size, use_ue8m0=use_ue8m0
         )
     elif quant_dtype == torch.int8:
         return per_token_group_quant_int8(silu_out, group_size=group_size)
@@ -57,6 +58,7 @@ def ref_silu_and_mul_per_block_quant(
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize("group_size", GROUP_SIZES)
 @pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device_idx", CUDA_DEVICES)
 @torch.inference_mode()
@@ -69,6 +71,7 @@ def test_silu_and_mul_per_block_quant(
     quant_dtype: torch.dtype,
     group_size: int,
     is_scale_transposed: bool,
+    use_ue8m0: bool,
     seed: int,
     device_idx: str,
 ) -> None:
@@ -84,15 +87,25 @@ def test_silu_and_mul_per_block_quant(
     if has_scale_ub:
         pytest.skip("Scale upper bound not yet supported")
 
+    if use_ue8m0 and quant_dtype != current_platform.fp8_dtype():
+        pytest.skip("UE8M0 scales are only supported for FP8 output")
+
     scale = 1 / hidden_size
     x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
 
     # Reference implementation
-    ref_out, ref_scales = ref_silu_and_mul_per_block_quant(x, quant_dtype, group_size)
+    ref_out, ref_scales = ref_silu_and_mul_per_block_quant(
+        x, quant_dtype, group_size, use_ue8m0
+    )
 
     # Fused kernel implementation
     ops_out, ops_scales = ops.silu_and_mul_per_block_quant(
-        x, group_size, quant_dtype, None, is_scale_transposed
+        x,
+        group_size,
+        quant_dtype,
+        None,
+        is_scale_transposed,
+        use_ue8m0,
     )
 
     # Check for NaN/Inf
@@ -124,7 +137,7 @@ def test_silu_and_mul_per_block_quant(
         scales = torch.empty(num_tokens, num_groups, device=device, dtype=torch.float32)
     opcheck(
         torch.ops._C.silu_and_mul_per_block_quant,
-        (output, x, scales, group_size, None, is_scale_transposed),
+        (output, x, scales, group_size, None, is_scale_transposed, use_ue8m0),
     )
 
 
