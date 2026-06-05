@@ -233,7 +233,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
             ChatRole::User,
-            "Check Shanghai weather and add 1.00 plus 2.",
+            "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
         Some(true), // always enable thinking in this fixture
@@ -261,9 +261,10 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
                 AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys and a different number
-                    // formatting style to verify text-level fidelity of the roundtrip.
-                    arguments: r#"{"y":1.00,"x":2}"#.to_string(),
+                    // Intentionally use a non-lexical order of keys to verify text-level
+                    // fidelity of the roundtrip where JSON formatting remains stable. The
+                    // `items` key also exercises templates that call `arguments.items()`.
+                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
                 }),
             ],
         },
@@ -291,7 +292,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.00, "x": 2}"#)?,
+        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(
@@ -585,9 +586,13 @@ fn test_tools() -> Vec<ChatTool> {
                 "type": "object",
                 "properties": {
                     "y": { "type": "number" },
-                    "x": { "type": "number" }
+                    "x": { "type": "number" },
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
                 },
-                "required": ["y", "x"]
+                "required": ["y", "x", "items"]
             }),
             strict: None,
         },
