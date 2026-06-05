@@ -506,9 +506,12 @@ def apply_ace_eviction(
     )
     query = _extract_query(messages) if (use_query_relevance and not use_attention) else None
 
+    # Only compress tool-result messages. User/system turns may carry the task
+    # description, security constraints, or behavioral guardrails that must never
+    # be silently evicted.
     tool_indices = [
         i for i, m in enumerate(messages)
-        if m.get("role") in ("tool", "user")
+        if m.get("role") == "tool"
         and isinstance(m.get("content"), str)
         and len(m["content"]) >= min_chars
     ]

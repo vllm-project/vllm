@@ -151,9 +151,16 @@ class ACEModelHook:
                     import numpy as np
                     w = attn_weights.detach().float().cpu().numpy()
                     # Expected shape: [batch, n_heads, n_new_tokens, seq_len]
-                    # or [n_heads, n_new_tokens, seq_len] — normalize to 3D
+                    # or [n_heads, n_new_tokens, seq_len] — normalize to 3D.
+                    # In batched inference the hook fires once for the whole
+                    # batch; w[0] would attribute another request's attention to
+                    # this conversation. Only capture when this request is the
+                    # sole batch occupant — otherwise skip and let ACE fall back
+                    # to BM25 (Mode 2) via the tracker.has_data guard.
                     if w.ndim == 4:
-                        w = w[0]  # take first batch element
+                        if w.shape[0] != 1:
+                            return output  # cannot isolate this request's weights
+                        w = w[0]  # safe: batch size 1
                     layer_idx = id(module)  # use object id as stable key
                     cap.on_layer_output(layer_idx, w, new_token_start=pos)
                 except Exception:

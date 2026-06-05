@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import re
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any, cast
@@ -63,6 +64,24 @@ from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+# conversation_id is a client-supplied registry key for ACE attention mode.
+# Constrain it to a bounded length and a safe charset so crafted/oversized keys
+# cannot pollute the process-global tracker registries.
+_CONVERSATION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def _validate_conversation_id(value: str | None) -> str | None:
+    """Return the conversation_id if well-formed, else None (no session)."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _CONVERSATION_ID_RE.match(value):
+        logger.warning(
+            "Ignoring malformed conversation_id for ACE attention mode; "
+            "falling back to BM25 scoring."
+        )
+        return None
+    return value
 
 
 class OpenAIServingRender:
@@ -262,7 +281,18 @@ class OpenAIServingRender:
             # Phase 3: retrieve accumulated attention tracker from the previous
             # generation turn, if the client provides a stable conversation_id.
             # Falls back to BM25 (Phase 2) when no attention data is available.
-            session_id: str | None = getattr(request, "conversation_id", None)
+            #
+            # SECURITY NOTE: conversation_id is a client-supplied key into the
+            # process-global tracker/capture registries. We constrain it to a
+            # bounded charset/length to prevent abuse via crafted keys. This does
+            # NOT provide cross-tenant isolation: two clients that share a
+            # conversation_id share a tracker. In multi-tenant deployments the
+            # session_id must be namespaced with an authenticated tenant/API-key
+            # identity, which is not yet plumbed into this render path — until
+            # then, attention-mode (Mode 3) should be treated as single-tenant.
+            session_id: str | None = _validate_conversation_id(
+                getattr(request, "conversation_id", None)
+            )
             tracker = get_tracker(session_id) if session_id else None
 
             apply_ace_eviction(

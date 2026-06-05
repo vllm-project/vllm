@@ -181,6 +181,29 @@ def test_apply_ace_keep_recent_messages_unmodified():
         )
 
 
+def test_apply_ace_never_evicts_user_messages():
+    """Only role=tool is compressible. A long early user message (task,
+    guardrails, security constraints) must survive even under maximum
+    compression pressure."""
+    user_content = "IMPORTANT: never delete production data. " * 50
+    messages = [{"role": "user", "content": user_content}]
+    for i in range(4):
+        messages.append({"role": "assistant", "content": f"Calling tool {i}"})
+        messages.append({"role": "tool", "content": f"verbose tool output {i}\n" * 80})
+
+    apply_ace_eviction(messages, budget_chars=1, keep_recent=1)
+
+    assert messages[0]["content"] == user_content, (
+        "User message must never be evicted"
+    )
+    # And at least one tool message was actually compressed.
+    assert any(
+        len(m["content"]) < len(f"verbose tool output {i}\n" * 80)
+        for i, m in enumerate(messages)
+        if m.get("role") == "tool"
+    )
+
+
 def test_apply_ace_returns_chars_removed():
     messages = _make_messages(tool_content_size=2000, n_tools=4)
     total_before = sum(
