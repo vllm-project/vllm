@@ -132,6 +132,8 @@ def maybe_init_mm_gpu_ipc_pool(
     if mm_ipc_gpu_memory_gb <= 0:
         set_mm_gpu_ipc_pool(None)
         return None
+    if api_process_count <= 0:
+        raise ValueError(f"api_process_count must be positive, got {api_process_count}")
     total_bytes = int(mm_ipc_gpu_memory_gb * GiB_bytes) // api_process_count
     pool = MultiModalGPUMemoryPool(total_bytes)
     set_mm_gpu_ipc_pool(pool)

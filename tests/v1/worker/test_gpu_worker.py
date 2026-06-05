@@ -8,6 +8,7 @@ import pytest
 import vllm.v1.worker.gpu_worker as gpu_worker_module
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
 )
 from vllm.utils.mem_constants import GiB_bytes
@@ -65,7 +66,12 @@ def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
     )
 
     assert worker._reserve_mm_ipc_gpu_memory(GiB_bytes) == (
-        GiB_bytes - int(0.25 * GiB_bytes) - PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+        GiB_bytes
+        - int(0.25 * GiB_bytes)
+        - (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+        )
     )
 
 
@@ -80,5 +86,9 @@ def test_reserve_mm_ipc_gpu_memory_uses_env_video_backend(
     worker = _worker_with_mm_config(_mm_config())
 
     assert worker._reserve_mm_ipc_gpu_memory(GiB_bytes) == (
-        GiB_bytes - PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+        GiB_bytes
+        - (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+        )
     )
