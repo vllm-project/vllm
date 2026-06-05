@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionCall
 from vllm.parser.abstract_parser import DelegatingParser
 
 if TYPE_CHECKING:
@@ -26,52 +26,52 @@ class MistralParser(DelegatingParser):
                 f"got {self._tool_parser.__class__.__name__}."
             )
 
+    def _maybe_force_auto_tool_parsing(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> None:
+        # When the Mistral grammar factory injected structured outputs,
+        # the model emits v11+ format ([TOOL_CALLS]name{args}) that the
+        # named/required parsers can't handle. Disable them so all
+        # tool_choice modes fall back to auto tool parsing via
+        # extract_tool_calls.
+        if getattr(request, "_grammar_from_tool_parser", False):
+            assert self._tool_parser is not None
+            self._tool_parser.supports_required_and_named = False
+
     def parse(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
-        content: str | None = model_output
-        reasoning, tool_calls = None, None
+        self._maybe_force_auto_tool_parsing(request)
+        reasoning, content, tool_calls = super().parse(
+            model_output, request, enable_auto_tools
+        )
+        if tool_calls:
+            from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 
-        # No grammar (pre-v11): delegate to base class for tool choice
-        # parsing (named/required/auto).
-        if not getattr(request, "_grammar_from_tool_parser", False):
-            reasoning, content, tool_calls = super().parse(
-                model_output, request, enable_auto_tools
-            )
-            if tool_calls:
-                from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
-
-                # Named/required tool_choice builds FunctionCalls without
-                # ID, backfill with Mistral-format IDs.
-                for tc in tool_calls:
-                    if not tc.id:
-                        tc.id = MistralToolCall.generate_random_id()
-
-        # Grammar (v11+): output is already structured, use
-        # MistralToolParser.extract_tool_calls directly.
-        else:
-            if self._reasoning_parser is not None:
-                reasoning, content = self._reasoning_parser.extract_reasoning(
-                    model_output, request
-                )
-
-            assert self._tool_parser is not None
-            tool_call_info = self._tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore[arg-type]
-            )
-            if tool_call_info.tools_called:
-                tool_calls = [
-                    FunctionCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=tc.function.arguments,
-                    )
-                    for tc in tool_call_info.tool_calls
-                ]
-                content = tool_call_info.content
-
+            # Named/required tool_choice builds FunctionCalls without
+            # ID, backfill with Mistral-format IDs.
+            for tc in tool_calls:
+                if not tc.id:
+                    tc.id = MistralToolCall.generate_random_id()
         return reasoning, content, tool_calls
+
+    def parse_delta(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None = None,
+        *,
+        finished: bool,
+    ) -> DeltaMessage | None:
+        self._maybe_force_auto_tool_parsing(request)
+        return super().parse_delta(
+            delta_text,
+            delta_token_ids,
+            request,
+            prompt_token_ids,
+            finished=finished,
+        )

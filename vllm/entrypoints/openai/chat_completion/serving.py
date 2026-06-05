@@ -425,8 +425,6 @@ class OpenAIServingChat(OpenAIServing):
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
-        is_mistral_grammar_path = request._grammar_from_tool_parser
-
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
         else:
@@ -450,14 +448,12 @@ class OpenAIServingChat(OpenAIServing):
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
         if (
-            is_mistral_grammar_path
-            or tool_choice_auto
+            tool_choice_auto
             or tool_choice_function_name
             or request.tool_choice == "required"
             or reasoning_parser
         ):
             all_previous_token_ids = [[] for _ in range(num_choices)]
-            reasoning_end_arr = [False] * num_choices
             prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
@@ -592,8 +588,6 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     parser = parsers[i]
-                    tool_parser = parser.tool_parser if parser is not None else None
-
                     if (
                         reasoning_parser
                         and res.prompt_token_ids
@@ -658,8 +652,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # just update previous_texts and previous_token_ids
                     if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
+                        tool_choice_auto
                         or tool_choice_function_name
                         or request.tool_choice == "required"
                         or reasoning_parser
@@ -687,35 +680,6 @@ class OpenAIServingChat(OpenAIServing):
                             )
                         )
                         harmony_tools_streamed[i] |= tools_streamed_flag
-                    # Mistral grammar path: combined reasoning + tool streaming
-                    elif is_mistral_grammar_path:
-                        from vllm.tool_parsers.mistral_tool_parser import (
-                            MistralToolParser,
-                        )
-
-                        assert tool_parser is not None
-                        assert isinstance(tool_parser, MistralToolParser)
-                        assert reasoning_end_arr is not None
-                        output_token_ids = as_list(output.token_ids)
-                        result = tool_parser.extract_maybe_reasoning_and_tool_streaming(
-                            reasoning_parser=reasoning_parser,
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            output_token_ids=output_token_ids,
-                            reasoning_ended=reasoning_end_arr[i],
-                            prompt_is_reasoning_end=(prompt_is_reasoning_end_arr[i]),
-                            request=request,
-                        )
-                        delta_message = result.delta_message
-                        reasoning_end_arr[i] = result.reasoning_ended
-                        current_text = result.current_text
-                        current_token_ids = result.current_token_ids
-                        if result.tools_called:
-                            tools_streamed[i] = True
-
                     elif parser is not None:
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
@@ -732,8 +696,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     # update the previous values for the next iteration
                     if (
-                        is_mistral_grammar_path
-                        or tool_choice_auto
+                        tool_choice_auto
                         or tool_choice_function_name
                         or request.tool_choice == "required"
                         or reasoning_parser
