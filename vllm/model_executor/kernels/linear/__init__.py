@@ -45,6 +45,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
 from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
     ExllamaLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+    HummingLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.machete import (
     MacheteLinearKernel,
 )
@@ -161,6 +164,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockScaledMMKernel,
     XPUFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
@@ -317,6 +321,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
+        XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
 }
@@ -343,6 +348,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MacheteLinearKernel,
         AllSparkLinearKernel,
         MarlinLinearKernel,
+        HummingLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
         TritonW4A16LinearKernel,
@@ -840,7 +846,7 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
 }
 
 
-def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
@@ -883,7 +889,9 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
         # is "auto". Deprecation warnings are emitted from vllm/envs.py.
-        if envs.VLLM_USE_FBGEMM:
+        if use_a16:  # force a16 if running weight-only quantization
+            force_kernel = MarlinNvFp4LinearKernel
+        elif envs.VLLM_USE_FBGEMM:
             force_kernel = FbgemmNvFp4LinearKernel
         elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             force_kernel = EmulationNvFp4LinearKernel
