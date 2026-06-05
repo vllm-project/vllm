@@ -294,6 +294,11 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
+    assigned_gpu_ids: list[int] | None = Field(default=None, exclude=True)
+    """Physical GPU device IDs assigned to this worker group. Populated by
+    executors before worker init. Workers index into this with local_rank to
+    get their physical CUDA device index, avoiding the need to set
+    CUDA_VISIBLE_DEVICES. When None, falls back to identity mapping."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).

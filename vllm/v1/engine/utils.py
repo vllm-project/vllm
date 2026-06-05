@@ -12,7 +12,6 @@ from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
 from typing import TYPE_CHECKING, cast
-from unittest.mock import patch
 
 import msgspec
 import zmq
@@ -269,16 +268,15 @@ def set_device_control_env_var(
     vllm_config: VllmConfig, local_dp_rank: int
 ) -> Iterator[None]:
     """
-    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
-    for engine subprocess.
+    Populate assigned_gpu_ids on the config for the given DP rank.
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    with patch.dict(os.environ, values=((evar, value),)):
-        yield
+    gpu_ids = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
+    vllm_config.parallel_config.assigned_gpu_ids = gpu_ids
+    yield
 
 
 def get_device_indices(
@@ -286,33 +284,33 @@ def get_device_indices(
     local_dp_rank: int,
     world_size: int,
     local_world_size: int | None = None,
-):
+) -> list[int]:
     """
-    Returns a comma-separated string of device indices for the specified
+    Returns list of physical device indices for the specified
     data parallel rank.
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
-    this will select devices 2 and 3 for local_dp_rank=1.
+    this will return [2, 3] for local_dp_rank=1.
     """
     if local_world_size is None:
         local_world_size = world_size
     try:
-        value = ",".join(
-            str(current_platform.device_id_to_physical_device_id(i))
+        return [
+            current_platform.device_id_to_physical_device_id(i)
             for i in range(
                 local_dp_rank * world_size,
                 local_dp_rank * world_size + local_world_size,
             )
-        )
+        ]
     except IndexError as e:
         raise Exception(
-            f"Error setting {device_control_env_var}: "
+            f"Error computing device indices for "
+            f"{device_control_env_var}: "
             f"local range: [{local_dp_rank * world_size}, "
             f"{(local_dp_rank + 1) * world_size}) "
             "base value: "
             f'"{os.getenv(device_control_env_var)}"'
         ) from e
-    return value
 
 
 def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
@@ -440,7 +438,7 @@ class CoreEngineActorManager:
                     device_evar, local_index, world_size
                 )
                 actor_env_vars = self.env_vars_dict.copy()
-                actor_env_vars[device_evar] = device_indices
+                actor_env_vars[device_evar] = ",".join(str(d) for d in device_indices)
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (

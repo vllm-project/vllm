@@ -297,23 +297,15 @@ class RayDistributedExecutor(Executor):
                 " each node."
             )
 
-        # Set environment variables for the driver and workers.
-        # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
-        # This is needed because:
-        # 1. Ray's compiled DAG needs to find the allocated GPU in
-        #    CUDA_VISIBLE_DEVICES.
-        # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
-        #    all GPUs for P2P checks and communication setup. Though if it was
-        #    just this reason, we could have also just kept the visible devices
-        #    unset.
-        # Each worker will use local_rank to index into the visible devices.
-        all_args_to_update_environment_variables = [
-            {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
-            for (node_id, _) in worker_node_and_gpu_ids
+        # Populate assigned_gpu_ids so workers address physical devices
+        # directly instead of relying on CUDA_VISIBLE_DEVICES remapping.
+        for node_id, _ in worker_node_and_gpu_ids:
+            self.vllm_config.parallel_config.assigned_gpu_ids = sorted(
+                node_gpus[node_id]
+            )
+
+        all_args_to_update_environment_variables: list[dict[str, str]] = [
+            {} for _ in worker_node_and_gpu_ids
         ]
 
         # Environment variables to copy from driver to workers
@@ -354,8 +346,15 @@ class RayDistributedExecutor(Executor):
         all_kwargs = []
         for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
+            # Each worker gets a config with its node's assigned GPU IDs.
+            import copy
+
+            worker_config = copy.copy(self.vllm_config)
+            worker_pc = copy.copy(self.vllm_config.parallel_config)
+            worker_pc.assigned_gpu_ids = sorted(node_gpus[node_id])
+            worker_config.parallel_config = worker_pc
             kwargs = dict(
-                vllm_config=self.vllm_config,
+                vllm_config=worker_config,
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,

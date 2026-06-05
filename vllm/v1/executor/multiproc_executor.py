@@ -124,6 +124,16 @@ class MultiprocExecutor(Executor):
 
         set_multiprocessing_worker_envs()
 
+        # Populate assigned_gpu_ids from external CUDA_VISIBLE_DEVICES
+        # (if user set it) or use identity mapping.
+        if self.parallel_config.assigned_gpu_ids is None:
+            from vllm.platforms import current_platform
+
+            cvd = os.environ.get(current_platform.device_control_env_var)
+            if cvd and cvd != "":
+                self.parallel_config.assigned_gpu_ids = [int(x) for x in cvd.split(",")]
+                del os.environ[current_platform.device_control_env_var]
+
         # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()

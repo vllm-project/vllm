@@ -2121,23 +2121,25 @@ class EngineCoreActorMixin:
             pass
         else:
             device_control_env_var = current_platform.device_control_env_var
-            self._set_cuda_visible_devices(
+            self._set_assigned_gpu_ids(
                 vllm_config, local_dp_rank, device_control_env_var
             )
 
-    def _set_cuda_visible_devices(
-        self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
+    def _set_assigned_gpu_ids(
+        self,
+        vllm_config: VllmConfig,
+        local_dp_rank: int,
+        device_control_env_var: str,
     ):
         world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
         try:
-            value = get_device_indices(
+            gpu_ids = get_device_indices(
                 device_control_env_var, local_dp_rank, world_size
             )
-            os.environ[device_control_env_var] = value
+            vllm_config.parallel_config.assigned_gpu_ids = gpu_ids
         except IndexError as e:
             raise Exception(
-                f"Error setting {device_control_env_var}: "
+                f"Error computing assigned_gpu_ids: "
                 f"local range: [{local_dp_rank * world_size}, "
                 f"{(local_dp_rank + 1) * world_size}) "
                 f'base value: "{os.getenv(device_control_env_var)}"'

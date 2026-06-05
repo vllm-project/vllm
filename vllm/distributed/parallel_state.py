@@ -440,13 +440,17 @@ class GroupCoordinator:
         self.device_group = self_device_group
 
         from vllm.platforms import current_platform
+        from vllm.platforms.interface import get_assigned_gpu_ids
+
+        assigned = get_assigned_gpu_ids()
+        dev_idx = assigned[local_rank] if assigned is not None else local_rank
 
         if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{local_rank}")
+            self.device = torch.device(f"cuda:{dev_idx}")
         elif current_platform.is_xpu():
-            self.device = torch.device(f"xpu:{local_rank}")
+            self.device = torch.device(f"xpu:{dev_idx}")
         elif current_platform.is_out_of_tree():
-            self.device = torch.device(f"{current_platform.device_name}:{local_rank}")
+            self.device = torch.device(f"{current_platform.device_name}:{dev_idx}")
         else:
             self.device = torch.device("cpu")
 
@@ -1430,6 +1434,7 @@ def _init_process_group_for_split_group(
     rank: int,
     local_rank: int,
     timeout: timedelta | None,
+    device_index: int | None = None,
 ) -> None:
     """Initialize the default PG with both CPU (gloo) and device (e.g. nccl)
     backends and an eager ``device_id`` binding so that subgroups can be
@@ -1438,7 +1443,8 @@ def _init_process_group_for_split_group(
     """
     if torch.accelerator.is_available() and backend != "gloo":
         init_backend = "cpu:gloo,cuda:nccl"
-        device_id: torch.device | None = torch.device(f"cuda:{local_rank}")
+        dev_idx = device_index if device_index is not None else local_rank
+        device_id: torch.device | None = torch.device(f"cuda:{dev_idx}")
     else:
         init_backend = "gloo"
         device_id = None
@@ -1520,6 +1526,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
+    device_index: int | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1603,6 +1610,7 @@ def init_distributed_environment(
                 rank=rank,
                 local_rank=local_rank,
                 timeout=timeout,
+                device_index=device_index,
             )
         else:
             # this backend is used for WORLD

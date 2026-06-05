@@ -263,19 +263,26 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
-                assert self.local_rank < torch.accelerator.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
+
+            # Resolve physical device index from assigned_gpu_ids
+            assigned = parallel_config.assigned_gpu_ids
+            if assigned is not None:
+                from vllm.platforms.interface import set_assigned_gpu_ids
+
+                set_assigned_gpu_ids(assigned)
+                assert self.local_rank < len(assigned), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_gpu_ids {assigned}"
                 )
-                visible_device_count = (
-                    torch.accelerator.device_count() if torch.cuda.is_available() else 0
-                )
-                assert self.parallel_config.local_world_size <= visible_device_count, (
-                    f"local_world_size ({self.parallel_config.local_world_size}) must "
-                    f"be less than or equal to the number of visible devices "
-                    f"({visible_device_count})."
+                device_index = assigned[self.local_rank]
+            else:
+                device_index = self.local_rank
+                assert device_index < torch.accelerator.device_count(), (
+                    f"DP adjusted local rank {device_index} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            self.device = torch.device(f"cuda:{device_index}")
             torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -290,6 +297,7 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+                device_index=device_index,
             )
 
             if self.use_v2_model_runner:
@@ -1158,6 +1166,7 @@ def init_worker_distributed_environment(
     distributed_init_method: str | None = None,
     local_rank: int = -1,
     backend: str = "nccl",
+    device_index: int | None = None,
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
@@ -1183,6 +1192,7 @@ def init_worker_distributed_environment(
         local_rank,
         backend,
         timeout,
+        device_index=device_index,
     )
 
     ensure_model_parallel_initialized(

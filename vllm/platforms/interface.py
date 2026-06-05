@@ -29,6 +29,21 @@ else:
 
 logger = init_logger(__name__)
 
+_assigned_gpu_ids: list[int] | None = None
+
+
+def set_assigned_gpu_ids(ids: list[int]) -> None:
+    """Set the physical GPU IDs assigned to this worker process.
+    Called during worker init so that device_id_to_physical_device_id()
+    can map local_rank to the correct physical device without relying
+    on CUDA_VISIBLE_DEVICES."""
+    global _assigned_gpu_ids
+    _assigned_gpu_ids = ids
+
+
+def get_assigned_gpu_ids() -> list[int] | None:
+    return _assigned_gpu_ids
+
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
@@ -233,6 +248,8 @@ class Platform:
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
+        if _assigned_gpu_ids is not None:
+            return _assigned_gpu_ids[device_id]
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
