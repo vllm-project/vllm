@@ -31,6 +31,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
@@ -690,6 +691,89 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
         num_heads * impl.dcp_world_size,
         kv_lora_rank + qk_rope_head_dim,
     )
+
+
+def test_flashmla_dcp_fp8_decode_metadata_uses_gathered_query_heads(monkeypatch):
+    class _FakeSchedulerMetadata:
+        tile_scheduler_metadata = None
+        num_splits = None
+
+    base_call: tuple[torch.Tensor, int, int, bool] | None = None
+    fp8_call: tuple[torch.Tensor, int, int] | None = None
+
+    def fake_get_mla_metadata(
+        seq_lens_device,
+        num_q_tokens_per_head_k,
+        num_heads_k,
+        is_fp8_kvcache=False,
+    ):
+        nonlocal base_call
+        base_call = (
+            seq_lens_device,
+            num_q_tokens_per_head_k,
+            num_heads_k,
+            is_fp8_kvcache,
+        )
+        return _FakeSchedulerMetadata(), None
+
+    def fake_get_mla_metadata_dense_fp8(
+        seq_lens_device, num_q_tokens_per_head_k, num_heads_k
+    ):
+        nonlocal fp8_call
+        fp8_call = (
+            seq_lens_device,
+            num_q_tokens_per_head_k,
+            num_heads_k,
+        )
+        return (
+            torch.empty((0, 8), dtype=torch.int32),
+            torch.empty((0,), dtype=torch.int32),
+        )
+
+    monkeypatch.setattr(flashmla_module, "get_mla_metadata", fake_get_mla_metadata)
+    monkeypatch.setattr(
+        flashmla_module,
+        "get_mla_metadata_dense_fp8",
+        fake_get_mla_metadata_dense_fp8,
+    )
+
+    builder = object.__new__(flashmla_module.FlashMLAMetadataBuilder)
+    builder.num_q_heads = 4
+    builder.dcp_world_size = 2
+    builder.is_fp8_kvcache = True
+    builder.compilation_config = type(
+        "_CompilationConfig",
+        (),
+        {
+            "cudagraph_mode": type(
+                "_CudaGraphMode",
+                (),
+                {"has_full_cudagraphs": lambda self: False},
+            )()
+        },
+    )()
+
+    seq_lens = torch.tensor([16, 24], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+    metadata = builder._build_decode(
+        block_table_tensor=torch.empty((2, 1), dtype=torch.int32),
+        seq_lens_device=seq_lens,
+        max_seq_len=24,
+        query_start_loc_cpu=query_start_loc,
+        query_start_loc_device=query_start_loc,
+        num_decode_tokens=2,
+        dcp_tot_seq_lens_device=None,
+    )
+
+    assert metadata.scheduler_metadata.tile_scheduler_metadata is not None
+    assert metadata.scheduler_metadata.num_splits is not None
+    assert base_call is not None
+    assert base_call[0] is seq_lens
+    assert base_call[1:] == (8, 1, True)
+    assert fp8_call is not None
+    assert fp8_call[0] is seq_lens
+    assert fp8_call[1:] == (8, 1)
 
 
 def run_attention_backend(
