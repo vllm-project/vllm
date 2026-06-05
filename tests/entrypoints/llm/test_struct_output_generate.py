@@ -1109,3 +1109,80 @@ def test_max_whitespace_cnt_e2e():
             f"Found {max_consecutive_space} consecutive spaces in output, "
             f"exceeding max_whitespace_cnt=2. Output: {generated_text!r}"
         )
+
+
+def test_max_whitespace_cnt_disabled_e2e():
+    """Reverse test for max_whitespace_cnt: verify runaway whitespace occurs
+    when max_whitespace_cnt=None (unbounded).
+
+    With no limit, the grammar FSM allows unlimited whitespace self-loops.
+    When the model outputs whitespace at high probability (e.g., after colons),
+    the generation hits max_tokens with finish_reason='length'.
+    """
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string"},
+            "answer": {"type": "integer"},
+        },
+        "required": ["question", "answer"],
+        "additionalProperties": False,
+    }
+
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        enforce_eager=True,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            max_whitespace_cnt=None,  # Explicitly disable the limit
+        ),
+        seed=42,
+    )
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=256,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompt = (
+        "Output a JSON object with exactly this schema: "
+        '{"question": "What is 2+2?", "answer": 4}. '
+        "Add multiple spaces (at least 3 spaces) after each colon "
+        "and after commas in the JSON output. Do not add any extra text."
+    )
+    outputs = llm.generate([prompt], sampling_params=sampling_params, use_tqdm=True)
+
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+
+        # The reverse test: expect either finish_reason='length' (runaway
+        # whitespace symptom) or consecutive spaces exceeding the limit
+        finish_reason = output.outputs[0].finish_reason
+
+        # Check for consecutive whitespace exceeding what would be allowed
+        max_consecutive_space = 0
+        current_run = 0
+        for ch in generated_text:
+            if ch == " ":
+                current_run += 1
+                max_consecutive_space = max(max_consecutive_space, current_run)
+            else:
+                current_run = 0
+
+        # Without the limit, the FSM allows unlimited whitespace.
+        # Either finish_reason='length' (ran out of tokens) or
+        # consecutive spaces > 2 (the limit that would normally be enforced)
+        assert finish_reason == "length" or max_consecutive_space > 2, (
+            f"Expected runaway whitespace symptom "
+            f"(finish_reason='length' or >2 consecutive spaces), "
+            f"but got finish_reason={finish_reason!r}, "
+            f"max_consecutive_space={max_consecutive_space}. "
+            f"Output: {generated_text!r}"
+        )
