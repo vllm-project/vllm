@@ -836,6 +836,16 @@ class SpeculativeConfig:
                         self.draft_pipeline_parallel_size,
                     )
                 )
+
+        if (
+            self.method == "mtp"
+            and self.target_parallel_config is not None
+            and self.target_parallel_config.pipeline_parallel_size > 1
+        ):
+            logger.warning_once(
+                "MTP speculative decoding with pipeline parallelism "
+                "(pipeline_parallel_size > 1) is experimental."
+            )
         return self
 
     def _validate_suffix_decoding(self):
