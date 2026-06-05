@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import InternalServerError, NotFoundError, OpenAI
+from openai import BadRequestError, NotFoundError, OpenAI
 from openai_harmony import Message
 
 from tests.utils import RemoteOpenAIServer
@@ -699,11 +699,97 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 async def test_function_calling_required(client: OpenAI, model_name: str):
     tools = [GET_WEATHER_SCHEMA]
 
-    with pytest.raises(InternalServerError):
+    response = await client.responses.create(
+        model=model_name,
+        input="What's the weather like in Paris today?",
+        tools=tools,
+        tool_choice="required",
+    )
+
+    assert response.status == "completed"
+    assert has_output_type(response, "function_call"), (
+        f"Expected function_call in output, got: {[o.type for o in response.output]}"
+    )
+    assert not has_output_type(response, "message"), (
+        "Required tool-choice JSON should not be returned as output_text."
+    )
+    tool_call = next(o for o in response.output if o.type == "function_call")
+    assert tool_call.name == "get_weather"
+    args = json.loads(tool_call.arguments)
+    assert "latitude" in args
+    assert "longitude" in args
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_required_with_stream(
+    pairs_of_event_types: dict[str, str],
+    client: OpenAI,
+    model_name: str,
+):
+    tools = [GET_WEATHER_SCHEMA]
+
+    stream = await client.responses.create(
+        model=model_name,
+        input="What's the weather like in Paris today?",
+        tools=tools,
+        tool_choice="required",
+        stream=True,
+    )
+
+    function_call_item = None
+    completed_event = None
+    completed_response = None
+    events = []
+    text_deltas = []
+    async for event in stream:
+        events.append(event)
+        if (
+            event.type == "response.output_item.added"
+            and event.item.type == "function_call"
+        ):
+            function_call_item = event.item
+        elif event.type == "response.output_text.delta":
+            text_deltas.append(event.delta)
+        elif (
+            event.type == "response.function_call_arguments.delta"
+            and function_call_item is not None
+        ):
+            function_call_item.arguments += event.delta
+        elif (
+            event.type == "response.output_item.done"
+            and event.item.type == "function_call"
+        ):
+            completed_event = event
+        elif event.type == "response.completed":
+            completed_response = event.response
+
+    validate_streaming_event_stack(events, pairs_of_event_types)
+    assert function_call_item is not None
+    assert function_call_item.type == "function_call"
+    assert function_call_item.name == "get_weather"
+    assert completed_event is not None
+    assert function_call_item.arguments == completed_event.item.arguments
+    assert completed_response is not None
+    assert has_output_type(completed_response, "function_call")
+    assert not has_output_type(completed_response, "message")
+    args = json.loads(function_call_item.arguments)
+    assert "latitude" in args
+    assert "longitude" in args
+    assert "".join(text_deltas).strip() == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_function_calling_required_builtin_tools_still_unsupported(
+    client: OpenAI,
+    model_name: str,
+):
+    with pytest.raises(BadRequestError):
         await client.responses.create(
             model=model_name,
-            input="What's the weather like in Paris today?",
-            tools=tools,
+            input="Search for the latest vLLM release.",
+            tools=[{"type": "web_search_preview"}],
             tool_choice="required",
         )
 

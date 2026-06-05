@@ -146,6 +146,11 @@ def extract_required_tool_call_streaming(
                 )
                 arguments = param_match.group(1) if param_match else ""
                 arguments, _ = filter_delta_text(arguments, previous_text)
+                try:
+                    _, end = json.JSONDecoder().raw_decode(arguments)
+                    arguments = arguments[:end]
+                except json.JSONDecodeError:
+                    pass
 
                 # if this iteration finishes a previous tool call but a
                 # new incomplete tool is already generated, take the
