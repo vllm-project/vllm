@@ -11,6 +11,8 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.16.post3"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG MORI_BRANCH="v1.1.0"
+ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -25,13 +27,16 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1250;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
+ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV AITER_ROCM_ARCH=gfx942;gfx950;gfx1250
-ENV MORI_GPU_ARCHS=gfx942;gfx950;gfx1250
+ENV AITER_ROCM_ARCH=gfx942;gfx950
+ENV MORI_GPU_ARCHS=gfx942;gfx950
 
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
+
+ARG PYTHON_VERSION=3.12
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
 WORKDIR /app
@@ -39,23 +44,21 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common build-essential git curl sudo vim less libopenmpi-dev libpci-dev python3-venv python3-dev
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
+    && for i in 1 2 3; do \
+        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+    done \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
-RUN python3 -m venv /opt/python --system-site-packages
-ENV PATH=/opt/python/bin:$PATH
-
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
-ENV UV_PYTHON=/opt/python/bin/python
-# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
-# Reference: https://github.com/astral-sh/uv/pull/1694
-ENV UV_HTTP_TIMEOUT=500
-ENV UV_INDEX_STRATEGY="unsafe-best-match"
-# Use copy mode to avoid hardlink failures with Docker cache mounts
-ENV UV_LINK_MODE=copy
-
-
-RUN uv pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11
+RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all sox && rm -rf /var/lib/apt/lists/*
 
 # Install sccache if USE_SCCACHE is enabled (for release builds)
@@ -66,16 +69,16 @@ ARG SCCACHE_BUCKET_NAME
 ARG SCCACHE_REGION_NAME
 ARG SCCACHE_S3_NO_CREDENTIALS
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-    echo "Installing sccache..." \
-    && SCCACHE_ARCH="x86_64" \
-    && SCCACHE_VERSION="v0.8.1" \
-    && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
-    && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
-    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
-    && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
-    && chmod +x /usr/bin/sccache \
-    && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
-    && sccache --version; \
+        echo "Installing sccache..." \
+        && SCCACHE_ARCH="x86_64" \
+        && SCCACHE_VERSION="v0.8.1" \
+        && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+        && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+        && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+        && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+        && chmod +x /usr/bin/sccache \
+        && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+        && sccache --version; \
     fi
 
 # Setup sccache for HIP compilation via HIP_CLANG_PATH
@@ -84,13 +87,13 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
 # NOTE: HIP_CLANG_PATH is NOT set as ENV to avoid affecting downstream images (Dockerfile.rocm)
 # Instead, each build stage should export HIP_CLANG_PATH=/opt/sccache-wrappers if USE_SCCACHE=1
 RUN if [ "$USE_SCCACHE" = "1" ]; then \
-    echo "Setting up sccache wrappers for HIP compilation..." \
-    && mkdir -p /opt/sccache-wrappers \
-    && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++ "$@"\n' > /opt/sccache-wrappers/clang++ \
-    && chmod +x /opt/sccache-wrappers/clang++ \
-    && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
-    && chmod +x /opt/sccache-wrappers/clang \
-    && echo "sccache wrappers created in /opt/sccache-wrappers"; \
+        echo "Setting up sccache wrappers for HIP compilation..." \
+        && mkdir -p /opt/sccache-wrappers \
+        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang++ "$@"\n' > /opt/sccache-wrappers/clang++ \
+        && chmod +x /opt/sccache-wrappers/clang++ \
+        && printf '#!/bin/bash\nexec sccache /opt/rocm/lib/llvm/bin/clang "$@"\n' > /opt/sccache-wrappers/clang \
+        && chmod +x /opt/sccache-wrappers/clang \
+        && echo "sccache wrappers created in /opt/sccache-wrappers"; \
     fi
 
 # Set sccache environment variables only when USE_SCCACHE=1
@@ -150,21 +153,21 @@ RUN cd pytorch \
     && pip install -r requirements.txt && git submodule update --init --recursive
 RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-    && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
-    && sccache --show-stats; \
-    fi \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           && sccache --show-stats; \
+       fi \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-    && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-    fi \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+       fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
@@ -173,10 +176,10 @@ RUN cd audio && git checkout ${PYTORCH_AUDIO_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && export CMAKE_C_COMPILER_LAUNCHER=sccache \
-    && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
-    fi \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+       fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && pip install dist/*.whl
@@ -208,14 +211,16 @@ FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && sccache --show-stats; \
-    fi \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
@@ -233,12 +238,12 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
 RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
     && git submodule update --init --recursive \
-    && uv pip install -r requirements.txt
-RUN uv pip install pyyaml && cd aiter \
+    && pip install -r requirements.txt
+RUN pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
-    export HIP_CLANG_PATH=/opt/sccache-wrappers \
-    && sccache --show-stats; \
-    fi \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
     && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
@@ -253,28 +258,64 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 # Full debs stage - includes Mori (used by Docker releases)
 FROM base AS debs
 RUN mkdir /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    uv pip install /install/*.whl
+    pip install /install/*.whl
 
 ARG BASE_IMAGE
+ARG TRITON_BRANCH
+ARG TRITON_REPO
+ARG PYTORCH_BRANCH
+ARG PYTORCH_VISION_BRANCH
+ARG PYTORCH_REPO
+ARG PYTORCH_VISION_REPO
+ARG PYTORCH_AUDIO_BRANCH
+ARG PYTORCH_AUDIO_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG MORI_BRANCH
+ARG MORI_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
+    && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_BRANCH: ${PYTORCH_AUDIO_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_REPO: ${PYTORCH_AUDIO_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
+    && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
