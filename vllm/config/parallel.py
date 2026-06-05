@@ -770,6 +770,7 @@ class ParallelConfig:
             "numa_bind",
             "numa_bind_nodes",
             "numa_bind_cpus",
+            "assigned_gpu_ids",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
