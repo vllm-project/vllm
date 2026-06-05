@@ -83,9 +83,26 @@ def fused_triton_qk_norm_rope_kvcache_update_impl(
     rdh = cos_sin_cache.shape[-1] // 2
     # Delegate to the attention backend's KV split: ROCM_AITER_UNIFIED_ATTN
     # places K/V on dim 1 ((num_blocks, 2, ...)), older backends on dim 0.
-    # `_split_kv_cache` is the canonical accessor and is also used by the
-    # sibling rope_kvcache_fusion pass via attn_layer.impl.
-    key_cache, value_cache = attn_layer.impl._split_kv_cache(kv_cache)  # type: ignore[attr-defined]
+    # ``_split_kv_cache`` is the canonical accessor and is also used by the
+    # sibling rope_kvcache_fusion pass via ``attn_layer.impl``. The leading
+    # underscore reflects that this is currently a per-impl convention
+    # rather than a stable base-class API; we keep using it (consistent
+    # with the sibling pass) but wrap the access with an actionable error
+    # so a non-AITER impl reaching this code path produces a clear
+    # message instead of a confusing AttributeError on a private name.
+    impl = attn_layer.impl
+    split_kv_cache = getattr(impl, "_split_kv_cache", None)
+    if split_kv_cache is None:
+        raise AttributeError(
+            f"QK-Norm+RoPE+KVCache fusion: attention impl "
+            f"{type(impl).__name__} for layer {layer_name} does not "
+            f"provide a `_split_kv_cache(kv_cache)` method (expected on "
+            f"ROCm AITER unified attention). Disable the fusion via "
+            f"--compilation-config "
+            f"'pass_config:{{fuse_qk_norm_rope_kvcache:false}}', or pin "
+            f"--attention_backend=ROCM_AITER_UNIFIED_ATTN."
+        )
+    key_cache, value_cache = split_kv_cache(kv_cache)
 
     # Mirror the unfused FP8-KV path (rocm_aiter_unified_attn.do_kv_cache_update
     # via reshape_and_cache_flash): when --kv-cache-dtype fp8 is in effect, the
@@ -99,8 +116,38 @@ def fused_triton_qk_norm_rope_kvcache_update_impl(
         key_cache = key_cache.view(fp8_dtype)
         value_cache = value_cache.view(fp8_dtype)
 
-    k_scale_f = getattr(attn_layer, "_k_scale_float", 1.0)
-    v_scale_f = getattr(attn_layer, "_v_scale_float", 1.0)
+    # ``_k_scale_float`` / ``_v_scale_float`` are populated by
+    # ``Attention.__init__`` (live model load) from checkpoint scales --
+    # ``1.0`` for uncalibrated checkpoints, the loaded value otherwise.
+    # When ``kv_cache_dtype != "auto"`` (i.e. quantized KV) these are
+    # required for correctness: the AITER kernel uses them to dequantize
+    # K/V before writing to the fp8 cache. A missing attribute here
+    # would silently apply identity scaling and corrupt the stored KV;
+    # raise instead.
+    if kv_cache_dtype != "auto":
+        if not hasattr(attn_layer, "_k_scale_float") or not hasattr(
+            attn_layer, "_v_scale_float"
+        ):
+            raise AttributeError(
+                f"QK-Norm+RoPE+KVCache fusion: layer {layer_name} has "
+                f"kv_cache_dtype={kv_cache_dtype!r} but is missing "
+                f"`_k_scale_float` / `_v_scale_float`. The fused kernel "
+                f"cannot safely write quantized KV without scales."
+            )
+        k_scale_f = attn_layer._k_scale_float
+        v_scale_f = attn_layer._v_scale_float
+    else:
+        # No KV quantization in effect; ``getattr`` default of 1.0 is
+        # safe since the kernel skips scale ops on ``None`` and a 1.0
+        # scale is a no-op.
+        k_scale_f = getattr(attn_layer, "_k_scale_float", 1.0)
+        v_scale_f = getattr(attn_layer, "_v_scale_float", 1.0)
+    # Pass ``None`` for unit scale (kernel skips the scale ops); pass a
+    # tensor otherwise. Crucially, when ``kv_cache_dtype != "auto"`` and
+    # the loaded scale happens to equal 1.0 (uncalibrated checkpoint),
+    # ``None`` and ``tensor(1.0)`` are equivalent because the kernel's
+    # scale path is multiplicative -- the unfused FP8-KV path follows
+    # the same convention.
     k_scale_t = (
         None
         if k_scale_f == 1.0
@@ -622,11 +669,31 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         finally:
             pm.fx_to_pattern = _orig_fx_to_pat
 
-        logger.info(
-            "QK-Norm+RoPE+KVCache fusion: replaced %s pattern(s) "
-            "with AITER fused_qkv_split_qk_norm_rope_cache",
-            self.matched_count,
-        )
+        if self.matched_count == 0:
+            # The pass-manager already gates on ``is_applicable_for_range``
+            # (compile ranges above ``rope_kvcache_fusion_max_token_num``),
+            # so reaching this branch with zero matches means the fusion
+            # was enabled (gate / dtype / AITER / kernel availability all
+            # passed) and at least one pattern was registered, but nothing
+            # matched the live graph. Likely causes: torch version drift in
+            # ``pm.fx_to_pattern`` (see the ``ignore_types`` relaxation
+            # above), upstream model FX-graph refactor, or an unsupported
+            # combination of compile flags (e.g. prefix caching enabled --
+            # the pattern was traced without it).
+            logger.warning_once(
+                "QK-Norm+RoPE+KVCache fusion registered patterns but matched "
+                "0 in the live graph. Fusion is enabled but inactive; falling "
+                "back to the unfused QK-norm + RoPE + KV-cache path. Possible "
+                "causes: torch._inductor.pattern_matcher API drift, upstream "
+                "model FX-graph changes, or prefix caching enabled (the "
+                "pattern was traced without it)."
+            )
+        else:
+            logger.info(
+                "QK-Norm+RoPE+KVCache fusion: replaced %s pattern(s) "
+                "with AITER fused_qkv_split_qk_norm_rope_cache",
+                self.matched_count,
+            )
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         return compile_range.end <= self.max_token_num
