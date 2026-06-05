@@ -789,10 +789,8 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        use_required_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
-        if request.tool_choice not in ("auto", "none") and (
-            not use_required_tool_json_shim
-        ):
+        use_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
+        if request.tool_choice not in ("auto", "none") and not use_tool_json_shim:
             raise NotImplementedError(
                 "Only 'auto' or 'none' tool_choice is supported "
                 "in response API with Harmony"
@@ -801,7 +799,7 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        if use_required_tool_json_shim:
+        if use_tool_json_shim:
             prompt_token_ids += get_encoding().encode(
                 _HARMONY_FINAL_MESSAGE_PREFILL, allowed_special="all"
             )
@@ -1732,10 +1730,9 @@ class OpenAIServingResponses(OpenAIServing):
             sequence_number += 1
             return event
 
+        use_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
         async with AsyncExitStack() as exit_stack:
-            if self.use_harmony and (
-                not self._use_harmony_required_tool_json_shim(request)
-            ):
+            if self.use_harmony and not use_tool_json_shim:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)
