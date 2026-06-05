@@ -759,64 +759,100 @@ def _patch_cpp_indirect_assert_if_needed():
 
 _patch_cpp_indirect_assert_if_needed()
 
+# ============================================================
+# Inductor FALLBACK_ALLOW_LIST fast-path for vllm::*/vllm_aiter::* ops
+# ============================================================
+# When Inductor encounters a custom op without a registered lowering or
+# decomposition (e.g. vllm::all_reduce, vllm_aiter::fused_add_rms_norm) it
+# correctly creates an implicit fallback that calls into the eager Python
+# impl. However, unless `base_name` (e.g. "vllm::all_reduce") is in
+# torch._inductor.lowering.FALLBACK_ALLOW_LIST, GraphLowering.call_function
+# (torch/_inductor/graph.py:~1283) takes the slow path that emits
+#   log.info("Creating implicit fallback for:\n%s",
+#            error.operator_str(target, args, kwargs))
+# `operator_str` eagerly recurses through __str__ on every input TensorBox;
+# for deep MoE/TP graphs (e.g. Kimi-K2.6 at TP=8) the IR provenance tree
+# behind a TP all-reduce input or a residual-fed RMSNorm input is hundreds
+# of layers deep, and stringifying it consumes many minutes of CPU per call,
+# effectively hanging compilation.
+#
+# Patching FALLBACK_ALLOW_LIST membership to also match any "vllm::*" or
+# "vllm_aiter::*" base_name routes our custom ops through the fast path
+# `make_fallback(target, warn=False, override_decomp=True)` instead. This
+# preserves all downstream behaviour (allreduce_rms_fusion still pattern-
+# matches them, partitioning still works, fallback semantics identical) but
+# skips the expensive log formatting on the FIRST encounter of each op.
+#
+# We wrap the OrderedSet in a thin proxy that:
+#   - Returns True from __contains__ for any vllm::*/vllm_aiter::* op
+#   - Otherwise delegates to the underlying set (preserving membership of
+#     the standard entries like "torchvision::roi_align", "aten::index_add")
+#   - Forwards add()/__iter__()/__len__()/etc. so other Inductor code paths
+#     that mutate or iterate the set keep working.
 
-def _patch_should_realize_on_reuse():
+_VLLM_FALLBACK_NAMESPACE_PREFIXES = ("vllm::", "vllm_aiter::")
+
+
+class _VllmFallbackAllowList:
+    """Membership proxy that auto-allows vllm::*/vllm_aiter::* base_names."""
+
+    _vllm_patched = True
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __contains__(self, item):
+        if isinstance(item, str) and item.startswith(_VLLM_FALLBACK_NAMESPACE_PREFIXES):
+            return True
+        return item in self._inner
+
+    def add(self, item):
+        self._inner.add(item)
+
+    def discard(self, item):
+        self._inner.discard(item)
+
+    def __iter__(self):
+        return iter(self._inner)
+
+    def __len__(self):
+        return len(self._inner)
+
+    def __repr__(self):
+        return f"_VllmFallbackAllowList({self._inner!r})"
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _patch_inductor_fallback_allow_list() -> None:
+    """Wrap torch._inductor.lowering.FALLBACK_ALLOW_LIST so any custom op in
+    the ``vllm::`` or ``vllm_aiter::`` namespaces is treated as a member.
+
+    Idempotent: a sentinel attribute on the proxy prevents re-wrapping.
     """
-    This patches the materialization heuristic in Inductor compilation.
-    Patched in torch 2.12: https://github.com/pytorch/pytorch/pull/176994
-    vLLM issue: https://github.com/vllm-project/vllm/issues/27828
-
-    Without this patch, Inductor inlined a chain of computations when compiling
-    the whole model graph at once. For example, the residual in fused_add_rms_norm
-    would get recomputed every time, and this would cascade through the model.
-
-    Note that pytorch/pytorch#176994 updated multiple callsites,
-    this is a simplified version of the fix.
-    """
-
-    # Only apply for 2.11, fix included in 2.12
-    if not is_torch_equal("2.11.0"):
+    try:
+        from torch._inductor import lowering as _lowering
+    except ImportError:
         return
 
-    def should_realize_on_reuse_patched(self, users: int) -> bool:
-        """
-        A heuristic to decide if we should realize a tensor
-        that is used multiple times.
-        """
-        from torch._inductor import config
-        from torch._inductor.ir import Pointwise, Reduction, is_cpu
-        from torch._inductor.virtualized import V
+    base = getattr(_lowering, "FALLBACK_ALLOW_LIST", None)
+    if base is None or getattr(base, "_vllm_patched", False):
+        return
 
-        if users > 1 and isinstance(self.data, (Pointwise, Reduction)):
-            if is_cpu(self.data):
-                # Heuristic for realizing reused result of heavy ops on cpu
-                opcount = self.data.inner_fn_opcount()
-                heavy_ops = ["exp", "sigmoid"]  # a list of heavy ops
-                if any(x in opcount.used_ops for x in heavy_ops):
-                    return True
-            if self.has_large_inner_fn():
-                return True
-            # Size-aware cost model comparing total memory traffic:
-            #   Inline:      total_read_bytes * users
-            #   Materialize: total_read_bytes + output_bytes * (1 + users)
-            # This naturally handles broadcast reads (small buffers are
-            # cheap to re-read) and dtype promotions (fp32 outputs cost
-            # more to write than bf16 inputs cost to read).
-            total_read_bytes = sum(
-                V.graph.get_dep_size_hint(dep) for dep in self.get_reads()
-            )
-            output_bytes = (
-                V.graph.sizevars.optimization_hint(self.data.get_numel(), fallback=0)
-                * self.data.dtype.itemsize
-            )
-            if total_read_bytes > 0 and output_bytes > 0:
-                return total_read_bytes * (users - 1) >= output_bytes * (1 + users)
-            return self.num_reads() > config.realize_reads_threshold
-        return False
+    _lowering.FALLBACK_ALLOW_LIST = _VllmFallbackAllowList(base)
 
-    from torch._inductor.ir import StorageBox
+    # torch/_inductor/graph.py imports the symbol at module load time:
+    #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
+    # so we also need to overwrite the local binding in the graph module if
+    # it has already been imported.
+    try:
+        from torch._inductor import graph as _graph
 
-    StorageBox.should_realize_on_reuse = should_realize_on_reuse_patched
+        if hasattr(_graph, "FALLBACK_ALLOW_LIST"):
+            _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
+    except ImportError:
+        pass
 
 
-_patch_should_realize_on_reuse()
+_patch_inductor_fallback_allow_list()

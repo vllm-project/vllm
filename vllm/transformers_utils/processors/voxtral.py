@@ -44,7 +44,7 @@ class MistralCommonFeatureExtractor:
             if not self.audio_encoder.audio_config.is_streaming:
                 audio = self.audio_encoder.pad(audio, self.sampling_rate)
 
-            audios_processed.append(torch.tensor(audio))
+            audios_processed.append(torch.from_numpy(audio))
 
         return BatchFeature(
             {"audio_arrays": audios_processed}, tensor_type=return_tensors
