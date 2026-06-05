@@ -3,7 +3,7 @@
 
 import sys
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +13,7 @@ import pytest
 from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
@@ -149,14 +150,18 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
         borrowed = threading.Event()
         seen_slots = []
 
-        with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as first_slot:
+        with ExitStack() as stack:
+            retained_slots = [
+                stack.enter_context(PyNvVideoCodecVideoBackend._borrow_decoder_slot())
+                for _ in range(PYNVVIDEOCODEC_MAX_RETAINED_DECODERS)
+            ]
 
-            def borrow_second_slot():
-                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as second_slot:
-                    seen_slots.append(second_slot)
+            def borrow_extra_slot():
+                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as extra_slot:
+                    seen_slots.append(extra_slot)
                     borrowed.set()
 
-            thread = threading.Thread(target=borrow_second_slot)
+            thread = threading.Thread(target=borrow_extra_slot)
             thread.start()
             assert not borrowed.wait(timeout=0.2)
 
@@ -164,8 +169,8 @@ def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatc
         thread.join(timeout=2.0)
         assert not thread.is_alive()
 
-        assert seen_slots == [first_slot]
-        assert create_count == 1
+        assert seen_slots[0] in retained_slots
+        assert create_count == PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
     finally:
         PyNvVideoCodecVideoBackend._decoder_slots = old_slots
         PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots

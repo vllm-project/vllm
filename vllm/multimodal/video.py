@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import math
+import os
 import tempfile
 import threading
 from abc import abstractmethod
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from io import BytesIO
 from typing import Any, ClassVar, Literal, NamedTuple, cast
 
@@ -186,7 +187,7 @@ PYNVVIDEOCODEC_VIDEO_BACKEND = "pynvvideocodec"
 # Fixed upper bound reserved for persistent PyNvVideoCodec decoder surfaces.
 PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES = 128 * MiB_bytes
 PYNVVIDEOCODEC_DECODER_CACHE_SIZE = 2
-PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
+PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 2
 
 
 class PyNvVideoCodecDecoderSlot:
@@ -863,11 +864,12 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
         target = VideoTargetMetadata(
             num_frames=num_frames, fps=fps, max_duration=max_duration
         )
-        with tempfile.NamedTemporaryFile(suffix=".mp4") as temp_file:
-            temp_file.write(data)
-            temp_file.flush()
+        temp_fd, temp_path = tempfile.mkstemp(suffix=".mp4")
+        try:
+            with os.fdopen(temp_fd, "wb") as temp_file:
+                temp_file.write(data)
 
-            gpu_source = cls._read_source_metadata(temp_file.name, nvc)
+            gpu_source = cls._read_source_metadata(temp_path, nvc)
             source = gpu_source.source
             frame_idx = cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
@@ -875,10 +877,13 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
             raw_frame_bytes = len(frame_idx) * gpu_source.height * gpu_source.width * 3
             pool = get_mm_gpu_ipc_pool()
             if pool is None or raw_frame_bytes == 0:
-                frames = cls._decode_to_pinned_host(temp_file.name, frame_idx, nvc)
+                frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
             else:
                 with pool.acquire(raw_frame_bytes):
-                    frames = cls._decode_to_pinned_host(temp_file.name, frame_idx, nvc)
+                    frames = cls._decode_to_pinned_host(temp_path, frame_idx, nvc)
+        finally:
+            with suppress(FileNotFoundError):
+                os.unlink(temp_path)
 
         valid_frame_indices = frame_idx[: int(frames.shape[0])]
         return frames, cls.create_hf_metadata(
