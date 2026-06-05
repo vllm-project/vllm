@@ -855,12 +855,16 @@ class OpenAIServingChat(OpenAIServing):
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
                 )
+                hide_reasoning = not request.include_reasoning and reasoning is not None
                 if not request.include_reasoning:
                     reasoning = None
+                if hide_reasoning:
+                    logprobs = None
             else:
                 reasoning = None
                 content = output.text
                 tool_calls = []
+                hide_reasoning = False
 
             auto_tools_called = False
 
@@ -989,7 +993,9 @@ class OpenAIServingChat(OpenAIServing):
                 else "stop",
                 stop_reason=output.stop_reason,
                 token_ids=(
-                    as_list(output.token_ids) if request.return_token_ids else None
+                    as_list(output.token_ids)
+                    if request.return_token_ids and not hide_reasoning
+                    else None
                 ),
                 routed_experts=routed_experts_b64,
             )
