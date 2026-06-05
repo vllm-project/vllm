@@ -53,6 +53,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_parallel_tool_call_excluded_token_ids,
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
@@ -300,6 +301,15 @@ class OpenAIServingChat(OpenAIServing):
                 sampling_params = request.to_sampling_params(
                     max_tokens,
                     self.default_sampling_params,
+                )
+
+            if (
+                self.use_harmony
+                and request.tools
+                and isinstance(sampling_params, SamplingParams)
+            ):
+                sampling_params.excluded_eos_token_ids = (
+                    get_parallel_tool_call_excluded_token_ids()
                 )
 
             self._log_inputs(
