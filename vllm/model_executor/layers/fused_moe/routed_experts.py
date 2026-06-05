@@ -317,12 +317,14 @@ class RoutedExperts(PluggableLayer):
     ):
         """
         Load grouped weight scales for group quantization or model weights
-            :param shard_dim: dimension to shard
-            :param expert_data: parameter for a particular expert
-            :param shard_id: either w1, w2, or w3
-            :param loaded_weight: checkpoint weight to load into the param
-            :param tp_rank: tensor parallel rank
-            :param load_full_w2: whether or not the w2 loaded should be sharded.
+
+        Args:
+            shard_dim: dimension to shard
+            expert_data: parameter for a particular expert
+            shard_id: either w1, w2, or w3
+            loaded_weight: checkpoint weight to load into the param
+            tp_rank: tensor parallel rank
+            load_full_w2: whether or not the w2 loaded should be sharded.
         """
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
