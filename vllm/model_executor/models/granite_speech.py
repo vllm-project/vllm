@@ -143,7 +143,7 @@ class GraniteSpeechMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
-            audio_embed_sizes=MultiModalFieldConfig.batched("audio"),
+            audio_embed_sizes=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -389,10 +389,8 @@ class GraniteSpeechConformerAttention(nn.Module):
         # shaw's relative positional embedding
         dist = attention_dists.to(hidden_states.device)
         rel_pos_emb = self.rel_pos_emb(dist)
-        rel_pos_emb_expanded = rel_pos_emb.view([1, 1, 1] + list(rel_pos_emb.shape))
         pos_attn = (
-            torch.sum(query_states.unsqueeze(-2) * rel_pos_emb_expanded, dim=-1)
-            * self.scale
+            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb) * self.scale
         )
 
         if remainder > 0:
@@ -616,11 +614,10 @@ class GraniteSpeechForConditionalGeneration(
             )
 
         with self._mark_tower_model(vllm_config, "audio"):
-            # Conformer encoder
-            self.encoder = GraniteSpeechCTCEncoder(
+            self.encoder = self._build_encoder(
                 config=config.encoder_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.encoder",
+                prefix=maybe_prefix(prefix, "encoder"),
             )
 
             # Blip2 QFormer
@@ -628,11 +625,23 @@ class GraniteSpeechForConditionalGeneration(
                 config=config,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                prefix=f"{prefix}.projector",
+                prefix=maybe_prefix(prefix, "projector"),
             )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _build_encoder(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> "GraniteSpeechCTCEncoder":
+        return GraniteSpeechCTCEncoder(
+            config=config,
+            quant_config=quant_config,
+            prefix=prefix,
         )
 
     def _parse_and_validate_audio_input(
@@ -717,13 +726,13 @@ class GraniteSpeechForConditionalGeneration(
             torch.Tensor: Mask of shape (bsz, num_features) to be applied to
             the audio features prior to splitting the audio embeddings.
         """
-        most_audio_features = torch.max(audio_embed_sizes).item()
-        mask_indices = torch.arange(
-            most_audio_features,
-            device=audio_embed_sizes.device,
-        ).view(1, -1)
+        most_audio_features = int(torch.max(audio_embed_sizes))
+        mask_indices = torch.arange(most_audio_features).view(1, -1)
         input_features_mask = mask_indices < audio_embed_sizes.view(-1, 1)
-        return input_features_mask
+        target_device = self.encoder.input_linear.weight.device
+        if target_device == input_features_mask.device:
+            return input_features_mask
+        return input_features_mask.pin_memory().to(target_device, non_blocking=True)
 
     def _pad_and_stack_input_features(
         self,
