@@ -92,6 +92,12 @@ class TritonAttentionMetadata:
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
 
+    # Propagated from CommonAttentionMetadata.causal so the per-batch
+    # causal toggle reaches kernel_unified_attention at launch time.
+    # Speculative-decoding verify sets this to False on the drafter's
+    # verify pass; pure decode and prefill keep it at True.
+    causal: bool = True
+
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -230,6 +236,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            causal=common_attn_metadata.causal,
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -346,6 +353,12 @@ class TritonAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        # kernel_unified_attention now accepts CAUSAL=False; the launcher
+        # rejects only the SWA + non-causal combination.
         return True
 
     @classmethod
@@ -619,7 +632,7 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=True,
+            causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,

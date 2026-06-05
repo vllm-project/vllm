@@ -258,6 +258,11 @@ def kernel_unified_attention(
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
     # FP8_PER_TOKEN_HEAD (3).
     KV_QUANT_MODE: tl.constexpr = 0,
+    # Causal toggle.  ``True`` (default) preserves the existing key<=query
+    # semantics.  ``False`` lets drafted query tokens attend bidirectionally
+    # within the prefix; used by speculative-decoding verify.  Composes with
+    # ``SLIDING_WINDOW`` and ``CHUNK_LOOKBACK`` via ``compute_kv_seq_mask``.
+    CAUSAL: tl.constexpr = True,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
     # Chunked / block-local attention.  ``CHUNK_LOOKBACK >= 0`` enables
@@ -499,6 +504,7 @@ def kernel_unified_attention(
             MAX_MM_RANGES,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
+            CAUSAL,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -802,7 +808,12 @@ def unified_attention(
     # disabling this flag costs nothing.
     use_td: bool = False,
 ):
-    assert causal, "Only causal attention is supported"
+    # SWA + non-causal is not a well-defined combination here; reject it
+    # explicitly.  All other combinations route through CAUSAL=False below.
+    if not causal:
+        assert window_size == (-1, -1), (
+            "Non-causal attention is not supported with a sliding window"
+        )
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
 
@@ -917,16 +928,23 @@ def unified_attention(
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
+    # 2. The batch includes a long prefill request, or
     # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
+    # 4. Batch invariance is enabled.
+    #
+    # The 3D path's segment reduction is associative across query-block
+    # rows, so any small ``max_seqlen_q`` (e.g. speculative-decoding
+    # verify with N+1 query tokens) can use it.  ``MAX_SEQLEN_Q_3D_LIMIT``
+    # is conservative: it guards the long-prefill case where the 3D
+    # extra segment-merge cost stops paying for itself.
+    MAX_SEQLEN_Q_3D_LIMIT = 16
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > MAX_SEQLEN_Q_3D_LIMIT
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
@@ -1028,6 +1046,7 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        CAUSAL=causal,
         Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,

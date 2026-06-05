@@ -268,6 +268,7 @@ def compute_kv_seq_mask(
     MAX_MM_RANGES: tl.constexpr,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    CAUSAL: tl.constexpr = True,
 ):
     """Build the KV mask for one tile.
 
@@ -279,9 +280,21 @@ def compute_kv_seq_mask(
     Chunked attention takes precedence over sliding window when both
     are non-default — the launcher zeros ``CHUNK_LOOKBACK`` whenever
     sliding window is disabled.
+
+    ``CAUSAL=False`` relaxes the key<=query constraint so drafted query
+    tokens (e.g. speculative-decoding verify) can attend bidirectionally
+    within the accepted prefix.  Out-of-bounds keys are still suppressed
+    by the caller's ``tile_mask`` (``seq_offset < seq_lens[seq_idx]``).
     """
-    # Compute attention mask: causal by default (key <= query)
-    seq_mask = seq_offset[None, :] <= query_abs_pos
+    # Compute attention mask: causal by default (key <= query).
+    if CAUSAL:
+        seq_mask = seq_offset[None, :] <= query_abs_pos
+    else:
+        # Non-causal: bidirectional within seq_len bounds; the caller's
+        # tile_mask handles OOB. seq_offset >= 0 is broadcast against
+        # query_abs_pos to yield the (BLOCK_M, TILE_SIZE) shape needed
+        # downstream.
+        seq_mask = (seq_offset[None, :] >= 0) & (query_abs_pos >= 0)
 
     # Apply sliding window / chunked attention to base mask
     # BEFORE mm_prefix OR.

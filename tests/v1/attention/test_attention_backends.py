@@ -754,6 +754,7 @@ def test_sliding_window_encoder_backend_correctness(
 NON_CAUSAL_BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
     AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
