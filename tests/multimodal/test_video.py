@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -9,9 +12,12 @@ import pytest
 
 from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     Molmo2VideoBackend,
+    PyNvVideoCodecVideoBackend,
     VideoLoader,
     get_video_loader_backend_for_processor,
 )
@@ -56,6 +62,114 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    decoder_cache_sizes = []
+
+    class FakeMetadata:
+        width = 10
+        height = 20
+        average_fps = 5.0
+        duration = 2.0
+
+    class FakeDecoder:
+        def __init__(self, *args, **kwargs):
+            decoder_cache_sizes.append(kwargs["decoder_cache_size"])
+
+        def __len__(self):
+            return 10
+
+        def get_stream_metadata(self):
+            return FakeMetadata()
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    class RecordingPool:
+        def __init__(self):
+            self.acquired: list[int] = []
+
+        @contextmanager
+        def acquire(self, size: int):
+            self.acquired.append(size)
+            yield
+
+    def fake_decode(cls, file_path: str, frame_idx: list[int], nvc):
+        return np.zeros((len(frame_idx), 20, 10, 3), dtype=np.uint8)
+
+    pool = RecordingPool()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
+    monkeypatch.setattr(
+        "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
+    )
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+    frames, metadata = loader.load_bytes(b"fake video", num_frames=4)
+
+    assert frames.shape == (4, 20, 10, 3)
+    assert pool.acquired == [4 * 20 * 10 * 3]
+    assert decoder_cache_sizes == [PYNVVIDEOCODEC_DECODER_CACHE_SIZE]
+    assert metadata["video_backend"] == PYNVVIDEOCODEC_VIDEO_BACKEND
+    assert metadata["frames_indices"] == [0, 3, 6, 9]
+
+
+def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatch):
+    class FakeSlot:
+        pass
+
+    create_count = 0
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = []
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+
+        def fake_create_slot(cls):
+            nonlocal create_count
+            create_count += 1
+            return FakeSlot()
+
+        monkeypatch.setattr(
+            PyNvVideoCodecVideoBackend,
+            "_create_decoder_slot",
+            classmethod(fake_create_slot),
+        )
+
+        borrowed = threading.Event()
+        seen_slots = []
+
+        with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as first_slot:
+
+            def borrow_second_slot():
+                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as second_slot:
+                    seen_slots.append(second_slot)
+                    borrowed.set()
+
+            thread = threading.Thread(target=borrow_second_slot)
+            thread.start()
+            assert not borrowed.wait(timeout=0.2)
+
+        assert borrowed.wait(timeout=2.0)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+        assert seen_slots == [first_slot]
+        assert create_count == 1
+    finally:
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
 
 
 # ============================================================================
