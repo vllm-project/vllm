@@ -11,10 +11,13 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "B row stride (",
+              b_row_stride_bytes, " B) must hold K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "B row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
   TORCH_CHECK(in_b.dtype() == torch::kFloat16,
               "Sweep only supports float16 activations");
   TORCH_CHECK(in_scale.dtype() == torch::kFloat16,
@@ -58,7 +61,7 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
       wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, _ACHUNK, _UNRL, _N, \
                         _GS><<<grid, block, 0, stream>>>(                     \
           K_in, M_in, 1, 1, wptr, aptr, sptr, nullptr, biasptr, cptr,         \
-          __wvPrGrp, CuCount);                                                \
+          __wvPrGrp, CuCount, b_row_stride_bytes_i32);                        \
     }
 
   #define SWEEP_GHF_N(_THRDS, _YTILE, _WVPRGRP, _ACHUNK, _UNRL, _GS)       \

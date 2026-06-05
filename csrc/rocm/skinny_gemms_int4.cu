@@ -21,10 +21,13 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
-  int64_t expected_weight_bytes = M_in * K_in / 2;
-  int64_t actual_weight_bytes = in_a.numel() * in_a.element_size();
-  TORCH_CHECK(actual_weight_bytes == expected_weight_bytes,
-              "Weight tensor must contain M*K/2 bytes for int4 packing");
+  const int64_t b_row_stride_bytes = in_a.stride(0) * in_a.element_size();
+  TORCH_CHECK(b_row_stride_bytes >= K_in / 2, "B row stride (",
+              b_row_stride_bytes, " bytes) must hold at least K/2=", K_in / 2,
+              " bytes per row");
+  TORCH_CHECK(std::in_range<int>(b_row_stride_bytes), "B row stride (",
+              b_row_stride_bytes, " bytes) exceeds int range");
+  const int b_row_stride_bytes_i32 = static_cast<int>(b_row_stride_bytes);
   TORCH_CHECK(
       in_b.dtype() == torch::kFloat16 || in_b.dtype() == torch::kBFloat16,
       "Activation must be float16 or bfloat16");
