@@ -4,7 +4,7 @@
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._custom_ops import cutlass_scaled_fp4_mm, fusedQuantizeNv
+from vllm._custom_ops import fusedQuantizeNv
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
@@ -16,6 +16,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
+)
+from vllm.utils.flashinfer import (
+    flashinfer_scaled_fp4_mm,
 )
 
 __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
@@ -105,13 +108,14 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
         x_scales_blocked = to_blocked(x_scales, backend="triton").view(x_scales.shape)
 
-        out = cutlass_scaled_fp4_mm(
+        out = flashinfer_scaled_fp4_mm(
             x_fp4,
             layer.weight,
             x_scales_blocked,
             layer.weight_scale,
             layer.fused_alpha,
             x.dtype,
+            backend="cutlass"
         )
 
         out = slice_nvfp4_output(out, output_size)
