@@ -38,7 +38,7 @@ macro_rules! tool_parser_factory {
 
 // Export a tool parser to Python by registering it here.
 tool_parser_factory! {
-    DeepSeekV4ToolParser,
+    DeepSeekV4ToolParser, // for testing on Python side
 }
 
 #[pyclass(name = "Tool", module = "vllm._rust_tool_parser", skip_from_py_object)]
