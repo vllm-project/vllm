@@ -6,10 +6,10 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
-import os
 import sys
 from importlib.util import find_spec
 
+from vllm.entrypoints.cli import cli_env_setup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -34,9 +34,7 @@ def main():
         vllm.entrypoints.cli.run_batch,
     ]
 
-    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
-        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    cli_env_setup(logger)
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:

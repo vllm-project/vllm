@@ -26,6 +26,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.cli import cli_env_setup
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import GenerationError
@@ -36,7 +37,6 @@ from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
-    cli_env_setup,
     log_non_default_args,
     log_version_and_model,
     process_lora_modules,
@@ -692,7 +692,7 @@ if __name__ == "__main__":
     # NOTE(simon):
     # This section should be in sync with vllm/entrypoints/cli/main.py for CLI
     # entrypoints.
-    cli_env_setup()
+    cli_env_setup(logger)
     parser = FlexibleArgumentParser(
         description="vLLM OpenAI-Compatible RESTful API server."
     )
