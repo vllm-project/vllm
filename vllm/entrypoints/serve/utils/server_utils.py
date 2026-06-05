@@ -26,7 +26,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
 )
-from vllm.entrypoints.utils import create_error_response, sanitize_message
+from vllm.entrypoints.serve.utils.error_response import (
+    create_error_response,
+    sanitize_message,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
