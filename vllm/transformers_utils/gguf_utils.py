@@ -18,6 +18,69 @@ from .repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
+# Mapping from GGUF architecture names to HF model types for architectures that
+# transformers does not natively support in its GGUF_CONFIG_MAPPING. Both
+# DeepSeek-V2 and V3 models use "deepseek2" as the GGUF general.architecture.
+GGUF_ARCH_TO_HF_MODEL_TYPE: dict[str, str] = {
+    "deepseek2": "deepseek_v2",
+}
+
+# GGUF metadata field → HF config attribute mapping for the deepseek2 architecture.
+# These fields cover both DeepSeek-V2 and V3 (which share the same GGUF arch name).
+_DEEPSEEK2_GGUF_CONFIG_MAPPING: dict[str, str | None] = {
+    "context_length": "max_position_embeddings",
+    "block_count": "num_hidden_layers",
+    "embedding_length": "hidden_size",
+    "feed_forward_length": "intermediate_size",
+    "rope.freq_base": "rope_theta",
+    "attention.head_count": "num_attention_heads",
+    "attention.head_count_kv": "num_key_value_heads",
+    "attention.layer_norm_rms_epsilon": "rms_norm_eps",
+    "vocab_size": "vocab_size",
+    # MoE parameters
+    "expert_count": "n_routed_experts",
+    "expert_used_count": "num_experts_per_tok",
+    "expert_shared_count": "n_shared_experts",
+    "expert_feed_forward_length": "moe_intermediate_size",
+    # MLA (Multi-head Latent Attention) parameters
+    "attention.kv_lora_rank": "kv_lora_rank",
+    "attention.q_lora_rank": "q_lora_rank",
+    "attention.qk_nope_head_dim": "qk_nope_head_dim",
+    "attention.qk_rope_head_dim": "qk_rope_head_dim",
+    "attention.v_head_dim": "v_head_dim",
+    # Dense prefix layers before MoE kicks in
+    "leading_dense_block_count": "first_k_dense_replace",
+}
+
+
+def _patch_transformers_gguf_for_deepseek2() -> None:
+    """Patch transformers to recognize deepseek2 as a supported GGUF architecture.
+
+    Transformers' GGUF_CONFIG_MAPPING omits deepseek2, so loading a standalone
+    DeepSeek-V2/V3 GGUF file (without config.json) raises a ValueError.  This
+    function adds the required entries to the mapping and to the derived
+    GGUF_SUPPORTED_ARCHITECTURES list so that load_gguf_checkpoint succeeds.
+    """
+    try:
+        from transformers import modeling_gguf_pytorch_utils
+        from transformers.integrations.ggml import GGUF_CONFIG_MAPPING
+    except ImportError:
+        return
+
+    if "deepseek2" in GGUF_CONFIG_MAPPING:
+        return
+
+    GGUF_CONFIG_MAPPING["deepseek2"] = _DEEPSEEK2_GGUF_CONFIG_MAPPING
+
+    supported = getattr(
+        modeling_gguf_pytorch_utils, "GGUF_SUPPORTED_ARCHITECTURES", None
+    )
+    if supported is not None and "deepseek2" not in supported:
+        supported.append("deepseek2")
+
+
+_patch_transformers_gguf_for_deepseek2()
+
 
 @cache
 def check_gguf_file(model: str | PathLike) -> bool:

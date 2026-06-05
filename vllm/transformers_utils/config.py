@@ -35,6 +35,7 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
+    GGUF_ARCH_TO_HF_MODEL_TYPE,
     check_gguf_file,
     is_gguf,
     is_remote_gguf,
@@ -173,6 +174,45 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+# Cache for GGUF architecture → AutoConfig-registered subclass mappings.
+# Each subclass keeps the GGUF arch name as model_type so that AutoConfig can
+# find it; vllm's post-processing in get_config() remaps it to the canonical HF
+# model_type afterwards.
+_gguf_arch_config_class_cache: dict[str, type[PretrainedConfig]] = {}
+
+
+def _ensure_gguf_arch_registered_in_autoconfig(gguf_arch: str) -> None:
+    """Register a config class for the given GGUF architecture name.
+
+    Creates a thin subclass of the target HF config class with model_type set to
+    the GGUF architecture name so that AutoConfig.from_pretrained can resolve the
+    class when loading from a GGUF file without config.json.
+    """
+    if gguf_arch in _gguf_arch_config_class_cache:
+        # Already registered; AutoConfig.register is idempotent with exist_ok=True.
+        AutoConfig.register(
+            gguf_arch, _gguf_arch_config_class_cache[gguf_arch], exist_ok=True
+        )
+        return
+
+    hf_model_type = GGUF_ARCH_TO_HF_MODEL_TYPE[gguf_arch]
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    base_class = CONFIG_MAPPING[hf_model_type]
+
+    # Create a subclass with the GGUF arch name as model_type so that
+    # AutoConfig.register accepts it (the model_type attribute must match the
+    # registration key).
+    alias_class = type(
+        f"_{gguf_arch.capitalize()}GGUFConfig",
+        (base_class,),
+        {"model_type": gguf_arch},
+    )
+
+    _gguf_arch_config_class_cache[gguf_arch] = alias_class
+    AutoConfig.register(gguf_arch, alias_class, exist_ok=True)
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -211,6 +251,14 @@ class HFConfigParser(ConfigParserBase):
                 dummy_config = PretrainedConfig(**dummy_kwargs)
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
+
+        # When a GGUF file is loaded without an accompanying config.json,
+        # transformers reads general.architecture from the GGUF metadata and
+        # uses it as model_type.  Some architectures (e.g. "deepseek2") are not
+        # registered in AutoConfig, so we register them here as aliases for their
+        # corresponding HF model types.
+        if "gguf_file" in kwargs and model_type in GGUF_ARCH_TO_HF_MODEL_TYPE:
+            _ensure_gguf_arch_registered_in_autoconfig(model_type)
 
         if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
@@ -764,6 +812,11 @@ def get_config(
 
     # Special architecture mapping check for GGUF models
     if _is_gguf:
+        # Remap GGUF-native architecture names (e.g. "deepseek2") to the
+        # canonical HF model_type (e.g. "deepseek_v2") so that subsequent
+        # lookups into MODEL_FOR_CAUSAL_LM_MAPPING_NAMES succeed.
+        if config.model_type in GGUF_ARCH_TO_HF_MODEL_TYPE:
+            config.update({"model_type": GGUF_ARCH_TO_HF_MODEL_TYPE[config.model_type]})
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]

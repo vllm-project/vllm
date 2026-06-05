@@ -9,6 +9,10 @@ from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
 from vllm.model_executor.model_loader.weight_utils import download_gguf
+from vllm.transformers_utils.gguf_utils import (
+    _DEEPSEEK2_GGUF_CONFIG_MAPPING,
+    GGUF_ARCH_TO_HF_MODEL_TYPE,
+)
 
 
 class TestGGUFDownload:
@@ -222,3 +226,60 @@ class TestGGUFModelLoader:
         model_config.model = "invalid-format"
         with pytest.raises(ValueError, match="Unrecognised GGUF reference"):
             loader._prepare_weights(model_config)
+
+
+class TestDeepSeek2GGUFSupport:
+    """Tests for deepseek2 GGUF architecture support in transformers patch."""
+
+    def test_gguf_arch_to_hf_model_type_has_deepseek2(self):
+        """GGUF_ARCH_TO_HF_MODEL_TYPE must map deepseek2 to deepseek_v2."""
+        assert "deepseek2" in GGUF_ARCH_TO_HF_MODEL_TYPE
+        assert GGUF_ARCH_TO_HF_MODEL_TYPE["deepseek2"] == "deepseek_v2"
+
+    def test_deepseek2_gguf_config_mapping_contains_core_fields(self):
+        """deepseek2 config mapping must cover the key model and MoE fields."""
+        required = {
+            "context_length",
+            "block_count",
+            "embedding_length",
+            "attention.head_count",
+            "attention.kv_lora_rank",
+            "expert_count",
+            "expert_used_count",
+        }
+        assert required.issubset(_DEEPSEEK2_GGUF_CONFIG_MAPPING)
+
+    def test_transformers_gguf_config_mapping_patched(self):
+        """_patch_transformers_gguf_for_deepseek2 must add deepseek2 to
+        transformers' GGUF_CONFIG_MAPPING and GGUF_SUPPORTED_ARCHITECTURES."""
+        from transformers import modeling_gguf_pytorch_utils
+        from transformers.integrations.ggml import GGUF_CONFIG_MAPPING
+
+        assert "deepseek2" in GGUF_CONFIG_MAPPING, (
+            "deepseek2 should be in GGUF_CONFIG_MAPPING after vllm import"
+        )
+        supported = modeling_gguf_pytorch_utils.GGUF_SUPPORTED_ARCHITECTURES
+        assert "deepseek2" in supported, (
+            "deepseek2 should be in GGUF_SUPPORTED_ARCHITECTURES after vllm import"
+        )
+
+    def test_ensure_gguf_arch_registered_creates_alias(self):
+        """_ensure_gguf_arch_registered_in_autoconfig registers a class for
+        deepseek2 that AutoConfig can resolve."""
+        from transformers import AutoConfig
+
+        from vllm.transformers_utils.config import (
+            _ensure_gguf_arch_registered_in_autoconfig,
+        )
+
+        _ensure_gguf_arch_registered_in_autoconfig("deepseek2")
+
+        # Should not raise; AutoConfig must know about deepseek2 now.
+        cfg = AutoConfig.for_model(
+            "deepseek2",
+            hidden_size=512,
+            num_hidden_layers=2,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+        )
+        assert cfg.model_type == "deepseek2"
