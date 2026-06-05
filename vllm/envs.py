@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
+    VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
@@ -114,6 +115,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
@@ -877,6 +879,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
+    # When True, GroupCoordinator constructs its CPU/device subgroups via
+    # ``torch.distributed.split_group(backend=...)``
+    # and ``init_distributed_environment`` initializes the default PG with
+    # mixed ``cpu:gloo,cuda:nccl`` backend + eager ``device_id`` binding.
+    "VLLM_DISTRIBUTED_USE_SPLIT_GROUP": lambda: bool(
+        int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
+    ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
@@ -1108,6 +1117,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - use aiter tuned gemms for unquantized gemms
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
+    ),
+    "VLLM_ROCM_USE_AITER_LINEAR_HIPBMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_LINEAR_HIPBMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter moe ops.
     # By default is enabled.
