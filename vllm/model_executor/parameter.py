@@ -3,6 +3,7 @@
 
 from collections.abc import Callable, Hashable
 from fractions import Fraction
+from typing import Any
 from weakref import WeakValueDictionary
 
 import torch
@@ -444,9 +445,7 @@ class SharedWeightParameter(BasevLLMParameter):
                 "currently support tensor parallelism"
             )
 
-    def add_partition(
-        self, index: int, data_key: Hashable, *args: list, **kwargs: dict
-    ):
+    def add_partition(self, index: int, data_key: Hashable, *args: Any, **kwargs: Any):
         """
         Add a partition to the weight parameter. Partitions whose `data_key`
         is the same will share tensor data
