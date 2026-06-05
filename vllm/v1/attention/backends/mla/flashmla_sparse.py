@@ -983,7 +983,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 f"Padding num_heads from {self.num_heads} to "
                 f"{self.prefill_padding} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_zeros((q.shape[0], self.prefill_padding, q.shape[2]))
+            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
             q_padded[:, : self.num_heads, :] = q
             q = q_padded
 
