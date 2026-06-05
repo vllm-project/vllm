@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from unittest.mock import MagicMock, patch
+
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.loggers import (
+    AggregatedLoggingStatLogger,
+    LoggingStatLogger,
+    StatLoggerManager,
+)
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
@@ -244,3 +251,53 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+# ---------------------------------------------------------------------------
+# StatLoggerManager multi-API-server logging tests (no GPU required)
+# ---------------------------------------------------------------------------
+
+_LOGGERS_MODULE = "vllm.v1.metrics.loggers"
+
+
+def _logging_factory_was_used(client_count: int, client_index: int) -> bool:
+    """Return True if LoggingStatLogger was registered as a factory.
+    Patches out PrometheusStatLogger (needs real config) and
+    LoggingStatLogger (needs real config) so the test runs without GPU.
+    Checks whether the patched LoggingStatLogger mock was called as a
+    factory — which only happens when logging is enabled for this server.
+    """
+    mock_config = MagicMock()
+    with (
+        patch(f"{_LOGGERS_MODULE}.PrometheusStatLogger"),
+        patch(f"{_LOGGERS_MODULE}.LoggingStatLogger") as mock_logging_cls,
+    ):
+        StatLoggerManager(
+            vllm_config=mock_config,
+            enable_default_loggers=True,
+            client_count=client_count,
+            client_index=client_index,
+        )
+    return mock_logging_cls.called
+
+
+def test_stat_logger_manager_single_server():
+    """With api_server_count=1 the default logging factory must be active."""
+    assert _logging_factory_was_used(client_count=1, client_index=0), (
+        "LoggingStatLogger should be active for a single API server"
+    )
+
+
+def test_stat_logger_manager_multi_server_primary():
+    """With api_server_count>1 the primary server (index 0) must log."""
+    assert _logging_factory_was_used(client_count=4, client_index=0), (
+        "LoggingStatLogger should be active on the primary API server (index 0)"
+    )
+
+
+def test_stat_logger_manager_multi_server_non_primary():
+    """With api_server_count>1 non-primary servers must NOT log."""
+    for idx in range(1, 4):
+        assert not _logging_factory_was_used(client_count=4, client_index=idx), (
+            f"LoggingStatLogger should be silent on server index {idx}"
+        )
