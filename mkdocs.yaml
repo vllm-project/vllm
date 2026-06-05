@@ -95,7 +95,6 @@ plugins:
             signature_crossrefs: true
             # Recommendations from api-autonav
             docstring_section_style: list
-            merge_init_into_class: true
             parameter_headings: true
             show_symbol_type_heading: true
             show_symbol_type_toc: true
