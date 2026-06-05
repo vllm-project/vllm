@@ -7,6 +7,7 @@ from torch import fx
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
@@ -26,7 +27,7 @@ from vllm.utils.torch_utils import (
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
+from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
@@ -204,7 +205,6 @@ class Qwen3NextQkNormRopeKvCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
@@ -270,12 +270,12 @@ class Qwen3NextQkNormRopeKvCachePattern:
             # round-trip and no dtype cast -- the model has neither).
             q_3d = q_3d.contiguous()
             q_w = q_weight.float() + 1.0
-            q_normed = self.rmsnorm_matcher(q_3d, q_w)
+            q_normed = ir.ops.rms_norm(q_3d, q_w, self.eps)
             q_normed_flat = q_normed.view(-1, q_size)
 
             k_3d = k.view(-1, num_kv_heads, head_dim)
             k_w = k_weight.float() + 1.0
-            k_normed = self.rmsnorm_matcher(k_3d, k_w)
+            k_normed = ir.ops.rms_norm(k_3d, k_w, self.eps)
             k_flat = k_normed.view(-1, k_size)
 
             q_rope, k_rope = self.rope_matcher(
@@ -291,12 +291,12 @@ class Qwen3NextQkNormRopeKvCachePattern:
 
         q_by_head = q.view(-1, q_size // head_dim, head_dim)
         q_w = q_weight.float() + 1.0
-        q_normed = self.rmsnorm_matcher(q_by_head, q_w)
+        q_normed = ir.ops.rms_norm(q_by_head, q_w, self.eps)
         q_flat = q_normed.view(-1, q_size)
 
         k_by_head = k.view(-1, k_size // head_dim, head_dim)
         k_w = k_weight.float() + 1.0
-        k_normed = self.rmsnorm_matcher(k_by_head, k_w)
+        k_normed = ir.ops.rms_norm(k_by_head, k_w, self.eps)
         k_flat = k_normed.view(-1, k_size)
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
