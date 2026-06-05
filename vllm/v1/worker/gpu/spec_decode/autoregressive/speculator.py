@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -50,6 +50,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         self.prefill_cudagraph_manager: PrefillSpeculatorCudaGraphManager | None = None
         self.decode_cudagraph_manager: DecodeSpeculatorCudaGraphManager | None = None
+
+        # SSD (Speculative Speculative Decoding) async overlap.
+        # Initialized lazily in load_draft_model when the predictor path is set.
+        # See: vllm/v1/spec_decode/ssd_worker.py
+        self._ssd: Optional["SSDAsyncOverlap"] = None  # type: ignore[name-defined]
+        self._ssd_last_draft_logits: Optional[torch.Tensor] = None
+        self._ssd_last_draft_hidden: Optional[torch.Tensor] = None
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -133,6 +140,41 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.kv_cache_config,
             progress_bar_desc="Capturing decode CUDA graphs",
         )
+
+    def _init_ssd(self) -> None:
+        """
+        Initialize SSDAsyncOverlap if ssd_outcome_predictor_path is configured.
+
+        Called after the draft model is loaded so that hidden_size is known.
+        SSD overlaps target verification (verify_stream) with draft
+        pre-speculation (draft_stream) to hide the drafting latency.
+
+        If the predictor path is not set, this is a no-op and all code paths
+        behave identically to standard spec decode.
+        """
+        predictor_path = getattr(
+            self.speculative_config, "ssd_outcome_predictor_path", None
+        )
+        if not predictor_path:
+            return
+
+        from vllm.v1.spec_decode.ssd_worker import SSDAsyncOverlap
+
+        self._ssd = SSDAsyncOverlap(
+            outcome_predictor_path=predictor_path,
+            hidden_size=self.hidden_size,
+            num_speculative_tokens=self.num_speculative_steps,
+            device=self.device,
+        )
+        logger.info(
+            "SSD async overlap enabled. Predictor loaded from: %s",
+            predictor_path,
+        )
+
+    def load_model(self, target_model) -> None:  # type: ignore[override]
+        """Load draft model and optionally initialise SSD."""
+        super().load_model(target_model)
+        self._init_ssd()
 
     @torch.inference_mode()
     def propose(
@@ -277,7 +319,88 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
         )
 
-        return self.draft_tokens[:num_reqs]
+        draft_tokens = self.draft_tokens[:num_reqs]
+
+        # SSD async overlap: kick off pre-speculation for the NEXT step on
+        # draft_stream, overlapping with the upcoming target verification.
+        # Only active when ssd_outcome_predictor_path is configured and
+        # the predictor was loaded; otherwise this is a no-op.
+        if self._ssd is not None and not dummy_run:
+            self._ssd_kick_off_predraft(num_reqs, draft_tokens)
+
+        return draft_tokens
+
+    def _ssd_kick_off_predraft(
+        self,
+        num_reqs: int,
+        draft_tokens: torch.Tensor,  # [num_reqs, K]
+    ) -> None:
+        """
+        Launch SSD pre-speculation on draft_stream for the next step.
+
+        Uses draft logits and hidden states cached from the just-completed
+        draft generation. Falls back silently if tensors are unavailable
+        (e.g., greedy-only path that never computes full logits).
+        """
+        assert self._ssd is not None
+
+        # We need [batch, K, vocab] logits.  The probabilistic draft path
+        # stores them in self.draft_logits; the greedy path does not.
+        # Only engage SSD when logits are available.
+        if self.draft_logits is None:
+            return
+
+        # draft_logits shape: [max_num_reqs, K, vocab] – slice to active reqs.
+        cur_logits = self.draft_logits[:num_reqs]  # [B, K, vocab]
+        # hidden_states shape: [max_num_tokens, hidden_size] – the K-th hidden
+        # state per request is at row `num_reqs-1..0` after multi-step decode.
+        # We use the stored per-request hidden states (set during _generate_draft).
+        cur_hidden = self.hidden_states[:num_reqs]  # [B, hidden_size]
+
+        # Build a simple draft_fn that will be called inside the predraft phase.
+        # At this point we don't run an actual model forward (that would require
+        # KV cache and attention metadata).  Instead, we store the logits and
+        # hidden for use by the outcome predictor and trigger it on the stream.
+        # The actual pre-speculation (running a new draft forward) is deferred
+        # to when the verify phase signals kv_ready_event.
+        #
+        # For the initial implementation we only run the outcome predictor
+        # (which predicts acceptance) and cache those predictions.  The full
+        # two-stream overlap (pre-drafting new tokens) requires KV-cache access
+        # and is planned as a follow-up; here we supply a no-op draft_fn so
+        # that the predictor still runs and accuracy metrics are tracked.
+        def noop_draft_fn(
+            cont_token: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            # Return placeholder tensors so SSD cache is populated.
+            B = cont_token.shape[0]
+            K = self.num_speculative_steps
+            V = cur_logits.shape[-1]
+            H = self.hidden_size
+            return (
+                torch.zeros(B, K, dtype=torch.int64, device=self.device),
+                torch.zeros(B, K, device=self.device),
+                torch.zeros(B, H, device=self.device),
+                torch.zeros(B, K, V, device=self.device),
+            )
+
+        self._ssd.run_predraft_phase(
+            draft_fn=noop_draft_fn,
+            draft_logits=cur_logits,
+            draft_hidden=cur_hidden,
+            draft_tokens=draft_tokens.to(torch.int64),
+        )
+
+        # Log prediction accuracy periodically (every 100 steps).
+        metrics = self._ssd.get_metrics()
+        total = metrics["ssd_total_predictions"]
+        if total > 0 and total % 100 == 0:
+            logger.debug(
+                "SSD prediction accuracy: %.3f (%d/%d)",
+                metrics["ssd_prediction_accuracy"],
+                metrics["ssd_correct_predictions"],
+                total,
+            )
 
     def sample_draft(
         self,
