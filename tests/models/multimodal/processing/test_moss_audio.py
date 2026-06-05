@@ -8,8 +8,6 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
-from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_BOS_TOKEN,
     MOSS_AUDIO_BOS_TOKEN_ID,
@@ -457,15 +455,17 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
         assert kwargs["deepstack_input_embeds"] is (cached if first else inter)
         assert model.deepstack_input_embeds is None
 
+    calls = []
+
+    def fake_lm(*args, **kwargs):
+        del args
+        calls.append(kwargs)
+        return torch.ones(1, 1)
+
     _patch_pp_group(monkeypatch, first=False)
     model = object.__new__(MossAudioModel)
     torch.nn.Module.__init__(model)
-
-    def fail_lm(*args, **kwargs):
-        del args, kwargs
-        pytest.fail("language model should not be called")
-
-    model.language_model = fail_lm
+    model.language_model = fake_lm
     model.deepstack_input_embeds = IntermediateTensors({})
     inter = IntermediateTensors(
         {
@@ -474,13 +474,14 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
         }
     )
 
-    with pytest.raises(AssertionError, match="must not receive inputs_embeds"):
-        model.forward(
-            input_ids=None,
-            positions=torch.arange(3),
-            intermediate_tensors=inter,
-            inputs_embeds=torch.ones(3, 8),
-        )
+    model.forward(
+        input_ids=None,
+        positions=torch.arange(3),
+        intermediate_tensors=inter,
+        inputs_embeds=torch.ones(3, 8),
+    )
+    assert calls[0]["inputs_embeds"] is None
+    assert calls[0]["deepstack_input_embeds"] is inter
 
 
 def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):

@@ -1854,13 +1854,12 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        assert intermediate_tensors is None or inputs_embeds is None, (
-            "non-first PP rank must not receive inputs_embeds"
-        )
-
         if intermediate_tensors is None:
             deepstack_input_embeds = self.deepstack_input_embeds
         else:
+            # Non-first PP ranks consume hidden states from intermediate_tensors.
+            # The executor may still pass dummy inputs_embeds during profiling.
+            inputs_embeds = None
             deepstack_input_embeds = intermediate_tensors
         hidden_states = self.language_model(
             input_ids,
