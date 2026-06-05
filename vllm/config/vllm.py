@@ -1002,11 +1002,6 @@ class VllmConfig:
         )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
-            # The DP coordination all_reduce runs on a dedicated stream (see
-            # vllm/v1/worker/dp_utils.py), so reading its result back no longer
-            # forces a GPU sync on the default stream. NCCL can therefore be
-            # used for DP synchronization even under async scheduling without
-            # introducing a bubble, so we no longer fall back to Gloo there.
             self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
