@@ -73,6 +73,8 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="Llama4ForConditionalGeneration",
             ),
         },
+        marks=[pytest.mark.core_model],
+    ),
     "internvl": VitCudagraphTestConfig(
         model="OpenGVLab/InternVL3-1B",
         num_video_frames=8,

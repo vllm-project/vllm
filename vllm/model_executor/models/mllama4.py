@@ -852,8 +852,7 @@ class Llama4ForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=[],
+            buffer_keys=["pixel_values"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
 
@@ -944,8 +943,7 @@ class Llama4ForConditionalGeneration(
         )
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs={"pixel_values": dummy_pixel_values},
-            buffers={},
+            values={"pixel_values": dummy_pixel_values},
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -958,15 +956,16 @@ class Llama4ForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        return EncoderCudaGraphReplayBuffers(buffers={})
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]},
+        )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
     ) -> torch.Tensor:
         return self.encode_image_chunks(
-            mm_kwargs["pixel_values"],
+            inputs["pixel_values"],
             use_data_parallel=False,
         ).flatten(0, 1)
 
