@@ -425,7 +425,6 @@ class MultiprocExecutor(Executor):
         initial_count = len(active_procs())
 
         # Give processes time to clean themselves up properly first
-
         logger.info(
             "[shutdown] Executor: waiting for worker exit count=%d",
             initial_count,
