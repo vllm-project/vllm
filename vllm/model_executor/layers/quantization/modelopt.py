@@ -622,10 +622,15 @@ class ModelOptFp8EmbeddingMethod(QuantizeMethodBase):
             )
         # Keep weight as [vocab, hidden] — no transpose (unlike the linear
         # path), since torch.embedding gathers along dim 0.
-        layer.weight = Parameter(weight, requires_grad=False)
+        # Use .data to unwrap ModelWeightParameter to a plain tensor before
+        # wrapping in Parameter (required by torch dispatch semantics).
+        layer.weight = Parameter(weight.data, requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         if hasattr(layer, "input_scale") and layer.input_scale is not None:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias=None):
+        raise NotImplementedError("FP8 embedding method is not used for linear layers.")
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         rows = torch.embedding(layer.weight, input_)
@@ -1456,6 +1461,9 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
             swizzle=False,
         )
         return out.view(*input_.shape, -1)
+
+    def apply(self, layer: torch.nn.Module, x: torch.Tensor, bias=None):
+        raise NotImplementedError("NVFP4 embedding method is not used for linear layers.")
 
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
@@ -2649,6 +2657,10 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptFp8EmbeddingMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4EmbeddingMethod(self.nvfp4_config)
+            if quant_algo == "W4A16_NVFP4":
+                # W4A16_NVFP4 uses the same packed-uint8 weight layout as
+                # NVFP4; skip the Marlin repack and do a row-gather instead.
+                return ModelOptNvFp4EmbeddingMethod(self.w4a16_nvfp4_config)
             return None
 
         return None

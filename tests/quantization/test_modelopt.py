@@ -755,6 +755,13 @@ def _make_mixed_cfg(quantized_layers: dict):
             exclude_modules=[],
             group_size=16,
         ),
+        w4a16_nvfp4_config=ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+            group_size=16,
+        ),
     )
 
 
@@ -822,3 +829,21 @@ def test_modelopt_mixed_config_lm_head_not_dispatched():
 
     result = cfg.get_quant_method(lm_head, prefix="model.lm_head")
     assert not isinstance(result, (ModelOptFp8EmbeddingMethod, ModelOptNvFp4EmbeddingMethod))
+
+
+def test_modelopt_mixed_config_dispatches_w4a16_nvfp4_embedding():
+    """W4A16_NVFP4 embedding routes to ModelOptNvFp4EmbeddingMethod using
+    w4a16_nvfp4_config — same packed-uint8 layout as NVFP4, Marlin repack
+    is skipped for the row-gather path."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    cfg = _make_mixed_cfg({"model.embed_tokens": {"quant_algo": "W4A16_NVFP4"}})
+    embed = VocabParallelEmbedding.__new__(VocabParallelEmbedding)
+    result = cfg.get_quant_method(embed, prefix="model.embed_tokens")
+    assert isinstance(result, ModelOptNvFp4EmbeddingMethod)
+    assert result.quant_config.quant_method == "W4A16_NVFP4"
