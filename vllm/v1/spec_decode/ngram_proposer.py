@@ -289,7 +289,7 @@ class NgramProposer:
         cache = self.global_ngram_cache
         assert cache is not None
 
-        draft_token_ids = [[] for _ in range(num_requests)]
+        draft_token_ids: list[list[int]] = [[] for _ in range(num_requests)]
         active_req_ids = (
             set(req_ids)
             if req_ids is not None
