@@ -66,8 +66,10 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
+
 RejectionSampleMethod = Literal["standard", "synthetic"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+SpecVerifyMethod = Literal["standard", "block"]
 
 
 @config
@@ -207,6 +209,18 @@ class SpeculativeConfig:
     [1, num_speculative_tokens + 1]. Resolved internally to
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
+
+    verify_method: SpecVerifyMethod = "standard"
+    """Verification rule used to accept/reject draft tokens in the random
+    sampling path. 'standard' applies the per-token rejection rule from
+    https://arxiv.org/abs/2211.17192. 'block' applies the block-wise
+    acceptance rule from Sun et al. 2024
+    (https://arxiv.org/abs/2403.10444) — a strictly ≥ 'standard'
+    algorithm that uses the cumulative product of target/draft probability
+    ratios plus the residual distribution at each position. 'block' only
+    activates when `num_speculative_tokens >= 3` and the drafter provides
+    real per-token probabilities (i.e. not ngram / suffix); shorter drafts
+    and probability-less drafters silently fall back to 'standard'."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
