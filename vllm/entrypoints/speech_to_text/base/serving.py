@@ -274,6 +274,7 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
+        # Run cpu intensive preprocess step in a separate thread pool executor.
         chunks, duration = await self._run_preprocess_step(
             self._decode_and_chunk_speech,
             audio_data,
