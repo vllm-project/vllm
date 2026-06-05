@@ -146,6 +146,25 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GEMMA4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-3.0-8b-instruct"),
+        Some(names::GRANITE)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-3.1-8b-instruct"),
+        Some(names::GRANITE)
+    );
+    // Negative: the `granite-3` pattern must NOT claim Granite 4 (handled by a
+    // separate `granite4` parser) or the legacy `granite-20b-fc` format.
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-20b-functioncalling"),
+        None
+    );
+
+    assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
     );
