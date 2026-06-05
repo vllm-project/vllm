@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -206,6 +207,22 @@ def test_modelopt_mixed_precision_does_not_infer_missing_sibling_linear(
     method = config.get_quant_method(fake_layer, missing_prefix)
 
     assert isinstance(method, UnquantizedLinearMethod)
+
+
+@pytest.mark.parametrize("prefix", ["lm_head", "model.lm_head"])
+def test_modelopt_mixed_precision_quantizes_w4a16_parallel_lm_head(prefix):
+    """Official ModelOpt mixed-precision NVFP4 checkpoints may quantize
+    ``lm_head`` as W4A16_NVFP4 instead of leaving it BF16. Keep this covered
+    separately from generic linear layers because LM heads are implemented by
+    ``ParallelLMHead`` rather than ``LinearBase``.
+    """
+    config = _mixed_precision_config(
+        {"lm_head": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}
+    )
+
+    method = config.get_quant_method(_mock_lm_head(), prefix=prefix)
+
+    assert isinstance(method, ModelOptNvFp4W4A16LinearMethod)
 
 
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
