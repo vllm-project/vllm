@@ -4795,6 +4795,26 @@ class GPUModelRunner(
                     pp.last_rank,
                     self.device,
                 )
+            # Hybrid (mamba/GDN linear-attention) models: the GDN forward rolls
+            # back its conv1d/SSM recurrent state using attn_metadata.num_accepted
+            # _tokens, which _update_states_after_model_execute sets ONLY on the
+            # sampler/last rank (this rank returns early in sample_tokens, so it
+            # never runs). Source the same per-request accepted count from the
+            # broadcast (recv: accepted drafts + bonus, -1 padded) so the non-last
+            # rank's GDN layers roll back state identically. Without this its
+            # num_accepted_tokens is stale -> accept-steps corrupt the recurrent
+            # state -> wrong verification -> non-greedy (pure-attention models are
+            # unaffected; this is the hybrid analogue of the s9 num_computed_tokens
+            # drift fix). Mirrors the last rank's gpu->cpu copy at :1567.
+            if (
+                self.model_config.is_hybrid
+                and self.num_accepted_tokens_event is not None
+            ):
+                num_accepted = (recv != -1).sum(dim=1)
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    num_accepted, non_blocking=True
+                )
+                self.num_accepted_tokens_event.record()
         else:
             # All-chunked-prefill: nothing was broadcast (recv is uninitialized) and
             # these requests take their next input from the prompt, not a sampled
