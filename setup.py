@@ -36,6 +36,8 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
+PRECOMPILED_RUST_EXTENSION_GLOB = "_rust_*.so"
+PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -52,6 +54,59 @@ USE_PRECOMPILED_RUST_FRONTEND = (
 def should_require_rust_frontend() -> bool:
     value = os.getenv("VLLM_REQUIRE_RUST_FRONTEND", "")
     return value.lower() not in ("", "0", "false", "no")
+
+
+# Rust frontend binary, built via setuptools-rust and installed into the
+# package directory alongside the Python modules.
+# TODO: we may use `RustBin` to directly install it into `bin` directory, but this
+# requires extra work on using precompiled binaries.
+rust_extensions = [
+    RustExtension(
+        target="vllm.vllm-rs",
+        path="rust/src/cmd/Cargo.toml",
+        args=["--bin", "vllm-rs"],
+        features=["native-tls-vendored"],
+        binding=Binding.Exec,
+        optional=not should_require_rust_frontend(),
+    ),
+    RustExtension(
+        target="vllm._rust_tool_parser",
+        path="rust/src/tool-parser/python/Cargo.toml",
+        features=["extension-module"],
+        binding=Binding.PyO3,
+        optional=not should_require_rust_frontend(),
+    ),
+]
+
+
+def get_precompiled_rust_extension_paths() -> list[Path]:
+    return sorted((ROOT_DIR / "vllm").glob(PRECOMPILED_RUST_EXTENSION_GLOB))
+
+
+def get_expected_rust_extension_module_names() -> list[str]:
+    """Return configured PyO3 Rust extension module names under ``vllm``."""
+    module_names = []
+    for rust_extension in rust_extensions:
+        if rust_extension.binding != Binding.PyO3:
+            continue
+
+        for target_name in rust_extension.target.values():
+            if target_name.startswith("vllm._rust_"):
+                module_names.append(target_name.rsplit(".", 1)[-1])
+
+    return module_names
+
+
+def get_missing_precompiled_rust_extension_modules() -> list[str]:
+    missing = []
+    for module_name in get_expected_rust_extension_module_names():
+        if not list((ROOT_DIR / "vllm").glob(f"{module_name}*.so")):
+            missing.append(module_name)
+    return missing
+
+
+def has_precompiled_rust_extensions() -> bool:
+    return not get_missing_precompiled_rust_extension_modules()
 
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
@@ -421,19 +476,33 @@ class precompiled_build_ext(build_ext):
 
 
 class precompiled_build_rust(build_rust):
-    """Skips local Rust builds when the precompiled wheel already ships vllm-rs."""
+    """Skips local Rust builds when all precompiled Rust artifacts are present."""
 
     def run(self) -> None:
-        if PRECOMPILED_RUST_FRONTEND_PATH.exists():
+        if (
+            PRECOMPILED_RUST_FRONTEND_PATH.exists()
+            and has_precompiled_rust_extensions()
+        ):
             logger.info(
-                "Skipping local Rust build: using precompiled %s",
+                "Skipping local Rust build: using precompiled %s and %s",
                 PRECOMPILED_RUST_FRONTEND_PATH,
+                get_precompiled_rust_extension_paths(),
             )
             return
 
+        missing = []
+        if not PRECOMPILED_RUST_FRONTEND_PATH.exists():
+            missing.append(str(PRECOMPILED_RUST_FRONTEND_PATH))
+        missing_rust_extensions = get_missing_precompiled_rust_extension_modules()
+        if missing_rust_extensions:
+            missing.extend(
+                str(ROOT_DIR / "vllm" / f"{module_name}*.so")
+                for module_name in missing_rust_extensions
+            )
         logger.warning(
-            "Precompiled wheel did not provide %s; falling back to local Rust build.",
-            PRECOMPILED_RUST_FRONTEND_PATH,
+            "Precompiled wheel did not provide all Rust artifacts (%s); "
+            "falling back to local Rust build.",
+            ", ".join(missing),
         )
         super().run()
 
@@ -754,6 +823,14 @@ class precompiled_wheel_utils:
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
+                        file_members.append(member)
+                        continue
+                    if (
+                        extract_rust_frontend
+                        and PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX.match(
+                            member.filename
+                        )
+                    ):
                         file_members.append(member)
                         continue
 
@@ -1127,6 +1204,10 @@ if PRECOMPILED_RUST_FRONTEND_PATH.exists():
     vllm_files = package_data.setdefault("vllm", [])
     if "vllm-rs" not in vllm_files:
         vllm_files.append("vllm-rs")
+vllm_files = package_data.setdefault("vllm", [])
+for rust_extension_path in get_precompiled_rust_extension_paths():
+    if rust_extension_path.name not in vllm_files:
+        vllm_files.append(rust_extension_path.name)
 
 if _no_device():
     ext_modules = []
@@ -1139,23 +1220,12 @@ else:
         if USE_PRECOMPILED_EXTENSIONS
         else cmake_build_ext,
     }
-if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
+if (
+    USE_PRECOMPILED_RUST_FRONTEND
+    or PRECOMPILED_RUST_FRONTEND_PATH.exists()
+    or has_precompiled_rust_extensions()
+):
     cmdclass["build_rust"] = precompiled_build_rust
-
-# Rust frontend binary, built via setuptools-rust and installed into the
-# package directory alongside the Python modules.
-# TODO: we may use `RustBin` to directly install it into `bin` directory, but this
-# requires extra work on using precompiled binaries.
-rust_extensions = [
-    RustExtension(
-        target="vllm.vllm-rs",
-        path="rust/src/cmd/Cargo.toml",
-        args=["--bin", "vllm-rs"],
-        features=["native-tls-vendored"],
-        binding=Binding.Exec,
-        optional=not should_require_rust_frontend(),
-    ),
-]
 
 setup(
     # static metadata should rather go in pyproject.toml

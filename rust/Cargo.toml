@@ -12,6 +12,7 @@ members = [
     "src/text",
     "src/tokenizer",
     "src/tool-parser",
+    "src/tool-parser/python",
 ]
 resolver = "3"
 
@@ -60,6 +61,8 @@ prometheus-client = "0.24.0"
 prometheus-client-derive-encode = "0.5.0"
 prost = "0.14.3"
 prost-types = "0.14.3"
+pyo3 = "0.28.3"
+pythonize = "0.28.0"
 rand = "0.9.2"
 reasoning-parser = "1.2.2"
 reqwest = { version = "0.12.8", default-features = false, features = ["rustls-tls"] }

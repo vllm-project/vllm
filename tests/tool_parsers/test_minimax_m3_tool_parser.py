@@ -257,5 +257,5 @@ def test_streaming_nested_tool_call(parser):
     assert json.loads(tool_calls[0]["arguments"]) == json.loads(
         parser.streamed_args_for_tool[0]
     )
-    assert parser.prev_tool_call_arr[0]["arguments"]["items"][1]["qty"] == 5
+    assert json.loads(parser.prev_tool_call_arr[0]["arguments"])["items"][1]["qty"] == 5
     assert results[-1].content == ""
