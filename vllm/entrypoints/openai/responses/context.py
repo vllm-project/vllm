@@ -20,7 +20,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -40,6 +39,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
+from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
