@@ -882,9 +882,10 @@ def cutlass_scaled_mm_azp(
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
-    :param azp_adj: In the per-tensor case, this should include the azp.
-    Always per-channel.
-    :param azp: Only set in the per-token case. Per-token if set.
+    Args:
+        azp_adj: In the per-tensor case, this should include the azp.
+            Always per-channel.
+        azp: Only set in the per-token case. Per-token if set.
     """
     assert b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
@@ -3908,9 +3909,12 @@ def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
     Note that sylvester hadamard transforms are also symmetric, which means that
     this function is also applies the (transpose <=> inverse) transform.
 
-    :param x: value to be transformed inplace
-    :param inplace: modify value in place
-    :return: value after transformation
+    Args:
+        x: value to be transformed inplace
+        inplace: modify value in place
+
+    Returns:
+        value after transformation
     """
     return torch.ops._C.hadacore_transform(x, inplace)
 

@@ -115,7 +115,7 @@ async def call_vllm_api(
             completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
             return text, completion_tokens
     except Exception as e:
-        print(f"Error calling vLLM API: {e}")
+        print(f"Error calling vLLM API ({type(e).__name__}): {e}")
         return "", 0
 
 
@@ -188,6 +188,7 @@ def evaluate_gsm8k(
     seed: int | None = 42,
     model: str = "gpt-oss-120b",
     api_key: str | None = None,
+    request_timeout_seconds: float = 600,
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -218,9 +219,8 @@ def evaluate_gsm8k(
             output_tokens[i] = tokens
             return answer, tokens
 
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=600)
-        ) as session:
+        timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [get_answer(session, i) for i in range(num_questions)]
             await tqdm.gather(*tasks, desc="Evaluating")
 

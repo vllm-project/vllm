@@ -42,10 +42,6 @@ class PromptLogprobsWorker:
         num_computed_tokens: torch.Tensor,
         # [max_num_reqs]
         prompt_lens: np.ndarray,
-        # [max_num_reqs]
-        prefill_lens: np.ndarray,
-        # [max_num_reqs]
-        num_computed_prefill_tokens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
         idx_mapping_np = input_batch.idx_mapping_np
         needs_prompt_logprobs = self.uses_prompt_logprobs[idx_mapping_np]
@@ -55,11 +51,11 @@ class PromptLogprobsWorker:
 
         num_prompt_logprobs = self.num_prompt_logprobs[idx_mapping_np]
         prompt_lens = prompt_lens[idx_mapping_np]
-        computed_prefill = num_computed_prefill_tokens[idx_mapping_np]
+        computed_prefill = input_batch.num_computed_prefill_tokens_np
         includes_prompt = computed_prefill < prompt_lens
         # NOTE(woosuk): If the request was resumed after preemption, its prompt
         # logprobs must have been computed before preemption. Skip.
-        resumed_after_prompt = prompt_lens < prefill_lens[idx_mapping_np]
+        resumed_after_prompt = prompt_lens < input_batch.prefill_len_np
         needs_prompt_logprobs &= includes_prompt & ~resumed_after_prompt
         if not np.any(needs_prompt_logprobs):
             return {}
