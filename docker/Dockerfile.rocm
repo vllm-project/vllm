@@ -28,14 +28,14 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
-ARG ARG_PYTORCH_ROCM_ARCH
+ARG ARG_PYTORCH_ROCM_ARCH=gfx1250
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install build dependencies and utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl \
-    libnuma-dev ccache mold
+    build-essential libnuma-dev ccache mold
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade pip
 # Note: mold is installed but not set as the system default linker because
@@ -61,6 +61,10 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+# python binary fall back for non venv builds
+ENV UV_PYTHON=${VIRTUAL_ENV:-/usr}/bin/python3
+# Expose paths from wheel installation
+ENV PKG_CONFIG_PATH=${ROCM_PATH}/lib/rocm_sysdeps/lib/pkgconfig:${PKG_CONFIG_PATH}
 # ccache directory - persisted across layer rebuilds via cache mounts.
 ENV CCACHE_DIR=/root/.cache/ccache
 ENV CCACHE_COMPILERCHECK=content
@@ -110,8 +114,8 @@ WORKDIR ${COMMON_WORKDIR}
 FROM base AS fetch_vllm_0
 ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
-ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
-ARG VLLM_BRANCH="main"
+ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
+ARG VLLM_BRANCH="455_wip"
 ENV VLLM_REPO=${VLLM_REPO}
 ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
@@ -241,7 +245,7 @@ ARG RIXL_BRANCH="39be1de8"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
 ARG UCX_BRANCH="bfb51733"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
+# ENV ROCM_PATH=/opt/rocm -> correct ROCM_PATH is set in base image
 ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
 ENV RIXL_BENCH_HOME=/usr/local/rixl_bench
@@ -297,6 +301,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     git checkout ${RIXL_BRANCH} && \
     CC="ccache gcc" CXX="ccache g++" \
     meson setup build --prefix=${RIXL_HOME} \
+                     --force-fallback-for=abseil-cpp \
                      -Ducx_path=${UCX_HOME} \
                      -Drocm_path=${ROCM_PATH} && \
     cd build && \
@@ -309,6 +314,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 RUN cd /opt/rixl && \
     sed -i "s/--exclude 'libamdhip64\*'/--exclude 'libamdhip64*' --exclude 'libcore*' --exclude 'libpull*'/" \
         contrib/build-wheel.sh && \
+    # The wheel build re-runs meson via meson-python; force the bundled abseil
+    sed -i 's|setup = \["-Dinstall_headers=false"\]|setup = ["-Dinstall_headers=false", "--force-fallback-for=abseil-cpp"]|' \
+        pyproject.toml && \
+    grep -q 'force-fallback-for' pyproject.toml && \
     mkdir -p /app/install && \
     _ucx_install_dir=${UCX_HOME} \
     ./contrib/build-wheel.sh \
@@ -325,7 +334,7 @@ ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
 # DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
 # it can be linked against DeepEP without arch mismatches.
 ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
+# ENV ROCM_PATH=/opt/rocm -> Correct rocm_path is set in base image
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
