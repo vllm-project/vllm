@@ -586,14 +586,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
-    packed_modules_mapping = {
-        "c_attn": ["c_attn"],
-        "gate_up_proj": [
-            "w2",
-            "w1",
-        ],
-    }
-
     embed_input_ids = SupportsMultiModal.embed_input_ids
 
     def get_mm_mapping(self) -> MultiModelKeys:
