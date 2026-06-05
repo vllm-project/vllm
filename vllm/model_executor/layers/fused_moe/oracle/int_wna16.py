@@ -274,35 +274,17 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if experts_cls is XPUExpertsWNA16:
-        assert (
-            prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard
-        ), (
-            "XPUExpertsWNA16 only supports the Standard activation format; "
-            "xpu_fused_moe(is_int4=True) does not implement BatchedExperts."
-        )
-        experts: mk.FusedMoEExperts = XPUExpertsWNA16(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    elif (
-        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts = experts_cls(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
+        extra_args["max_num_tokens"] = max_num_tokens
+        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
+
+    experts = experts_cls(
+        moe_config=moe_config,
+        quant_config=moe_quant_config,
+        **extra_args,
+    )
 
     return mk.FusedMoEKernel(
         prepare_finalize,
