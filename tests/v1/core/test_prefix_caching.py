@@ -1041,6 +1041,7 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        scheduler_block_size=block_size,
     )
 
     # the default hash function is sha256
