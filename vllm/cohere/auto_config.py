@@ -180,6 +180,58 @@ def resolve_profiles(
     return args, env, applied
 
 
+def _is_auto_config_enabled() -> bool:
+    return os.environ.get("VLLM_ENABLE_COHERE_AUTO_CONFIG", "0").strip().lower() in (
+        "1",
+        "true",
+    )
+
+
+def resolve_speculative_draft_attention_backend(
+    model: str | None,
+    *,
+    revision: str | None = None,
+    trust_remote_code: bool = False,
+) -> str | None:
+    """Return ``attention-backend`` from hardware profiles for eagle draft models.
+
+    Used by offline spec-decode benchmarks so the draft model uses the same
+    attention backend as the target (e.g. ``TRITON_ATTN`` on MI300x). Returns
+    ``None`` when auto-config is disabled, the model is not Cohere, or the
+    merged profile does not set ``attention-backend``.
+    """
+    if not _is_auto_config_enabled():
+        return None
+    if not detect_cohere_from_model_id(
+        model,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+    ):
+        return None
+    profile_args, _, _ = resolve_profiles()
+    raw = profile_args.get("attention-backend")
+    if raw is None:
+        return None
+    return str(raw)
+
+
+def apply_profile_draft_attention_backend(
+    speculative_config: dict[str, object],
+    model: str | None,
+    *,
+    revision: str | None = None,
+    trust_remote_code: bool = False,
+) -> None:
+    """Set ``attention_backend`` on a speculative config from hardware profiles."""
+    backend = resolve_speculative_draft_attention_backend(
+        model,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+    )
+    if backend is not None:
+        speculative_config["attention_backend"] = backend
+
+
 _TRUTHY_STRINGS = frozenset({"", "1", "true", "yes", "on"})
 _FALSY_STRINGS = frozenset({"0", "false", "no", "off"})
 

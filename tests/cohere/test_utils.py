@@ -392,10 +392,20 @@ def make_speculative_config(args) -> dict[str, Any] | None:
         return None
     if not args.draft_model:
         raise ValueError("--draft_model is required for speculative mode")
-    return {
+    config: dict[str, Any] = {
         "method": args.method,
         "model": args.draft_model,
         "num_speculative_tokens": args.num_spec_tokens,
         "draft_tensor_parallel_size": args.draft_tp,
         "max_model_len": args.max_model_len,
     }
+    target_model = getattr(args, "model", None)
+    if target_model:
+        from vllm.cohere.auto_config import apply_profile_draft_attention_backend
+
+        apply_profile_draft_attention_backend(
+            config,
+            target_model,
+            trust_remote_code=True,
+        )
+    return config

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, TypedDict
@@ -1206,12 +1207,20 @@ if __name__ == "__main__":
 
     # Add speculative decoding configuration if provided and not disabled
     if not parsed_args.disable_spec:
-        default_spec_config = (
-            f'{{"method": "eagle", "model": "{draft_model_name}", '
-            f'"num_speculative_tokens": 3, '
-            f'"draft_tensor_parallel_size": {parsed_args.tp_size}}}'
+        spec_config: dict[str, Any] = {
+            "method": "eagle",
+            "model": draft_model_name,
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": parsed_args.tp_size,
+        }
+        from vllm.cohere.auto_config import apply_profile_draft_attention_backend
+
+        apply_profile_draft_attention_backend(
+            spec_config,
+            model_name,
+            trust_remote_code=True,
         )
-        server_args.extend(["--speculative_config", default_spec_config])
+        server_args.extend(["--speculative_config", json.dumps(spec_config)])
 
     print(f"Starting vLLM server with model: {model_name}")
     print(f"Tensor parallel size: {parsed_args.tp_size}")

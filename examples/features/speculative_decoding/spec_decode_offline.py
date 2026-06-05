@@ -3,6 +3,9 @@
 
 # cohere start
 import json
+import os
+
+os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")
 # cohere end
 
 from transformers import AutoTokenizer
@@ -42,6 +45,23 @@ def get_custom_mm_prompts(num_prompts):
         prompts = prompts * (num_prompts // len(IMAGE_URLS) + 1)
 
     return [[{"role": "user", "content": prompt}] for prompt in prompts[:num_prompts]]
+
+
+# cohere start
+def _apply_profile_draft_attention_backend(
+    speculative_config: dict,
+    model_dir: str,
+) -> None:
+    from vllm.cohere.auto_config import apply_profile_draft_attention_backend
+
+    apply_profile_draft_attention_backend(
+        speculative_config,
+        model_dir,
+        trust_remote_code=True,
+    )
+
+
+# cohere end
 
 
 def parse_args():
@@ -131,9 +151,10 @@ def main(args):
             "num_speculative_tokens": args.num_spec_tokens,
             "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
             "parallel_drafting": args.parallel_drafting,
-            # Match target TRITON_ATTN on MI300x; draft autoselect can pick ROCM_ATTN.
-            "attention_backend": "TRITON_ATTN",
         }
+        # cohere start
+        _apply_profile_draft_attention_backend(speculative_config, model_dir)
+        # cohere end
     elif args.method == "ngram":
         speculative_config = {
             "method": "ngram",
@@ -170,6 +191,7 @@ def main(args):
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
         }
+        _apply_profile_draft_attention_backend(speculative_config, model_dir)
     # cohere end
     elif args.method == "mtp":
         speculative_config = {

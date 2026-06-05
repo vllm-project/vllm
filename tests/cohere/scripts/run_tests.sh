@@ -419,6 +419,10 @@ run_thinking_budget() {
 
 run_speculative_decoding() {
     echo "Running speculative decoding tests..."
+    # Eagle draft attention-backend is resolved from hardware_profiles.yaml
+    # (via apply_profile_draft_attention_backend) in spec_decode_offline.py,
+    # test_utils.make_speculative_config, and test_request_cancellation.py
+    # when VLLM_ENABLE_COHERE_AUTO_CONFIG=1.
 
     # originally we are in vllm-cohere/tests directory
     cd ../
