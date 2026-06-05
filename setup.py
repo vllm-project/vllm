@@ -729,7 +729,6 @@ class precompiled_wheel_utils:
                             "vllm/spinloop.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
-                            "vllm/_rocm_sparse_mla_C.abi3.so",
                         }
                     )
                 if extract_rust_frontend:
@@ -1048,7 +1047,6 @@ ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
-    ext_modules.append(CMakeExtension(name="vllm._rocm_sparse_mla_C", optional=True))
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))

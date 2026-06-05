@@ -1688,8 +1688,9 @@ def rocm_sparse_attn_prefill(
 
 # ============================================================================
 # HIP MFMA kernel implementation for sparse-MLA decode.
-# Compiled at build time via CMakeLists.txt (_rocm_sparse_mla_C extension).
-# Ops are registered under torch.ops.vllm_sparse_mla_hip namespace.
+# Compiled at build time via CMakeLists.txt into the _rocm_C extension when
+# gfx950 is in VLLM_GPU_ARCHES (see csrc/rocm/sparse_mla_decode.cu).
+# Ops are registered under the torch.ops.vllm_sparse_mla_hip namespace.
 # ============================================================================
 
 logger = logging.getLogger(__name__)

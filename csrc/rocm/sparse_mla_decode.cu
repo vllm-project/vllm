@@ -8,17 +8,32 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 
-#include "core/registration.h"
-
 using bf16x8 = __attribute__((__vector_size__(8 * sizeof(__bf16)))) __bf16;
 using fx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 
-static constexpr int NOPE_DIM = 448;
-static constexpr int TOKEN_BYTES = 576;
-static constexpr int SCALE_BYTES = 8;
-static constexpr int HEAD_DIM = 512;
+// Most of these are referenced only from the gfx950 device kernels below.
+// On non-gfx950 device passes the `#else` empty-stub branch hides those
+// references, so we annotate them `[[maybe_unused]]` to silence
+// `-Werror=unused-const-variable` for those passes. `BLOCK_H` is also used
+// by the host launchers further down, so it is genuinely live on every pass.
+[[maybe_unused]] static constexpr int NOPE_DIM = 448;
+[[maybe_unused]] static constexpr int TOKEN_BYTES = 576;
+[[maybe_unused]] static constexpr int SCALE_BYTES = 8;
+[[maybe_unused]] static constexpr int HEAD_DIM = 512;
 static constexpr int BLOCK_H = 16;
-static constexpr int BLOCK_K = 32;
+[[maybe_unused]] static constexpr int BLOCK_K = 32;
+
+// gfx950 device-only path: the MFMA bf16 and fp8 conversion builtins below
+// require gfx950 MFMA support. Following the q_gemm_rdna3.cu precedent, we
+// gate the full device code on `__HIP__GFX950__ || !__HIP_DEVICE_COMPILE__`
+// so the kernel bodies remain visible to the host compilation pass (for
+// linkage of the host launchers) while non-gfx950 device passes get empty
+// `__global__` stubs (see the `#else` branch at the end of this block).
+#if defined(__HIPCC__) && defined(__gfx950__)
+  #define __HIP__GFX950__
+#endif
+
+#if defined(__HIP__GFX950__) || !defined(__HIP_DEVICE_COMPILE__)
 
 __device__ __forceinline__ fx4 mfma_16x16x32_bf16(bf16x8 a, bf16x8 b, fx4 c) {
   return __builtin_amdgcn_mfma_f32_16x16x32_bf16(a, b, c, 0, 0, 0);
@@ -48,7 +63,7 @@ __device__ __forceinline__ void gather_and_dequant_k_tile(
     int4 z;
     z.x = z.y = z.z = z.w = 0;
     int4* d4 = reinterpret_cast<int4*>(dst_row);
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 8; ++j) d4[j] = z;
   } else if (col0 < NOPE_DIM) {
     const uint8_t* scale_ptr =
@@ -62,10 +77,10 @@ __device__ __forceinline__ void gather_and_dequant_k_tile(
     float scl_f = sb.fv;
 
     const uint32_t* src32 = reinterpret_cast<const uint32_t*>(token_ptr + col0);
-#pragma unroll
+  #pragma unroll
     for (int u32_i = 0; u32_i < 16; ++u32_i) {
       uint32_t word = src32[u32_i];
-#pragma unroll
+  #pragma unroll
       for (int b = 0; b < 4; ++b) {
         uint8_t kb = (word >> (b * 8)) & 0xFF;
         uint32_t packed = (uint32_t)kb;
@@ -76,7 +91,7 @@ __device__ __forceinline__ void gather_and_dequant_k_tile(
   } else {
     const int4* src4 = reinterpret_cast<const int4*>(token_ptr + NOPE_DIM);
     int4* d4 = reinterpret_cast<int4*>(dst_row);
-#pragma unroll
+  #pragma unroll
     for (int j = 0; j < 8; ++j) d4[j] = src4[j];
   }
 
@@ -95,26 +110,26 @@ __device__ __forceinline__ void process_k_tile(
     int wave) {
   if (wave == 0) {
     fx4 qk[2] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
-#pragma unroll
+  #pragma unroll
     for (int c = 0; c < HEAD_DIM / 32; ++c) {
       bf16x8 q_reg;
       const __bf16* q_src = &q_lds[m_a * HEAD_DIM + c * 32 + kg * 8];
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 8; ++i) q_reg[i] = q_src[i];
 
-#pragma unroll
+  #pragma unroll
       for (int nt = 0; nt < 2; ++nt) {
         bf16x8 k_reg;
         const __bf16* k_src =
             &k_lds[(nt * 16 + n_b) * HEAD_DIM + c * 32 + kg * 8];
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 8; ++i) k_reg[i] = k_src[i];
         qk[nt] = mfma_16x16x32_bf16(q_reg, k_reg, qk[nt]);
       }
     }
-#pragma unroll
+  #pragma unroll
     for (int nt = 0; nt < 2; ++nt) {
-#pragma unroll
+  #pragma unroll
       for (int i = 0; i < 4; ++i) {
         int k_col = nt * 16 + n_d;
         float s = qk[nt][i] * scale;
@@ -127,14 +142,14 @@ __device__ __forceinline__ void process_k_tile(
   __syncthreads();
 
   fx4 qk_local[2];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) {
     qk_local[0][i] = scores_lds[(m_d_base + i) * BLOCK_K + n_d];
     qk_local[1][i] = scores_lds[(m_d_base + i) * BLOCK_K + 16 + n_d];
   }
 
   fx4 p[2];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) {
     float row_max = fmaxf(qk_local[0][i], qk_local[1][i]);
     row_max = fmaxf(row_max, __shfl_xor(row_max, 1));
@@ -161,7 +176,7 @@ __device__ __forceinline__ void process_k_tile(
     p[0][i] = e0;
     p[1][i] = e1;
 
-#pragma unroll
+  #pragma unroll
     for (int nt = 0; nt < N_TILES_PER_WAVE; ++nt) acc[nt][i] *= alpha;
 
     m_state[i] = m_new;
@@ -169,7 +184,7 @@ __device__ __forceinline__ void process_k_tile(
   }
 
   if (wave == 0) {
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) {
       p_lds[(m_d_base + i) * BLOCK_K + n_d] = (__bf16)p[0][i];
       p_lds[(m_d_base + i) * BLOCK_K + 16 + n_d] = (__bf16)p[1][i];
@@ -180,14 +195,14 @@ __device__ __forceinline__ void process_k_tile(
 
   bf16x8 p_reg;
   const __bf16* p_src = &p_lds[m_a * BLOCK_K + kg * 8];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; ++i) p_reg[i] = p_src[i];
 
-#pragma unroll
+  #pragma unroll
   for (int nt_local = 0; nt_local < N_TILES_PER_WAVE; ++nt_local) {
     int n_tile = wave * N_TILES_PER_WAVE + nt_local;
     bf16x8 k_reg;
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 8; ++i) {
       k_reg[i] = k_lds[(kg * 8 + i) * HEAD_DIM + n_tile * 16 + n_b];
     }
@@ -206,13 +221,13 @@ __device__ __forceinline__ void load_q(const __bf16* q, int64_t q_stride0,
     const __bf16* src = q + query * q_stride0 + head_global * q_stride1 + qc0;
     const int4* s4 = reinterpret_cast<const int4*>(src);
     int4* d4 = reinterpret_cast<int4*>(dst);
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) d4[i] = s4[i];
   } else {
     int4 z;
     z.x = z.y = z.z = z.w = 0;
     int4* d4 = reinterpret_cast<int4*>(dst);
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) d4[i] = z;
   }
 }
@@ -254,12 +269,12 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_kernel(
 
   float m_state[4], l_state[4];
   fx4 acc[N_TILES_PER_WAVE];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) {
     m_state[i] = -3.4028234663852886e38f;
     l_state[i] = 0.f;
   }
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < N_TILES_PER_WAVE; ++i) {
     acc[i] = (fx4){0.f, 0.f, 0.f, 0.f};
   }
@@ -297,7 +312,7 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_kernel(
   }
 
   {
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) {
       int head_local = m_d_base + i;
       int head_global = pid_h * BLOCK_H + head_local;
@@ -320,7 +335,7 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_kernel(
 
       __bf16* out_row =
           output + query * out_stride0 + head_global * out_stride1;
-#pragma unroll
+  #pragma unroll
       for (int nt_local = 0; nt_local < N_TILES_PER_WAVE; ++nt_local) {
         int n_tile = wave * N_TILES_PER_WAVE + nt_local;
         int col = n_tile * 16 + n_d;
@@ -367,12 +382,12 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_partial_kernel(
 
   float m_state[4], l_state[4];
   fx4 acc[N_TILES_PER_WAVE];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) {
     m_state[i] = -3.4028234663852886e38f;
     l_state[i] = 0.f;
   }
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < N_TILES_PER_WAVE; ++i) {
     acc[i] = (fx4){0.f, 0.f, 0.f, 0.f};
   }
@@ -414,7 +429,7 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_partial_kernel(
   const int triple = (query * num_head_blocks + pid_h) * SPLIT_K + pid_split;
 
   if (wave == 0 && n_d == 0) {
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) {
       int idx = triple * BLOCK_H + m_d_base + i;
       scratch_m[idx] = m_state[i];
@@ -423,10 +438,10 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_partial_kernel(
   }
 
   __syncthreads();
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) {
     int row = m_d_base + i;
-#pragma unroll
+  #pragma unroll
     for (int nt_local = 0; nt_local < N_TILES_PER_WAVE; ++nt_local) {
       int n_tile = wave * N_TILES_PER_WAVE + nt_local;
       int col = n_tile * 16 + n_d;
@@ -443,7 +458,7 @@ __global__ __launch_bounds__(256, 2) void sparse_mla_decode_partial_kernel(
     const int4* src4 =
         reinterpret_cast<const int4*>(&k_lds[my_row * HEAD_DIM + my_col0]);
     int4* dst4 = reinterpret_cast<int4*>(dst);
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) dst4[i] = src4[i];
   }
 }
@@ -465,10 +480,10 @@ __global__ __launch_bounds__(256, 4) void sparse_mla_decode_reduce_kernel(
   float m_merged = -3.4028234663852886e38f;
   float l_merged = 0.f;
   float acc_merged[32];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 32; ++i) acc_merged[i] = 0.f;
 
-#pragma unroll
+  #pragma unroll
   for (int s = 0; s < SPLIT_K; ++s) {
     const int triple = (query * num_head_blocks + pid_h) * SPLIT_K + s;
     float m_s = scratch_m[triple * BLOCK_H + my_row];
@@ -485,12 +500,12 @@ __global__ __launch_bounds__(256, 4) void sparse_mla_decode_reduce_kernel(
                              (int64_t)triple * BLOCK_H * HEAD_DIM +
                              my_row * HEAD_DIM + my_col0;
     const int4* src4 = reinterpret_cast<const int4*>(acc_base);
-#pragma unroll
+  #pragma unroll
     for (int i = 0; i < 4; ++i) {
       int4 v = src4[i];
       __bf16 vbf[8];
       *reinterpret_cast<int4*>(vbf) = v;
-#pragma unroll
+  #pragma unroll
       for (int j = 0; j < 8; ++j) {
         float a_s = (float)vbf[j];
         acc_merged[i * 8 + j] = acc_merged[i * 8 + j] * alpha + a_s * beta;
@@ -519,13 +534,38 @@ __global__ __launch_bounds__(256, 4) void sparse_mla_decode_reduce_kernel(
   __bf16* out_row =
       output + query * out_stride0 + head_global * out_stride1 + my_col0;
   __bf16 out_buf[32];
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 32; ++i) out_buf[i] = (__bf16)(acc_merged[i] * inv_denom);
   int4* dst4 = reinterpret_cast<int4*>(out_row);
   const int4* sb4 = reinterpret_cast<const int4*>(out_buf);
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 4; ++i) dst4[i] = sb4[i];
 }
+
+#else  // non-gfx950 device pass: empty __global__ stubs for symbol parity.
+
+template <bool HAS_ATTN_SINK, bool HAS_EXTRA>
+__global__ void sparse_mla_decode_kernel(const __bf16*, const uint8_t*,
+                                         const int32_t*, const int32_t*,
+                                         const uint8_t*, const int32_t*,
+                                         const int32_t*, const float*, __bf16*,
+                                         int64_t, int64_t, int64_t, int64_t,
+                                         int64_t, int64_t, int, int, int, int,
+                                         float, int) {}
+
+template <bool HAS_EXTRA, int SPLIT_K>
+__global__ void sparse_mla_decode_partial_kernel(
+    const __bf16*, const uint8_t*, const int32_t*, const int32_t*,
+    const uint8_t*, const int32_t*, const int32_t*, float*, float*, __bf16*,
+    int64_t, int64_t, int64_t, int64_t, int, int, int, int, float, int, int) {}
+
+template <bool HAS_ATTN_SINK, int SPLIT_K>
+__global__ void sparse_mla_decode_reduce_kernel(const float*, const float*,
+                                                const __bf16*, const float*,
+                                                __bf16*, int64_t, int64_t, int,
+                                                int) {}
+
+#endif  // __HIP__GFX950__ || !__HIP_DEVICE_COMPILE__
 
 void sparse_mla_decode_single(
     torch::Tensor q, torch::Tensor main_cache, torch::Tensor main_indices,
@@ -688,5 +728,3 @@ TORCH_LIBRARY_IMPL(vllm_sparse_mla_hip, CUDA, m) {
   m.impl("decode_single", &sparse_mla_decode_single);
   m.impl("decode_split", &sparse_mla_decode_split);
 }
-
-REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

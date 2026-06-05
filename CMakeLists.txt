@@ -1306,6 +1306,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3_wmma.cu")
   endif()
 
+  if(VLLM_GPU_ARCHES MATCHES "gfx950")
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/sparse_mla_decode.cu")
+    set_source_files_properties("csrc/rocm/sparse_mla_decode.cu"
+      PROPERTIES COMPILE_OPTIONS "-Wno-c++11-narrowing")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1316,32 +1323,6 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
-  #
-  # _rocm_sparse_mla_C extension (gfx950 only)
-  #
-  list(FIND VLLM_GPU_ARCHES "gfx950" _gfx950_idx)
-  if(NOT _gfx950_idx EQUAL -1)
-    set(VLLM_ROCM_SPARSE_MLA_SRC
-      "csrc/rocm/sparse_mla_decode.cu")
-
-    set(VLLM_ROCM_SPARSE_MLA_FLAGS ${VLLM_GPU_FLAGS}
-      "-Wno-c++11-narrowing")
-
-    define_extension_target(
-      _rocm_sparse_mla_C
-      DESTINATION vllm
-      LANGUAGE ${VLLM_GPU_LANG}
-      SOURCES ${VLLM_ROCM_SPARSE_MLA_SRC}
-      COMPILE_FLAGS ${VLLM_ROCM_SPARSE_MLA_FLAGS}
-      ARCHITECTURES "gfx950"
-      USE_SABI 3
-      WITH_SOABI)
-
-    message(STATUS "Building ROCm sparse MLA decode kernel for gfx950.")
-  else()
-    message(STATUS "Not building ROCm sparse MLA decode kernel (gfx950 not in target architectures).")
-  endif()
-  
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()

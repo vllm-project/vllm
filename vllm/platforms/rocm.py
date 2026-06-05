@@ -54,11 +54,6 @@ try:
 except ImportError as e:
     logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
-try:
-    import vllm._rocm_sparse_mla_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._rocm_sparse_mla_C with %r", e)
-
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
@@ -467,8 +462,6 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extensions
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
-        with contextlib.suppress(ImportError):
-            import vllm._rocm_sparse_mla_C  # noqa: F401
 
     @classmethod
     def get_valid_backends(
