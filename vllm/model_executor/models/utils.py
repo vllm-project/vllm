@@ -19,9 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -59,6 +57,16 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        # Deprecation warnings
+        if key.endswith(".kv_scale"):
+            logger.warning_once(
+                "DEPRECATED. Found kv_scale in the checkpoint. "
+                "This format is deprecated in favor of separate k_scale and "
+                "v_scale tensors and will be removed in a future release. "
+                "Functionally, we will remap kv_scale to k_scale and duplicate "
+                "k_scale to v_scale"
+            )
+
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
                 if new_key is None:
@@ -353,9 +361,11 @@ class AutoWeightsLoader:
             if "gptq" in quant_config.get_name():
                 self.ignore_unexpected_suffixes.append(".bias")
             # Get mappings for KV cache quantization scales
-            if cache_scale_mapper := quant_config.get_cache_scale_mapper():
-                mapper = mapper or WeightsMapper()
-                mapper |= cache_scale_mapper
+            mapper = mapper or WeightsMapper()
+            mapper |= quant_config.get_cache_scale_mapper()
+            self.ignore_unexpected_suffixes.extend(
+                quant_config._ignore_unexpected_suffixes
+            )
         if mapper is not None:
             weights = mapper.apply(weights)
         # filter out weights with first-prefix/substr to skip in name
