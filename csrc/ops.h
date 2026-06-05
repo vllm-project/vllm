@@ -40,12 +40,6 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
-void silu_and_mul_per_block_quant(torch::Tensor& out,
-                                  torch::Tensor const& input,
-                                  torch::Tensor& scales, int64_t group_size,
-                                  std::optional<torch::Tensor> scale_ub,
-                                  bool is_scale_transposed);
-
 // rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
 // ABI for CUDA). It remains here because the CPU build still uses these
 // torch::Tensor declarations.
@@ -83,8 +77,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& kv_c_and_k_pe_cache,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
-
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
