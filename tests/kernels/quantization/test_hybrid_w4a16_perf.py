@@ -217,6 +217,43 @@ SHAPES: list[dict[str, Any]] = [
         "group_size": 128,
         "comment": "L2 2MiB above",
     },
+    {
+        "in_features": 2048,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B qkv_proj",
+    },
+    {
+        "in_features": 2048,
+        "out_features": 12288,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B gate_up_proj",
+    },
+    {
+        "in_features": 6144,
+        "out_features": 2048,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B down_proj",
+    },
+    # RedHatAI/gemma-3-4b-it-quantized.w4a16 (g=128)
+    {
+        "in_features": 2560,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Gemma3-4B qkv_proj",
+    },
+    {
+        "in_features": 2560,
+        "out_features": 20480,
+        "group_size": 128,
+        "comment": "Gemma3-4B gate_up_proj",
+    },
+    {
+        "in_features": 10240,
+        "out_features": 2560,
+        "group_size": 128,
+        "comment": "Gemma3-4B down_proj",
+    },
 ]
 
 # Provider naming convention: "<base>[-zp][-bf16]". Suffix -zp selects the
@@ -356,6 +393,34 @@ def prepare_hybrid_weights(
     }
 
 
+def _compute_packed_scale_zp(
+    w_s: torch.Tensor,
+    w_zp: torch.Tensor | None,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Pack the per-group packed scale/zp carrier into one fp32, matching the load-time
+    carrier built in ``HybridW4A16LinearKernel.process_weights_after_loading``.
+
+    Built ONLY for asymmetric layers (``w_zp`` given); returns None for symmetric
+    (the kernel uses the constant -8 offset there, no carrier). Low 16 bits =
+    scale; high 16 bits are dtype-specific:
+      fp16: bias_eff = -(8*scale + (zp-8)*scale) — magic-constant fp16 FMA dequant.
+      bf16: zp_int = raw zp 0..15 — int-domain subtract (bit-identical to the
+            separate scale + zp loads).
+    """
+    if w_zp is None or dtype not in (torch.float16, torch.bfloat16):
+        return None
+    scale_u16 = w_s.view(torch.uint16).to(torch.int32) & 0xFFFF
+    if dtype == torch.float16:
+        w_s_f32 = w_s.to(torch.float32)
+        scaled_zp_f32 = (w_zp.to(torch.float32) - 8.0) * w_s_f32
+        bias_eff = (-(8.0 * w_s_f32 + scaled_zp_f32)).to(dtype)
+        hi_u16 = bias_eff.contiguous().view(torch.uint16).to(torch.int32) & 0xFFFF
+    else:
+        hi_u16 = w_zp.to(torch.int32) & 0xFFFF
+    return ((hi_u16 << 16) | scale_u16).view(torch.float32).contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Core measurement
 # ---------------------------------------------------------------------------
@@ -400,6 +465,10 @@ def measure_tflops(
 
     cu_count = num_compute_units()
     use_zp = _provider_use_zp(provider)
+    # packing zero point and scales for faster access
+    packed_scale_zp = _compute_packed_scale_zp(
+        weights["w_s_skinny"], weights["w_zp"] if use_zp else None, dtype
+    )
 
     def run():
         return _hybrid_w4a16_apply_impl(
@@ -411,6 +480,7 @@ def measure_tflops(
             None,  # bias
             cu_count,
             group_size,
+            packed_scale_zp,
         )
 
     ms = triton.testing.do_bench_cudagraph(run, quantiles=[0.5])

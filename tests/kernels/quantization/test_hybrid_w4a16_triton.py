@@ -105,7 +105,6 @@ def test_triton_w4a16_skinny_fmt_gemm_matches_reference(
         b_q=b_packed,
         scales=scales,
         group_size=G,
-        zp_bias=8,
     )
     ref = _w4a16_skinny_reference(
         a,
@@ -144,6 +143,24 @@ def _w4a16_skinny_reference_asymmetric(
     w_fp = (w_int4_kn.to(torch.float32) - zp_raw_full) * s_full  # [K, N]
     out = a_mk.to(torch.float32) @ w_fp  # [M, N]
     return out.to(a_mk.dtype)
+
+
+def _pack_scale_zp(
+    scales_nkg: torch.Tensor, zp_nkg: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
+    """Build the asymmetric PackedSb carrier [N, K//G] fp32 that
+    triton_w4a16_skinny_fmt_gemm consumes (low 16 bits = scale; high 16 bits =
+    fp16 bias_eff = -(8 + (zp-8))*scale, or bf16 integer zp). Mirrors
+    HybridW4A16LinearKernel.process_weights_after_loading.
+    """
+    scale_u16 = scales_nkg.contiguous().view(torch.uint16).to(torch.int32) & 0xFFFF
+    if dtype == torch.float16:
+        s32 = scales_nkg.to(torch.float32)
+        bias_eff = (-(8.0 * s32 + (zp_nkg.to(torch.float32) - 8.0) * s32)).to(dtype)
+        hi_u16 = bias_eff.contiguous().view(torch.uint16).to(torch.int32) & 0xFFFF
+    else:
+        hi_u16 = zp_nkg.to(torch.int32) & 0xFFFF
+    return ((hi_u16 << 16) | scale_u16).view(torch.float32).contiguous()
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
@@ -185,7 +202,7 @@ def test_triton_w4a16_skinny_fmt_gemm_asymmetric(dtype, M, K, N, G, random_seed:
         b_q=b_packed,
         scales=scales,
         group_size=G,
-        zp=zp,
+        packed_scale_zp=_pack_scale_zp(scales, zp, dtype),
     )
     ref = _w4a16_skinny_reference_asymmetric(
         a,
