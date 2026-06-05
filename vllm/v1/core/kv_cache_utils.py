@@ -1238,10 +1238,8 @@ def _get_kv_cache_config_deepseek_v4(
 
     kv_cache_tensors: list[KVCacheTensor] = []
     for ps, slots in buckets.items():
-        for slot_idx in range(len(slots)):
-            kv_cache_tensors.append(
-                KVCacheTensor(size=ps * num_blocks, shared_by=slots[slot_idx])
-            )
+        for slot in slots:
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=slot))
 
     return num_blocks, kv_cache_tensors
 
