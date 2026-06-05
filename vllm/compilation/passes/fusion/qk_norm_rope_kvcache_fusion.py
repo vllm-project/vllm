@@ -8,7 +8,7 @@ from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm import ir
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm._aiter_ops import check_aiter_fused_qk_norm_rope_cache, rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -196,6 +196,20 @@ class Qwen3NextQkNormRopeKvCachePattern:
         self.num_kv_heads = layer.num_kv_heads
         self.head_size = layer.head_size
         self.head_size_v = layer.head_size_v
+        # The fused AITER kernel takes a single ``head_dim`` argument and
+        # uses it for both K and V (see ``triton_qk_norm_rope_kvcache`` in
+        # ``vllm/_aiter_ops.py`` and the kernel's ``head_dim`` parameter).
+        # If a future model added to ``_QK_NORM_MODEL_TYPES`` has an
+        # asymmetric V head dim, the kernel would split V using the K
+        # head_dim and silently corrupt the V cache. Fail loud at
+        # registration so the gate has to be revisited rather than
+        # producing numerically-silent wrong KV writes.
+        assert self.head_size_v == self.head_size, (
+            f"fused_triton_qk_norm_rope_kvcache_update assumes "
+            f"head_size_v == head_size; got {self.head_size_v} != "
+            f"{self.head_size} for layer {self.layer_name}. The AITER "
+            f"kernel has no separate head_dim_v argument."
+        )
         self.eps = eps
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
@@ -470,6 +484,20 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         if not rocm_aiter_ops.is_enabled():
             logger.warning_once(
                 "QK Norm+RoPE+KVCache fusion not enabled: AITER not available"
+            )
+            return
+
+        # The config-level auto-enable in ``enable_qk_norm_rope_kvcache``
+        # already calls ``check_aiter_fused_qk_norm_rope_cache``, but a user
+        # who explicitly sets ``pass_config.fuse_qk_norm_rope_kvcache=True``
+        # bypasses that callable -- without this guard we would register
+        # patterns and only crash at first invocation when the fused kernel
+        # is dispatched.
+        if not check_aiter_fused_qk_norm_rope_cache():
+            logger.warning_once(
+                "QK Norm+RoPE+KVCache fusion not enabled: bundled AITER "
+                "does not provide aiter.ops.triton.rope."
+                "fused_qkv_split_qk_norm_rope_cache"
             )
             return
 
