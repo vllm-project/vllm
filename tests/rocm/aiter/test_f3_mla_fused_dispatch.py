@@ -3,7 +3,7 @@
 """
 Unit tests for F3: fused RoPE + MLA KV-cache write dispatch in AiterMLAImpl.
 
-PR3 adds two methods to AiterMLAImpl (and AiterTritonMLAImpl):
+PR3 will add two methods to AiterMLAImpl (and AiterTritonMLAImpl):
   - fused_rope_kvcache_supported() -> bool
       Returns True when VLLM_ROCM_USE_AITER_TRITON_ROPE=1 AND
       VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=1.
@@ -13,7 +13,8 @@ PR3 adds two methods to AiterMLAImpl (and AiterTritonMLAImpl):
       Calls ops.concat_and_cache_mla_rope_fused() instead of the unfused
       ops.concat_and_cache_mla() + separate rope path.
 
-These tests run without a GPU using mocks.
+These tests are ROCm-only and are skipped when the PR3 methods are not yet
+implemented in AiterMLAImpl (i.e. when running against this PR only).
 """
 
 from __future__ import annotations
@@ -86,6 +87,8 @@ class TestFusedRopeKVCacheSupported:
         )
 
         self.ImplClass = AiterMLAImpl
+        if not hasattr(AiterMLAImpl, "fused_rope_kvcache_supported"):
+            pytest.skip("fused_rope_kvcache_supported not implemented (requires PR3)")
 
     def _call_supported(self, impl_instance) -> bool:
         return impl_instance.fused_rope_kvcache_supported()
@@ -149,6 +152,8 @@ class TestDoRopeAndKVCacheUpdate:
         from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
 
         self.ImplClass = AiterMLAImpl
+        if not hasattr(AiterMLAImpl, "do_rope_and_kv_cache_update"):
+            pytest.skip("do_rope_and_kv_cache_update not implemented (requires PR3)")
 
     def _run_update(self, impl_instance, layer, tensors):
         query, key, value, positions, cos_sin_cache, slot_mapping, kv_cache = tensors

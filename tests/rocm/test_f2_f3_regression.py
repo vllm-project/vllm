@@ -101,7 +101,7 @@ def test_tc5_1_is_hip_false_on_nvidia():
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific regression test"
 )
-def test_tc5_2_all_flags_off_rmsnorm_unchanged(monkeypatch):
+def test_tc5_2_all_flags_off_rmsnorm_unchanged(monkeypatch, default_vllm_config):
     """TC-5.2: With all F2/F3 flags unset, RMSNorm must produce the same
     output as the PyTorch-native reference."""
     import torch
@@ -139,7 +139,7 @@ def test_tc5_2_all_flags_off_rmsnorm_unchanged(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific")
-def test_tc5_2_standard_forward_returns_bf16(monkeypatch):
+def test_tc5_2_standard_forward_returns_bf16(monkeypatch, default_vllm_config):
     """TC-5.2: forward() must return BF16 tensor regardless of F2/F3 flag state."""
     import torch
 
@@ -163,7 +163,7 @@ def test_tc5_2_standard_forward_returns_bf16(monkeypatch):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific")
-def test_tc5_5_rmsnorm_deterministic(monkeypatch):
+def test_tc5_5_rmsnorm_deterministic(monkeypatch, default_vllm_config):
     """TC-5.5: Identical input must produce identical output from forward_hip."""
     import torch
 

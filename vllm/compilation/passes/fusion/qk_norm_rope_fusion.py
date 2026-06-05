@@ -23,7 +23,10 @@ from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
-FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+try:
+    FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+except AttributeError:
+    FUSED_QK_ROPE_OP = None  # vllm._C not compiled (source-only run)
 
 P = ParamSpec("P")
 

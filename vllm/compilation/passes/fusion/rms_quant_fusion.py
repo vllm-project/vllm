@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from typing import Any, NamedTuple
 
 import torch
@@ -84,13 +85,20 @@ def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
     )
 
 
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+try:
+    RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+except AttributeError:
+    RMS_ADD_OP = None  # vllm._C not compiled (source-only run)
 
-QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-}
+QUANT_OPS: dict[QuantKey, OpOverload] = {}
+try:
+    QUANT_OPS[kFp8StaticTensorSym] = torch.ops._C.static_scaled_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8DynamicTensorSym] = torch.ops._C.dynamic_scaled_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8DynamicTokenSym] = (
+        torch.ops._C.dynamic_per_token_scaled_fp8_quant.default
+    )  # noqa: E501
+except AttributeError:
+    pass  # vllm._C not compiled (source-only run)
 if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -115,32 +123,36 @@ class FusedRMSQuantKey(NamedTuple):
         )
 
 
-FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
-    FusedRMSQuantKey(
-        kFp8StaticTensorSym, False
-    ): torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8StaticTensorSym, True
-    ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-}
+FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {}
+with contextlib.suppress(AttributeError):  # vllm._C not compiled (source-only run)
+    FUSED_OPS.update(
+        {
+            FusedRMSQuantKey(
+                kFp8StaticTensorSym, False
+            ): torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8StaticTensorSym, True
+            ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8DynamicTokenSym, False
+            ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8DynamicTokenSym, True
+            ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8Dynamic128Sym, False
+            ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8Dynamic128Sym, True
+            ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8Dynamic64Sym, False
+            ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+            FusedRMSQuantKey(
+                kFp8Dynamic64Sym, True
+            ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+        }
+    )
 
 
 class RMSNormQuantPattern:

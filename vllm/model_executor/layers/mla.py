@@ -185,31 +185,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
             fwd_ctx = get_forward_context()
             slot_mapping_dict = fwd_ctx.slot_mapping
+            if isinstance(slot_mapping_dict, list):
+                slot_mapping_dict = slot_mapping_dict[0]
             layer_slot_mapping = slot_mapping_dict.get(self.mla_attn.layer_name)
             if layer_slot_mapping is not None and self.mla_attn.kv_cache.numel() > 0:
                 q_nope = q[..., : self.qk_nope_head_dim]
                 q_pe_pre = q[..., self.qk_nope_head_dim :]
-                k_nope = kv_c_normed.unsqueeze(1)  # [B, 1, kv_lora_rank]
-                k_pe_out = torch.empty_like(k_pe)
+                kv_c = kv_c_normed.squeeze(1)  # [B, kv_lora_rank]
+                cos_sin = self.rotary_emb.cos_sin_cache
+                head_dim = self.qk_rope_head_dim
+                cos_cache = cos_sin[:, :head_dim]
+                sin_cache = cos_sin[:, head_dim:]
                 rocm_aiter_ops.fused_rope_and_mla_kv_cache_write(
                     q_nope=q_nope,
                     q_pe=q_pe_pre,
-                    k_nope=k_nope,
-                    k_pe=k_pe,
+                    kv_c=kv_c,
+                    k_pe=k_pe.squeeze(1),
                     kv_cache=self.mla_attn.kv_cache,
-                    slot_mapping=layer_slot_mapping.flatten(),
-                    positions=positions,
-                    cos_sin_cache=self.rotary_emb.cos_sin_cache,
-                    k_scale=self.mla_attn._k_scale,
-                    is_neox=self.rotary_emb.is_neox_style,
                     q_out=q,
-                    k_pe_out=k_pe_out,
+                    slot_mapping=layer_slot_mapping.flatten(),
+                    k_scale=self.mla_attn._k_scale,
+                    q_scale=self.mla_attn._k_scale,
+                    positions=positions,
+                    cos_cache=cos_cache,
+                    sin_cache=sin_cache,
+                    is_neox=self.rotary_emb.is_neox_style,
                 )
-                k_pe = k_pe_out
-                # kv_cache already updated; do_kv_cache_update inside mla_attn
-                # will write the same data again (redundant but correct).
-                # Eliminating that duplicate write is deferred to the follow-on PR
-                # when this flag defaults to True.
+                # kv_cache already updated by the fused kernel above.
+                # do_kv_cache_update inside mla_attn will write the same data
+                # again (redundant but correct); the duplicate write will be
+                # removed in the follow-on PR when this flag defaults to True.
             else:
                 # Fallback: slot_mapping unavailable or kv_cache empty
                 q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(

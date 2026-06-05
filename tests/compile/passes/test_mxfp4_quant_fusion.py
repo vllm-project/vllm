@@ -32,15 +32,23 @@ from vllm.platforms import current_platform
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
+try:
+    import vllm._C  # noqa: F401
+
+    _VLLM_C_AVAILABLE = True
+except ModuleNotFoundError:
+    _VLLM_C_AVAILABLE = False
+
 _NEEDS_ROCM_AITER = pytest.mark.skipif(
-    not (current_platform.is_rocm() and IS_AITER_FOUND),
-    reason="Requires ROCm platform with AITER installed",
+    not (current_platform.is_rocm() and IS_AITER_FOUND and _VLLM_C_AVAILABLE),
+    reason="Requires ROCm platform with AITER installed and compiled vllm._C",
 )
 
 _NEEDS_MXFP4_STANDALONE = pytest.mark.skipif(
     not (
         current_platform.is_rocm()
         and IS_AITER_FOUND
+        and _VLLM_C_AVAILABLE
         and rocm_aiter_ops.has_fused_rmsnorm_mxfp4_quant()
     ),
     reason="Requires aiter.ops.triton.fused_mxfp4_quant (fused_rms_mxfp4_quant)",
