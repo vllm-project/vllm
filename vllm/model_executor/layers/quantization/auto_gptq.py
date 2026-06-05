@@ -485,6 +485,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             weight_key,
+            group_size=self.quant_config.group_size,
             may_have_zp=not self.quant_config.is_sym,
             may_have_bias=True,
         )
@@ -746,16 +747,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(

@@ -251,6 +251,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
+            group_size=group_size,
             may_have_zp=self.quant_config.has_zp,
             may_have_bias=False,
             allow_marlin=False,

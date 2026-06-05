@@ -524,6 +524,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             kInt4Static,
+            group_size=self.quant_config.group_size,
             may_have_zp=self.quant_config.zero_point,
             may_have_bias=True,
         )
@@ -725,16 +726,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             a1_gscale=getattr(layer, "w13_input_global_scale", None),
             a2_gscale=getattr(layer, "w2_input_global_scale", None),
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize,
-        layer: RoutedExperts,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
         )
 
     def apply(

@@ -111,6 +111,7 @@ def _get_priority_backends(
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
+    group_size: int,
     may_have_zp: bool,
     may_have_bias: bool,
     allow_marlin: bool = True,
@@ -168,7 +169,7 @@ def select_wna16_moe_backend(
         config,
         may_have_zp,
         may_have_bias,
-        group_size=weight_key.scale.group_shape[1],
+        group_size=group_size,
         allow_marlin=allow_marlin,
     )
 
