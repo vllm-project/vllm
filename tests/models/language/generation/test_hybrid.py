@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import multi_gpu_test
+from tests.utils import multi_gpu_test, wait_for_gpu_memory_to_clear
 from vllm import LLM
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -404,6 +405,30 @@ def _get_vllm_runner_params(
     }
 
 
+def _wait_for_rocm_memory_to_settle() -> None:
+    if not current_platform.is_rocm():
+        return
+
+    num_gpus = current_platform.device_count()
+    if num_gpus == 0:
+        return
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(num_gpus)),
+        threshold_ratio=0.01,
+        timeout_s=120,
+    )
+
+
+@contextmanager
+def _owned_vLLM_runner(vllm_runner, kwargs):
+    try:
+        with vllm_runner(**kwargs) as runner:
+            yield runner
+    finally:
+        _wait_for_rocm_memory_to_settle()
+
+
 def _get_vLLM_output(
     vllm_runner,
     kwargs,
@@ -413,17 +438,21 @@ def _get_vLLM_output(
     num_repetitions=1,
     vllm_model=None,
 ):
-    outs = []
-    if vllm_model is None:
-        vllm_model = vllm_runner(**kwargs)
-    for _ in range(num_repetitions):
-        if num_logprobs < 0:
-            vllm_output = vllm_model.generate_greedy(prompts, max_tokens)
-        else:
-            vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs
-            )
-        outs.append(vllm_output)
+    runner_context = (
+        _owned_vLLM_runner(vllm_runner, kwargs)
+        if vllm_model is None
+        else nullcontext(vllm_model)
+    )
+    with runner_context as runner:
+        outs = []
+        for _ in range(num_repetitions):
+            if num_logprobs < 0:
+                vllm_output = runner.generate_greedy(prompts, max_tokens)
+            else:
+                vllm_output = runner.generate_greedy_logprobs(
+                    prompts, max_tokens, num_logprobs
+                )
+            outs.append(vllm_output)
 
     return outs, vllm_model
 
@@ -772,37 +801,43 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     # Cache only part of all the prompts
     vllm_runner_kwargs["enable_prefix_caching"] = True
-    vllm_outputs_partial_cache, vllm_model = _get_vLLM_output(
-        vllm_runner, vllm_runner_kwargs, generated_prompts[:3], max_tokens, num_logprobs
-    )
-
-    compare_operator(
-        outputs_0_lst=vllm_outputs_no_cache[0][:3],
-        outputs_1_lst=vllm_outputs_partial_cache[0],
-        name_0="vllm_no_cache",
-        name_1="vllm_partial_cache",
-    )
-
-    vllm_outputs_cache_rep, _ = _get_vLLM_output(
-        vllm_runner,
-        vllm_runner_kwargs,
-        generated_prompts,
-        max_tokens,
-        num_logprobs,
-        n_repetitions,
-        vllm_model=vllm_model,
-    )
-
-    for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
-        # In the first repetition, the caches are filled
-        # In the second repetition, these caches are reused
+    with _owned_vLLM_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
+        vllm_outputs_partial_cache, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts[:3],
+            max_tokens,
+            num_logprobs,
+            vllm_model=vllm_model,
+        )
 
         compare_operator(
-            outputs_0_lst=vllm_outputs_no_cache[0],
-            outputs_1_lst=vllm_outputs_cache_itn,
+            outputs_0_lst=vllm_outputs_no_cache[0][:3],
+            outputs_1_lst=vllm_outputs_partial_cache[0],
             name_0="vllm_no_cache",
-            name_1=f"vllm_cache_it_{r_idx + 1}",
+            name_1="vllm_partial_cache",
         )
+
+        vllm_outputs_cache_rep, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts,
+            max_tokens,
+            num_logprobs,
+            n_repetitions,
+            vllm_model=vllm_model,
+        )
+
+        for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
+            # In the first repetition, the caches are filled
+            # In the second repetition, these caches are reused
+
+            compare_operator(
+                outputs_0_lst=vllm_outputs_no_cache[0],
+                outputs_1_lst=vllm_outputs_cache_itn,
+                name_0="vllm_no_cache",
+                name_1=f"vllm_cache_it_{r_idx + 1}",
+            )
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
@@ -826,7 +861,7 @@ def test_same_mamba_output_apc_on_vs_off(
 
     # No prefix caching
     kwargs_no_apc = {**base_kwargs, "enable_prefix_caching": False}
-    with vllm_runner(**kwargs_no_apc) as vllm_model:
+    with _owned_vLLM_runner(vllm_runner, kwargs_no_apc) as vllm_model:
         outputs_no_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_no_apc,
@@ -841,7 +876,7 @@ def test_same_mamba_output_apc_on_vs_off(
         "enable_prefix_caching": True,
         "mamba_block_size": 16,
     }
-    with vllm_runner(**kwargs_with_apc) as vllm_model:
+    with _owned_vLLM_runner(vllm_runner, kwargs_with_apc) as vllm_model:
         outputs_with_apc, _ = _get_vLLM_output(
             vllm_runner,
             kwargs_with_apc,
