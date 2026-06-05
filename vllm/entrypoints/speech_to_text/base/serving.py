@@ -3,9 +3,11 @@
 import asyncio
 import io
 import math
+import os
 import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -62,6 +64,8 @@ SpeechToTextSegment: TypeAlias = TranscriptionSegment | TranslationSegment
 T = TypeVar("T", bound=SpeechToTextResponse)
 V = TypeVar("V", bound=SpeechToTextResponseVerbose)
 S = TypeVar("S", bound=SpeechToTextSegment)
+R = TypeVar("R")
+
 
 ResponseType: TypeAlias = (
     TranscriptionResponse
@@ -71,6 +75,34 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+
+def _get_stt_preprocess_max_workers() -> int:
+    default_workers = max(1, min(os.cpu_count() or 1, 2))
+    configured_workers = os.getenv("VLLM_STT_PREPROCESS_MAX_WORKERS")
+    if configured_workers is None:
+        return default_workers
+
+    try:
+        workers = int(configured_workers)
+    except ValueError:
+        logger.warning(
+            "Invalid VLLM_STT_PREPROCESS_MAX_WORKERS=%r; using %d worker(s).",
+            configured_workers,
+            default_workers,
+        )
+        return default_workers
+
+    if workers < 1:
+        logger.warning(
+            "Expected VLLM_STT_PREPROCESS_MAX_WORKERS to be >= 1, got %d; "
+            "using %d worker(s).",
+            workers,
+            default_workers,
+        )
+        return default_workers
+
+    return workers
 
 
 def asr_inter_chunk_separator(
@@ -130,12 +162,97 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
+        # Keep preprocessing bounded because audio decode/VAD may also fan out
+        # inside native libraries like FFmpeg or ONNX Runtime.
+        self._preprocess_max_workers = _get_stt_preprocess_max_workers()
+        self._preprocess_executor: ThreadPoolExecutor | None = None
+        self._preprocess_semaphore: asyncio.Semaphore | None = None
+
+        # REMOVE
+        print(f"self._preprocess_max_workers: {self._preprocess_max_workers}")
+
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
         from vllm.model_executor.model_loader import get_model_cls
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
+
+    def shutdown(self) -> None:
+        if (executor := getattr(self, "_preprocess_executor", None)) is not None:
+            executor.shutdown(wait=False)
+            self._preprocess_executor = None
+
+    def _get_preprocess_executor(self) -> ThreadPoolExecutor:
+        max_workers = getattr(
+            self, "_preprocess_max_workers", _get_stt_preprocess_max_workers()
+        )
+        self._preprocess_max_workers = max_workers
+
+        if (executor := getattr(self, "_preprocess_executor", None)) is None:
+            executor = ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="stt-preprocess",
+            )
+            self._preprocess_executor = executor
+
+        return executor
+
+    def _get_preprocess_semaphore(self) -> asyncio.Semaphore:
+        max_workers = getattr(
+            self, "_preprocess_max_workers", _get_stt_preprocess_max_workers()
+        )
+        self._preprocess_max_workers = max_workers
+
+        if (semaphore := getattr(self, "_preprocess_semaphore", None)) is None:
+            semaphore = asyncio.Semaphore(max_workers)
+            self._preprocess_semaphore = semaphore
+
+        return semaphore
+
+    async def _run_preprocess_step(self, func: Callable[..., R], *args) -> R:
+        executor = self._get_preprocess_executor()
+        semaphore = self._get_preprocess_semaphore()
+        loop = asyncio.get_running_loop()
+
+        async with semaphore:
+            return await loop.run_in_executor(executor, func, *args)
+
+    def _decode_and_chunk_speech(
+        self,
+        audio_data: bytes,
+    ) -> tuple[list[np.ndarray], float]:
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        try:
+            with io.BytesIO(audio_data) as buf:
+                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
+        except Exception as exc:
+            raise ValueError("Invalid or unsupported audio file.") from exc
+
+        duration = get_audio_duration(y=y, sr=sr)
+        do_split_audio = self.asr_config.allow_audio_chunking and (
+            self.asr_config.max_audio_clip_s is not None
+            and duration > self.asr_config.max_audio_clip_s
+        )
+
+        if not do_split_audio:
+            chunks = [y]
+        else:
+            assert self.asr_config.max_audio_clip_s is not None
+            assert self.asr_config.min_energy_split_window_size is not None
+            chunks = split_audio(
+                audio_data=y,
+                sample_rate=int(sr),
+                max_clip_duration_s=self.asr_config.max_audio_clip_s,
+                overlap_duration_s=self.asr_config.overlap_chunk_second,
+                min_energy_window_size=self.asr_config.min_energy_split_window_size,
+            )
+
+        return chunks, duration
 
     async def _detect_language(
         self,
@@ -209,35 +326,10 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
-        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
-        # transparently falls back to ffmpeg via an in-memory fd.
-        # NOTE resample to model SR here for efficiency. This is also a
-        # pre-requisite for chunking, as it assumes Whisper SR.
-        try:
-            with io.BytesIO(audio_data) as buf:
-                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
-        except Exception as exc:
-            raise ValueError("Invalid or unsupported audio file.") from exc
-
-        duration = get_audio_duration(y=y, sr=sr)
-        do_split_audio = self.asr_config.allow_audio_chunking and (
-            self.asr_config.max_audio_clip_s is not None
-            and duration > self.asr_config.max_audio_clip_s
+        chunks, duration = await self._run_preprocess_step(
+            self._decode_and_chunk_speech,
+            audio_data,
         )
-
-        if not do_split_audio:
-            chunks = [y]
-        else:
-            assert self.asr_config.max_audio_clip_s is not None
-            assert self.asr_config.min_energy_split_window_size is not None
-            chunks = split_audio(
-                audio_data=y,
-                sample_rate=int(sr),
-                max_clip_duration_s=self.asr_config.max_audio_clip_s,
-                overlap_duration_s=self.asr_config.overlap_chunk_second,
-                min_energy_window_size=self.asr_config.min_energy_split_window_size,
-            )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
