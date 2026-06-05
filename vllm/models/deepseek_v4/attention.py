@@ -182,11 +182,12 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.eps = config.rms_norm_eps
         self.scale = self.head_dim**-0.5
 
-        # Padded to min 64 heads for FlashMLA, initialized to -inf
-        # (no sink effect). Weight loading fills the first n_local_heads slots.
-        padded_heads = max(self.n_local_heads, 64)
+        # Padded Q head count is dictated by the platform subclass.
+        self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
+        # Sink padded to the same head count, initialized to -inf (no sink
+        # effect). Weight loading fills the first n_local_heads slots.
         self.attn_sink = nn.Parameter(
-            torch.full((padded_heads,), -float("inf"), dtype=torch.float32),
+            torch.full((self.padded_heads,), -float("inf"), dtype=torch.float32),
             requires_grad=False,
         )
 
@@ -270,8 +271,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         assert cache_config is not None, "DeepseekV4 attention requires cache_config"
         # ---- Attention / KV-cache setup ----
-        # Padded Q head count is dictated by the platform subclass.
-        self.padded_heads = self.get_padded_num_q_heads(self.n_local_heads)
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
