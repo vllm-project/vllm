@@ -18,9 +18,11 @@ from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -31,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -323,6 +326,27 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = block
 
         self.num_free_blocks += 1
+
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the front of the free list."""
+        if len(blocks) == 0:
+            return
+
+        first_block = self.fake_free_list_head.next_free_block
+        assert first_block is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        prev_block = self.fake_free_list_head
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+
+        prev_block.next_free_block = first_block
+        first_block.prev_free_block = prev_block
+
+        self.num_free_blocks += len(blocks)
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks back into the free list
@@ -695,7 +719,9 @@ def _check_enough_kv_cache_memory(
     if available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
-            "Try increasing `gpu_memory_utilization` when initializing the engine. "
+            "Try increasing `gpu_memory_utilization` when initializing the engine "
+            "(this flag also controls CPU memory reservation on the CPU "
+            "backend, despite its name). "
             "See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             "for more details."
         )
@@ -712,11 +738,12 @@ def _check_enough_kv_cache_memory(
             )
 
         raise ValueError(
-            f"To serve at least one request with the models's max seq len "
+            f"To serve at least one request with the model's max seq len "
             f"({max_model_len}), ({format_gib(needed_memory)} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
             f"memory ({format_gib(available_memory)} GiB). {estimated_msg}"
-            f"Try increasing `gpu_memory_utilization` or decreasing `max_model_len` "
+            f"Try increasing `gpu_memory_utilization` (which also controls "
+            f"CPU memory on the CPU backend) or decreasing `max_model_len` "
             f"when initializing the engine. "
             f"See https://docs.vllm.ai/en/latest/configuration/conserving_memory/ "
             f"for more details."
@@ -1650,15 +1677,33 @@ def get_kv_cache_groups(
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
         return kv_cache_groups
 
+    # Pull HiddenStateCacheSpec layers out before the general multi-group
+    # path so they don't affect page-size unification or grouping.
+    hidden_specs = {
+        k: v for k, v in kv_cache_spec.items() if isinstance(v, HiddenStateCacheSpec)
+    }
+    filtered_spec = {
+        k: v
+        for k, v in kv_cache_spec.items()
+        if not isinstance(v, HiddenStateCacheSpec)
+    }
+
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
-    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
-    # Model contains multiple attention types, but KV cache of all layers
-    # have the same physical memory per block per layer. Split the layers
-    # into groups with the same number of layers, and thus same total page
-    # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+
+    # Add hidden-state layers back with page aligned to the common page.
+    if hidden_specs:
+        common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        for name, spec in hidden_specs.items():
+            per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+            new_bs = max(common_page // per_token, 1)
+            aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
+            groups.append(KVCacheGroupSpec([name], aligned))
+
+    return groups
 
 
 def generate_scheduler_kv_cache_config(
@@ -1968,6 +2013,9 @@ def get_kv_cache_configs(
                     "across workers. This is not supported yet."
                 )
 
+    # Check if the KV cache specs are registered correctly.
+    # This is to prevent that some layers are initialized with unregistered specs.
+    KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
