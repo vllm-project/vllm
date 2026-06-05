@@ -53,6 +53,9 @@ pub struct Config {
     pub reasoning_parser: ParserSelection,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
+    /// Disable frontend-side multimodal preprocessing and render the model as
+    /// language-only.
+    pub language_model_only: bool,
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
