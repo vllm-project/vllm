@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+from functools import cache
+
 import torch
 import torch.distributed as dist
 
@@ -13,6 +16,33 @@ from vllm.v1.worker.ubatch_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+@cache
+def _get_dp_sync_stream() -> torch.cuda.Stream:
+    return torch.cuda.Stream()
+
+
+def _dp_sync_stream_context(
+    parallel_config: ParallelConfig,
+) -> contextlib.AbstractContextManager:
+    # Run the NCCL DP coordination all_reduce on a dedicated stream so that
+    # reading the result back drains only this stream, not the default stream
+    # which has async-scheduled forward kernels. When NCCL DP sync is disabled
+    # the all_reduce is a blocking CPU collective, so there is nothing to
+    # overlap and we stay on the default stream.
+    if parallel_config.disable_nccl_for_dp_synchronization:
+        return contextlib.nullcontext()
+    return torch.cuda.stream(_get_dp_sync_stream())
+
+
+@cache
+def _get_dp_coord_buffer(device: torch.device | str, dp_size: int) -> torch.Tensor:
+    # Persistent all_reduce buffer, allocated once per (device, dp_size). A
+    # per-step allocation on the dedicated stream can be freed and handed by the
+    # caching allocator to a default-stream forward kernel while the all_reduce
+    # is still in flight, corrupting the collective.
+    return torch.zeros(4, dp_size, device=device, dtype=torch.int32)
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -49,7 +79,8 @@ def _run_ar(
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
-    tensor = tensor_cpu.to(device, non_blocking=True)
+    tensor = _get_dp_coord_buffer(device, dp_size)
+    tensor.copy_(tensor_cpu, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -127,14 +158,18 @@ def _synchronize_dp_ranks(
 
     # Coordinate between the DP ranks via an All Reduce
     # to determine the total number of tokens that each rank
-    # will run and if we are using ubatching or not.
-    tensor = _run_ar(
-        should_ubatch=should_attempt_ubatching,
-        orig_num_tokens_per_ubatch=num_tokens_unpadded,
-        padded_num_tokens_per_ubatch=num_tokens_padded,
-        cudagraph_mode=cudagraph_mode,
-        parallel_config=parallel_config,
-    )
+    # will run and if we are using ubatching or not. Read the result back to
+    # CPU inside the stream context so the subsequent .item() calls drain only
+    # the dedicated stream, not the default stream's async-scheduled forward
+    # kernels.
+    with _dp_sync_stream_context(parallel_config):
+        tensor = _run_ar(
+            should_ubatch=should_attempt_ubatching,
+            orig_num_tokens_per_ubatch=num_tokens_unpadded,
+            padded_num_tokens_per_ubatch=num_tokens_padded,
+            cudagraph_mode=cudagraph_mode,
+            parallel_config=parallel_config,
+        ).cpu()
 
     # Synchronize cudagraph_mode across ranks first (take min).
     # This is needed before DP padding decision since we use the synced

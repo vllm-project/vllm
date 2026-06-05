@@ -1002,17 +1002,12 @@ class VllmConfig:
         )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
-            if self.scheduler_config.async_scheduling:
-                if self.parallel_config.data_parallel_size > 1 and (
-                    self.model_config is None or self.model_config.is_moe
-                ):
-                    logger.info_once(
-                        "Disabling NCCL for DP synchronization "
-                        "when using async scheduling.",
-                    )
-                self.parallel_config.disable_nccl_for_dp_synchronization = True
-            else:
-                self.parallel_config.disable_nccl_for_dp_synchronization = False
+            # The DP coordination all_reduce runs on a dedicated stream (see
+            # vllm/v1/worker/dp_utils.py), so reading its result back no longer
+            # forces a GPU sync on the default stream. NCCL can therefore be
+            # used for DP synchronization even under async scheduling without
+            # introducing a bubble, so we no longer fall back to Gloo there.
+            self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         if (
             self.speculative_config is not None
