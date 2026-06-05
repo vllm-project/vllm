@@ -4656,6 +4656,44 @@ async fn tokenize_chat_conflicting_generation_flags_returns_400() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_chat_empty_messages_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_chat_empty_message_content_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/tokenize",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": ""}],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_unknown_model_returns_404() {
     let mut app = test_app().await;
 

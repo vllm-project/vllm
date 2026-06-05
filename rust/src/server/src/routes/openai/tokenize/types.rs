@@ -8,7 +8,9 @@ use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
     convert_message, normalize_generation_prompt_mode,
 };
-use crate::routes::openai::utils::types::{ChatMessage, Normalizable, default_true};
+use crate::routes::openai::utils::types::{
+    ChatMessage, Normalizable, default_true, validate_messages,
+};
 
 /// `POST /tokenize` body. Untagged: a JSON object with `messages` parses as the
 /// chat variant; one with `prompt` parses as the completion variant.
@@ -29,9 +31,10 @@ pub struct TokenizeCompletionRequest {
     pub return_token_strs: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct TokenizeChatRequest {
     pub model: Option<String>,
+    #[validate(custom(function = "validate_messages"))]
     pub messages: Vec<ChatMessage>,
     #[serde(default = "default_true")]
     pub add_generation_prompt: bool,
@@ -109,9 +112,11 @@ pub struct DetokenizeResponse {
 }
 
 // ---- trait impls required by ValidatedJson ----
-// Field-level checks are empty; cross-field rules live in the handler.
 impl Validate for TokenizeRequest {
     fn validate(&self) -> Result<(), ValidationErrors> {
+        if let Self::Chat(req) = self {
+            req.validate()?;
+        }
         Ok(())
     }
 }
