@@ -845,6 +845,10 @@ class GPUModelRunner(
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_probs: torch.Tensor | None = None
+        # Per-request broadcast valid-sampled-token count from the last receiver
+        # call (non-last PP rank), consumed by _update_states to correct the
+        # optimistic num_computed_tokens drift. Keyed by req_id.
+        self._pp_prev_valid_sampled_count: dict[str, int] = {}
         self._draft_prob_req_ids: list[str] | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
@@ -1322,6 +1326,23 @@ class GPUModelRunner(
                     # scheduling. Corrected on GPU in _prepare_inputs.
                     optimistic_num_accepted = req_state.prev_num_draft_len
                     req_state.output_token_ids.extend([-1] * optimistic_num_accepted)
+
+                    # Non-last PP rank: the GPU kernel that corrects the optimistic
+                    # num_computed_tokens (update_num_computed_tokens_for_batch_change,
+                    # in _prepare_inputs) only runs on the sampler/last rank (gated on
+                    # valid_sampled_token_count_gpu). Reconstruct the same correction
+                    # here from the broadcast valid count the receiver stashed, BEFORE
+                    # num_computed_tokens is written to req_state / the cpu buffer
+                    # below — the scheduler advanced it optimistically (all drafts
+                    # accepted); subtract the rejected drafts so rope/KV positions
+                    # (built from num_computed_tokens) are not off-by-one after a
+                    # rejection. (The last rank keeps the kernel + deferred path.)
+                    if not is_last_rank:
+                        prev_valid = self._pp_prev_valid_sampled_count.get(req_id)
+                        if prev_valid is not None:
+                            num_computed_tokens -= num_computed_tokens_drift_correction(
+                                optimistic_num_accepted, prev_valid
+                            )
 
                     deferred_spec_decode_corrections.append(
                         (req_id, optimistic_num_accepted, req_state)
@@ -4787,6 +4808,7 @@ class GPUModelRunner(
         discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
         discard_req_indices_set = set(discard_req_indices)
         prev_req_id_to_index: dict[str, int] = {}
+        self._pp_prev_valid_sampled_count = {}
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i in discard_req_indices_set:
                 continue
@@ -4831,21 +4853,12 @@ class GPUModelRunner(
                 if optimistic:
                     del req_state.output_token_ids[-optimistic:]
                 req_state.output_token_ids.extend(values)
-                # (B, positions arm) num_computed_tokens drift correction — the
-                # non-last-rank analogue of the GPU kernel
-                # update_num_computed_tokens_for_batch_change (:2138), which runs
-                # only on the sampler rank (gated on valid_sampled_token_count_gpu).
-                # The scheduler advanced num_computed_tokens optimistically by
-                # 1 + prev_num_draft_len (all drafts assumed accepted); the true
-                # advance is v. Subtract the rejected drafts here so the else-branch
-                # copy (:2147) feeds self.positions (:2160) the right rope/KV
-                # positions. Without this, every draft rejection leaves the non-last
-                # rank's positions over-advanced by one -> rope off-by-one -> wrong
-                # verification -> non-greedy output.
-                correction = num_computed_tokens_drift_correction(optimistic, v)
-                if correction:
-                    self.input_batch.num_computed_tokens_cpu[i] -= correction
-                    req_state.num_computed_tokens -= correction
+            # Stash this request's broadcast valid count so _update_states can apply
+            # the num_computed_tokens drift correction AFTER the scheduler's
+            # optimistic value is set (here in the receiver it would be overwritten
+            # by _update_states :1408). v = accepted drafts + bonus; the next step's
+            # optimistic advance assumed all drafts accepted.
+            self._pp_prev_valid_sampled_count[req_id] = v
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
