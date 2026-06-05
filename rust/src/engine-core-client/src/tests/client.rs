@@ -1225,6 +1225,86 @@ async fn dropping_a_live_stream_triggers_abort() {
     client.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-burst".to_vec();
+    let request_ids = ["req-1", "req-2", "req-3"];
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                for _ in 0..3 {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                }
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![
+                            request_output("req-1", vec![99], None),
+                            request_output("req-2", vec![99], None),
+                            request_output("req-3", vec![99], None),
+                        ],
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+                let abort =
+                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(
+                    ids,
+                    vec![
+                        "req-1".to_string(),
+                        "req-2".to_string(),
+                        "req-3".to_string()
+                    ]
+                );
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
+                );
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    // Open every request first so all three adds reach the engine before it
+    // emits outputs, then drain the first token from each stream.
+    let mut streams = Vec::new();
+    for id in request_ids {
+        streams.push(client.call(sample_request_with_id(id)).await.unwrap());
+    }
+    for stream in streams.iter_mut() {
+        let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(first.new_token_ids, vec![99]);
+    }
+    // Drop the whole burst back-to-back so the abort worker can batch them.
+    drop(streams);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dispatcher_failure_propagates_to_streams_and_future_calls() {
     init_tracing();
