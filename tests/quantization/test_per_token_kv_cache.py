@@ -25,11 +25,13 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
+DEVICE_TYPE = current_platform.device_type
+
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
     pytest.mark.skipif(
-        not current_platform.is_cuda_alike(),
-        reason="Per-token-head KV cache tests require CUDA or ROCm GPU.",
+        current_platform.is_cpu(),
+        reason="Per-token-head KV cache tests require GPU.",
     ),
 ]
 
@@ -166,7 +168,7 @@ def test_reshape_and_cache_per_token_head(
     )
 
     set_random_seed(seed)
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 4
 
@@ -260,7 +262,7 @@ def test_per_token_head_round_trip_accuracy(
         triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(42)
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 2
@@ -323,7 +325,7 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
         triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     num_tokens = 4
     num_heads = 2
     head_size = 64
@@ -430,7 +432,7 @@ def test_triton_unified_attention_per_token_head_scale(
     from vllm.utils.math_utils import next_power_of_2
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
 
     num_seqs = len(seq_lens)

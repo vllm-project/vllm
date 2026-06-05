@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 from transformers import AutoTokenizer
 
 import vllm
 import vllm.config
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -311,8 +313,13 @@ def _assert_qwen35_text_vl_and_mixed_lora(
     )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @create_new_process_for_each_test()
-def test_qwen35_text_lora(qwen35_text_lora_files, qwen35_vl_lora_files):
+def test_qwen35_text_lora(
+    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+):
     llm = vllm.LLM(
         model=MODEL_PATH,
         max_model_len=4096,
@@ -335,7 +342,9 @@ def test_qwen35_text_lora(qwen35_text_lora_files, qwen35_vl_lora_files):
 
 
 @multi_gpu_test(num_gpus=4)
-def test_qwen35_text_lora_tp4(qwen35_text_lora_files, qwen35_vl_lora_files):
+def test_qwen35_text_lora_tp4(
+    qwen35_text_lora_files, qwen35_vl_lora_files, maybe_enable_lora_dual_stream
+):
     llm = vllm.LLM(
         model=MODEL_PATH,
         max_model_len=4096,
