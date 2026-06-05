@@ -18,12 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.oracle.humming import (
-    convert_to_humming_moe_kernel_format,
-    get_humming_moe_quant_config,
-    make_humming_moe_kernel,
-    select_humming_moe_backend,
-)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -38,7 +32,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    convert_to_humming_moe_kernel_format,
+    get_humming_moe_quant_config,
     input_schema_to_quant_key,
+    make_humming_moe_kernel,
+    select_humming_moe_experts,
     weight_schema_to_quant_key,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -645,8 +643,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
             self.force_input_schema or self.input_schema
         )
 
-        # Select Humming MoE backend
-        self.backend, self.experts_cls = select_humming_moe_backend(
+        # Select Humming MoE experts
+        self.experts_cls = select_humming_moe_experts(
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
@@ -796,12 +794,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
-        assert self.backend is not None
         self.moe_kernel = make_humming_moe_kernel(
             self.moe_quant_config,
             self.moe,
             self.experts_cls,
-            self.backend,
             layer=layer,
             routing_tables=layer._expert_routing_tables(),
         )
