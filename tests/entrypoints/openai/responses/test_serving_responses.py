@@ -261,18 +261,6 @@ def test_harmony_required_function_call_rejects_invalid_output(
 @pytest.mark.parametrize(
     ("request_kwargs", "param"),
     [
-        (
-            {
-                "text": ResponseTextConfig(
-                    format=ResponseFormatTextJSONSchemaConfig(
-                        type="json_schema",
-                        name="weather_answer",
-                        schema={"type": "object"},
-                    )
-                )
-            },
-            "text.format",
-        ),
         ({"max_tool_calls": 0}, "max_tool_calls"),
         (
             {"structured_outputs": StructuredOutputsParams(json={"type": "object"})},
@@ -299,6 +287,45 @@ def test_harmony_required_function_call_rejects_conflicting_options(
     assert error.error.param == param
 
 
+def test_harmony_required_function_call_allows_text_format() -> None:
+    serving = _harmony_required_tool_serving()
+    text_schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[_function_tool()],
+        tool_choice="required",
+        text=ResponseTextConfig(
+            format=ResponseFormatTextJSONSchemaConfig(
+                type="json_schema",
+                name="weather_answer",
+                schema=text_schema,
+            )
+        ),
+    )
+
+    assert serving._validate_create_responses_input(request) is None
+    sampling_params = request.to_sampling_params(default_max_tokens=128)
+    assert sampling_params.structured_outputs is not None
+    assert sampling_params.structured_outputs.json == text_schema
+
+    serving._apply_harmony_required_function_tool_schema(
+        request, sampling_params, is_required_function_call=True
+    )
+
+    assert sampling_params.structured_outputs is not None
+    tool_schema = sampling_params.structured_outputs.json
+    assert isinstance(tool_schema, dict)
+    assert tool_schema["type"] == "array"
+    assert tool_schema["items"]["anyOf"][0]["properties"]["name"]["enum"] == [
+        "get_weather"
+    ]
+
+
 def test_harmony_required_function_tool_schema_honors_limits() -> None:
     single_tool_schema = OpenAIServingResponses._required_function_tool_json_schema(
         ResponsesRequest(
@@ -321,6 +348,20 @@ def test_harmony_required_function_tool_schema_honors_limits() -> None:
     assert single_tool_schema["maxItems"] == 1
     assert isinstance(limited_schema, dict)
     assert limited_schema["maxItems"] == 3
+
+
+def test_harmony_required_function_tool_schema_preserves_tool_parameters() -> None:
+    tool = _function_tool()
+    tool.parameters["$defs"] = {"city": {"type": "string"}}
+    request = ResponsesRequest(
+        input="Call get_weather for Paris.",
+        tools=[tool],
+        tool_choice="required",
+    )
+
+    OpenAIServingResponses._required_function_tool_json_schema(request)
+
+    assert "$defs" in tool.parameters
 
 
 @pytest.mark.parametrize(
