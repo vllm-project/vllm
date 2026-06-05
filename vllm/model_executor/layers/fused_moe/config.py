@@ -1266,6 +1266,13 @@ class FusedMoEConfig:
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
 
+    # CUDA graph max capture size, snapshotted from
+    # compilation_config.max_cudagraph_capture_size at layer-construction time so
+    # kernels need not call get_current_vllm_config() (which is unavailable when
+    # process_weights_after_loading runs outside a set_current_vllm_config context,
+    # e.g. RL weight reload).
+    max_capture_size: int = 0
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(
