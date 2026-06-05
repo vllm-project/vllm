@@ -39,10 +39,23 @@ class FixFunctionalizationPass(VllmInductorPass):
         count = 0
 
         rope_targets = [torch.ops._C.rotary_embedding.default]
+        fused_deepseek_v4_mla_targets = []
 
         if hasattr(torch.ops.vllm, "rocm_aiter_triton_rotary_embedding"):
             rope_targets.append(
                 torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+            )
+        if hasattr(
+            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
+        ):
+            fused_deepseek_v4_mla_targets.append(
+                torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
+            )
+        if hasattr(
+            torch.ops.vllm, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
+        ):
+            fused_deepseek_v4_mla_targets.append(
+                torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
             )
 
         for node in graph.nodes:
@@ -181,6 +194,9 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif at_target in fused_deepseek_v4_mla_targets:
+                mutated_args = {1: "q", 2: "k_cache"}
+                self.defunctionalize(graph, node, mutated_args)
             elif (
                 hasattr(torch.ops.vllm, "fused_rope_unified_mla_kv_cache_update")
                 and at_target
