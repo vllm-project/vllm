@@ -175,6 +175,7 @@ def _function_tool() -> FunctionTool:
 
 
 def _harmony_required_tool_serving() -> OpenAIServingResponses:
+    # Bypass __init__ to test internal helpers without engine wiring.
     serving = object.__new__(OpenAIServingResponses)
     serving.use_harmony = True
     serving.enable_log_outputs = False
@@ -185,7 +186,7 @@ def _harmony_required_tool_serving() -> OpenAIServingResponses:
     return serving
 
 
-def test_harmony_required_tool_json_output_becomes_function_call_and_replays() -> None:
+def test_harmony_required_function_call_output_replays() -> None:
     serving = _harmony_required_tool_serving()
     request = ResponsesRequest(
         input="Call get_weather for Paris.",
@@ -204,7 +205,7 @@ def test_harmony_required_tool_json_output_becomes_function_call_and_replays() -
         stop_reason=None,
     )
 
-    items = serving._make_harmony_required_tool_json_output_items(request, output)
+    items = serving._make_harmony_required_function_call_items(request, output)
 
     assert len(items) == 1
     item = items[0]
@@ -243,7 +244,7 @@ def test_harmony_required_tool_json_output_becomes_function_call_and_replays() -
         ('[{"name":"get_time","parameters":{}}]', "unknown tool"),
     ],
 )
-def test_harmony_required_tool_json_rejects_invalid_output(
+def test_harmony_required_function_call_rejects_invalid_output(
     text: str,
     match: str,
 ) -> None:
@@ -254,7 +255,7 @@ def test_harmony_required_tool_json_rejects_invalid_output(
     )
 
     with pytest.raises(ValueError, match=match):
-        OpenAIServingResponses._parse_required_tool_json_output(request, text)
+        OpenAIServingResponses._parse_required_function_tool_output(request, text)
 
 
 @pytest.mark.parametrize(
@@ -279,7 +280,7 @@ def test_harmony_required_tool_json_rejects_invalid_output(
         ),
     ],
 )
-def test_harmony_required_tool_json_rejects_conflicting_options(
+def test_harmony_required_function_call_rejects_conflicting_options(
     request_kwargs: dict,
     param: str,
 ) -> None:
@@ -298,8 +299,8 @@ def test_harmony_required_tool_json_rejects_conflicting_options(
     assert error.error.param == param
 
 
-def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
-    single_tool_schema = OpenAIServingResponses._required_tool_json_schema(
+def test_harmony_required_function_tool_schema_honors_limits() -> None:
+    single_tool_schema = OpenAIServingResponses._required_function_tool_json_schema(
         ResponsesRequest(
             input="Call get_weather for Paris.",
             tools=[_function_tool()],
@@ -307,7 +308,7 @@ def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
             parallel_tool_calls=False,
         )
     )
-    limited_schema = OpenAIServingResponses._required_tool_json_schema(
+    limited_schema = OpenAIServingResponses._required_function_tool_json_schema(
         ResponsesRequest(
             input="Call get_weather for Paris.",
             tools=[_function_tool()],
@@ -332,7 +333,7 @@ def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
         ],
     ],
 )
-def test_harmony_required_tool_json_streaming_reconstructs_arguments(
+def test_harmony_required_function_call_streaming_reconstructs_arguments(
     chunks: list[str],
 ) -> None:
     previous_text = ""

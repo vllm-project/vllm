@@ -7,9 +7,9 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
-from copy import copy, deepcopy
+from copy import copy
 from http import HTTPStatus
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from fastapi import Request
 from openai.types.responses import (
@@ -323,11 +323,14 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        is_required_function_call = self._is_harmony_required_function_call_request(
+            request
+        )
         if (
             self.use_harmony
             and request.tool_choice == "required"
             and request.tools
-            and not all(isinstance(tool, FunctionTool) for tool in request.tools)
+            and not is_required_function_call
         ):
             return self.create_error_response(
                 err_type="invalid_request_error",
@@ -338,7 +341,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="tool_choice",
             )
-        if self._use_harmony_required_tool_json_shim(request):
+        if is_required_function_call:
             if request.max_tool_calls is not None and request.max_tool_calls < 1:
                 return self.create_error_response(
                     err_type="invalid_request_error",
@@ -427,9 +430,12 @@ class OpenAIServingResponses(OpenAIServing):
         lora_request = self._maybe_get_adapters(request)
         model_name = self.models.model_name(lora_request)
 
+        is_required_function_call = self._is_harmony_required_function_call_request(
+            request
+        )
         if self.use_harmony:
             messages, engine_inputs = self._make_request_with_harmony(
-                request, prev_response
+                request, prev_response, is_required_function_call
             )
         else:
             messages, engine_inputs = await self._make_request(request, prev_response)
@@ -491,7 +497,9 @@ class OpenAIServingResponses(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
-            self._apply_harmony_required_tool_json_schema(request, sampling_params)
+            self._apply_harmony_required_function_tool_schema(
+                request, sampling_params, is_required_function_call
+            )
 
             trace_headers = (
                 None
@@ -500,10 +508,10 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
             context: ConversationContext
-            function_tool_names = extract_function_tool_names(request.tools)
-            if self._use_harmony_required_tool_json_shim(request):
+            if is_required_function_call:
                 context = SimpleContext()
             elif self.use_harmony:
+                function_tool_names = extract_function_tool_names(request.tools)
                 if request.stream:
                     context = StreamingHarmonyContext(
                         messages, available_tools, function_tool_names
@@ -788,9 +796,10 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
+        is_required_function_call: bool,
     ):
-        use_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
-        if request.tool_choice not in ("auto", "none") and not use_tool_json_shim:
+        has_unsupported_tool_choice = request.tool_choice not in ("auto", "none")
+        if has_unsupported_tool_choice and not is_required_function_call:
             raise NotImplementedError(
                 "Only 'auto' or 'none' tool_choice is supported "
                 "in response API with Harmony"
@@ -799,7 +808,7 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        if use_tool_json_shim:
+        if is_required_function_call:
             prompt_token_ids += get_encoding().encode(
                 _HARMONY_FINAL_MESSAGE_PREFILL, allowed_special="all"
             )
@@ -808,10 +817,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         return messages, [engine_input]
 
-    def _use_harmony_required_tool_json_shim(
+    def _is_harmony_required_function_call_request(
         self,
         request: ResponsesRequest,
     ) -> bool:
+        """Return True when Harmony Responses should force function calls."""
         return (
             self.use_harmony
             and request.tool_choice == "required"
@@ -820,15 +830,15 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
     @staticmethod
-    def _required_tool_json_schema(request: ResponsesRequest) -> dict:
+    def _required_function_tool_json_schema(request: ResponsesRequest) -> dict:
+        """Build the JSON schema used to force required function calls."""
         json_schema = get_json_schema_from_tools(
             tool_choice=request.tool_choice,
-            tools=deepcopy(request.tools),
+            tools=request.tools,
         )
         if json_schema is None:
             raise ValueError("tool_choice='required' requires function tools.")
-        if not isinstance(json_schema, dict):
-            raise ValueError("tool_choice='required' requires a JSON object schema.")
+        json_schema = cast(dict[str, Any], json_schema)
 
         max_items = request.max_tool_calls
         if request.parallel_tool_calls is False:
@@ -837,22 +847,25 @@ class OpenAIServingResponses(OpenAIServing):
             json_schema["maxItems"] = max_items
         return json_schema
 
-    def _apply_harmony_required_tool_json_schema(
+    def _apply_harmony_required_function_tool_schema(
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
+        is_required_function_call: bool,
     ) -> None:
-        if not self._use_harmony_required_tool_json_shim(request):
+        """Attach required-function constrained decoding to sampling params."""
+        if not is_required_function_call:
             return
         sampling_params.structured_outputs = StructuredOutputsParams(
-            json=self._required_tool_json_schema(request)
+            json=self._required_function_tool_json_schema(request)
         )
 
     @staticmethod
-    def _parse_required_tool_json_output(
+    def _parse_required_function_tool_output(
         request: ResponsesRequest,
         text: str,
     ) -> list[FunctionDefinition]:
+        """Parse constrained JSON into function-call definitions."""
         try:
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(text)
         except ValidationError as exc:
@@ -880,11 +893,12 @@ class OpenAIServingResponses(OpenAIServing):
                 )
         return tool_calls
 
-    def _make_harmony_required_tool_json_output_items(
+    def _make_harmony_required_function_call_items(
         self,
         request: ResponsesRequest,
         final_output: CompletionOutput,
     ) -> list[ResponseOutputItem]:
+        """Convert constrained JSON output into public function_call items."""
         if self.enable_log_outputs and self.request_logger:
             self.request_logger.log_outputs(
                 request_id=request.request_id,
@@ -895,7 +909,7 @@ class OpenAIServingResponses(OpenAIServing):
                 delta=False,
             )
 
-        tool_calls = self._parse_required_tool_json_output(
+        tool_calls = self._parse_required_function_tool_output(
             request=request,
             text=final_output.text,
         )
@@ -918,17 +932,18 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                 )
             )
-        self._append_required_tool_json_output_to_harmony_store(
+        self._append_required_function_calls_to_harmony_store(
             request,
             output_items,
         )
         return output_items
 
-    def _append_required_tool_json_output_to_harmony_store(
+    def _append_required_function_calls_to_harmony_store(
         self,
         request: ResponsesRequest,
         output_items: list[ResponseOutputItem],
     ) -> None:
+        """Store equivalent Harmony calls so previous_response_id can replay."""
         if not request.store or request.request_id not in self.msg_store:
             return
         for item in output_items:
@@ -982,7 +997,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
-        if self._use_harmony_required_tool_json_shim(request):
+        if self._is_harmony_required_function_call_request(request):
             assert isinstance(context, SimpleContext)
             final_res = context.final_output
             assert final_res is not None
@@ -995,7 +1010,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status = "incomplete"
                 output = []
             else:
-                output = self._make_harmony_required_tool_json_output_items(
+                output = self._make_harmony_required_function_call_items(
                     request,
                     final_output,
                 )
@@ -1564,7 +1579,9 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        use_required_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
+        is_required_function_call = self._is_harmony_required_function_call_request(
+            request
+        )
         previous_tool_json_text = ""
         history_tool_call_cnt = 0
         function_name_returned = False
@@ -1574,7 +1591,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request.tools,
                 chat_template_kwargs=self._effective_chat_template_kwargs(request),
             )
-            if self.parser and not use_required_tool_json_shim
+            if self.parser and not is_required_function_call
             else None
         )
 
@@ -1600,7 +1617,7 @@ class OpenAIServingResponses(OpenAIServing):
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
-            if use_required_tool_json_shim:
+            if is_required_function_call:
                 current_tool_json_text = previous_tool_json_text + delta_text
                 delta_message, function_name_returned = (
                     extract_required_tool_call_streaming(
@@ -1624,7 +1641,9 @@ class OpenAIServingResponses(OpenAIServing):
                     and output.finish_reason != "length"
                 ):
                     try:
-                        self._parse_required_tool_json_output(
+                        # Late validation checks schema-level rules that are not
+                        # knowable while streaming partial JSON shards.
+                        self._parse_required_function_tool_output(
                             request,
                             previous_tool_json_text,
                         )
@@ -1730,9 +1749,11 @@ class OpenAIServingResponses(OpenAIServing):
             sequence_number += 1
             return event
 
-        use_tool_json_shim = self._use_harmony_required_tool_json_shim(request)
+        is_required_function_call = self._is_harmony_required_function_call_request(
+            request
+        )
         async with AsyncExitStack() as exit_stack:
-            if self.use_harmony and not use_tool_json_shim:
+            if self.use_harmony and not is_required_function_call:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)
