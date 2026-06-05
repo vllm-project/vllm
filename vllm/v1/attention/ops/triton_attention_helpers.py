@@ -164,16 +164,22 @@ def compute_tile_loop_bounds(
 
     ``tile_base`` is the absolute KV position the loop starts from
     (``seq_offset = tile_base + j * TILE_SIZE + offs_t``); it is 0 on every
-    non-shifted path. The 2D pointer SWA path shifts it to the exact window
-    lower bound instead of the floor-rounded tile boundary, so the window's
-    keys occupy the minimal ``ceil(W / TILE_SIZE)`` tiles; the floor-rounded
-    start, by contrast, lets the masked leading slots (positions before the
-    window in the first tile) push the window across up to one extra tile.
-    (It also makes the online-softmax reduction order independent of the window
-    offset mod ``TILE_SIZE``, so output is byte-identical across batch shapes.)
-    The 3D and ``USE_TD`` paths keep ``tile_base = 0``: the former
-    segments in absolute tile coordinates, and the latter's tensor-descriptor
-    load assumes each tile lies within a single KV block.
+    non-shifted path. The 2D pointer and 3D-segmented SWA paths both shift it
+    to the exact window lower bound instead of the floor-rounded tile boundary,
+    so the window's keys occupy the minimal ``ceil(W / TILE_SIZE)`` tiles; the
+    floor-rounded start, by contrast, lets the masked leading slots (positions
+    before the window in the first tile) push the window across up to one extra
+    tile. (It also makes the online-softmax reduction order independent of the
+    window offset mod ``TILE_SIZE``, so output is byte-identical across batch
+    shapes - now on the 3D path as well.)
+
+    Only the ``USE_TD`` tensor-descriptor path keeps ``tile_base = 0``: its load
+    fetches a whole tile from one physical block (relying on
+    ``BLOCK_SIZE % TILE_SIZE == 0``), which an arbitrary base would violate. On
+    the 3D path the per-segment slice below runs in window-tile coordinates
+    while ``tiles_per_segment`` stays ``seq_len``-derived, so the segments that
+    do work remain a subset of those ``reduce_segments`` treats as valid and the
+    extra high-index segments are harmlessly empty (``M = -inf``).
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -213,15 +219,20 @@ def compute_tile_loop_bounds(
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
-        if IS_3D or USE_TD:
-            # Keep the floor-rounded, TILE_SIZE-aligned iteration here:
-            # 3D segmenting reasons in absolute tile coordinates, and the
-            # tensor-descriptor KV load assumes each tile lies in one block
-            # (which an arbitrary base offset would violate).
+        if USE_TD:
+            # Tensor-descriptor KV load fetches a whole tile from one physical
+            # block (relies on BLOCK_SIZE % TILE_SIZE == 0); an arbitrary base
+            # would straddle a block boundary, so keep the floor-rounded,
+            # TILE_SIZE-aligned iteration.
             tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
             tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
         else:
-            # 2D pointer path: base-shift to the exact lower bound (see docstring).
+            # 2D pointer and 3D-segmented paths: base-shift to the exact window
+            # lower bound (see docstring). Each slot resolves its own physical
+            # block, so a base-shifted tile straddling two KV blocks is fine; for
+            # 3D the segment slice below runs in window-tile coordinates while
+            # tiles_per_segment stays seq_len-derived, keeping the active
+            # segments a subset of reduce_segments' valid range.
             tile_base = tl.maximum(0, first_allowed_key)
             tile_start = 0
             tile_end = cdiv_fn(
