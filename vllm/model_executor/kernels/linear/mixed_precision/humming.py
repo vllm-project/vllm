@@ -58,4 +58,6 @@ class HummingLinearKernel(MPLinearKernel):
             inputs=flatten_inputs,
             compute_config=layer.compute_config,
         )
+        if bias is not None:
+            output.add_(bias)
         return output.view(*x.shape[:-1], output.size(-1))
