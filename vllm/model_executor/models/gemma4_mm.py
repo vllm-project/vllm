@@ -1268,17 +1268,13 @@ class Gemma4ForConditionalGeneration(
         # pass has already allocated activations we should account for.
         last_hidden_states_map: dict[int, torch.Tensor] = {}
         for patches, items in buckets.items():
-            mem_get_info = current_platform.mem_get_info
-            if callable(mem_get_info):
-                free, total = mem_get_info()
-                max_batch_size = min(
-                    len(items),
-                    self._encoder_chunk(
-                        patches, free, total, vision_cfg.position_embedding_size
-                    ),
-                )
-            else:
-                max_batch_size = len(items)
+            free, total = current_platform.mem_get_info()
+            max_batch_size = min(
+                len(items),
+                self._encoder_chunk(
+                    patches, free, total, vision_cfg.position_embedding_size
+                ),
+            )
 
             for chunk_idx in range(0, len(items), max_batch_size):
                 chunk_items = items[chunk_idx : chunk_idx + max_batch_size]
@@ -1385,20 +1381,16 @@ class Gemma4ForConditionalGeneration(
             fc_list = list(frame_counts)
 
         total_frames = pixel_values.shape[0]
-        mem_get_info = current_platform.mem_get_info
-        if callable(mem_get_info):
-            free, total = mem_get_info()
-            max_batch_size = min(
-                total_frames,
-                self._encoder_chunk(
-                    pixel_values.shape[1],
-                    free,
-                    total,
-                    vision_cfg.position_embedding_size,
-                ),
-            )
-        else:
-            max_batch_size = total_frames
+        free, total = current_platform.mem_get_info()
+        max_batch_size = min(
+            total_frames,
+            self._encoder_chunk(
+                pixel_values.shape[1],
+                free,
+                total,
+                vision_cfg.position_embedding_size,
+            ),
+        )
 
         padding_positions = (pixel_position_ids == -1).all(dim=-1)
 

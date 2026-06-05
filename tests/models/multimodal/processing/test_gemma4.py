@@ -287,30 +287,11 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
     )
 
 
-def test_process_image_input_cpu_platform_no_mem_get_info():
-    """CPU platform returns None for mem_get_info; guard must not crash."""
-    from unittest.mock import MagicMock, patch
+def test_cpu_platform_mem_get_info_returns_valid_memory():
+    """CpuPlatform.mem_get_info must return (available, total) in bytes."""
+    from vllm.platforms.cpu import CpuPlatform
 
-    # Simulate the CPU platform __getattr__ returning None for mem_get_info.
-    mock_platform = MagicMock()
-    mock_platform.mem_get_info = None
-
-    n_items = 4
-    patches = _VIDEO_PATCHES_PER_FRAME
-
-    captured = {}
-    with patch("vllm.model_executor.models.gemma4_mm.current_platform", mock_platform):
-        import vllm.model_executor.models.gemma4_mm as mm_mod
-
-        platform = mm_mod.current_platform
-        mem_get_info = platform.mem_get_info
-        if callable(mem_get_info):
-            free, total = mem_get_info()
-            captured["max_batch_size"] = min(
-                n_items,
-                _encoder_chunk(patches, free, total, _POSITION_EMBEDDING_SIZE),
-            )
-        else:
-            captured["max_batch_size"] = n_items
-
-    assert captured["max_batch_size"] == n_items
+    free, total = CpuPlatform.mem_get_info()
+    assert total > 0, "total memory must be positive"
+    assert free > 0, "available memory must be positive"
+    assert free <= total, "available memory cannot exceed total"
