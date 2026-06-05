@@ -561,6 +561,13 @@ class FlashInferSSUBackend(MambaSSUBackend):
             return None
         if state_batch_indices.dim() == 1:
             return state_batch_indices.to(torch.int32).contiguous()
+        # 2-D path: non-spec calls have size(1) == 1, spec calls have
+        # size(1) == 1+num_spec. Non-spec is always safe to collapse. Spec
+        # is only safe to collapse when every column points at the SAME
+        # cache slot (mamba_cache_mode ∈ {"align", "none"}); under "all"
+        # the columns differ per spec position, so we must return None and
+        # let the dispatcher fall back to the bare kernel — otherwise we
+        # silently use only the first column's slot, corrupting state.
         if state_batch_indices.dim() == 2 and state_batch_indices.size(1) == 1:
             return state_batch_indices[:, 0].to(torch.int32).contiguous()
         if (
@@ -568,9 +575,6 @@ class FlashInferSSUBackend(MambaSSUBackend):
             and state_batch_indices.dim() == 2
             and state_batch_indices.size(1) > 1
         ):
-            # MTP with align/none cache mode: all 1+num_spec columns point
-            # at the same in-place cache slot. Take the first column;
-            # per-call NPREDICTED is conveyed via cu_seqlens/max_seqlen.
             return state_batch_indices[:, 0].to(torch.int32).contiguous()
         return None
 

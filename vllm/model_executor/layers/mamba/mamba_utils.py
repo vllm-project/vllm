@@ -200,7 +200,13 @@ class MambaStateShapeCalculator:
         temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim)
         nheads = divide(num_heads, tp_world_size)
         ngroups = max(1, divide(n_groups, tp_world_size))
-        max_window = checkpoint_interval + num_spec
+        # Buffer holds at most `checkpoint_interval` accepted tokens between
+        # commits. The runtime trigger `prev + seq_lens > max_window`
+        # (ssu_dispatch.py) commits early when a spec call would overflow, so
+        # we no longer reserve `+ num_spec` headroom. Effective cadence drops
+        # to `max(1, checkpoint_interval - num_spec)` accepted tokens/window,
+        # which is the price of staying under flashinfer's 16-token cap.
+        max_window = min(checkpoint_interval + num_spec, 16)
         old_x_shape = (max_window, nheads, head_dim)
         old_B_shape = (2, max_window, ngroups, state_size)
         old_dt_shape = (2, nheads, max_window)

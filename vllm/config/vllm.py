@@ -2130,6 +2130,32 @@ class VllmConfig:
             )
         return self
 
+    # @model_validator(mode="after")
+    # def validate_mamba_checkpoint_interval_with_spec(self) -> "VllmConfig":
+    #     """Reject `checkpoint_interval + num_speculative_tokens > 16`.
+
+    #     The FlashInfer checkpointing kernel stamps `max_window =
+    #     checkpoint_interval + num_spec` as a JIT constexpr and asserts
+    #     `max_window <= 16` (its MMA-K atom dispatch is limited to {8, 16}).
+    #     Catching this here turns a 3-min-into-engine-init RuntimeError
+    #     ("checkpointing_ssu supports at most 16 cache tokens") into an
+    #     immediate, actionable error.
+    #     """
+    #     if self.mamba_config is None:
+    #         return self
+    #     interval = self.mamba_config.checkpoint_interval
+    #     num_spec = self.num_speculative_tokens
+    #     if interval + num_spec > 16:
+    #         raise ValueError(
+    #             f"--mamba-checkpoint-interval={interval} + "
+    #             f"num_speculative_tokens={num_spec} = {interval + num_spec} "
+    #             "exceeds the FlashInfer checkpointing kernel's max_window "
+    #             "cap of 16. Reduce --mamba-checkpoint-interval (or "
+    #             "num_speculative_tokens in the speculative config) so the "
+    #             "sum is <= 16."
+    #         )
+    #     return self
+
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None

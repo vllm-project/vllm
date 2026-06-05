@@ -1165,23 +1165,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 cache_buf_idx=cache_buf_idx,
                 prev_num_accepted_tokens=prev_num_accepted_tokens,
                 state_scales=ssm_state_scales,
-                # MTP + checkpointing: vLLM's spec layout
-                # (mamba_get_block_table_tensor in v1/attention/backends/utils.py)
-                # uses DISTINCT cache blocks per spec position in *all*
-                # mamba_cache_mode values, not just "all". Each spec
-                # column therefore points at a different cache slot,
-                # incompatible with flashinfer checkpointing_ssu's
-                # one-slot-per-batch API. We always fall back to the
-                # non-checkpointing kernel under spec.
-                #
-                # Enabling MTP+checkpointing would require either an
-                # upstream kernel change (multi-slot-per-batch) or a
-                # vLLM layout change (share one SSM slot across spec
-                # positions). The dispatcher and kernel-level plumbing
-                # (NPREDICTED>1 buffers, per-slot tracker increment,
-                # generalized cumAdt fold) are in place for whenever
-                # one of those lands.
-                spec_uniform_state_slots=False,
+                # MTP layout under cache_mode ∈ {"none", "align"} writes
+                # all 1+num_spec spec positions into the SAME cache slot
+                # per sequence — safe to collapse the 2D state_batch_indices
+                # to its first column and route through the FlashInfer
+                # checkpointing kernel (which has int8/fp8/bf16 specs).
+                # Under cache_mode="all" each spec column points at a
+                # DIFFERENT cache slot, so the columns can't be collapsed;
+                # we fall through to the bare selective_state_update kernel.
+                spec_uniform_state_slots=(not is_mamba_cache_all),
             )
             # Padding rows from CUDA-graph batches or block-table padding map
             # to NULL_BLOCK_ID slots. The kernel still wrote arbitrary output

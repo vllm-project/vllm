@@ -373,6 +373,32 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
+            # 8-bit SSM cache dtypes route differently depending on whether MTP
+            # is on:
+            #  - STP (num_speculative_tokens=0): cache_mode='all' uses the
+            #    checkpointing kernel via src→dst slot copy + in-place write.
+            #    The checkpointing kernel HAS int8/fp8 specs, so this works.
+            #  - MTP (num_speculative_tokens>0): cache_mode='all' must route
+            #    through the bare selective_state_update kernel (the checkpoint
+            #    kernel can't write 1+num_spec distinct slots per batch). The
+            #    bare kernel lacks fp8 (and historically int8) specs.
+            # So only reject the combo when MTP is on.
+            num_spec = vllm_config.speculative_config.num_speculative_tokens \
+                if vllm_config.speculative_config is not None else 0
+            if (
+                num_spec > 0
+                and cache_config.mamba_cache_mode == "all"
+                and cache_config.mamba_ssm_cache_dtype in ("int8", "fp8", "fp8_e4m3fn")
+            ):
+                raise ValueError(
+                    f"--mamba-ssm-cache-dtype={cache_config.mamba_ssm_cache_dtype!r} "
+                    "is not supported with --mamba-cache-mode='all' + "
+                    "num_speculative_tokens>0 (the bare FlashInfer "
+                    "selective_state_update kernel used in that path lacks "
+                    "8-bit specializations). Use --mamba-cache-mode=align "
+                    "with --enable-prefix-caching, or "
+                    "--no-enable-prefix-caching (which forces cache_mode='none')."
+                )
             logger.info(
                 "Warning: Prefix caching in Mamba cache '%s' "
                 "mode is currently enabled. "
