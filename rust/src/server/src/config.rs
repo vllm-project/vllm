@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Result;
+use serde::Serialize;
 use serde_json::Value;
 use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
 /// How the HTTP server obtains its listening socket.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
     BindTcp { host: String, port: u16 },
@@ -20,7 +21,7 @@ pub enum HttpListenerMode {
 
 /// Which coordinator implementation should be active when one is present for a
 /// frontend client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CoordinatorMode {
     /// Do not run a coordinator at all.
     None,
@@ -32,7 +33,7 @@ pub enum CoordinatorMode {
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Config {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
@@ -52,6 +53,9 @@ pub struct Config {
     pub reasoning_parser: ParserSelection,
     /// Chat renderer selection.
     pub renderer: RendererSelection,
+    /// Disable frontend-side multimodal preprocessing and render the model as
+    /// language-only.
+    pub language_model_only: bool,
     /// Server-default chat template override, as a file path or inline
     /// template.
     pub chat_template: Option<String>,
@@ -61,6 +65,8 @@ pub struct Config {
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// When `true`, set `X-Request-Id` on every HTTP response.
+    pub enable_request_id_headers: bool,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,

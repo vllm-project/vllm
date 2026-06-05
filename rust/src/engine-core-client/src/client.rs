@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -10,6 +11,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
 use crate::protocol::handshake::EngineCoreReadyResponse;
+use crate::protocol::lora::LoraRequest;
 use crate::protocol::utility::EngineCoreUtilityRequest;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
 use crate::transport::{self, ConnectedEngine};
@@ -22,7 +24,7 @@ pub use stream::{EngineCoreOutputStream, EngineCoreStreamOutput};
 
 /// How the frontend acquires its request/response transport with Python
 /// `EngineCoreProc`s.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum TransportMode {
     /// The Rust process owns the startup handshake and allocates or binds the
     /// frontend transport addresses itself before replying to engine
@@ -290,10 +292,8 @@ impl EngineCoreClient {
 
         // If any engine reported a dp_stats_address in its ready response, use it
         // as the external coordinator address.
-        let dp_stats_address: Option<String> = engines
-            .iter()
-            .filter_map(|e| e.ready_response.as_ref())
-            .find_map(|r| r.dp_stats_address.clone());
+        let dp_stats_address: Option<String> =
+            engines.iter().find_map(|engine| engine.ready_response.dp_stats_address.clone());
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
@@ -368,40 +368,44 @@ impl EngineCoreClient {
     /// Return the ready responses received from all engines on the input
     /// socket.
     pub fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse> {
-        self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .collect()
+        self.engines.iter().map(|engine| &engine.ready_response).collect()
     }
 
-    /// Return the engine-reported effective model dtype, when available.
-    pub fn model_dtype(&self) -> Option<ModelDtype> {
+    /// Return the engine-reported effective model dtype.
+    pub fn model_dtype(&self) -> ModelDtype {
         self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .find_map(|response| response.dtype)
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .dtype
+    }
+
+    /// Return the engine-reported Python vLLM version.
+    pub fn vllm_version(&self) -> &str {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .vllm_version
+            .as_str()
     }
 
     /// Return the total number of GPU blocks summed across all connected
     /// engines.
     pub fn total_num_gpu_blocks(&self) -> u64 {
-        self.engines
-            .iter()
-            .filter_map(|engine| engine.ready_response.as_ref())
-            .map(|r| r.num_gpu_blocks)
-            .sum()
+        self.engines.iter().map(|engine| engine.ready_response.num_gpu_blocks).sum()
     }
 
     /// Return the minimum engine-reported `max_model_len` across all engines.
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ
     /// from the originally configured value.
-    pub fn max_model_len(&self) -> Option<u32> {
+    pub fn max_model_len(&self) -> u32 {
         self.engines
             .iter()
-            .filter_map(|e| e.ready_response.as_ref())
-            .map(|r| r.max_model_len as u32)
+            .map(|engine| engine.ready_response.max_model_len as u32)
             .min()
+            .expect("engine core client requires at least one engine")
     }
 
     /// Get the model name associated with this client used for metrics
@@ -595,9 +599,27 @@ impl EngineCoreClient {
     }
 
     /// Return whether the engine is currently sleeping at any level.
+    ///
+    /// Under data parallel, all engines should agree on the sleep state: a
+    /// divergence signals a control-plane bug. Returns
+    /// `Error::InconsistentUtilityResults` if engines disagree.
     pub async fn is_sleeping(&self) -> Result<bool> {
-        // TODO: we only return the result of the first engine here.
-        Ok(self.call_utility("is_sleeping", ()).await?[0])
+        let results: Vec<bool> = self.call_utility("is_sleeping", ()).await?;
+        // `engine_count >= 1` is enforced during startup handshake, so `results`
+        // is normally non-empty; fall back to a fail-loud error rather than
+        // indexing in case that invariant is ever bypassed.
+        let first = *results.first().ok_or_else(|| Error::InconsistentUtilityResults {
+            method: "is_sleeping".to_string(),
+            values: "[]".to_string(),
+        })?;
+        if results.iter().all(|&v| v == first) {
+            Ok(first)
+        } else {
+            Err(Error::InconsistentUtilityResults {
+                method: "is_sleeping".to_string(),
+                values: format!("{results:?}"),
+            })
+        }
     }
 
     /// Reset the multi-modal cache.
@@ -613,18 +635,48 @@ impl EngineCoreClient {
     }
 
     /// Reset the prefix cache and optionally the external connector cache.
+    ///
+    /// Under data parallel, returns `true` only when every engine confirms the
+    /// reset (AND aggregation).
     pub async fn reset_prefix_cache(
         &self,
         reset_running_requests: bool,
         reset_connector: bool,
     ) -> Result<bool> {
-        // TODO: we only return the result of the first engine here.
-        Ok(self
+        let results: Vec<bool> = self
             .call_utility(
                 "reset_prefix_cache",
                 (reset_running_requests, reset_connector),
             )
-            .await?[0])
+            .await?;
+        // `engine_count >= 1` is enforced during startup handshake, so `results`
+        // is normally non-empty; fail loud rather than reporting a vacuous
+        // success (`[].all() == true`) in case that invariant is ever bypassed.
+        if results.is_empty() {
+            return Err(Error::InconsistentUtilityResults {
+                method: "reset_prefix_cache".to_string(),
+                values: "[]".to_string(),
+            });
+        }
+        Ok(results.into_iter().all(|ok| ok))
+    }
+
+    /// Load or refresh one LoRA adapter on every connected engine.
+    pub async fn add_lora(&self, lora_request: &LoraRequest) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("add_lora", (lora_request,))
+            .await?
+            .into_iter()
+            .all(|loaded| loaded))
+    }
+
+    /// Remove one LoRA adapter from every connected engine.
+    pub async fn remove_lora(&self, lora_id: u64) -> Result<bool> {
+        Ok(self
+            .call_utility::<bool, _>("remove_lora", (lora_id,))
+            .await?
+            .into_iter()
+            .all(|removed| removed))
     }
 
     /// Put the engine to sleep.

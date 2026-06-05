@@ -592,3 +592,308 @@ def _combine_topk_swa_indices_kernel(
 
         combined_len = topk_len + swa_len
         tl.store(combined_lens_ptr + token_idx, combined_len)
+
+
+def build_flashinfer_mixed_sparse_indices(
+    decode_swa_indices: torch.Tensor,
+    decode_compressed_indices: torch.Tensor | None,
+    decode_compressed_topk_lens: torch.Tensor | None,
+    prefill_topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    swa_block_table: torch.Tensor,
+    swa_block_size: int,
+    compressed_block_table: torch.Tensor | None,
+    compressed_block_size: int,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+    decode_compressed_indices_are_local: bool = False,
+    decode_is_valid_token: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
+
+    Produces ``sparse_indices`` of shape ``[num_tokens, window_size +
+    padded_topk]`` (the first ``window_size`` columns are SWA slot ids, the rest
+    are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length per
+    token). Decode tokens read precomputed SWA/compressed indices; prefill tokens
+    derive their SWA window from the position and translate local compressed
+    indices to global slots via the block tables.
+    """
+    assert decode_swa_indices.dtype == torch.int32
+    assert decode_swa_indices.dim() == 2
+    assert decode_swa_indices.shape[-1] == window_size
+    if decode_compressed_topk_lens is not None:
+        assert decode_compressed_topk_lens.dtype == torch.int32
+    assert prefill_topk_indices.dtype == torch.int32
+    assert prefill_topk_indices.dim() == 2
+    assert query_start_loc.dtype == torch.int32
+    assert seq_lens.dtype == torch.int32
+    assert token_to_req_indices.dtype == torch.int32
+    assert swa_block_table.dtype == torch.int32
+
+    num_decode_tokens = decode_swa_indices.shape[0]
+    num_prefill_tokens = prefill_topk_indices.shape[0]
+    num_tokens = num_decode_tokens + num_prefill_tokens
+    assert token_to_req_indices.shape[0] >= num_tokens
+    if decode_compressed_topk_lens is not None:
+        assert decode_compressed_topk_lens.shape[0] >= num_decode_tokens
+
+    decode_compressed_topk = 0
+    if decode_compressed_indices is None:
+        decode_compressed_indices = prefill_topk_indices
+    else:
+        assert decode_compressed_indices.dtype == torch.int32
+        assert decode_compressed_indices.dim() == 2
+        assert decode_compressed_indices.shape[0] == num_decode_tokens
+        decode_compressed_topk = decode_compressed_indices.shape[-1]
+    if decode_compressed_topk > 0 and decode_compressed_indices_are_local:
+        assert decode_is_valid_token is not None
+        assert decode_is_valid_token.dtype == torch.bool
+        assert decode_is_valid_token.shape[0] >= num_decode_tokens
+    else:
+        decode_is_valid_token = token_to_req_indices
+
+    if compressed_block_table is None:
+        compressed_block_table = swa_block_table
+    assert compressed_block_table.dtype == torch.int32
+    has_decode_compressed_lens = decode_compressed_topk_lens is not None
+    if decode_compressed_topk_lens is None:
+        decode_compressed_topk_lens = token_to_req_indices
+
+    # The FlashInfer TRTLLM-gen sparse-MLA kernels require every per-token topk
+    # index row to start on a 16-byte boundary: the kernel loads the compressed
+    # indices with 128-bit (16-byte) vectorized loads, so a misaligned row would
+    # fault or read across rows. 16 bytes = 4 int32 indices, so round the topk
+    # width (and hence the row stride, since the SWA columns are fixed-width) up
+    # to a multiple of 4. The extra columns are filled with -1 (invalid) and bounded
+    # by ``sparse_topk_lens``, so padding never changes the attention result.
+    padded_topk = max(topk, decode_compressed_topk)
+    padded_topk = (padded_topk + 3) // 4 * 4
+    sparse_indices = torch.empty(
+        (num_tokens, window_size + padded_topk),
+        dtype=torch.int32,
+        device=decode_swa_indices.device,
+    )
+    sparse_topk_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=decode_swa_indices.device
+    )
+    if num_tokens == 0:
+        return sparse_indices, sparse_topk_lens
+
+    window_block_size = triton.next_power_of_2(max(window_size, 1))
+    topk_block_size = triton.next_power_of_2(max(padded_topk, 1))
+    max_block_size = max(window_block_size, topk_block_size)
+    num_warps = 4 if max_block_size >= 256 else 1
+
+    _build_flashinfer_mixed_sparse_indices_kernel[(num_tokens,)](
+        sparse_indices,
+        sparse_indices.stride(0),
+        sparse_topk_lens,
+        decode_swa_indices,
+        decode_swa_indices.stride(0),
+        decode_compressed_indices,
+        decode_compressed_indices.stride(0),
+        decode_compressed_topk_lens,
+        decode_is_valid_token,
+        prefill_topk_indices,
+        prefill_topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        token_to_req_indices,
+        swa_block_table,
+        swa_block_table.stride(0),
+        swa_block_size,
+        compressed_block_table,
+        compressed_block_table.stride(0),
+        compressed_block_size,
+        NUM_DECODE_TOKENS=num_decode_tokens,
+        WINDOW_SIZE=window_size,
+        COMPRESS_RATIO=compress_ratio,
+        TOP_K=topk,
+        PADDED_TOP_K=padded_topk,
+        PREFILL_TOPK_STRIDE=prefill_topk_indices.shape[-1],
+        DECODE_COMPRESSED_TOPK=decode_compressed_topk,
+        DECODE_COMPRESSED_INDICES_ARE_LOCAL=decode_compressed_indices_are_local,
+        HAS_DECODE_COMPRESSED_LENS=has_decode_compressed_lens,
+        WINDOW_BLOCK_SIZE=window_block_size,
+        TOPK_BLOCK_SIZE=topk_block_size,
+        num_warps=num_warps,
+    )
+    return sparse_indices, sparse_topk_lens
+
+
+@triton.jit(
+    do_not_specialize=[
+        "sparse_indices_stride",
+        "decode_swa_stride",
+        "decode_compressed_stride",
+        "prefill_topk_stride",
+        "swa_block_table_stride",
+        "swa_block_size",
+        "compressed_block_table_stride",
+        "compressed_block_size",
+        "NUM_DECODE_TOKENS",
+        "PREFILL_TOPK_STRIDE",
+    ]
+)
+def _build_flashinfer_mixed_sparse_indices_kernel(
+    sparse_indices_ptr,
+    sparse_indices_stride,
+    sparse_topk_lens_ptr,
+    decode_swa_indices_ptr,
+    decode_swa_stride,
+    decode_compressed_indices_ptr,
+    decode_compressed_stride,
+    decode_compressed_topk_lens_ptr,
+    decode_is_valid_token_ptr,
+    prefill_topk_indices_ptr,
+    prefill_topk_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    token_to_req_indices_ptr,
+    swa_block_table_ptr,
+    swa_block_table_stride,
+    swa_block_size,
+    compressed_block_table_ptr,
+    compressed_block_table_stride,
+    compressed_block_size,
+    NUM_DECODE_TOKENS,
+    WINDOW_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    TOP_K: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+    PREFILL_TOPK_STRIDE,
+    DECODE_COMPRESSED_TOPK: tl.constexpr,
+    DECODE_COMPRESSED_INDICES_ARE_LOCAL: tl.constexpr,
+    HAS_DECODE_COMPRESSED_LENS: tl.constexpr,
+    WINDOW_BLOCK_SIZE: tl.constexpr,
+    TOPK_BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+
+    if token_idx < NUM_DECODE_TOKENS:
+        for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+            offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
+            mask = offset < WINDOW_SIZE
+            values = tl.load(
+                decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
+                mask=mask,
+                other=-1,
+            )
+            tl.store(
+                sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
+                values,
+                mask=mask,
+            )
+
+        compressed_len = tl.zeros((), dtype=tl.int32)
+        for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
+            offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
+            mask = offset < PADDED_TOP_K
+            values = tl.load(
+                decode_compressed_indices_ptr
+                + token_idx * decode_compressed_stride
+                + offset,
+                mask=offset < DECODE_COMPRESSED_TOPK,
+                other=-1,
+            )
+            if DECODE_COMPRESSED_INDICES_ARE_LOCAL:
+                token_valid = tl.load(decode_is_valid_token_ptr + token_idx)
+                is_valid = values >= 0
+                req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+                block_indices = values // compressed_block_size
+                block_numbers = tl.load(
+                    compressed_block_table_ptr
+                    + req_idx * compressed_block_table_stride
+                    + block_indices,
+                    mask=mask & is_valid,
+                    other=-1,
+                )
+                block_offsets = values % compressed_block_size
+                values = block_numbers * compressed_block_size + block_offsets
+                values = tl.where(is_valid, values, -1)
+                compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
+            tl.store(
+                sparse_indices_ptr
+                + token_idx * sparse_indices_stride
+                + WINDOW_SIZE
+                + offset,
+                values,
+                mask=mask,
+            )
+
+        if DECODE_COMPRESSED_TOPK == 0:
+            compressed_len = tl.zeros((), dtype=tl.int32)
+        elif not DECODE_COMPRESSED_INDICES_ARE_LOCAL:
+            if HAS_DECODE_COMPRESSED_LENS:
+                compressed_len = tl.load(decode_compressed_topk_lens_ptr + token_idx)
+            else:
+                compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
+
+        tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + compressed_len)
+        return
+
+    prefill_idx = token_idx - NUM_DECODE_TOKENS
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    query_start = tl.load(query_start_loc_ptr + req_idx)
+    query_end = tl.load(query_start_loc_ptr + req_idx + 1)
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + req_idx)
+    start_pos = seq_len - query_len
+    token_idx_in_query = token_idx - query_start
+    pos = start_pos + token_idx_in_query
+    swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+    swa_start_pos = pos - swa_len + 1
+    topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+
+    for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+        offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
+        mask = offset < WINDOW_SIZE
+        pos_offset = swa_start_pos + offset
+        block_indices = pos_offset // swa_block_size
+        block_numbers = tl.load(
+            swa_block_table_ptr + req_idx * swa_block_table_stride + block_indices,
+            mask=mask & (offset < swa_len),
+            other=-1,
+        )
+        block_offsets = pos_offset % swa_block_size
+        slot_ids = block_numbers * swa_block_size + block_offsets
+        slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+        tl.store(
+            sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
+            slot_ids,
+            mask=mask,
+        )
+
+    for i in range(0, PADDED_TOP_K, TOPK_BLOCK_SIZE):
+        offset = i + tl.arange(0, TOPK_BLOCK_SIZE)
+        mask = offset < PADDED_TOP_K
+        local_idx = tl.load(
+            prefill_topk_indices_ptr + prefill_idx * prefill_topk_stride + offset,
+            mask=(offset < PREFILL_TOPK_STRIDE) & (offset < topk_len),
+            other=-1,
+        )
+        is_valid = local_idx >= 0
+        block_indices = local_idx // compressed_block_size
+        block_numbers = tl.load(
+            compressed_block_table_ptr
+            + req_idx * compressed_block_table_stride
+            + block_indices,
+            mask=mask & is_valid,
+            other=-1,
+        )
+        block_offsets = local_idx % compressed_block_size
+        slot_ids = block_numbers * compressed_block_size + block_offsets
+        slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
+        tl.store(
+            sparse_indices_ptr
+            + token_idx * sparse_indices_stride
+            + WINDOW_SIZE
+            + offset,
+            slot_ids,
+            mask=mask,
+        )
+
+    tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + topk_len)
