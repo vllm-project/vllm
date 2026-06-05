@@ -4,32 +4,48 @@
 #include <torch/csrc/stable/library.h>
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
+  // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias) -> ()");
+
+  // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias) -> ()");
+
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
       "bias, Tensor? input_ids, Tensor? tid2eid) -> ()");
+
+  // Calculate the result of moe by summing up the partial results
+  // from all selected experts.
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size.
   m.def(
       "moe_align_block_size(Tensor topk_ids, int num_experts,"
       "                     int block_size, Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map) -> ()");
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size, but for the batched case.
   m.def(
       "batched_moe_align_block_size(int max_tokens_per_batch,"
       "                     int block_size, Tensor expert_num_tokens,"
       "                     Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
+
+  // Aligning the number of tokens to be processed by each expert such
+  // that it is divisible by the block size.
   m.def(
       "moe_lora_align_block_size(Tensor topk_ids,"
       "                     Tensor token_lora_mapping,"
@@ -51,6 +67,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "Tensor expert_ids, Tensor num_tokens_post_pad, "
       "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
       "int bit) -> Tensor");
+
   m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
@@ -58,6 +75,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "int topk, Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
       "permuted_idx)->()");
+
   m.def(
       "moe_permute_with_scratch(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
@@ -66,22 +84,29 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
       "permuted_idx, Tensor! sort_workspace, Tensor! permuted_experts_id, "
       "Tensor! sorted_row_idx, Tensor! topk_ids_for_sort)->()");
+
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
       "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
       "int topk, Tensor! hidden_states)->()");
+
   m.def("moe_permute_unpermute_supported() -> bool");
   m.def(
       "moe_permute_sort_workspace_size(int num_expanded_rows, int n_expert) -> "
       "int");
+
+  // Row shuffle for MoE
   m.def(
       "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
       "output_tensor) -> ()");
+
+  // Apply grouped topk routing to select experts.
   m.def(
       "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
+
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   // conditionally compiled so impl registration is in source file

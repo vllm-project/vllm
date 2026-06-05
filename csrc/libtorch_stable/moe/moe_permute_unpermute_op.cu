@@ -82,7 +82,7 @@ void moe_permute_impl(
   STD_TORCH_CHECK(expert_first_token_offset.size(0) == n_local_expert + 1,
                   "expert_first_token_offset shape != n_local_expert+1");
   STD_TORCH_CHECK(
-      inv_permuted_idx.sizes() == token_expert_indices.sizes(),
+      inv_permuted_idx.sizes().equals(token_expert_indices.sizes()),
       "token_expert_indices shape must be same as inv_permuted_idx");
 
   auto device = input.device();
