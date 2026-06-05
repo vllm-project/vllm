@@ -13,20 +13,22 @@ Locking design
 --------------
 There is no explicit lock.  Thread safety is achieved by ownership:
 
-* _lookup_state is owned exclusively by the scheduler thread.
-  query() and update_cached_exists() read and write it directly.
+* _lookup_state and _lookup_batch are owned exclusively by the scheduler
+  thread.  query(), flush(), and update_cached_exists() read and write
+  them directly.
 
-* _lookup_queue is written by the scheduler (put_nowait) and read by
-  the worker (get / get_nowait).  queue.Queue is thread-safe by design.
+* _lookup_queue is written by the scheduler (flush → put_nowait, one item
+  per step) and read by the worker (get).  queue.Queue is thread-safe.
 
 * _pending_results is written by the worker (put) and read by the
   scheduler (get_nowait inside drain_results).  queue.SimpleQueue is
   thread-safe by design.
 
-The scheduler calls drain_results() once per step (from
-TieringOffloadingManager._process_finished_jobs()) before any query()
-calls, so query() itself is a pure OrderedDict operation with no queue
-interaction.
+query() accumulates new keys in _lookup_batch without touching the queue.
+flush() is called once per step from on_schedule_end(), posting the entire
+batch as a single queue item so the worker sees one batch per step.
+drain_results() is called once per step from _process_finished_jobs()
+before any query() calls, so query() is a pure OrderedDict operation.
 """
 
 import queue
@@ -88,8 +90,14 @@ class AsyncLookupWorker(ABC):
         # slot → status; scheduler-owned, no lock needed.
         self._lookup_state: OrderedDict[int, int] = OrderedDict()
 
-        # Scheduler → worker: keys to look up.
-        self._lookup_queue: queue.Queue[tuple[OffloadKey, ReqContext]] = queue.Queue()
+        # Accumulates (key, req_context) pairs during query() calls.
+        # Flushed as one queue item per step by flush().
+        self._lookup_batch: list[tuple[OffloadKey, ReqContext]] = []
+
+        # Scheduler → worker: one full step's batch per item.
+        self._lookup_queue: queue.Queue[list[tuple[OffloadKey, ReqContext]]] = (
+            queue.Queue()
+        )
 
         # Worker → scheduler: completed result batches.
         # Each item is a list of (slot, status) pairs.
@@ -140,12 +148,24 @@ class AsyncLookupWorker(ABC):
         status = self._lookup_state.get(slot, _IN_FLIGHT)
         if status == _IN_FLIGHT:
             if slot not in self._lookup_state:
-                # New key — queue for async lookup.
+                # New key — buffer for async lookup; flushed by flush().
                 self._evict_if_full()
                 self._lookup_state[slot] = _IN_FLIGHT
-                self._lookup_queue.put_nowait((key, req_context))
+                self._lookup_batch.append((key, req_context))
             return None
         return status  # FOUND or NOT_FOUND
+
+    def flush(self) -> None:
+        """Post this step's accumulated keys to the worker thread.
+
+        Called once per step from on_schedule_end() after all query() calls
+        are done. The worker receives the full batch and processes it during
+        the model-execution window, maximising time available before the next
+        step's drain_results().  Safe to call with an empty batch (no-op).
+        """
+        if self._lookup_batch:
+            self._lookup_queue.put_nowait(self._lookup_batch)
+            self._lookup_batch = []
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
@@ -200,15 +220,18 @@ class AsyncLookupWorker(ABC):
         """
         if len(self._lookup_state) < self._max_results:
             return
-        for slot, status in self._lookup_state.items():
-            if status != _IN_FLIGHT:
-                del self._lookup_state[slot]
-                logger.warning(
-                    "async_lookup cache full (%d entries): evicted slot %d",
-                    self._max_results,
-                    slot,
-                )
-                return
+        evict_slot = next(
+            (s for s, st in self._lookup_state.items() if st != _IN_FLIGHT),
+            None,
+        )
+        if evict_slot is not None:
+            del self._lookup_state[evict_slot]
+            logger.warning(
+                "async_lookup cache full (%d entries): evicted slot %d",
+                self._max_results,
+                evict_slot,
+            )
+            return
         # Every slot is _IN_FLIGHT — allow the dict to exceed max_results
         # temporarily rather than evict a pending lookup.
         logger.warning(
@@ -219,22 +242,14 @@ class AsyncLookupWorker(ABC):
 
     def _worker(self) -> None:
         while not self._shutdown_event.is_set():
-            # Block until the first key arrives.
+            # Block until flush() posts a batch.
             try:
-                item = self._lookup_queue.get(timeout=1.0)
+                pending = self._lookup_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
 
             if self._shutdown_event.is_set():
                 break
-
-            # Collect first item then drain the rest of the queue.
-            pending: list[tuple[OffloadKey, ReqContext]] = [item]
-            while True:
-                try:
-                    pending.append(self._lookup_queue.get_nowait())
-                except queue.Empty:
-                    break
 
             # Group by req_id.
             batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}

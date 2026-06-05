@@ -272,8 +272,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Fan out: query all tier workers simultaneously so their background
         # threads run concurrently.  Then sweep in priority order — the first
-        # FOUND wins, and any lower-priority None blocks acting on a result
-        # until that tier resolves.
+        # FOUND wins, and a higher-priority None blocks acting on any
+        # lower-priority result until that tier resolves.
         results = [w.query(key, req_context) for w in self._async_lookup_workers]
         for i, result in enumerate(results):
             if result is None:
@@ -592,6 +592,8 @@ class TieringOffloadingManager(OffloadingManager):
         self._maybe_process_finished_jobs()
         self._processed_jobs_this_step = False
         self._flush_pending_promotions()
+        for worker in self._async_lookup_workers:
+            worker.flush()
         for tier in self.secondary_tiers:
             tier.on_schedule_end()
 
@@ -612,6 +614,12 @@ class TieringOffloadingManager(OffloadingManager):
         self._maybe_process_finished_jobs()
 
         self._flush_pending_promotions()
+
+        # Flush any buffered lookup keys not yet posted by on_schedule_end()
+        # (e.g. in tests that call take_events() directly).  No-op when the
+        # buffer is already empty.
+        for worker in self._async_lookup_workers:
+            worker.flush()
 
         # Reset the per-step gate so next step's first call does real work.
         self._processed_jobs_this_step = False
