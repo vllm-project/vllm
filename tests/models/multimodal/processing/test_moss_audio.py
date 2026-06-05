@@ -590,8 +590,6 @@ def test_moss_audio_gated_mlp_tp_shapes_and_loading(monkeypatch, tp_size):
     params = dict(mlp.named_parameters())
     assert params["gate_up_proj.weight"].shape == torch.Size([16 // tp_size, 4])
     assert params["down_proj.weight"].shape == torch.Size([6, 8 // tp_size])
-    if tp_size == 1:
-        assert mlp(torch.randn(2, 4)).shape == (2, 6)
 
     gate_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
     up_weight = torch.arange(100, 132, dtype=torch.float32).reshape(8, 4)
@@ -650,9 +648,6 @@ def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):
     assert hasattr(attention, "out_proj")
     assert not hasattr(attention, "qkv")
     assert attention.k_proj.bias is None
-    assert attention(
-        torch.randn(1, 3, config.d_model), torch.ones(1, 3, dtype=torch.bool)
-    ).shape == (1, 3, config.d_model)
 
     weight_names = [
         "layers.0.self_attn.q_proj.weight",

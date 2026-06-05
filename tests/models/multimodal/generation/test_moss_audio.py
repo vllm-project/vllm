@@ -33,7 +33,41 @@ PARALLEL_SMOKE_CASES = [
     ),
 ]
 
+HF_ACCURACY_SKIP_REASON = (
+    "HF AutoModelForCausalLM cannot load remote MOSS-Audio configs; "
+    "vLLM generation coverage is provided by the smoke tests below."
+)
 
+
+@pytest.mark.core_model
+def test_moss_audio_generation_smoke(vllm_runner) -> None:
+    model = "OpenMOSS-Team/MOSS-Audio-4B-Instruct"
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
+    prompts = [f"{MOSS_AUDIO_PLACEHOLDER}\nBriefly describe this audio."]
+    audios = [[AudioAsset("mary_had_lamb").audio_and_sample_rate[0]]]
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        enforce_eager=True,
+        max_model_len=1024,
+        limit_mm_per_prompt={"audio": 1},
+        trust_remote_code=True,
+    ) as vllm_model:
+        outputs = vllm_model.generate_greedy(
+            prompts,
+            max_tokens=4,
+            audios=audios,
+        )
+
+    assert len(outputs) == 1
+    assert len(outputs[0][1]) > 0
+
+
+@pytest.mark.skip(reason=HF_ACCURACY_SKIP_REASON)
 @pytest.mark.parametrize("model", ACCURACY_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [8])
