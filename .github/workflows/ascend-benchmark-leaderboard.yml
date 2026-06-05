@@ -24,7 +24,7 @@ on:
         description: Model used for the benchmark run
         required: false
         type: string
-        default: Qwen/Qwen2.5-0.5B-Instruct
+        default: Qwen/Qwen2.5-3B-Instruct
       dataset_path:
         description: Dataset path on the trusted runner for formal workloads such as sharegpt-online
         required: false
@@ -82,6 +82,9 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
@@ -94,13 +97,13 @@ jobs:
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
       HF_REPO_ID: intellistream/vllm-hust-benchmark-results
-      MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-0.5B-Instruct' }}
+      MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-3B-Instruct' }}
       BENCH_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online' }}
       BENCH_DATASET_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.dataset_path || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_DATASET_PATH) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_DATASET_PATH) || '' }}
       BENCH_CONSTRAINTS_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.constraints_file || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_CONSTRAINTS_FILE) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_CONSTRAINTS_FILE) || '' }}
-      MODEL_PARAMETERS: 0.5B
+      MODEL_PARAMETERS: 3B
       MODEL_PRECISION: BF16
       DTYPE: bfloat16
       MAX_MODEL_LEN: "256"
@@ -118,20 +121,22 @@ jobs:
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
       SAME_SPEC_BENCHMARK_ENABLED: ${{ vars.VLLM_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1' }}
+      PERFGATE_MODE: ${{ vars.VLLM_HUST_PERFGATE_MODE || 'report' }}
+      PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
       SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || '' }}
       SAME_SPEC_CONSTRAINTS_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_CONSTRAINTS_FILE || '' }}
       ASCEND_BENCHMARK_USE_SUDO: ${{ vars.VLLM_HUST_BENCHMARK_USE_SUDO || '1' }}
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
-      PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
+      PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
       BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_HUST_BENCHMARK_GH_TOKEN }}
-      BENCHMARK_REPO_SSH_KEY: ${{ secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY }}
-      BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || '' }}
+      BENCHMARK_REPO_SSH_KEY: ${{ github.event_name != 'pull_request' && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
+      BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'feature/perfgate-two-stage' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
@@ -252,6 +257,21 @@ jobs:
           }
 
           clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
+
+      - name: Deepen clone for fork-point detection
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --deepen=500 origin main || git fetch --unshallow origin main || true
+          git fetch --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
+          git checkout --force "$PR_HEAD_SHA"
+          fork_point="$(git merge-base "$PR_HEAD_SHA" "$PR_BASE_SHA")"
+          echo "FORK_POINT=$fork_point" >> "$GITHUB_ENV"
+          echo "Fork point: $fork_point"
 
       - name: Checkout benchmark repo
         run: |
@@ -669,6 +689,13 @@ jobs:
             --require-npu \
             --json | tee "$PRECHECK_DIR/runtime-check.json"
 
+      - name: Performance gate - fetch Stage 1 baseline
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          PERFGATE_ALLOW_BASELINE_FALLBACK: "0"
+        run: bash .github/workflows/scripts/perfgate_fetch_baseline.sh "$FORK_POINT"
+
       - name: Run benchmark CI and optional formal publish
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
@@ -677,6 +704,7 @@ jobs:
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_WEBSITE_REPO: ${{ github.workspace }}/vllm-hust-website
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
@@ -704,6 +732,35 @@ jobs:
             exit "$rc"
           done
 
+      - name: Performance gate - Stage 1 comparison
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
+        run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
+
+
+      - name: Performance gate - Stage 2 trial rebase and benchmark
+        if: ${{ github.event_name == 'pull_request' && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
+        shell: bash
+        env:
+          WORKSPACE_ROOT: ${{ github.workspace }}
+          VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
+          VLLM_HUST_REPO: ${{ github.workspace }}
+          VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
+          VLLM_HUST_WEBSITE_REPO: ${{ github.workspace }}/vllm-hust-website
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
+        run: |
+          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
+
+      - name: Performance gate - two-stage comparison
+        if: ${{ github.event_name == 'pull_request' }}
+        shell: bash
+        env:
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
+        run: bash .github/workflows/scripts/perfgate_compare.sh
+
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
@@ -728,6 +785,7 @@ jobs:
           runner_preflight_failure = result_root / 'runner_preflight_failure.txt'
           summary_path = Path(os.environ['GITHUB_STEP_SUMMARY'])
           comment_path = result_root / 'benchmark_comment.md'
+          perfgate_report = result_root / 'perfgate_report.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           bench_scenario = os.environ.get('BENCH_SCENARIO', 'random-online')
           publish_mode = 'formal-publish' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
@@ -768,6 +826,27 @@ jobs:
             )
             lines.append(failure_note)
             comment_lines.append(failure_note)
+          baseline_notes = []
+          stage1_source = os.environ.get('PERFGATE_BASELINE_SOURCE')
+          stage1_commit = os.environ.get('PERFGATE_BASELINE_COMMIT')
+          if stage1_source or stage1_commit:
+            baseline_notes.append(
+              f"- Stage 1 baseline: `{stage1_commit or 'unknown'}` source `{stage1_source or 'unknown'}`"
+            )
+          stage2_source = os.environ.get('PERFGATE_STAGE2_M2_BASELINE_SOURCE')
+          stage2_commit = os.environ.get('PERFGATE_STAGE2_M2_BASELINE_COMMIT')
+          if stage2_source or stage2_commit:
+            baseline_notes.append(
+              f"- Stage 2 baseline: `{stage2_commit or 'unknown'}` source `{stage2_source or 'unknown'}`"
+            )
+          if baseline_notes:
+            lines.extend(baseline_notes)
+            comment_lines.extend(baseline_notes)
+          if perfgate_report.is_file():
+            perfgate_markdown = perfgate_report.read_text(encoding='utf-8').strip()
+            lines.extend(['', perfgate_markdown])
+            comment_lines.extend(['', perfgate_markdown])
+
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [
@@ -880,3 +959,32 @@ jobs:
               });
               core.info('Created benchmark PR comment');
             }
+
+  store-main-perfgate-baseline:
+    name: Store main perfgate baseline
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: ascend-benchmark
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download benchmark artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ascend-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .benchmarks/ci
+
+      - name: Store perfgate baseline
+        shell: bash
+        env:
+          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          PYTHON_BIN: python3
+          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
+        run: bash .github/workflows/scripts/perfgate_store_baseline.sh
