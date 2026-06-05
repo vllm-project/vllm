@@ -809,6 +809,18 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
+                    # Clamp to max_model_len. Mirrors the RUNNING-path guard
+                    # above for streaming/resumable requests whose accumulated
+                    # token count can grow past max_model_len across successive
+                    # `_update_request_as_session` calls (continuous Voxtral
+                    # realtime audio sessions). Run before spec-decode padding so
+                    # a length-capped session drops to <=0 and the padding block
+                    # (gated on num_new_tokens == 1) is naturally skipped.
+                    num_new_tokens = min(
+                        num_new_tokens,
+                        self.max_model_len - 1 - num_computed_tokens,
+                    )
+
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     if (
@@ -840,7 +852,16 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    assert num_new_tokens > 0
+                    if num_new_tokens <= 0:
+                        # Length-capped: the request has reached max_model_len
+                        # and can never make progress. Finish it gracefully
+                        # (finish_requests removes it from the waiting queues)
+                        # instead of asserting and crashing the engine, and
+                        # avoid head-of-line blocking the waiting queue.
+                        self.finish_requests(
+                            request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        continue
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -1885,6 +1906,21 @@ class Scheduler(SchedulerInterface):
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
+            # After extending the session with new streaming input, check if
+            # the accumulated tokens (prompt + encoder + output) reached
+            # max_model_len. Without this guard a fatal assertion fires in
+            # gpu_model_runner._bookkeeping_sync once the streaming input pushes
+            # the total past the limit (continuous Voxtral realtime sessions).
+            if request.num_tokens >= self.max_model_len:
+                logger.warning(
+                    "Streaming session %s reached max_model_len (%d >= %d) "
+                    "after session update. Finishing request gracefully.",
+                    request.request_id,
+                    request.num_tokens,
+                    self.max_model_len,
+                )
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -2018,6 +2054,23 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
+                # If the session reached max_model_len after the update (e.g.
+                # continuous audio streaming accumulating encoder tokens past
+                # the limit), finish gracefully here instead of letting it
+                # crash later in the model runner.
+                if existing.num_tokens >= self.max_model_len:
+                    logger.warning(
+                        "Streaming session %s reached max_model_len "
+                        "(%d >= %d) after session update. Finishing request "
+                        "gracefully.",
+                        existing.request_id,
+                        existing.num_tokens,
+                        self.max_model_len,
+                    )
+                    self.finish_requests(
+                        existing.request_id,
+                        RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
