@@ -15,7 +15,7 @@ jobs:
       - name: Trigger contributor leaderboard refresh
         uses: peter-evans/repository-dispatch@v3
         with:
-          token: ${{ secrets.ORG_DISPATCH_TOKEN || github.token }}
+          token: ${{ secrets.ORG_DISPATCH_TOKEN }}
           repository: vLLM-HUST/.github
           event-type: contributor-update
           client-payload: '{"source_repo": "${{ github.repository }}", "commit": "${{ github.sha }}"}'
