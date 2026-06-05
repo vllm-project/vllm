@@ -289,6 +289,65 @@ def _load_k_tile_nvfp4_bytewise(
 
 
 @triton.jit
+def _load_k_tile_nvfp4_bytewise_transposed(
+    key_data_ptr,
+    key_scale_cache_ptr,
+    global_scale,
+    physical_block_idx,
+    seq_offset,
+    kv_head_idx,
+    offs_b,
+    byte_mask,
+    tile_mask,
+    stride_data_0: tl.int64,
+    stride_data_1: tl.int64,
+    stride_data_2: tl.int64,
+    stride_data_3: tl.constexpr,
+    stride_scale_blk: tl.int64,
+    stride_scale_slot: tl.int64,
+    stride_scale_head: tl.int64,
+    stride_scale_dim: tl.int64,
+    BLOCK_SIZE: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    Q,
+):
+    SCALE_DIM: tl.constexpr = HEAD_SIZE // 16
+    scale_group_idx = offs_b // 8
+    slot_in_block = seq_offset % BLOCK_SIZE
+
+    data_offset = (
+        physical_block_idx[:, None] * stride_data_0
+        + slot_in_block[:, None] * stride_data_1
+        + kv_head_idx * stride_data_2
+        + offs_b[None, :] * stride_data_3
+    )
+    raw_bytes = tl.load(
+        key_data_ptr + data_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+
+    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+        slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+    )
+    scale_offset = (
+        physical_block_idx[:, None] * stride_scale_blk
+        + swizzled_slot * stride_scale_slot
+        + kv_head_idx * stride_scale_head
+        + swizzled_scale * stride_scale_dim
+    )
+    block_scale_bits = tl.load(
+        key_scale_cache_ptr + scale_offset,
+        mask=tile_mask[:, None] & byte_mask[None, :],
+        other=0,
+    )
+    scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
+    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
+    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    return tl.trans(low.to(Q.dtype)), tl.trans(high.to(Q.dtype))
+
+
+@triton.jit
 def _load_v_tile_nvfp4_bytewise(
     value_data_ptr,
     value_scale_cache_ptr,
@@ -635,6 +694,7 @@ def kernel_unified_attention(
     Q_IS_FP8: tl.constexpr = False,
     USE_RAW_CURRENT_KV: tl.constexpr = False,
     USE_NVFP4_BYTEWISE_DECODE: tl.constexpr = False,
+    USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE == 2 or KV_QUANT_MODE == 3
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
@@ -682,6 +742,11 @@ def kernel_unified_attention(
         tl.static_assert(
             not USE_FP8,
             "USE_NVFP4_BYTEWISE_DECODE does not support FP8 output stores",
+        )
+    if USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE:
+        tl.static_assert(
+            USE_NVFP4_BYTEWISE_DECODE,
+            "USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE requires bytewise decode",
         )
 
     q_block_global_idx = tl.program_id(0)
@@ -857,28 +922,52 @@ def kernel_unified_attention(
         )
 
         if USE_NVFP4_BYTEWISE_DECODE:
-            K_low, K_high = _load_k_tile_nvfp4_bytewise(
-                key_cache_ptr,
-                k_scale_cache_ptr,
-                nvfp4_k_global_scale,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                offs_b,
-                byte_mask,
-                tile_mask,
-                stride_k_cache_0,
-                stride_k_cache_1,
-                stride_k_cache_2,
-                stride_k_cache_3,
-                stride_ks_blk,
-                stride_ks_slot,
-                stride_ks_head,
-                stride_ks_dim,
-                BLOCK_SIZE,
-                HEAD_SIZE,
-                Q_even,
-            )
+            if USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE:
+                K_low, K_high = _load_k_tile_nvfp4_bytewise_transposed(
+                    key_cache_ptr,
+                    k_scale_cache_ptr,
+                    nvfp4_k_global_scale,
+                    physical_block_idx,
+                    seq_offset,
+                    kv_head_idx,
+                    offs_b,
+                    byte_mask,
+                    tile_mask,
+                    stride_k_cache_0,
+                    stride_k_cache_1,
+                    stride_k_cache_2,
+                    stride_k_cache_3,
+                    stride_ks_blk,
+                    stride_ks_slot,
+                    stride_ks_head,
+                    stride_ks_dim,
+                    BLOCK_SIZE,
+                    HEAD_SIZE,
+                    Q_even,
+                )
+            else:
+                K_low, K_high = _load_k_tile_nvfp4_bytewise(
+                    key_cache_ptr,
+                    k_scale_cache_ptr,
+                    nvfp4_k_global_scale,
+                    physical_block_idx,
+                    seq_offset,
+                    kv_head_idx,
+                    offs_b,
+                    byte_mask,
+                    tile_mask,
+                    stride_k_cache_0,
+                    stride_k_cache_1,
+                    stride_k_cache_2,
+                    stride_k_cache_3,
+                    stride_ks_blk,
+                    stride_ks_slot,
+                    stride_ks_head,
+                    stride_ks_dim,
+                    BLOCK_SIZE,
+                    HEAD_SIZE,
+                    Q_even,
+                )
             S = score_scale * (tl.dot(Q_even, K_low) + tl.dot(Q_odd, K_high))
         else:
             if USE_TD:
@@ -1615,6 +1704,7 @@ def unified_attention(
     num_kv_heads = k.shape[2]
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
+    head_size_padded = triton.next_power_of_2(head_size)
 
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
@@ -1652,6 +1742,9 @@ def unified_attention(
         and output_scale is None
         and q.dtype != current_platform.fp8_dtype()
     )
+    use_nvfp4_transposed_k_bytewise_decode = (
+        use_nvfp4_bytewise_decode and head_size in (128, 256)
+    )
 
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
@@ -1682,7 +1775,6 @@ def unified_attention(
     # stores don't mask the padded tail.  Fall back to the pointer path
     # for Q/O in that case — KV tile loads are unaffected because their
     # ``shape`` already matches ``block_shape`` on the inner axis.
-    head_size_padded = triton.next_power_of_2(head_size)
     _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
     use_td_qo = use_td and _is_pow2_nq and _is_pow2_hs
@@ -1871,6 +1963,7 @@ def unified_attention(
         USE_TD_QO=use_td_qo,
         USE_RAW_CURRENT_KV=use_raw_current_kv,
         USE_NVFP4_BYTEWISE_DECODE=use_nvfp4_bytewise_decode,
+        USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE=(use_nvfp4_transposed_k_bytewise_decode),
         **launch_kwargs,
     )
 

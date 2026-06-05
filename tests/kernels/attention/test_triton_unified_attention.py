@@ -30,6 +30,7 @@ DEVICE_TYPE = current_platform.device_type
 
 NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [128, 256]
+NVFP4_BYTEWISE_HEAD_SIZES = [64, 128, 192, 256, 320, 384, 448, 512]
 NVFP4_MIXED_KV_HEAD_SIZES = [64, 128, 192, 320, 512]
 BLOCK_SIZES = [16]
 
@@ -719,7 +720,7 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
-@pytest.mark.parametrize("head_size", [128, 256, 320, 512])
+@pytest.mark.parametrize("head_size", NVFP4_BYTEWISE_HEAD_SIZES)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn_nvfp4_kv(
