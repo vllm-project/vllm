@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import os
 import signal
@@ -28,7 +26,7 @@ def _register_signal_handlers():
     signal.signal(signal.SIGTSTP, signal_handler)
 
 
-def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
+def _interactive_cli(args: argparse.Namespace) -> "tuple[str, OpenAI]":
     from openai import OpenAI
 
     _register_signal_handlers()
@@ -70,7 +68,7 @@ def _print_completion_stream(stream) -> str:
     return output
 
 
-def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
+def chat(system_prompt: str | None, model_name: str, client: "OpenAI") -> None:
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
