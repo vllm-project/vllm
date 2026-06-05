@@ -867,7 +867,7 @@ class SiglipVisionModel(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
             use_head=use_head,
         )
 

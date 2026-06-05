@@ -506,16 +506,24 @@ class Glm4MoeModel(nn.Module):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
+
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight, shard_id)
+                if weight_loader == default_weight_loader:
+                    weight_loader(param, loaded_weight)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -540,8 +548,7 @@ class Glm4MoeModel(nn.Module):
                     # here since otherwise we may skip experts with other
                     # available replicas.
                     weight_loader = typing.cast(
-                        Callable[..., bool],
-                        getattr(param, "weight_loader", default_weight_loader),
+                        Callable[..., bool], param.weight_loader
                     )
                     success = weight_loader(
                         param,
