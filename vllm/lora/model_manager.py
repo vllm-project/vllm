@@ -98,23 +98,14 @@ class LoRAModelManager:
             f"No supported LoRA modules found in {self.model.__class__.__name__}."
         )
 
-        # Initialize lora_config early since capacity and lora_slots properties
-        # depend on it
-        self.lora_config = lora_config
-
-        assert self.capacity >= self.lora_slots, (
-            f"The capacity of the manager ({self.capacity=}) must be "
-            f"greater than or equal to the number of LoRA slots ({self.lora_slots=})."
-        )
-        self._registered_adapters = AdapterLRUCache[LoRAModel](
-            self.capacity, self.deactivate_adapter
-        )
-        self._active_adapters = AdapterLRUCache[None](
-            self.lora_slots, self._deactivate_adapter
-        )
+        self._registered_adapters: dict[int, LoRAModel] = {}
+        # Dict instead of a set for compatibility with LRUCache.
+        self._active_adapters: dict[int, None] = {}
         self.adapter_type = "LoRA"
+        self.lora_config = lora_config
         self.device = device
         self.max_num_seqs = max_num_seqs
+        assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
         self.vocab_size = vocab_size
@@ -122,7 +113,6 @@ class LoRAModelManager:
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
-        # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
@@ -1172,8 +1162,39 @@ class LoRAModelManager:
         return self._registered_adapters.get(adapter_id)
 
 
+class LoRALRUCache(AdapterLRUCache[LoRAModel]):
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], object]):
+        super().__init__(capacity, deactivate_lora_fn)
+
+
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
+
+    def __init__(
+        self,
+        model: SupportsLoRAModel,
+        max_num_seqs: int,
+        max_num_batched_tokens: int,
+        vocab_size: int,
+        lora_config: LoRAConfig,
+        device: torch.device,
+        vllm_config: VllmConfig,
+    ):
+        super().__init__(
+            model,
+            max_num_seqs,
+            max_num_batched_tokens,
+            vocab_size,
+            lora_config,
+            device,
+            vllm_config,
+        )
+        self._registered_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
+            self.capacity, self.deactivate_adapter
+        )
+        self._active_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
+            self.lora_slots, self._deactivate_adapter
+        )
 
     def list_adapters(self) -> dict[int, LoRAModel]:
         """List all registered LoRAModels."""
