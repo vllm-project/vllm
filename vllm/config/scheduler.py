@@ -89,6 +89,32 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    # FlowPrefill: sub-chunk preemption (vLLM Q2 2026 roadmap)
+    # Reference: FlowPrefill paper (arxiv Feb 2026)
+    # "avoid excessive preemption, prefill HoL blocking"
+    preemption_granularity: int | None = None
+    """FlowPrefill sub-chunk preemption granularity (tokens).
+
+    When set to an integer N, the scheduler inserts CUDA event checkpoints
+    every N tokens within a prefill chunk. Decode requests can preempt
+    prefill at these checkpoints without requiring KV recomputation, since
+    KV blocks allocated up to the checkpoint are preserved.
+
+    ``None`` (default) disables FlowPrefill — all existing behavior is
+    unchanged and no overhead is introduced.
+
+    Reference: FlowPrefill paper (arxiv Feb 2026), vLLM Q2 2026 roadmap
+    item: "avoid excessive preemption, prefill HoL blocking".
+    """
+
+    preemption_decode_threshold: int = 1
+    """FlowPrefill: minimum decode queue depth to trigger sub-chunk preemption.
+
+    When ``preemption_granularity`` is set, a prefill checkpoint is only
+    inserted when the number of actively-decoding requests is at least this
+    value. Defaults to 1 (any decode request triggers preemption).
+    """
+
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
