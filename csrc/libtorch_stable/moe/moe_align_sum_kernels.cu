@@ -500,8 +500,6 @@ void moe_align_block_size(
     torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
     torch::stable::Tensor num_tokens_post_pad,
     std::optional<torch::stable::Tensor> maybe_expert_map) {
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      topk_ids.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(topk_ids.get_device_index());
 
@@ -543,7 +541,7 @@ void moe_align_block_size(
                   scalar_t, fill_threads>;
           small_batch_expert_kernel<<<1, fill_threads + threads,
                                       shared_mem_size, stream>>>(
-              reinterpret_cast<const scalar_t*>(topk_ids.data_ptr()),
+              reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
               reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(experts_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(
@@ -564,7 +562,7 @@ void moe_align_block_size(
           // blockIdx.x == 0: counting experts and aligning
           // blockIdx.x == 1: filling sorted_token_ids
           align_kernel<<<2, threads, shared_mem_size, stream>>>(
-              reinterpret_cast<const scalar_t*>(topk_ids.data_ptr()),
+              reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
               reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(experts_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(
@@ -585,7 +583,7 @@ void moe_align_block_size(
           auto sort_kernel =
               vllm::moe::count_and_sort_expert_tokens_kernel<scalar_t>;
           sort_kernel<<<gridDims, block_threads, 0, stream>>>(
-              reinterpret_cast<const scalar_t*>(topk_ids.data_ptr()),
+              reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
               reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(cumsum_buffer.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(expert_map.mutable_data_ptr()),
@@ -603,8 +601,6 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
                                   torch::stable::Tensor num_tokens_post_pad) {
   namespace batched_kernel = vllm::moe::batched_moe_align_block_size;
 
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      batch_num_tokens.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(batch_num_tokens.get_device_index());
   int32_t const B = batch_num_tokens.size(0);
@@ -621,7 +617,7 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
   batched_kernel::batched_moe_align_block_size_kernel<<<
       batched_kernel::num_blocks, batched_kernel::num_threads, 0, stream>>>(
       B, max_tokens_per_batch, block_size,
-      reinterpret_cast<const int32_t*>(batch_num_tokens.data_ptr()),
+      reinterpret_cast<const int32_t*>(batch_num_tokens.const_data_ptr()),
       reinterpret_cast<int32_t*>(sorted_ids.mutable_data_ptr()),
       reinterpret_cast<int32_t*>(batch_ids.mutable_data_ptr()),
       reinterpret_cast<int32_t*>(num_tokens_post_pad.mutable_data_ptr()));
@@ -647,7 +643,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           input.scalar_type(), "moe_sum_kernel", [&] {
             vllm::moe::moe_sum_kernel<scalar_t, 2><<<grid, block, 0, stream>>>(
                 reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.data_ptr()),
+                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
                 hidden_size);
           });
       break;
@@ -657,7 +653,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           input.scalar_type(), "moe_sum_kernel", [&] {
             vllm::moe::moe_sum_kernel<scalar_t, 3><<<grid, block, 0, stream>>>(
                 reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.data_ptr()),
+                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
                 hidden_size);
           });
       break;
@@ -667,7 +663,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           input.scalar_type(), "moe_sum_kernel", [&] {
             vllm::moe::moe_sum_kernel<scalar_t, 4><<<grid, block, 0, stream>>>(
                 reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.data_ptr()),
+                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
                 hidden_size);
           });
       break;
@@ -691,10 +687,9 @@ void moe_lora_align_block_size(
   STD_TORCH_CHECK(block_size > 0, "block_size should be greater than 0. ");
 
   int device_max_shared_mem;
-  const int dev = topk_ids.get_device_index();
+  int dev = topk_ids.get_device_index();
   cudaDeviceGetAttribute(&device_max_shared_mem,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-  const torch::stable::accelerator::DeviceGuard device_guard(dev);
   const cudaStream_t stream = get_current_cuda_stream(dev);
 
   int64_t padded_num_experts =
@@ -738,9 +733,8 @@ void moe_lora_align_block_size(
           auto kernel =
               vllm::moe::moe_lora_align_block_size_small_batch_expert_kernel<
                   scalar_t, fill_threads>;
-          STD_CUDA_CHECK(cudaFuncSetAttribute(
-              (void*)kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-              shared_mem));
+          STD_CUDA_CHECK(VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
+              (void*)kernel, shared_mem));
           // Grid size is (max_loras + 1) because active_lora_ids has length
           // max_loras + 1: sorted-unique values of token_lora_mapping, which
           // can include -1 (base-model tokens) in addition to up to max_loras
@@ -824,7 +818,7 @@ void moe_lora_align_block_size(
               vllm::moe::lora_count_and_sort_expert_tokens_kernel<scalar_t>;
 
           sort_kernel<<<gridDims, block_threads, 0, stream>>>(
-              reinterpret_cast<scalar_t*>(topk_ids.mutable_data_ptr()),
+              reinterpret_cast<const scalar_t*>(topk_ids.const_data_ptr()),
               reinterpret_cast<int32_t*>(sorted_token_ids.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(cumsum.mutable_data_ptr()),
               reinterpret_cast<int32_t*>(expert_map.mutable_data_ptr()),

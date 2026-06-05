@@ -499,6 +499,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_MXFP8_STABLE_SRCS}"
       CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC ${VLLM_MXFP8_STABLE_SRCS})
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
     message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
   else()
@@ -634,7 +635,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
-  set(VLLM_STABLE_EXT_SRC
+  list(APPEND VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
@@ -1069,10 +1070,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Building hadacore")
   endif()
 
-  if(VLLM_MXFP8_STABLE_SRCS)
-    list(APPEND VLLM_STABLE_EXT_SRC ${VLLM_MXFP8_STABLE_SRCS})
-  endif()
-
   # if CUDA endif
   endif()
 
@@ -1144,20 +1141,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_STABLE_EXT_SRC
         "csrc/libtorch_stable/moe/grouped_topk_kernels.cu"
-        "csrc/libtorch_stable/moe/moe_wna16.cu")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0)
-        list(APPEND VLLM_MOE_STABLE_EXT_SRC
-          "csrc/libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-          "csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu")
-      endif()
-      if(VLLM_MOE_DSV3_ROUTER_GEMM_SRCS)
-        list(APPEND VLLM_MOE_STABLE_EXT_SRC ${VLLM_MOE_DSV3_ROUTER_GEMM_SRCS})
-      endif()
+        "csrc/libtorch_stable/moe/moe_wna16.cu"
+        "csrc/libtorch_stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+        "csrc/libtorch_stable/moe/moe_permute_unpermute_op.cu")
     endif()
 
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_MOE_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+
+    if(VLLM_GPU_LANG STREQUAL "CUDA")
+      if(VLLM_MOE_DSV3_ROUTER_GEMM_SRCS)
+        list(APPEND VLLM_MOE_STABLE_EXT_SRC ${VLLM_MOE_DSV3_ROUTER_GEMM_SRCS})
+      endif()
+    endif()
 
     message(STATUS "Enabling MoE C_stable extension.")
     define_extension_target(
@@ -1180,6 +1177,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
     elseif(VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_moe_C_stable_libtorch PRIVATE USE_ROCM)
+    endif()
+
+    if(VLLM_GPU_LANG STREQUAL "HIP")
       find_library(_MOE_STABLE_TORCH_AMDHIP64 amdhip64
         PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
       if(_MOE_STABLE_TORCH_AMDHIP64)
