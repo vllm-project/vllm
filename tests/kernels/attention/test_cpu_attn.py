@@ -258,10 +258,13 @@ def varlen_with_paged_kv(
 
     # KV cache for CPU attention
     cache_dtype = torch.uint8 if is_fp8 else dtype
-    packed_key_cache = torch.empty(
-        num_blocks, num_kv_heads, block_size, head_size, dtype=cache_dtype
+    packed_key_value_cache = torch.empty(
+        num_blocks, num_kv_heads, block_size, head_size * 2, dtype=cache_dtype
     )
-    packed_value_cache = torch.empty_like(packed_key_cache)
+    packed_key_value_cache = packed_key_value_cache.view(
+        (num_blocks, num_kv_heads, block_size * 2, -1)
+    )
+    packed_key_cache, packed_value_cache = packed_key_value_cache.chunk(2, dim=2)
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
