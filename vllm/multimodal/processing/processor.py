@@ -1315,9 +1315,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         video's interleaved placeholder layout is a function of the paired
         audio (and vice versa). Coupling is enforced two ways that work
         together: group-aware cache keys (see
-        :meth:`_apply_coupled_mm_cache_keys`) stop a member from being reused
+        `_apply_coupled_mm_cache_keys`) stop a member from being reused
         for a *different* pairing, and group-miss expansion (see
-        :meth:`_get_cache_missing_items`) reprocesses the whole group whenever
+        `_get_cache_missing_items`) reprocesses the whole group whenever
         any member is missing — including when LRU eviction drops one member
         but not the other. Without both, the per-item processor cache can serve
         one member while the other misses, producing either a ``StopIteration``
@@ -1342,7 +1342,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         ``prompt_updates`` depend on the whole group. It does **not** by itself
         keep a group atomically resident — LRU eviction can still drop one
         member but not the other; that partial-residency case is handled by
-        group-miss expansion in :meth:`_get_cache_missing_items`.
+        group-miss expansion in `_get_cache_missing_items`.
 
         These keys are used **only** for processor-cache membership and
         storage. The semantic ``mm_hashes`` (which become
