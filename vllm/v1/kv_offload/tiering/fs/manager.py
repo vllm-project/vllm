@@ -26,6 +26,7 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -39,6 +40,24 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+
+class FsAsyncLookupWorker(AsyncLookupWorker):
+    """Async lookup worker for FileSystemTierManager."""
+
+    def __init__(
+        self,
+        tier: "FileSystemTierManager",
+        tier_idx: int,
+        max_results: int = 1_000_000,
+    ) -> None:
+        super().__init__(tier_idx=tier_idx, max_results=max_results)
+        self._tier = tier
+
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        return [os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys]
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -121,10 +140,12 @@ class FileSystemTierManager(SecondaryTierManager):
     ) -> bool | None:
         return os.path.exists(self.file_mapper.get_file_name(key))
 
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> list[bool | None]:
-        return [os.path.exists(self.file_mapper.get_file_name(k)) for k in keys]
+    def create_lookup_worker(
+        self, tier_idx: int, max_results: int = 1_000_000
+    ) -> FsAsyncLookupWorker:
+        return FsAsyncLookupWorker(
+            tier=self, tier_idx=tier_idx, max_results=max_results
+        )
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:

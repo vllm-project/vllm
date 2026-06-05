@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -26,6 +27,24 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+
+
+class ExampleAsyncLookupWorker(AsyncLookupWorker):
+    """Async lookup worker for ExampleSecondaryTierManager."""
+
+    def __init__(
+        self,
+        tier: "ExampleSecondaryTierManager",
+        tier_idx: int,
+        max_results: int = 1_000_000,
+    ) -> None:
+        super().__init__(tier_idx=tier_idx, max_results=max_results)
+        self._tier = tier
+
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        return [k in self._tier.blocks for k in keys]
 
 
 class ExampleSecondaryTierManager(SecondaryTierManager):
@@ -66,10 +85,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
 
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> list[bool | None]:
-        return [k in self.blocks for k in keys]
+    def create_lookup_worker(
+        self, tier_idx: int, max_results: int = 1_000_000
+    ) -> ExampleAsyncLookupWorker:
+        return ExampleAsyncLookupWorker(
+            tier=self, tier_idx=tier_idx, max_results=max_results
+        )
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:

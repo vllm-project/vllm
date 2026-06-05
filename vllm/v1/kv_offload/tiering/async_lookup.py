@@ -1,29 +1,49 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-AsyncLookupWorker: background worker for secondary tier existence checks.
+AsyncLookupWorker: per-tier background worker for secondary tier existence
+checks.
 
-Queue management lives here; actual lookup is delegated to each tier's
-batch_lookup() implementation.
+Each secondary tier gets its own AsyncLookupWorker instance and background
+thread, so all tiers process lookups concurrently.  The scheduler fans out
+query() calls to every tier worker simultaneously, then sweeps results in
+tier-priority order to respect tier precedence.
+
+Locking design
+--------------
+There is no explicit lock.  Thread safety is achieved by ownership:
+
+* _lookup_state is owned exclusively by the scheduler thread.
+  query() and update_cached_exists() read and write it directly.
+
+* _lookup_queue is written by the scheduler (put_nowait) and read by
+  the worker (get / get_nowait).  queue.Queue is thread-safe by design.
+
+* _pending_results is written by the worker (put) and read by the
+  scheduler (get_nowait inside drain_results).  queue.SimpleQueue is
+  thread-safe by design.
+
+The scheduler calls drain_results() once per step (from
+TieringOffloadingManager._process_finished_jobs()) before any query()
+calls, so query() itself is a pure OrderedDict operation with no queue
+interaction.
 """
 
 import queue
 import threading
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Collection
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 logger = init_logger(__name__)
 
-# Sentinel for a slot that is queued or currently being looked up.
-_IN_FLIGHT = object()
-
-# Result constants stored in _async_results.
-NOT_FOUND: int = -1
-FOUND: int = 1
+# Status values stored in _lookup_state and returned by query().
+_IN_FLIGHT: int = 0  # queued or currently being looked up by the worker
+NOT_FOUND: int = -1  # not present in this tier
+FOUND: int = 1  # present in this tier
 
 
 def _slot(key: OffloadKey) -> int:
@@ -36,88 +56,131 @@ def _slot(key: OffloadKey) -> int:
     return int.from_bytes(key[:8], "big")
 
 
-class AsyncLookupWorker:
+class AsyncLookupWorker(ABC):
     """
-    Background worker that performs secondary tier existence checks
-    asynchronously, keeping the scheduler thread non-blocking.
+    Per-tier background worker for secondary tier existence checks.
 
-    The scheduler thread calls query() which either returns a cached result
-    or queues the key and returns None.  The worker drains the queue
-    continuously, groups keys by req_id, and calls tier.batch_lookup()
-    on each tier in order.
+    Each secondary tier has its own AsyncLookupWorker instance, giving
+    each tier its own background thread so all tiers can process lookups
+    concurrently.
 
-    Results are stored in a bounded FIFO OrderedDict.  On store completion,
-    update_cached_exists() proactively populates the cache so subsequent
-    lookups for stored keys return immediately.
+    Subclasses implement only batch_lookup() — all queue management,
+    state tracking, and result delivery is provided by this base class.
+
+    The scheduler fans out query() calls to all tier workers simultaneously,
+    then sweeps results in tier-priority order: the first FOUND wins, and
+    a None from any lower-priority tier blocks acting on a higher-priority
+    FOUND until that tier resolves.
+
+    drain_results() must be called once per step from
+    TieringOffloadingManager._process_finished_jobs() before any query()
+    calls so that query() is a pure dict operation.
     """
 
     def __init__(
         self,
-        tiers: list[SecondaryTierManager],
+        tier_idx: int,
         max_results: int = 1_000_000,
     ) -> None:
-        self._tiers = tiers
+        self._tier_idx = tier_idx
         self._max_results = max_results
-        self._lock = threading.Lock()
-        # slot → _IN_FLIGHT | NOT_FOUND | FOUND
-        self._async_results: OrderedDict[int, object] = OrderedDict()
-        # slot → tier_idx, populated only when FOUND
-        self._result_tier: dict[int, int] = {}
-        self._queue: queue.Queue[tuple[OffloadKey, ReqContext] | object] = queue.Queue()
+
+        # slot → status; scheduler-owned, no lock needed.
+        self._lookup_state: OrderedDict[int, int] = OrderedDict()
+
+        # Scheduler → worker: keys to look up.
+        self._lookup_queue: queue.Queue[tuple[OffloadKey, ReqContext]] = queue.Queue()
+
+        # Worker → scheduler: completed result batches.
+        # Each item is a list of (slot, status) pairs.
+        # SimpleQueue is explicitly thread-safe for one writer / one reader.
+        self._pending_results: queue.SimpleQueue[list[tuple[int, int]]] = (
+            queue.SimpleQueue()
+        )
+
         self._shutdown_event = threading.Event()
         self._thread = threading.Thread(
             target=self._worker,
-            name="vllm_offloading_lookup",
+            name=f"vllm_offloading_lookup_tier{tier_idx}",
             daemon=True,
         )
         self._thread.start()
+
+    @abstractmethod
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> list[bool | None]:
+        """
+        Check whether a batch of blocks exist in this tier.
+
+        Called from the worker thread — must be synchronous and must not
+        touch the primary tier or scheduler state.
+
+        Returns a list parallel to keys: True if present, False if not
+        found, None if the tier is busy (retry later).
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Scheduler-thread API
+    # ------------------------------------------------------------------
 
     def query(self, key: OffloadKey, req_context: ReqContext) -> int | None:
         """
         Non-blocking lookup called from the scheduler thread.
 
+        drain_results() must have been called earlier in the same step.
+
         Returns:
-            tier_idx  — block found in that tier (consume and initiate promotion).
-            NOT_FOUND — block not present in any tier.
+            FOUND     — block is present in this tier.
+            NOT_FOUND — block is not present in this tier.
             None      — result not yet available; retry next step.
         """
-        with self._lock:
-            slot = _slot(key)
-            if slot in self._async_results:
-                state = self._async_results[slot]
-                if state is _IN_FLIGHT:
-                    return None
-                if state == FOUND:
-                    return self._result_tier[slot]
-                return NOT_FOUND  # state == NOT_FOUND
-            # New key — queue for async lookup.
-            self._evict_if_full()
-            self._async_results[slot] = _IN_FLIGHT
-            self._queue.put_nowait((key, req_context))
-        return None
+        slot = _slot(key)
+        status = self._lookup_state.get(slot, _IN_FLIGHT)
+        if status == _IN_FLIGHT:
+            if slot not in self._lookup_state:
+                # New key — queue for async lookup.
+                self._evict_if_full()
+                self._lookup_state[slot] = _IN_FLIGHT
+                self._lookup_queue.put_nowait((key, req_context))
+            return None
+        return status  # FOUND or NOT_FOUND
 
-    def update_cached_exists(
-        self, keys: Collection[OffloadKey], tier_idx: int
-    ) -> None:
+    def drain_results(self) -> None:
+        """Apply pending worker results to _lookup_state.
+
+        Called once per step from TieringOffloadingManager._process_finished_jobs()
+        before update_cached_exists() calls, so query() needs no queue
+        interaction.  Applying worker results first ensures that a subsequent
+        update_cached_exists() can correctly upgrade a worker NOT_FOUND to
+        FOUND when a store completes in the same step.
+        """
+        while True:
+            try:
+                batch = self._pending_results.get_nowait()
+            except queue.Empty:
+                break
+            for slot, status in batch:
+                # Only apply if the slot is still _IN_FLIGHT.  A FOUND written
+                # by update_cached_exists() during the worker's lookup takes
+                # precedence and must not be overwritten.
+                if self._lookup_state.get(slot, _IN_FLIGHT) == _IN_FLIGHT:
+                    self._lookup_state[slot] = status
+
+    def update_cached_exists(self, keys: Collection[OffloadKey]) -> None:
         """Populate the cache for keys confirmed present by a completed store.
 
         Called from TieringOffloadingManager._process_finished_jobs() when a
-        primary -> secondary store job completes.  Overwrites _IN_FLIGHT or
-        NOT_FOUND entries; leaves existing FOUND entries untouched.
+        primary -> secondary store job completes for this tier.  Overwrites
+        _IN_FLIGHT or NOT_FOUND entries; leaves existing FOUND entries untouched.
         """
-        with self._lock:
-            for key in keys:
-                slot = _slot(key)
-                if slot in self._async_results:
-                    current = self._async_results[slot]
-                    if current is _IN_FLIGHT or current == NOT_FOUND:
-                        self._async_results[slot] = FOUND
-                        self._result_tier[slot] = tier_idx
-                    # else: valid FOUND already present — leave it
-                else:
+        for key in keys:
+            slot = _slot(key)
+            if self._lookup_state.get(slot, _IN_FLIGHT) != FOUND:
+                if slot not in self._lookup_state:
                     self._evict_if_full()
-                    self._async_results[slot] = FOUND
-                    self._result_tier[slot] = tier_idx
+                self._lookup_state[slot] = FOUND
 
     def shutdown(self) -> None:
         """Stop the worker thread."""
@@ -129,23 +192,21 @@ class AsyncLookupWorker:
     # ------------------------------------------------------------------
 
     def _evict_if_full(self) -> None:
-        """Evict the oldest resolved entry if at capacity. Must be called under _lock.
+        """Evict the oldest resolved entry if at capacity.
 
         _IN_FLIGHT entries are never evicted — evicting a pending slot would
-        cause its result to be silently discarded and the key re-queued
-        indefinitely, producing a livelock under high load.
+        cause its result to arrive in _pending_results with no matching
+        _IN_FLIGHT entry, leading drain_results() to insert a stale result.
         """
-        if len(self._async_results) < self._max_results:
+        if len(self._lookup_state) < self._max_results:
             return
-        for slot, state in self._async_results.items():
-            if state is not _IN_FLIGHT:
-                del self._async_results[slot]
-                self._result_tier.pop(slot, None)
+        for slot, status in self._lookup_state.items():
+            if status != _IN_FLIGHT:
+                del self._lookup_state[slot]
                 logger.warning(
-                    "async_lookup cache full (%d entries): evicted slot %d state=%s",
+                    "async_lookup cache full (%d entries): evicted slot %d",
                     self._max_results,
                     slot,
-                    state,
                 )
                 return
         # Every slot is _IN_FLIGHT — allow the dict to exceed max_results
@@ -160,83 +221,52 @@ class AsyncLookupWorker:
         while not self._shutdown_event.is_set():
             # Block until the first key arrives.
             try:
-                item = self._queue.get(timeout=1.0)
+                item = self._lookup_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
 
             if self._shutdown_event.is_set():
                 break
 
-            # Drain the rest of the queue and group keys by req_id.
-            batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
+            # Collect first item then drain the rest of the queue.
+            pending: list[tuple[OffloadKey, ReqContext]] = [item]
+            while True:
+                try:
+                    pending.append(self._lookup_queue.get_nowait())
+                except queue.Empty:
+                    break
 
-            def _add(item: object) -> None:
-                key, req_context = item  # type: ignore[misc]
+            # Group by req_id.
+            batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
+            for key, req_context in pending:
                 req_id = req_context.req_id
                 if req_id not in batches:
                     batches[req_id] = (req_context, [])
                 batches[req_id][1].append(key)
 
-            _add(item)
-            while True:
-                try:
-                    _add(self._queue.get_nowait())
-                except queue.Empty:
-                    break
-
             if not batches:
                 continue
 
-            # For each request group, iterate tiers until all keys are resolved.
-            results: list[tuple[int, int, int]] = []  # (slot, result, tier_idx)
+            results: list[tuple[int, int]] = []  # (slot, status)
             for req_context, keys in batches.values():
-                unresolved = list(keys)
-                found: dict[int, int] = {}   # slot → tier_idx
-                not_found: list[int] = []
-                # Slots where at least one tier returned None (busy); these
-                # must remain _IN_FLIGHT so the scheduler retries next step.
-                busy_slots: set[int] = set()
+                try:
+                    hits = self.batch_lookup(keys, req_context)
+                except Exception as exc:
+                    logger.warning(
+                        "batch_lookup failed on tier %d for %d keys: %s",
+                        self._tier_idx,
+                        len(keys),
+                        exc,
+                    )
+                    hits = [False] * len(keys)
 
-                for tier_idx, tier in enumerate(self._tiers):
-                    if not unresolved:
-                        break
-                    try:
-                        tier_results = tier.batch_lookup(unresolved, req_context)
-                    except Exception as exc:
-                        logger.warning(
-                            "batch_lookup failed on tier %d for %d keys: %s",
-                            tier_idx, len(unresolved), exc,
-                        )
-                        tier_results = [False] * len(unresolved)
+                for key, hit in zip(keys, hits):
+                    if hit is True:
+                        results.append((_slot(key), FOUND))
+                    elif hit is False:
+                        results.append((_slot(key), NOT_FOUND))
+                    # hit is None → stays _IN_FLIGHT (not added to results)
 
-                    still_unresolved = []
-                    for key, hit in zip(unresolved, tier_results):
-                        if hit is True:
-                            found[_slot(key)] = tier_idx
-                        elif hit is None:
-                            busy_slots.add(_slot(key))
-                            still_unresolved.append(key)
-                        else:  # False — not in this tier, try the next
-                            still_unresolved.append(key)
-                    unresolved = still_unresolved
-
-                # Keys not found in any tier: only mark NOT_FOUND if no tier
-                # was busy for that key; busy keys stay _IN_FLIGHT for retry.
-                for key in unresolved:
-                    slot = _slot(key)
-                    if slot not in busy_slots:
-                        not_found.append(slot)
-
-                for slot, tier_idx in found.items():
-                    results.append((slot, FOUND, tier_idx))
-                for slot in not_found:
-                    results.append((slot, NOT_FOUND, -1))
-
-            # Write results under lock; skip slots no longer _IN_FLIGHT
-            # (e.g. overwritten by update_cached_exists during the lookup).
-            with self._lock:
-                for slot, result, tier_idx in results:
-                    if self._async_results.get(slot) is _IN_FLIGHT:
-                        self._async_results[slot] = result
-                        if result == FOUND:
-                            self._result_tier[slot] = tier_idx
+            # Post the entire batch as one item — no lock needed.
+            if results:
+                self._pending_results.put(results)
