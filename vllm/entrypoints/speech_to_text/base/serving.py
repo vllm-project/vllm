@@ -162,14 +162,10 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
-        # Keep preprocessing bounded because audio decode/VAD may also fan out
-        # inside native libraries like FFmpeg or ONNX Runtime.
+        # setup preprocess resources
         self._preprocess_max_workers = _get_stt_preprocess_max_workers()
         self._preprocess_executor: ThreadPoolExecutor | None = None
         self._preprocess_semaphore: asyncio.Semaphore | None = None
-
-        # REMOVE
-        print(f"self._preprocess_max_workers: {self._preprocess_max_workers}")
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
