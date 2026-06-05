@@ -447,7 +447,7 @@ def make_kv_cache_config(
 ) -> KVCacheConfig:
     kv_cache_groups = [
         KVCacheGroupSpec(
-            ["layer0", "layer2"],
+            ["model.layers.0.self_attn", "model.layers.2.self_attn"],
             FullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=4,
@@ -459,7 +459,7 @@ def make_kv_cache_config(
     if swa_enabled:
         kv_cache_groups.append(
             KVCacheGroupSpec(
-                ["layer1", "layer3"],
+                ["model.layers.1.self_attn", "model.layers.3.self_attn"],
                 SlidingWindowSpec(
                     block_size=block_size,
                     num_kv_heads=4,

@@ -15,7 +15,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--rank", default=0, type=int)
+    parser.add_argument("--pp-rank", default=0, type=int)
+    parser.add_argument("--tp-rank", default=0, type=int)
     parser.add_argument("--timeout-ms", default=1000, type=int)
     return parser.parse_args()
 
@@ -37,7 +38,7 @@ def main() -> None:
     sock.setsockopt(zmq.RCVTIMEO, args.timeout_ms)
     try:
         sock.connect(make_zmq_path(args.host, args.port))
-        sock.send(msgspec.msgpack.encode((GET_META_MSG, args.rank)))
+        sock.send(msgspec.msgpack.encode((GET_META_MSG, args.pp_rank, args.tp_rank)))
         sock.recv()
     finally:
         sock.close()

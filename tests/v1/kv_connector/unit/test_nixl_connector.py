@@ -9,6 +9,7 @@ import textwrap
 import time
 import uuid
 from collections import defaultdict
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -20,6 +21,7 @@ import torch
 from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
+    EngineTransferInfo,
     KVOutputAggregator,
     TransferTopology,
     get_current_attn_backend,
@@ -366,7 +368,11 @@ def test_kv_transfer_handshake(dist_init):
         # metadata.
         kv_cache_groups = [
             KVCacheGroupSpec(
-                ["layer0", "layer1", "layer2"],
+                [
+                    "model.layers.0.self_attn",
+                    "model.layers.1.self_attn",
+                    "model.layers.2.self_attn",
+                ],
                 FullAttentionSpec(
                     block_size=16,
                     num_kv_heads=4,
@@ -393,9 +399,9 @@ def test_kv_transfer_handshake(dist_init):
         shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
         unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
         kv_caches = {
-            "layer0": shared_tensor,
-            "layer1": unique_tensor,
-            "layer2": shared_tensor,
+            "model.layers.0.self_attn": shared_tensor,
+            "model.layers.1.self_attn": unique_tensor,
+            "model.layers.2.self_attn": shared_tensor,
         }
         prefill_connector.register_kv_caches(kv_caches)
 
@@ -407,11 +413,12 @@ def test_kv_transfer_handshake(dist_init):
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
 
-        # The scheduler connector expects metadata to be in
-        # dict[int, KVConnectorHandshakeMetadata], where the first key is
-        # the dp_rank, the second key is the tp_rank.
+        # The scheduler connector expects metadata keyed by (pp_rank, tp_rank).
+        # Engine core dispatches via the PP-aware entry point, which is what
+        # starts the NIXL handshake listener; the legacy non-PP-aware setter
+        # does not, so use the PP-aware one here to match production.
         scheduler_connector = scheduler.get_kv_connector()
-        scheduler_connector.set_xfer_handshake_metadata({0: metadata})
+        scheduler_connector.set_xfer_handshake_metadata_pp_aware({(0, 0): metadata})
 
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.
@@ -451,6 +458,7 @@ def test_kv_transfer_handshake(dist_init):
                 kv_connector_metadata["remote_host"],
                 kv_connector_metadata["remote_port"],
                 kv_connector_metadata["tp_size"],
+                kv_connector_metadata.get("pp_size", 1),
                 kv_connector_metadata["remote_engine_id"],
             )
 
@@ -479,8 +487,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
-        # Mock register_kv_caches attribute needed for tests that do not call it.
-        self.src_xfer_handles_by_block_size = {self.block_size: 1}
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
@@ -501,10 +507,16 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         )
 
     def _nixl_handshake(
-        self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
-    ) -> dict[int, str]:
+        self,
+        host: str,
+        port: int,
+        remote_tp_size: int,
+        remote_pp_size: int,
+        expected_engine_id: str,
+    ) -> dict[tuple[int, int], str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
+        assert remote_pp_size == 1
         # These should've been done in register_kv_caches(), called by
         # gpu_model_runner. Here we just hardcode some dummy values.
         slot_size_bytes = 4096
@@ -512,6 +524,16 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.block_len_per_layer = [slot_size_bytes * self.block_size]
         self.num_blocks = 1
         self.dst_num_blocks[self.engine_id] = self.num_blocks
+        self.local_registered_layer_indices = [0]
+        self.local_seen_layer_names = ["model.layers.0.self_attn"]
+        # register_kv_caches() also builds the layer-name -> NIXL region map that
+        # the handshake validation resolves producer members against; mirror it
+        # here since this mock bypasses register_kv_caches().
+        self._local_layer_name_to_region_indices = {
+            name: [i] for i, name in enumerate(self.local_seen_layer_names)
+        }
+        self._local_kv_cache_key = (0, self.tp_rank)
+        self.kv_caches_base_addr[self.engine_id][self._local_kv_cache_key] = [0]
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
 
@@ -532,7 +554,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # When remote tp_size > local tp_size, handshake with multiple
         # remote ranks.
         num_handshakes = 1 if tp_ratio > 0 else -tp_ratio
-        remote_agents: dict[int, str] = {}
+        remote_agents: dict[tuple[int, int], str] = {}
         for remote_tp_rank in range(num_handshakes):
             remote_agent_name = self.add_remote_agent(
                 NixlAgentMetadata(
@@ -549,11 +571,17 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
                     physical_blocks_per_logical_kv_block=1,
+                    pp_rank=0,
+                    pp_size=1,
+                    start_layer=0,
+                    end_layer=1,
+                    registered_layer_indices=[0],
+                    registered_layer_names=["model.layers.0.self_attn"],
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
             )
-            remote_agents[remote_tp_rank] = remote_agent_name
+            remote_agents[(0, remote_tp_rank)] = remote_agent_name
         return remote_agents
 
 
@@ -590,7 +618,7 @@ class TestNixlHandshake:
         worker = connector.connector_worker
         # simulate handshake
         worker.dst_xfer_side_handles = {
-            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
+            FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {(0, 0): 1}
         }
         worker.kv_cache_layout = "HND"
         num_xfers = 4
@@ -743,29 +771,34 @@ class TestNixlHandshake:
         worker.block_len_per_layer = [4096 * worker.block_size]
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
-        worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
-        worker.num_descs = len(worker.src_blocks_data)
+        worker.num_descs = 1
+        worker.local_registered_layer_indices = [0]
+        worker.local_seen_layer_names = ["model.layers.0.self_attn"]
+        worker._local_kv_cache_key = (0, worker.tp_rank)
+        worker.kv_caches_base_addr[worker.engine_id][worker._local_kv_cache_key] = [0]
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
-            assert set(remote_agents.keys()) == set(range(tp_ratio))
+            assert set(remote_agents.keys()) == {(0, rank) for rank in range(tp_ratio)}
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
-            remote_info = worker.transfer_topo.get_engine_info(remote_engine_id)
+            remote_info = worker.transfer_topo.get_engine_info(remote_engine_id, 0)
             assert remote_info.remote_tp_size == remote_tp_size
             assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
-            # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
-            assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
-            assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
+            # Each shard registers a list of tp_ratio handles.
+            split_key = (remote_engine_id, 0, -tp_ratio)
+            assert split_key in worker.src_xfer_handles_by_shard_tp_ratio
+            assert len(worker.src_xfer_handles_by_shard_tp_ratio[split_key]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
             assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
-                range(tp_ratio)
+                (0, rank) for rank in range(tp_ratio)
             )
 
         remote_agents = worker._nixl_handshake(
             host="localhost",
             port=1234,
             remote_tp_size=4,
+            remote_pp_size=1,
             expected_engine_id=worker.REMOTE_ENGINE_ID,
         )
         check_handshake(4)
@@ -778,6 +811,7 @@ class TestNixlHandshake:
             host="localhost",
             port=1234,
             remote_tp_size=6,
+            remote_pp_size=1,
             expected_engine_id=worker.REMOTE_ENGINE_ID,
         )
         check_handshake(6)
@@ -906,9 +940,6 @@ class TestNixlHandshake:
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
-        # Register (mocked) local xfer handler
-        # worker = connector.connector_worker
-        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
         metadata = NixlConnectorMetadata()
         total_reqs = 5
         for i in range(total_reqs):
@@ -983,6 +1014,18 @@ class TestNixlHandshake:
             worker.block_len_per_layer = [4096 * worker.block_size]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+            worker.local_registered_layer_indices = [0]
+            worker.local_seen_layer_names = ["model.layers.0.self_attn"]
+            # register_kv_caches() builds the layer-name -> NIXL region map the
+            # handshake validation resolves producer members against; mirror it
+            # here since this test sets local registration state by hand.
+            worker._local_layer_name_to_region_indices = {
+                name: [i] for i, name in enumerate(worker.local_seen_layer_names)
+            }
+            worker._local_kv_cache_key = (0, worker.tp_rank)
+            worker.kv_caches_base_addr[worker.engine_id][worker._local_kv_cache_key] = [
+                0
+            ]
 
             # Metadata with different kv_cache_layout than local worker
             mismatched_layout = "HND" if worker.kv_cache_layout != "HND" else "NHD"
@@ -998,6 +1041,12 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
+                pp_rank=0,
+                pp_size=1,
+                start_layer=0,
+                end_layer=1,
+                registered_layer_indices=[0],
+                registered_layer_names=["model.layers.0.self_attn"],
             )
 
             with pytest.raises(RuntimeError):
@@ -1041,6 +1090,18 @@ class TestNixlHandshake:
             worker.block_len_per_layer = [2048 * worker.block_size]
             worker.num_blocks = 1
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+            worker.local_registered_layer_indices = [0]
+            worker.local_seen_layer_names = ["model.layers.0.self_attn"]
+            # register_kv_caches() builds the layer-name -> NIXL region map the
+            # handshake validation resolves producer members against; mirror it
+            # here since this test sets local registration state by hand.
+            worker._local_layer_name_to_region_indices = {
+                name: [i] for i, name in enumerate(worker.local_seen_layer_names)
+            }
+            worker._local_kv_cache_key = (0, worker.tp_rank)
+            worker.kv_caches_base_addr[worker.engine_id][worker._local_kv_cache_key] = [
+                0
+            ]
 
             # Metadata with different kv_cache_layout than local worker
             meta = NixlAgentMetadata(
@@ -1056,6 +1117,12 @@ class TestNixlHandshake:
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
                 physical_blocks_per_logical_kv_block=1,
+                pp_rank=0,
+                pp_size=1,
+                start_layer=0,
+                end_layer=1,
+                registered_layer_indices=[0],
+                registered_layer_names=["model.layers.0.self_attn"],
             )
 
             # We don't check layout for homogeneous TP and MLA for now, as the
@@ -1573,18 +1640,27 @@ def test_register_kv_caches(
                 kv_cache_tensors=[
                     KVCacheTensor(
                         size=kv_cache_spec.page_size_bytes * num_blocks,
-                        shared_by=["all-layers"],
+                        shared_by=["model.layers.0.self_attn"],
                     )
                     for _ in range(num_layers)
                 ],
-                kv_cache_groups=[KVCacheGroupSpec(["all-layers"], kv_cache_spec)],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(["model.layers.0.self_attn"], kv_cache_spec)
+                ],
             )
         else:
             kv_cache_config = KVCacheConfig(
                 num_blocks=num_blocks,
                 kv_cache_tensors=[],
                 kv_cache_groups=[
-                    KVCacheGroupSpec(["layer0", "layer1", "layer2"], kv_cache_spec)
+                    KVCacheGroupSpec(
+                        [
+                            "model.layers.0.self_attn",
+                            "model.layers.1.self_attn",
+                            "model.layers.2.self_attn",
+                        ],
+                        kv_cache_spec,
+                    )
                 ],
             )
         # Create connector
@@ -1654,7 +1730,7 @@ def test_register_kv_caches(
 
             expected_blocks_count = num_blocks * (2 if virtually_split else 1)
 
-            kv_caches = {"all-layers": cross_layers_kv_cache}
+            kv_caches = {"model.layers.0.self_attn": cross_layers_kv_cache}
         else:
             # Create test kv cache tensors using proper backend shape
             kv_cache_shape = backend_cls.get_kv_cache_shape(
@@ -1666,9 +1742,9 @@ def test_register_kv_caches(
             shared_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
             unique_tensor = torch.zeros(*kv_cache_shape, dtype=kv_cache_spec.dtype)
             kv_caches = {
-                "layer0": shared_tensor,
-                "layer1": unique_tensor,
-                "layer2": shared_tensor,
+                "model.layers.0.self_attn": shared_tensor,
+                "model.layers.1.self_attn": unique_tensor,
+                "model.layers.2.self_attn": shared_tensor,
             }
 
             # Store tensor info for validation
@@ -1711,6 +1787,12 @@ def test_register_kv_caches(
                 f"Entry {i}: Expected base address {expected_base_addrs[i]}, "
                 f"got {base_addr}"
             )
+
+        # The local NIXL transfer-descriptor dlist is now registered lazily (on
+        # the first remote handshake) rather than eagerly in register_kv_caches;
+        # trigger that registration so the get_xfer_descs assertions below see
+        # the local block layout.
+        connector.connector_worker.register_local_xfer_handler(block_size)
 
         # Verify get_xfer_descs was called with blocks_data
         assert mock_wrapper_instance.get_xfer_descs.called
@@ -1839,11 +1921,11 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     ):
         worker._recving_transfers = {"req1": [123]}
         # Mock register_kv_cache which registers local handle
-        worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
+        worker.src_xfer_handles_by_remote = {("engine1", 0, worker.block_size): 455}
         # P TP = 2 * D TP case, we should register 2 local handles
-        worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
-        worker.dst_xfer_side_handles = {"engine1": {0: 789}}
-        worker._remote_agents = {"engine1": {0: "agent1"}}
+        worker.src_xfer_handles_by_shard_tp_ratio = {("engine1", 0, -2): [456, 457]}
+        worker.dst_xfer_side_handles = {"engine1": {(0, 0): 789}}
+        worker._remote_agents = {"engine1": {(0, 0): "agent1"}}
         worker._registered_descs = ["desc1", "desc2"]
 
         mock_listener.is_alive.return_value = False
@@ -2493,6 +2575,12 @@ def test_compatibility_hash_validation(
         ssm_sizes=(0, 0),
         attn_backend_name=decode_worker.backend_name,
         physical_blocks_per_logical_kv_block=1,
+        pp_rank=0,
+        pp_size=1,
+        start_layer=0,
+        end_layer=1,
+        registered_layer_indices=[0],
+        registered_layer_names=["model.layers.0.self_attn"],
     )
     handshake_payload = NixlHandshakePayload(
         compatibility_hash=remote_hash,
@@ -2517,6 +2605,7 @@ def test_compatibility_hash_validation(
                     host="localhost",
                     port=1234,
                     remote_tp_size=1,
+                    remote_pp_size=1,
                     expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 )
         else:
@@ -2524,11 +2613,12 @@ def test_compatibility_hash_validation(
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,
+                remote_pp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             )
             # Verify handshake returned agent mapping
             assert isinstance(result, dict)
-            assert len(result) == 1
+            assert set(result) == {(0, 0)}
 
 
 @pytest.mark.parametrize(
@@ -2616,6 +2706,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,
+                remote_pp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             )
 
@@ -2662,19 +2753,28 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         # / `dst_xfer_side_handles` to be keyed by remote rank.
         remote_engine_id = "remote_engine"
         worker.transfer_topo.register_remote_engine(
-            remote_engine_id=remote_engine_id,
-            remote_tp_size=prefill_tp_size,
-            remote_block_size=worker.block_size,
-            remote_block_len=worker.block_size * 4096,
-            remote_physical_blocks_per_logical=1,
-            local_block_len=worker.block_size * 4096,
+            remote_engine_id,
+            EngineTransferInfo(
+                remote_tp_size=prefill_tp_size,
+                remote_block_len=worker.block_size * 4096,
+                remote_block_size=worker.block_size,
+                remote_physical_blocks_per_logical=1,
+                remote_pp_rank=0,
+                start_layer=0,
+                end_layer=1,
+            ),
         )
         worker._remote_agents[remote_engine_id] = {
-            rank: f"agent_p{rank}" for rank in range(prefill_tp_size)
+            (0, rank): f"agent_p{rank}" for rank in range(prefill_tp_size)
         }
         worker.dst_xfer_side_handles = {
-            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+            remote_engine_id: {(0, rank): 100 + rank for rank in range(prefill_tp_size)}
         }
+        worker._pp_layer_map[remote_engine_id] = SimpleNamespace(pp_size=1)
+        worker.tp_mappings[(remote_engine_id, 0)] = SimpleNamespace(
+            all_source_ranks=(0,),
+            source_ranks_per_group=((0,),),
+        )
         # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
         assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size
 
@@ -2721,7 +2821,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
 
         # Broadcast goes to ranks {1, 2, 3} only, never to the read target.
         expected_recipients = {
-            worker._remote_agents[remote_engine_id][r]
+            worker._remote_agents[remote_engine_id][(0, r)]
             for r in range(1, prefill_tp_size)
         }
         assert {agent for agent, _ in send_notif_calls} == expected_recipients

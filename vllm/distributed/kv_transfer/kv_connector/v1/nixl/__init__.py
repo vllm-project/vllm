@@ -10,6 +10,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
     NixlHandshakePayload,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pp_layer_map import (
+    PPLayerMap,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
 )
@@ -28,4 +31,5 @@ __all__ = [
     "NixlConnectorWorker",
     "NixlHandshakePayload",
     "NixlKVConnectorStats",
+    "PPLayerMap",
 ]

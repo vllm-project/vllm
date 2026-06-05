@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -34,8 +34,20 @@ GET_META_MSG = b"get_meta_msg"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add pipeline-parallel producer metadata (pp_rank, pp_size,
+#      start_layer, end_layer, registered_layer_indices,
+#      registered_layer_names) and per-request pp_size. NIXL regions are
+#      advertised per layer-name so HMA pool composition may differ across PP
+#      producer shards and the decode consumer.
+#   6: Add region_members so each advertised NIXL region declares ALL the
+#      (global_layer_index, kv_group_index) members sharing it — including HMA
+#      cross-group pooled members (e.g. an swa_cache pooled onto a later layer's
+#      main-attn region) that are dedup'd out of registered_layer_names. Without
+#      this, a pooled member belonging to a different kv group than the region's
+#      representative is never transferred (its blocks are dropped), corrupting
+#      KV under PP+HMA disaggregation.
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
@@ -51,6 +63,25 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    pp_rank: int
+    pp_size: int
+    start_layer: int
+    end_layer: int
+    registered_layer_indices: list[int]
+    registered_layer_names: list[str]
+    # Parallel to the advertised regions (registered_layer_names order): for
+    # each NIXL region, the full list of layer names whose transfer caches
+    # physically share that region. Captures HMA cross-group pooled members
+    # that registered_layer_names (representatives only) omits, so the transfer
+    # can cover every member's blocks in a shared region. Keyed by layer name
+    # (not (layer_index, kv_group_index)) because distinct caches can merge into
+    # one kv group via UniformTypeKVCacheSpecs (e.g. an MLA layer's main latent
+    # and its indexer k_cache both land in the full-attention group): a
+    # (layer_index, group) pair is then non-unique across regions, whereas the
+    # layer name uniquely identifies the region and is stable across the PP
+    # producer shard and the full-model consumer. Defaults to empty for backward
+    # construction; populated in register_kv_caches.
+    region_members: list[list[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -142,6 +173,7 @@ class HeartbeatInfo:
     host: str
     port: int
     tp_size: int
+    pp_size: int
 
 
 @dataclass
@@ -159,6 +191,7 @@ class ReqMeta:
     # To be used when logical block size does not match the kernel block size
     local_physical_block_ids: BlockIds
     tp_size: int
+    pp_size: int = 1
     remote: RemoteMeta | None = None
 
 
@@ -182,6 +215,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            pp_size=kv_transfer_params.get("pp_size", 1),
         )
 
     def add_new_req_to_save(
