@@ -19,7 +19,10 @@ setuptools-rust>=1.9.0
 runai-model-streamer[s3,gcs,azure]==0.15.7
 conch-triton-kernels==1.2.1
 timm>=1.0.17
-# amd-quark: required for Quark quantization on ROCm 
+# amd-quark: required for Quark quantization on ROCm
 # To be consistent with test_quark.py
 amd-quark>=0.8.99
 tilelang==0.1.10
+
+# Required for faster safetensors model loading
+fastsafetensors >= 0.3.2

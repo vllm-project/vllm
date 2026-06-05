@@ -164,6 +164,10 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 #endif
 
+// CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
+torch::stable::Tensor get_cuda_view_from_cpu_tensor(
+    torch::stable::Tensor& cpu_tensor);
+
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
     torch::stable::Tensor& output,
@@ -215,6 +219,13 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
                               std::optional<torch::stable::Tensor> residual,
                               int64_t group_size, bool is_scale_transposed);
 
+void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
+                                  torch::stable::Tensor const& input,
+                                  torch::stable::Tensor& scales,
+                                  int64_t group_size,
+                                  std::optional<torch::stable::Tensor> scale_ub,
+                                  bool is_scale_transposed);
+
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,
                       torch::stable::Tensor& query,
@@ -237,6 +248,23 @@ torch::stable::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     torch::stable::Tensor const& position_ids,
     torch::stable::Tensor const& cos_sin_cache, int64_t q_head_padded,
     double eps, int64_t cache_block_size);
+
+void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
+    torch::stable::Tensor& q, torch::stable::Tensor const& kv,
+    torch::stable::Tensor& k_cache, torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, double eps,
+    int64_t cache_block_size);
+
+void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
+    torch::stable::Tensor const& q, torch::stable::Tensor const& kv,
+    torch::stable::Tensor& q_fp8, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& fp8_scale,
+    torch::stable::Tensor const& q_fp8_scale_inv, double eps,
+    int64_t cache_block_size);
 
 #ifndef USE_ROCM
 torch::stable::Tensor minimax_allreduce_rms(

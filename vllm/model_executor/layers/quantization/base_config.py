@@ -162,7 +162,13 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_cache_scale(self, name: str) -> str | None:
+    def get_cache_scale_mapper(self) -> "WeightsMapper | None":
+        """Mapping from checkpoint KV-cache scale names to vLLM scale names.
+
+        Returning a mapper here causes `AutoWeightsLoader` to apply it to the
+        weight stream automatically; individual model `load_weights` methods
+        do not need to know about KV-cache scales.
+        """
         return None
 
     def apply_vllm_mapper(  # noqa: B027
