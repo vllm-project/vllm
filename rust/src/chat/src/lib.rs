@@ -219,6 +219,16 @@ mod tests {
             &ParserSelection::Explicit(names::QWEN3.to_string()),
         )
         .unwrap();
+        validate_parser_overrides(
+            &ParserSelection::Explicit("llama3_json".to_string()),
+            &ParserSelection::Explicit(names::COHERE_COMMAND3.to_string()),
+        )
+        .unwrap();
+        validate_parser_overrides(
+            &ParserSelection::Explicit("llama3_json".to_string()),
+            &ParserSelection::Explicit(names::COHERE_COMMAND4.to_string()),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -245,6 +255,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, cohere_command3, cohere_command4, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
     }
 }

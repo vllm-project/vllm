@@ -22,18 +22,35 @@ impl Tokenizer for FakeTokenizer {
             .collect())
     }
 
-    fn token_to_id(&self, _token: &str) -> Option<u32> {
-        None
+    fn token_to_id(&self, token: &str) -> Option<u32> {
+        match token {
+            "<|START_THINKING|>" => Some(1),
+            "<|END_THINKING|>" => Some(2),
+            _ => None,
+        }
     }
 }
 
 #[test]
 fn factory_contains_and_lists_registered_parsers() {
     let factory = ReasoningParserFactory::new();
+    assert!(factory.contains(names::COHERE_COMMAND3));
+    assert!(factory.contains(names::COHERE_COMMAND4));
     assert!(factory.contains(names::QWEN3));
     assert!(factory.contains(names::DEEPSEEK_V4));
+    assert!(factory.list().contains(&names::COHERE_COMMAND3.to_string()));
+    assert!(factory.list().contains(&names::COHERE_COMMAND4.to_string()));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
+}
+
+#[test]
+fn factory_creates_cohere_command_aliases() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let factory = ReasoningParserFactory::new();
+
+    factory.create(names::COHERE_COMMAND3, tokenizer.clone()).unwrap();
+    factory.create(names::COHERE_COMMAND4, tokenizer).unwrap();
 }
 
 #[test]
