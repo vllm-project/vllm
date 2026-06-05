@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 from collections.abc import Sequence
 from typing import Any
 
@@ -29,13 +30,12 @@ logger = init_logger(__name__)
 
 def _rust_tool_parser_module() -> Any:
     try:
-        from vllm import _rust_tool_parser
+        return importlib.import_module("vllm._rust_tool_parser")
     except ImportError as exc:
         raise RuntimeError(
             "Rust tool parsing requires the vllm._rust_tool_parser PyO3 "
             "extension. Rebuild vLLM with Rust frontend/extensions enabled."
         ) from exc
-    return _rust_tool_parser
 
 
 class RustToolParser(ToolParser):
@@ -165,9 +165,9 @@ class RustToolParser(ToolParser):
 
         if arguments is not None:
             self.streamed_args_for_tool[index] += arguments
-            self.prev_tool_call_arr[index]["arguments"] = (
-                self.streamed_args_for_tool[index]
-            )
+            self.prev_tool_call_arr[index]["arguments"] = self.streamed_args_for_tool[
+                index
+            ]
             self.current_tool_id = index
 
         return tool_call_id
