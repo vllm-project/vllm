@@ -15,5 +15,5 @@ class MinimaxM3ToolParser(RustToolParser):
     and represents nested arguments with parameter-name XML tags.
     """
 
-    rust_parser_name = "minimax_m3"
+    rust_parser_name = "MinimaxM3ToolParser"
     tool_call_start_token = "]<]minimax[>[<tool_call>"
