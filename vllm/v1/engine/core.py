@@ -744,13 +744,14 @@ class EngineCore:
                 preset.
         """
 
-        if tags is not None and not tags:
-            return None
         if tags is not None:
+            if not tags:
+                raise ValueError(
+                    "sleep() got tags=[], expected None or non-empty tags."
+                )
             for tag in tags:
                 if tag not in ("weights", "kv_cache"):
-                    logger.warning("Tag %s is not sleepable.", tag)
-                    return None
+                    raise ValueError(f"Tag {tag} is not sleepable.")
 
         # Pause scheduler before sleeping.
         clear_prefix_cache = tags is not None or level >= 1
