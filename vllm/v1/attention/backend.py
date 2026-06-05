@@ -241,6 +241,10 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_kv_connector(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -283,6 +287,7 @@ class AttentionBackend(ABC):
         attn_type: str,
         use_non_causal: bool = False,
         use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -319,6 +324,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("non-causal attention not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
+        if use_kv_connector and not cls.supports_kv_connector():
+            invalid_reasons.append("KV connector not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -391,6 +398,11 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
+
+    positions: torch.Tensor | None = None
+    """(num_actual_tokens,) token positions.  Optional; set when the caller
+    has positions available so that builders can pre-compute position-dependent
+    metadata (e.g. C128A topk indices for DeepSeek V4)."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -796,14 +808,17 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
+    def fused_output_quant_supported(self, quant_key: "QuantKey") -> bool:
         """
         Does this attention implementation support fused output quantization.
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        :param quant_key: QuantKey object that describes the quantization op
-        :return: is fusion supported for this type of quantization
+        Args:
+            quant_key: QuantKey object that describes the quantization op
+
+        Returns:
+            is fusion supported for this type of quantization
         """
         return False
 

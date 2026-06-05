@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
@@ -16,16 +15,17 @@ class BlockTables:
         block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
-        max_model_len: int,
+        max_num_blocks_per_group: list[int],
         device: torch.device,
+        kernel_block_sizes: list[int],
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
     ):
         self.block_sizes = block_sizes
+        self.kernel_block_sizes = kernel_block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_model_len = max_model_len
         self.device = device
 
         self.cp_size = cp_size
@@ -33,32 +33,21 @@ class BlockTables:
         self.cp_interleave = cp_interleave
 
         self.num_kv_cache_groups = len(self.block_sizes)
+        assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
+
+        self.blocks_per_kv_block = [
+            bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
+        ]
+
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            block_size = self.block_sizes[i]
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            max_num_blocks = max_num_blocks_per_group[i] * self.blocks_per_kv_block[i]
             block_table = StagedWriteTensor(
-                (self.max_num_reqs, max_num_blocks),
-                dtype=torch.int32,
-                device=device,
+                (self.max_num_reqs, max_num_blocks), dtype=torch.int32, device=device
             )
             self.block_tables.append(block_table)
-        self.block_table_ptrs = self._make_ptr_tensor(
-            [b.gpu for b in self.block_tables]
-        )
-        self.block_table_strides = torch.tensor(
-            [b.gpu.stride(0) for b in self.block_tables],
-            dtype=torch.int64,
-            device=self.device,
-        )
 
-        self.block_sizes_tensor = torch.tensor(
-            self.block_sizes, dtype=torch.int32, device=self.device
-        )
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
@@ -69,7 +58,6 @@ class BlockTables:
         self.input_block_tables: list[torch.Tensor] = [
             torch.zeros_like(b.gpu) for b in self.block_tables
         ]
-        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
         self.slot_mappings = torch.zeros(
             self.num_kv_cache_groups,
@@ -78,11 +66,32 @@ class BlockTables:
             device=self.device,
         )
 
+        self.init_block_table_layout_tensors()
+
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
         return torch.tensor(
             [t.data_ptr() for t in x], dtype=torch.uint64, device=self.device
         )
+
+    def init_block_table_layout_tensors(self) -> None:
+        # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
+        # cache raw data_ptr() values that go stale once the underlying tensors
+        # are reallocated on wake; block_sizes_tensor needs re-populating
+        # because its storage lives under the kv_cache pool tag and comes back
+        # with undefined contents.
+        self.block_table_ptrs = self._make_ptr_tensor(
+            [b.gpu for b in self.block_tables]
+        )
+        self.block_table_strides = torch.tensor(
+            [b.gpu.stride(0) for b in self.block_tables],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.block_sizes_tensor = torch.tensor(
+            self.kernel_block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
         self,
@@ -93,6 +102,9 @@ class BlockTables:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
             block_ids = new_block_ids[i]
+            bpk = self.blocks_per_kv_block[i]
+            if bpk > 1:
+                block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
@@ -118,7 +130,6 @@ class BlockTables:
             self.num_blocks.gpu,
             self.num_blocks.gpu.stride(0),
             num_reqs,
-            self.input_block_tables[0].shape[1],  # max_num_blocks
             BLOCK_SIZE=1024,  # type: ignore
         )
         return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
@@ -178,7 +189,6 @@ def _gather_block_tables_kernel(
     num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     num_reqs,  # actual number of requests (for padding)
-    max_num_blocks,  # stride for zeroing padded rows
     BLOCK_SIZE: tl.constexpr,
 ):
     # kv cache group id
@@ -186,6 +196,7 @@ def _gather_block_tables_kernel(
     batch_idx = tl.program_id(1)
 
     stride = tl.load(block_table_strides + group_id)
+    max_num_blocks = stride  # stride equals max_num_blocks for this group.
     dst_block_table_ptr = _load_ptr(dst_block_table_ptrs + group_id, tl.int32)
     dst_row_ptr = dst_block_table_ptr + batch_idx * stride
 
