@@ -10,7 +10,6 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -22,6 +21,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
@@ -32,7 +32,7 @@ class OpenAIServingTokenization(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
-        openai_serving_render: OpenAIServingRender,
+        online_renderer: OnlineRenderer,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -46,7 +46,7 @@ class OpenAIServingTokenization(OpenAIServing):
             request_logger=request_logger,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
@@ -71,7 +71,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 if request.tools is None
                 else [tool.model_dump() for tool in request.tools]
             )
-            error_check_ret = self.openai_serving_render.validate_chat_template(
+            error_check_ret = self.online_renderer.validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,
                 trust_request_chat_template=self.trust_request_chat_template,
@@ -79,7 +79,7 @@ class OpenAIServingTokenization(OpenAIServing):
             if error_check_ret is not None:
                 return error_check_ret
 
-            _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+            _, engine_inputs = await self.online_renderer.preprocess_chat(
                 request,
                 request.messages,
                 default_template=self.chat_template,
@@ -89,7 +89,7 @@ class OpenAIServingTokenization(OpenAIServing):
                 skip_mm_cache=True,
             )
         else:
-            engine_inputs = await self.openai_serving_render.preprocess_completion(
+            engine_inputs = await self.online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=None,

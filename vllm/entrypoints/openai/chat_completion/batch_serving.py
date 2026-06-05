@@ -62,7 +62,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        render = self.openai_serving_render
+        render = self.online_renderer
 
         if not render.use_harmony:
             # Common case: validate the chat template once for the whole batch.

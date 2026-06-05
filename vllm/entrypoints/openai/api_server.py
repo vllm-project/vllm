@@ -32,7 +32,7 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -54,6 +54,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
@@ -365,7 +366,7 @@ async def init_app_state(
     )
     await state.openai_serving_models.init_static_loras()
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
         model_registry=state.openai_serving_models.registry,
@@ -381,10 +382,16 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
+    state.serving_renderer = ServingRender(
+        model_config=engine_client.model_config,
+        model_registry=state.openai_serving_models.registry,
+        online_renderer=state.online_renderer,
+    )
+
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         state.openai_serving_models,
-        state.openai_serving_render,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -429,7 +436,6 @@ async def init_render_app_state(
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
@@ -449,7 +455,7 @@ async def init_render_app_state(
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,
         renderer=renderer,
         model_registry=model_registry,
@@ -465,10 +471,16 @@ async def init_render_app_state(
         log_error_stack=args.log_error_stack,
     )
 
+    state.serving_renderer = ServingRender(
+        model_config=vllm_config.model_config,
+        model_registry=model_registry,
+        online_renderer=state.online_renderer,
+    )
+
     state.openai_serving_models = model_registry
 
     # Expose tokenization via the render handler (no engine required).
-    state.openai_serving_tokenization = state.openai_serving_render
+    state.openai_serving_tokenization = state.online_renderer
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
