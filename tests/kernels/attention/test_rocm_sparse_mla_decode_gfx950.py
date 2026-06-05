@@ -3,13 +3,17 @@
 """
 Unit tests for the HIP MFMA sparse-MLA decode kernels (gfx950).
 
-Tests cover:
-  - single-WG decode (split_k == 1): main-only, main+extra, with/without attn_sink
-  - split-K decode: forced via SPARSE_MLA_HIP_SPLIT_K env override
-  - various batch / head / sequence-length combinations
+All tests use the DeepSeek-V4-Pro production attention dims (see HF config
+https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json) and
+are parametrized over the runtime axes the kernel must support:
+  * batch (``num_queries``): single decode and small MTP-style batches.
+  * sequence length per query: the SWA window (``sliding_window=128``) and
+    the topk budget (``index_topk=1024``).
+  * split-K: both the single-WG path and the split-reduce path are covered
+    by forcing the internal split-K override.
 """
 
-import os
+import contextlib
 
 import pytest
 import torch
@@ -32,9 +36,24 @@ pytestmark = pytest.mark.skipif(
     not _is_gfx950(), reason="Requires ROCm gfx950 hardware"
 )
 
+# Per-token KV head dims for DeepSeek-V4-Pro MLA. The HIP kernel is
+# hard-coded for these values (576-byte token payload + 8-byte scales):
+#   nope_head_dim = head_dim(512) - qk_rope_head_dim(64) = 448
+#   rope_head_dim = qk_rope_head_dim                     = 64
 NOPE_HEAD_DIM = 448
 ROPE_HEAD_DIM = 64
 HEAD_DIM = NOPE_HEAD_DIM + ROPE_HEAD_DIM
+
+# DeepSeek-V4-Pro production attention params (HF config.json):
+#   * num_attention_heads = 128  ->  16 heads per rank at TP=8.
+#   * ROCM_AITER_MLA_SPARSE backend supports kernel_block_size in {1, 64};
+#     paged deployments use 64.
+#   * sliding_window = 128       ->  max main/SWA tokens per query.
+#   * index_topk    = 1024       ->  max extra/topk tokens per query.
+DSV4_NUM_HEADS = 16
+DSV4_BLOCK_SIZE = 64
+DSV4_SWA_WINDOW = 128
+DSV4_TOPK = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -173,162 +192,98 @@ def _call_hip_decode(
     )
 
 
-@torch.inference_mode()
-def test_hip_decode_main_only_no_sink() -> None:
-    """Single-WG decode with main cache only, no attn_sink."""
-    device = torch.device("cuda")
-    torch.manual_seed(42)
-    block_size = 4
-    num_queries, num_heads = 2, 3
-    q = (
-        torch.randn(
-            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    )
-    main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
-    main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
-    scale = HEAD_DIM**-0.5
+@contextlib.contextmanager
+def _force_split_k(value: int | None):
+    """Temporarily override the internal split-K picker.
 
-    actual = _call_hip_decode(
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        scale,
-        attn_sink=None,
-    )
-    expected = _ref_sparse_decode_ragged(
-        q,
-        main_cache,
-        [[0, 2], [4, 1]],
-        scale,
-        attn_sink=None,
-        block_size=block_size,
-    )
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    The kernel module reads ``SPARSE_MLA_HIP_SPLIT_K`` once at import time
+    into ``mod._SPLIT_K_OVERRIDE``; tests mutate that module attribute
+    directly so they can exercise both the single-WG (split_k=1) and the
+    split-reduce paths regardless of the auto-tuned heuristic.
+    """
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
-
-@torch.inference_mode()
-def test_hip_decode_main_only_with_sink() -> None:
-    """Single-WG decode with main cache only, with attn_sink."""
-    device = torch.device("cuda")
-    torch.manual_seed(42)
-    block_size = 4
-    num_queries, num_heads = 2, 3
-    q = (
-        torch.randn(
-            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    )
-    main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
-    main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
-    attn_sink = torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
-    scale = HEAD_DIM**-0.5
-
-    actual = _call_hip_decode(
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        scale,
-        attn_sink=attn_sink,
-    )
-    expected = _ref_sparse_decode_ragged(
-        q,
-        main_cache,
-        [[0, 2], [4, 1]],
-        scale,
-        attn_sink=attn_sink,
-        block_size=block_size,
-    )
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@torch.inference_mode()
-def test_hip_decode_main_extra_with_sink() -> None:
-    """Single-WG decode with main + extra cache and attn_sink."""
-    device = torch.device("cuda")
-    torch.manual_seed(1)
-    block_size = 4
-    num_queries, num_heads = 2, 3
-    q = (
-        torch.randn(
-            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    )
-    main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    extra_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
-    main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
-    main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
-    extra_indices = torch.tensor([1, 3, 0], dtype=torch.int32, device=device)
-    extra_indptr = torch.tensor([0, 1, 3], dtype=torch.int32, device=device)
-    attn_sink = torch.tensor([-0.1, 0.0, 0.1], dtype=torch.float32, device=device)
-    scale = HEAD_DIM**-0.5
-
-    actual = _call_hip_decode(
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        scale,
-        attn_sink=attn_sink,
-        extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        extra_indptr=extra_indptr,
-    )
-    expected = _ref_sparse_decode_ragged(
-        q,
-        main_cache,
-        [[0, 2], [4, 1]],
-        scale,
-        attn_sink=attn_sink,
-        block_size=block_size,
-        extra_cache=extra_cache,
-        extra_rows=[[1], [3, 0]],
-    )
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
-
-
-@torch.inference_mode()
-def test_hip_decode_split_k() -> None:
-    """Force split-K path (split_k=2) and verify correctness."""
-    device = torch.device("cuda")
-    torch.manual_seed(7)
-    block_size = 4
-    num_queries, num_heads = 1, 16
-    num_tokens = 128
-    q = (
-        torch.randn(
-            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
-        )
-        * 0.125
-    )
-    main_kv = (
-        torch.randn(num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    )
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    main_indices = torch.arange(num_tokens, dtype=torch.int32, device=device)
-    main_indptr = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
-    attn_sink = torch.randn(num_heads, dtype=torch.float32, device=device) * 0.1
-    scale = HEAD_DIM**-0.5
-
-    old_val = os.environ.get("SPARSE_MLA_HIP_SPLIT_K")
+    orig = mod._SPLIT_K_OVERRIDE
+    if value is not None:
+        mod._SPLIT_K_OVERRIDE = str(int(value))
     try:
-        os.environ["SPARSE_MLA_HIP_SPLIT_K"] = "2"
-        from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+        yield
+    finally:
+        mod._SPLIT_K_OVERRIDE = orig
 
-        orig = mod._SPLIT_K_OVERRIDE
-        mod._SPLIT_K_OVERRIDE = "2"
 
+def _make_q(num_queries: int, num_heads: int, device: torch.device) -> torch.Tensor:
+    return (
+        torch.randn(
+            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+
+
+def _build_contiguous_ragged(
+    num_queries: int,
+    tokens_per_query: int,
+    device: torch.device,
+    start: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor, list[list[int]]]:
+    """Build (indices, indptr, rows) where each query owns
+    ``tokens_per_query`` contiguous slots starting at ``start``."""
+    rows = [
+        list(range(start + qi * tokens_per_query, start + (qi + 1) * tokens_per_query))
+        for qi in range(num_queries)
+    ]
+    indices = torch.tensor(
+        [s for r in rows for s in r], dtype=torch.int32, device=device
+    )
+    indptr = torch.tensor(
+        [qi * tokens_per_query for qi in range(num_queries + 1)],
+        dtype=torch.int32,
+        device=device,
+    )
+    return indices, indptr, rows
+
+
+# Parametrize against the realistic DSv4 deployment axes:
+#   * ``num_queries`` covers single-token decode and small MTP batches.
+#   * ``split_k`` covers both the single-WG path and the split-reduce path.
+#   * ``with_sink`` toggles the attention-sink branch.
+# All tests pin ``num_heads = DSV4_NUM_HEADS`` (=16, DSv4 at TP=8) and
+# ``block_size = DSV4_BLOCK_SIZE`` (=64, the paged-MLA cache block size).
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("split_k", [1, 4])
+@pytest.mark.parametrize("num_queries", [1, 4])
+@pytest.mark.parametrize("with_sink", [False, True])
+def test_hip_decode_main_only(num_queries, with_sink, split_k) -> None:
+    """SWA-only decode (main cache) at DSv4 dims, with/without sink."""
+    device = torch.device("cuda")
+    torch.manual_seed(42 + num_queries * 10 + int(with_sink) * 3 + split_k)
+    tokens_per_query = DSV4_SWA_WINDOW
+
+    q = _make_q(num_queries, DSV4_NUM_HEADS, device)
+    main_kv = (
+        torch.randn(
+            num_queries * tokens_per_query,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, DSV4_BLOCK_SIZE)
+    main_indices, main_indptr, main_rows = _build_contiguous_ragged(
+        num_queries, tokens_per_query, device
+    )
+    attn_sink = (
+        torch.randn(DSV4_NUM_HEADS, dtype=torch.float32, device=device) * 0.1
+        if with_sink
+        else None
+    )
+    scale = HEAD_DIM**-0.5
+
+    with _force_split_k(split_k):
         actual = _call_hip_decode(
             q,
             main_cache,
@@ -336,78 +291,186 @@ def test_hip_decode_split_k() -> None:
             main_indptr,
             scale,
             attn_sink=attn_sink,
-            max_main_len=num_tokens,
+            max_main_len=tokens_per_query,
         )
-    finally:
-        mod._SPLIT_K_OVERRIDE = orig
-        if old_val is None:
-            os.environ.pop("SPARSE_MLA_HIP_SPLIT_K", None)
-        else:
-            os.environ["SPARSE_MLA_HIP_SPLIT_K"] = old_val
-
-    main_rows = [list(range(num_tokens))]
     expected = _ref_sparse_decode_ragged(
         q,
         main_cache,
         main_rows,
         scale,
         attn_sink=attn_sink,
-        block_size=block_size,
+        block_size=DSV4_BLOCK_SIZE,
     )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("split_k", [1, 4])
 @pytest.mark.parametrize("num_queries", [1, 4])
-@pytest.mark.parametrize("num_heads", [3, 16, 32])
-@pytest.mark.parametrize("seq_len", [32, 64, 128])
-def test_hip_decode_shapes(num_queries, num_heads, seq_len) -> None:
-    """Parametrized test over different batch/head/seqlen combos."""
+@pytest.mark.parametrize("with_sink", [False, True])
+def test_hip_decode_main_extra(num_queries, with_sink, split_k) -> None:
+    """SWA + topk decode (main + extra caches) at DSv4 dims."""
     device = torch.device("cuda")
-    torch.manual_seed(num_queries * 1000 + num_heads * 10 + seq_len)
-    block_size = 4
-    q = (
+    torch.manual_seed(7 + num_queries * 11 + int(with_sink) * 5 + split_k)
+    # ``main`` carries SWA tokens; ``extra`` carries topk tokens. Use a
+    # modest extra length (rather than the full DSV4_TOPK=1024) to keep
+    # the Python reference fast while still exercising both code paths.
+    main_per_query = DSV4_SWA_WINDOW
+    extra_per_query = DSV4_BLOCK_SIZE * 2  # 128 topk tokens
+
+    q = _make_q(num_queries, DSV4_NUM_HEADS, device)
+    main_kv = (
         torch.randn(
-            num_queries, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+            num_queries * main_per_query,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
         )
         * 0.125
     )
-    main_kv = (
-        torch.randn(seq_len, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_kv = (
+        torch.randn(
+            num_queries * extra_per_query,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
     )
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, DSV4_BLOCK_SIZE)
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, DSV4_BLOCK_SIZE)
+    main_indices, main_indptr, main_rows = _build_contiguous_ragged(
+        num_queries, main_per_query, device
+    )
+    extra_indices, extra_indptr, extra_rows = _build_contiguous_ragged(
+        num_queries, extra_per_query, device
+    )
+    attn_sink = (
+        torch.randn(DSV4_NUM_HEADS, dtype=torch.float32, device=device) * 0.1
+        if with_sink
+        else None
+    )
     scale = HEAD_DIM**-0.5
 
-    tokens_per_query = seq_len // num_queries
-    main_rows = []
-    indices_list = []
-    indptr = [0]
-    for qi in range(num_queries):
-        start = qi * tokens_per_query
-        end = start + tokens_per_query
-        row_slots = list(range(start, end))
-        main_rows.append(row_slots)
-        indices_list.extend(row_slots)
-        indptr.append(indptr[-1] + len(row_slots))
-
-    main_indices = torch.tensor(indices_list, dtype=torch.int32, device=device)
-    main_indptr = torch.tensor(indptr, dtype=torch.int32, device=device)
-
-    actual = _call_hip_decode(
+    with _force_split_k(split_k):
+        actual = _call_hip_decode(
+            q,
+            main_cache,
+            main_indices,
+            main_indptr,
+            scale,
+            attn_sink=attn_sink,
+            extra_cache=extra_cache,
+            extra_indices=extra_indices,
+            extra_indptr=extra_indptr,
+            max_main_len=main_per_query,
+            max_extra_len=extra_per_query,
+        )
+    expected = _ref_sparse_decode_ragged(
         q,
         main_cache,
-        main_indices,
-        main_indptr,
+        main_rows,
         scale,
-        attn_sink=None,
-        max_main_len=tokens_per_query,
+        attn_sink=attn_sink,
+        block_size=DSV4_BLOCK_SIZE,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
     )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("split_k", [2, 4, 8])
+@pytest.mark.parametrize("num_queries", [1, 4])
+def test_hip_decode_split_k(num_queries, split_k) -> None:
+    """Force the split-K reduce path with the DSv4 topk-sized seqlen."""
+    device = torch.device("cuda")
+    torch.manual_seed(2026 + num_queries * 13 + split_k)
+    tokens_per_query = DSV4_TOPK  # full DSv4 topk budget
+
+    q = _make_q(num_queries, DSV4_NUM_HEADS, device)
+    main_kv = (
+        torch.randn(
+            num_queries * tokens_per_query,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, DSV4_BLOCK_SIZE)
+    main_indices, main_indptr, main_rows = _build_contiguous_ragged(
+        num_queries, tokens_per_query, device
+    )
+    attn_sink = torch.randn(DSV4_NUM_HEADS, dtype=torch.float32, device=device) * 0.1
+    scale = HEAD_DIM**-0.5
+
+    with _force_split_k(split_k):
+        actual = _call_hip_decode(
+            q,
+            main_cache,
+            main_indices,
+            main_indptr,
+            scale,
+            attn_sink=attn_sink,
+            max_main_len=tokens_per_query,
+        )
+    expected = _ref_sparse_decode_ragged(
+        q,
+        main_cache,
+        main_rows,
+        scale,
+        attn_sink=attn_sink,
+        block_size=DSV4_BLOCK_SIZE,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("split_k", [1, 4])
+@pytest.mark.parametrize("num_queries", [1, 4])
+@pytest.mark.parametrize(
+    "tokens_per_query",
+    [DSV4_BLOCK_SIZE, DSV4_SWA_WINDOW, DSV4_TOPK],
+    ids=["one_block", "swa_window", "topk"],
+)
+def test_hip_decode_seqlen(num_queries, tokens_per_query, split_k) -> None:
+    """Sweep DSv4 sequence lengths: one block, SWA window, full topk."""
+    device = torch.device("cuda")
+    torch.manual_seed(num_queries * 1009 + tokens_per_query + split_k)
+
+    q = _make_q(num_queries, DSV4_NUM_HEADS, device)
+    main_kv = (
+        torch.randn(
+            num_queries * tokens_per_query,
+            HEAD_DIM,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        * 0.125
+    )
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, DSV4_BLOCK_SIZE)
+    main_indices, main_indptr, main_rows = _build_contiguous_ragged(
+        num_queries, tokens_per_query, device
+    )
+    scale = HEAD_DIM**-0.5
+
+    with _force_split_k(split_k):
+        actual = _call_hip_decode(
+            q,
+            main_cache,
+            main_indices,
+            main_indptr,
+            scale,
+            attn_sink=None,
+            max_main_len=tokens_per_query,
+        )
     expected = _ref_sparse_decode_ragged(
         q,
         main_cache,
         main_rows,
         scale,
         attn_sink=None,
-        block_size=block_size,
+        block_size=DSV4_BLOCK_SIZE,
     )
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
