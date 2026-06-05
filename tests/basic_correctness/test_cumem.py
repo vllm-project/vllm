@@ -177,6 +177,43 @@ def test_end_to_end(model: str):
     assert output[0].outputs[0].text == output3[0].outputs[0].text
 
 
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_sleep_wake_memory_tags():
+    model = "Qwen/Qwen3-0.6B"
+    kv_cache_bytes = 8 * GiB_bytes
+    llm = LLM(
+        model,
+        enable_sleep_mode=True,
+        kv_cache_memory_bytes=kv_cache_bytes,
+    )
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    free_gpu_bytes_before_release = torch.cuda.mem_get_info()[0]
+    llm.sleep(tags=["kv_cache"])
+
+    free_gpu_bytes_after_release, _ = torch.cuda.mem_get_info()
+    released_bytes = free_gpu_bytes_after_release - free_gpu_bytes_before_release
+    assert released_bytes >= kv_cache_bytes * 0.99
+
+    free_gpu_bytes_before_resume = torch.cuda.mem_get_info()[0]
+    llm.wake_up(tags=["kv_cache"])
+    free_gpu_bytes_after_resume = torch.cuda.mem_get_info()[0]
+    resumed_bytes = free_gpu_bytes_before_resume - free_gpu_bytes_after_resume
+    assert resumed_bytes >= kv_cache_bytes * 0.99
+
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    free_gpu_bytes_before_weight_release = torch.cuda.mem_get_info()[0]
+    llm.sleep(tags=["weights"])
+    free_gpu_bytes_after_weight_release = torch.cuda.mem_get_info()[0]
+    assert free_gpu_bytes_after_weight_release > free_gpu_bytes_before_weight_release
+
+    llm.wake_up(tags=["weights"])
+
+
 @create_new_process_for_each_test()
 def test_deep_sleep():
     model = "hmellor/tiny-random-LlamaForCausalLM"

@@ -161,26 +161,41 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(
+        self,
+        level: int = 1,
+        tags: list[str] | None = None,
+    ) -> None:
+        tags_to_sleep = tags if tags is not None else ["weights", "kv_cache"]
+        if not tags_to_sleep:
+            logger.info("No memory tags to sleep.")
+            return
+
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
-        if level == 2:
+        if tags is None and level == 2:
             model = self.model_runner.model
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        allocator.sleep(
+            tags=tags_to_sleep,
+            offload_tags=("weights",) if tags is None and level == 1 else tuple(),
+        )
+
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
+            "Sleep mode released tags %s and freed %s GiB memory, "
+            "%s GiB memory is still in use.",
+            tags_to_sleep,
             format_gib(freed_bytes),
             format_gib(used_bytes),
         )
@@ -191,8 +206,8 @@ class Worker(WorkerBase):
         allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags)
 
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        wake_up_weights = tags is None or "weights" in tags
+        if len(self._sleep_saved_buffers) and wake_up_weights:
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:

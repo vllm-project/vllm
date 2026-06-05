@@ -724,7 +724,12 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        tags: list[str] | None = None,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -735,18 +740,28 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+            tags: Optional memory tags to sleep instead of using a level
+                preset.
         """
 
+        if tags is not None and not tags:
+            return None
+        if tags is not None:
+            for tag in tags:
+                if tag not in ("weights", "kv_cache"):
+                    logger.warning("Tag %s is not sleepable.", tag)
+                    return None
+
         # Pause scheduler before sleeping.
-        clear_prefix_cache = level >= 1
+        clear_prefix_cache = tags is not None or level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
-        if level < 1:
+        if tags is None and level < 1:
             return pause_future
 
-        # Level 1+: Delegate to executor for GPU memory management
+        # Level 1+ or explicit tags: Delegate to executor for GPU memory management
         model_executor = self.model_executor
         if pause_future is None:
-            model_executor.sleep(level)
+            model_executor.sleep(level, tags=tags)
             return None
 
         future = Future[Any]()
@@ -754,7 +769,7 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                future.set_result(model_executor.sleep(level, tags=tags))
             except Exception as e:
                 future.set_exception(e)
 

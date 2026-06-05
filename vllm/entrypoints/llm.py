@@ -804,7 +804,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        tags: list[str] | None = None,
+    ):
         """
         Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
@@ -826,8 +831,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
+            tags: Optional memory tags to sleep instead of using a level
+                preset. Values must be in `("weights", "kv_cache")`. If tags
+                are provided, they take precedence over the level preset.
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, tags=tags)
 
     def wake_up(self, tags: list[str] | None = None):
         """

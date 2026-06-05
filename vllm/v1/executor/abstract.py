@@ -315,20 +315,34 @@ class Executor(ABC):
         """Reset the encoder cache in each worker to clear cached encoder outputs."""
         self.collective_rpc("reset_encoder_cache")
 
-    def sleep(self, level: int = 1):
-        if self.is_sleeping:
-            logger.warning("Executor is already sleeping.")
+    def sleep(
+        self,
+        level: int = 1,
+        tags: list[str] | None = None,
+    ) -> None:
+        tags_to_sleep = ["weights", "kv_cache"] if tags is None else tags
+        tags_to_sleep = [tag for tag in tags_to_sleep if tag not in self.sleeping_tags]
+        if not tags_to_sleep:
+            logger.info("Memory tags %s are already sleeping.", tags)
             return
         time_before_sleep = time.perf_counter()
-        self.collective_rpc("sleep", kwargs=dict(level=level))
+        self.collective_rpc(
+            "sleep",
+            kwargs=dict(level=level, tags=tags_to_sleep if tags is not None else None),
+        )
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
-        self.is_sleeping = True
+        self.sleeping_tags.update(tags_to_sleep)
+        self.is_sleeping = bool(self.sleeping_tags)
         logger.info(
-            "It took %.6f seconds to fall asleep.", time_after_sleep - time_before_sleep
+            "It took %.6f seconds to sleep memory tags %s.",
+            time_after_sleep - time_before_sleep,
+            tags_to_sleep,
         )
 
-    def wake_up(self, tags: list[str] | None = None):
+    def wake_up(
+        self,
+        tags: list[str] | None = None,
+    ) -> None:
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
