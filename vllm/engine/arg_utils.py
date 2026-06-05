@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -462,6 +463,7 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
+    device_ids: str | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -970,6 +972,15 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
+        )
+        parallel_group.add_argument(
+            "--device-ids",
+            type=str,
+            default=None,
+            help="Comma-separated physical GPU device IDs to use "
+            '(e.g. --device-ids "2,3,5,7"). Avoids setting '
+            "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
+            "visibility for GPU-NIC affinity and DeepGEMM.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1699,6 +1710,18 @@ class EngineArgs:
         )
         return SpeculativeConfig(**self.speculative_config)
 
+    def _resolve_device_ids(self) -> list[int] | None:
+        if not self.device_ids:
+            return None
+        ids = [int(x) for x in self.device_ids.split(",")]
+        # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
+        # --device-ids values as indices into the CVD-visible set.
+        cvd = os.environ.get(current_platform.device_control_env_var)
+        if cvd and cvd != "":
+            cvd_ids = [int(x) for x in cvd.split(",")]
+            ids = [cvd_ids[i] for i in ids]
+        return ids
+
     def create_engine_config(
         self,
         usage_context: UsageContext | None = None,
@@ -2004,6 +2027,7 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            assigned_gpu_ids=self._resolve_device_ids(),
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,

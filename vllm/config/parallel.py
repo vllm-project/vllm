@@ -294,11 +294,12 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
-    assigned_gpu_ids: list[int] | None = Field(default=None, exclude=True)
-    """Physical GPU device IDs assigned to this worker group. Populated by
-    executors before worker init. Workers index into this with local_rank to
-    get their physical CUDA device index, avoiding the need to set
-    CUDA_VISIBLE_DEVICES. When None, falls back to identity mapping."""
+    assigned_gpu_ids: list[int] | None = None
+    """Physical GPU device IDs to use. Workers address these devices
+    directly instead of relying on CUDA_VISIBLE_DEVICES, preserving
+    full GPU topology visibility (needed for GPU-NIC affinity in RDMA
+    and DeepGEMM MegaMoE init). Example: ``[2, 3]`` makes vLLM use
+    only GPUs 2 and 3. When None, uses all visible devices in order."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
