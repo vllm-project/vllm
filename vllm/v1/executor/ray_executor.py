@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
 import os
 from collections import defaultdict
 from collections.abc import Callable
@@ -347,14 +346,9 @@ class RayDistributedExecutor(Executor):
         all_kwargs = []
         for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
-            # Shallow-copy so each worker gets its node's assigned_gpu_ids
-            # without mutating the shared config (matters for multi-node).
-            worker_pc = copy.copy(self.vllm_config.parallel_config)
-            worker_pc.assigned_gpu_ids = sorted(node_gpus[node_id])
-            worker_config = copy.copy(self.vllm_config)
-            worker_config.parallel_config = worker_pc
             kwargs = dict(
-                vllm_config=worker_config,
+                vllm_config=self.vllm_config,
+                assigned_gpu_ids=sorted(node_gpus[node_id]),
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,

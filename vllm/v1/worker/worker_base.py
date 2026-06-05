@@ -286,6 +286,10 @@ class WorkerWrapperBase:
                     extended_calls,
                 )
 
+        assigned_gpu_ids = kwargs.pop("assigned_gpu_ids", None)
+        if assigned_gpu_ids is not None:
+            vllm_config.parallel_config.assigned_gpu_ids = assigned_gpu_ids
+
         shared_worker_lock = kwargs.pop("shared_worker_lock", None)
         if shared_worker_lock is None:
             msg = (
