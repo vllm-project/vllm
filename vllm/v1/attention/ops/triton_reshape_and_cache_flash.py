@@ -43,10 +43,10 @@ def _float_to_e4m3fn_bits(x):
     subnormal_mant = tl.floor(x * 512.0 + 0.5).to(tl.int32)
     subnormal_mant = tl.minimum(subnormal_mant, 7)
 
-    exp_unbiased = tl.floor(tl.log2(x_safe)).to(tl.int32)
+    x_bits = x_safe.to(tl.uint32, bitcast=True)
+    exp_unbiased = ((x_bits >> 23) & 0xFF).to(tl.int32) - 127
     exp_bits = exp_unbiased + 7
-    base = tl.exp2(exp_unbiased.to(tl.float32))
-    mant = tl.floor(((x / base) - 1.0) * 8.0 + 0.5).to(tl.int32)
+    mant = (((x_bits & 0x7FFFFF) + 0x80000) >> 20).to(tl.int32)
     exp_bits += mant >> 3
     mant = mant & 7
 
@@ -57,19 +57,19 @@ def _float_to_e4m3fn_bits(x):
 
 
 @triton.jit
-def _e4m3fn_bits_to_float(bits):
-    bits_i32 = bits.to(tl.int32)
-    payload = bits_i32 & 0x7F
+def _nvfp4_scale_bits_to_float(bits):
+    # NVFP4 block scales are generated from absmax values, so they are
+    # non-negative.  Keep this scale-specific helper positive-only instead of
+    # exposing it as a general signed E4M3 decoder.
+    payload = bits.to(tl.int32) & 0x7F
     exp_bits = (payload >> 3) & 0x0F
     mant = payload & 0x07
 
+    normal_bits = ((exp_bits + 120) << 23) | (mant << 20)
+    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
     subnormal = mant.to(tl.float32) / 512.0
-    normal = (1.0 + mant.to(tl.float32) * 0.125) * tl.exp2(
-        (exp_bits - 7).to(tl.float32)
-    )
     value = tl.where(exp_bits == 0, subnormal, normal)
-    value = tl.where(payload == 0, 0.0, value)
-    return tl.where((bits_i32 & 0x80) != 0, -value, value)
+    return tl.where(payload == 0, 0.0, value)
 
 
 @triton.jit
@@ -183,8 +183,8 @@ def _reshape_cache_nvfp4_kernel(
     k_block_scale_bits = _float_to_e4m3fn_bits((k_quant_scale * k_vec_max) / 6.0)
     v_block_scale_bits = _float_to_e4m3fn_bits((v_quant_scale * v_vec_max) / 6.0)
 
-    k_block_scale_f32 = _e4m3fn_bits_to_float(k_block_scale_bits)
-    v_block_scale_f32 = _e4m3fn_bits_to_float(v_block_scale_bits)
+    k_block_scale_f32 = _nvfp4_scale_bits_to_float(k_block_scale_bits)
+    v_block_scale_f32 = _nvfp4_scale_bits_to_float(v_block_scale_bits)
     k_output_scale = tl.where(
         k_block_scale_f32 == 0.0, 0.0, k_quant_scale / k_block_scale_f32
     )
