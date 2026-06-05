@@ -1316,7 +1316,7 @@ def try_get_optimal_moe_config(
     else:
         # First try to load optimal config from the file
         E, _, N = w2_shape
-        if dtype == "int4_w4a16":
+        if dtype in ("int4_w4a16", "nvfp4"):
             N = N * 2
         block_n = block_shape[0] if block_shape else 0
         block_k = block_shape[1] if block_shape else 0

@@ -65,7 +65,7 @@ def _dequantize_nvfp4_kernel(
     """
     BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
 
-    row_idx = tl.program_id(0)
+    row_idx = tl.program_id(0).to(tl.int64)
     tile_idx = tl.program_id(1)
 
     if has_batch_global_scale:
