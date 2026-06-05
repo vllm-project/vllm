@@ -317,6 +317,34 @@ class GELU(CustomOp):
         return self.forward_native(x)
 
 
+# --8<-- [start:gelu_tanh]
+@CustomOp.register("gelu_tanh")
+class GELUTanh(CustomOp):
+    # --8<-- [end:gelu_tanh]
+
+    def __init__(self):
+        super().__init__()
+        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and hasattr(
+            torch.ops._C, "gelu_tanh"
+        ):
+            self.op = torch.ops._C.gelu_tanh
+        else:
+            self.op = None
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="tanh")
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if self.op:
+            out = torch.empty_like(x)
+            self.op(out, x)
+            return out
+        return self.forward_native(x)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
 # --8<-- [start:gelu_and_mul]
 @CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
@@ -367,6 +395,9 @@ class GeluAndMul(CustomOp):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)
@@ -722,7 +753,8 @@ _ACTIVATION_REGISTRY = LazyDict(
 
 
 def _get_gelu_pytorch_tanh() -> nn.Module:
-    """Get PyTorch GELU with tanh approximation, with ROCm fallback."""
+    """Get PyTorch GELU with tanh approximation, with ROCm fallback
+    and fast GELU for ARM."""
     if current_platform.is_rocm():
         # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
         logger.warning_once(
@@ -730,6 +762,8 @@ def _get_gelu_pytorch_tanh() -> nn.Module:
             "Falling back to GELU(approximate='none')."
         )
         return nn.GELU(approximate="none")
+    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+        return GELUTanh()
     return nn.GELU(approximate="tanh")
 
 
