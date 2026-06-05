@@ -661,6 +661,8 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
             # Only register group quant patterns on CUDA/ROCm where the C++ op exists
+            if not hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+                continue
             for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                 for has_col_major_scales in [True, False]:
                     for is_e8m0 in [True, False]:
