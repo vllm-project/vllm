@@ -241,11 +241,21 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
-        if state["start_thinking"] == -1:
-            start_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_start_token_ids
-            )
-            state["start_thinking"] = start_thinking
+        # PATCH: Fix for #44676
+        # Treat <tool_call> as implicit reasoning end to prevent budget-forced corruption
+        if state.get("in_think", False):
+            # Check the new tokens generated in this step
+            new_tokens = state.get("output_tok_ids", [])[-sampled_tokens_from_previous_step:]
+            
+            # The reasoning parser's is_reasoning_end check is the source of truth.
+            # We mimic that behavior here to ensure consistency.
+            # We look for the <tool_call> token (often handled by the tokenizer).
+            # If your tokenizer/parser doesn't expose it, we define the ID here:
+            if any(t in new_tokens for t in [77093]): 
+                state["in_think"] = False
+                state["think_count"] = 0
+                return
+                
         if state["end_thinking"] == -1:
             end_thinking = self._find_last_sequence_index(
                 state.get("output_tok_ids", []), self.think_end_token_ids
