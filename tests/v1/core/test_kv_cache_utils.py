@@ -358,6 +358,43 @@ def test_free_kv_cache_block_queue_append_n():
     )
 
 
+def test_free_kv_cache_block_queue_prepend_n():
+    # Seed the queue with one block so prepend has an existing head to splice
+    # in front of (fake_head->b0->fake_tail).
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    queue = FreeKVCacheBlockQueue(blocks[0:1])
+
+    # Prepend 0 blocks is a no-op.
+    queue.prepend_n([])
+    assert queue.num_free_blocks == 1
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+
+    # Prepend 2 blocks; they land in front of the existing head, in order.
+    # fake_head->b4->b5->b0->fake_tail
+    queue.prepend_n(blocks[4:6])
+    assert queue.num_free_blocks == 3
+    assert queue.fake_free_list_head.next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is queue.fake_free_list_head
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is blocks[5]
+    assert blocks[0].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[0]
+
+    # A second prepend goes ahead of everything previously prepended.
+    # fake_head->b1->b2->b4->b5->b0->fake_tail
+    queue.prepend_n(blocks[1:3])
+    assert queue.num_free_blocks == 5
+    assert queue.fake_free_list_head.next_free_block is blocks[1]
+    assert blocks[1].next_free_block is blocks[2]
+    assert blocks[2].next_free_block is blocks[4]
+
+    # The popleft order reflects the front-to-back queue order.
+    assert [queue.popleft().block_id for _ in range(5)] == [1, 2, 4, 5, 0]
+    assert queue.num_free_blocks == 0
+
+
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
     # Create an empty FreeKVCacheBlockQueue with these blocks
