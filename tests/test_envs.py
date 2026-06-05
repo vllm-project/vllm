@@ -36,6 +36,17 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_vllm_api_key_is_not_compile_factor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # VLLM_API_KEY is a server bearer-token secret. compile_factors() is
+    # written to cache_key_factors.json on disk and logged at DEBUG level,
+    # so the raw value must not be included.
+    monkeypatch.setenv("VLLM_API_KEY", "sk-test-secret-do-not-leak")
+
+    assert "VLLM_API_KEY" not in envs.compile_factors()
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
