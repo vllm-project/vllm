@@ -80,29 +80,9 @@ logger = init_logger(__name__)
 def _get_stt_preprocess_max_workers() -> int:
     default_workers = max(1, min(os.cpu_count() or 1, 2))
     configured_workers = os.getenv("VLLM_STT_PREPROCESS_MAX_WORKERS")
-    if configured_workers is None:
-        return default_workers
-
-    try:
-        workers = int(configured_workers)
-    except ValueError:
-        logger.warning(
-            "Invalid VLLM_STT_PREPROCESS_MAX_WORKERS=%r; using %d worker(s).",
-            configured_workers,
-            default_workers,
-        )
-        return default_workers
-
-    if workers < 1:
-        logger.warning(
-            "Expected VLLM_STT_PREPROCESS_MAX_WORKERS to be >= 1, got %d; "
-            "using %d worker(s).",
-            workers,
-            default_workers,
-        )
-        return default_workers
-
-    return workers
+    num_workers = int(configured_workers) if configured_workers else default_workers
+    logger.info("Using %d worker(s) for STT preprocess.", num_workers)
+    return num_workers
 
 
 def asr_inter_chunk_separator(
@@ -164,8 +144,11 @@ class OpenAISpeechToText(OpenAIServing):
 
         # setup preprocess resources
         self._preprocess_max_workers = _get_stt_preprocess_max_workers()
-        self._preprocess_executor: ThreadPoolExecutor | None = None
-        self._preprocess_semaphore: asyncio.Semaphore | None = None
+        self._preprocess_executor = ThreadPoolExecutor(
+            max_workers=self._preprocess_max_workers,
+            thread_name_prefix="stt-preprocess",
+        )
+        self._preprocess_semaphore = asyncio.Semaphore(self._preprocess_max_workers)
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
@@ -177,42 +160,11 @@ class OpenAISpeechToText(OpenAIServing):
     def shutdown(self) -> None:
         if (executor := getattr(self, "_preprocess_executor", None)) is not None:
             executor.shutdown(wait=False)
-            self._preprocess_executor = None
-
-    def _get_preprocess_executor(self) -> ThreadPoolExecutor:
-        max_workers = getattr(
-            self, "_preprocess_max_workers", _get_stt_preprocess_max_workers()
-        )
-        self._preprocess_max_workers = max_workers
-
-        if (executor := getattr(self, "_preprocess_executor", None)) is None:
-            executor = ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="stt-preprocess",
-            )
-            self._preprocess_executor = executor
-
-        return executor
-
-    def _get_preprocess_semaphore(self) -> asyncio.Semaphore:
-        max_workers = getattr(
-            self, "_preprocess_max_workers", _get_stt_preprocess_max_workers()
-        )
-        self._preprocess_max_workers = max_workers
-
-        if (semaphore := getattr(self, "_preprocess_semaphore", None)) is None:
-            semaphore = asyncio.Semaphore(max_workers)
-            self._preprocess_semaphore = semaphore
-
-        return semaphore
 
     async def _run_preprocess_step(self, func: Callable[..., R], *args) -> R:
-        executor = self._get_preprocess_executor()
-        semaphore = self._get_preprocess_semaphore()
         loop = asyncio.get_running_loop()
-
-        async with semaphore:
-            return await loop.run_in_executor(executor, func, *args)
+        async with self._preprocess_semaphore:
+            return await loop.run_in_executor(self._preprocess_executor, func, *args)
 
     def _decode_and_chunk_speech(
         self,
