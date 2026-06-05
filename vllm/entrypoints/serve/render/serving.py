@@ -412,11 +412,25 @@ class OpenAIServingRender:
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
             raise ValueError(f"Harmony does not support {reasoning_effort=}")
+        # Forward chat_template_kwargs so callers can override Harmony system
+        # fields (e.g. model_identity, instructions, container_description,
+        # start_date) that are otherwise unreachable from the Chat Completions
+        # request. Reserved keys passed below are stripped to avoid a duplicate
+        # keyword argument TypeError.
+        template_kwargs = dict(request.chat_template_kwargs or {})
+        for reserved in (
+            "reasoning_effort",
+            "browser_description",
+            "python_description",
+            "with_custom_tools",
+        ):
+            template_kwargs.pop(reserved, None)
         sys_msg = get_system_message(
             reasoning_effort=reasoning_effort,
             browser_description=None,
             python_description=None,
             with_custom_tools=should_include_tools,
+            **template_kwargs,
         )
         messages.append(sys_msg)
 
