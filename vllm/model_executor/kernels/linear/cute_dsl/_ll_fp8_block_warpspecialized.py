@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""LL FP8 Block-Scaled GEMM kernel (SM90 compatible).
+"""LL FP8 Block-Scaled GEMM kernel (SM100 compatible).
 
 C[M,N] = (scale_A * A_fp8) @ (scale_B * B_fp8)^T
 
