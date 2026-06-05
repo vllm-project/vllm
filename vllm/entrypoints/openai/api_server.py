@@ -31,8 +31,8 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.scale_out.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -205,20 +205,20 @@ def build_app(
 
         register_generate_api_routers(app)
 
-        from vllm.entrypoints.serve.disagg.api_router import (
+        from vllm.entrypoints.scale_out.disagg import (
             attach_router as attach_disagg_router,
         )
 
         attach_disagg_router(app)
 
-        from vllm.entrypoints.serve.elastic_ep.api_router import (
+        from vllm.entrypoints.scale_out.elastic_ep import (
             attach_router as elastic_ep_attach_router,
         )
 
         elastic_ep_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
+        from vllm.entrypoints.scale_out.render.api_router import (
             attach_router as attach_render_router,
         )
 
@@ -429,7 +429,7 @@ async def init_render_app_state(
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]

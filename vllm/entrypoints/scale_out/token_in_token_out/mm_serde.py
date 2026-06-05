@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encode/decode utilities for multimodal tensors and field metadata
-over JSON/HTTP, used by the disaggregated generate endpoint."""
+over JSON/HTTP, used by the Tokens IN <> Tokens OUT generate endpoint."""
 
 from __future__ import annotations
 

@@ -512,7 +512,7 @@ async def test_header_dp_rank_argument():
         )
 
         # Create render serving instance (required by OpenAIServingChat)
-        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+        from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 
         serving_render = OpenAIServingRender(
             model_config=engine.model_config,

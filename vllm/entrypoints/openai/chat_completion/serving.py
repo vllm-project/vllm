@@ -75,7 +75,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+    from vllm.entrypoints.scale_out.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 

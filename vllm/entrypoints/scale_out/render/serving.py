@@ -24,8 +24,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
-from vllm.entrypoints.serve.disagg.protocol import (
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
