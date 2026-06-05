@@ -197,13 +197,6 @@ class FakeNixlWrapper:
     def get_xfer_telemetry(self, handle: int) -> dict:
         return get_default_xfer_telemetry()
 
-    ############################################################
-    # Follow are for changing the behavior during testing.
-    ############################################################
-
-    def set_cycles_before_xfer_done(self, cycles: int):
-        """Set the number of cycles before a transfer is considered done."""
-
 
 @contextlib.contextmanager
 def _make_fake_nixl_pkg():
@@ -578,10 +571,7 @@ class TestNixlHandshake:
         """Test case where multiple xfers are initiated to the same engine.
 
         This test triggers the connector to load remote KV for the same
-        `request_id`. The transfer is not done immediately due to
-        `set_cycles_before_xfer_done`, so there is a state where there are
-        multiple transfer states for the same `request_id`, and `get_finished`
-        should handle it correctly (wait for all transfers to be done).
+        `request_id`.
         """
         vllm_config = create_vllm_config()
 
@@ -598,7 +588,6 @@ class TestNixlHandshake:
         )
         assert isinstance(connector.connector_worker.nixl_wrapper, FakeNixlWrapper)
         worker = connector.connector_worker
-        worker.nixl_wrapper.set_cycles_before_xfer_done(3)
         # simulate handshake
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
@@ -1304,7 +1293,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     # Worker stats with transfer metrics
     worker_stats = NixlKVConnectorStats()
     worker_stats.record_transfer(get_default_xfer_telemetry())
-    worker_stats.data["remote_tokens"] = []
 
     # Scheduler stats with custom metric (needs dummy transfer to avoid being skipped)
     scheduler_stats = NixlKVConnectorStats()
@@ -1314,7 +1302,6 @@ def test_scheduler_kv_connector_stats_aggregation():
             "post_duration": [0],
             "bytes_transferred": [0],
             "num_descriptors": [0],
-            "remote_tokens": [128],
         }
     )
 
@@ -1355,7 +1342,6 @@ def test_scheduler_kv_connector_stats_aggregation():
     ).scheduler_stats.kv_connector_stats
     nixl_stats = final_stats["NixlConnector"]
     assert nixl_stats.num_successful_transfers == 2
-    assert nixl_stats.data["remote_tokens"] == [128]
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])

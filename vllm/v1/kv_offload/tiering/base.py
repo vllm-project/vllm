@@ -185,6 +185,14 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    def on_schedule_end(self) -> None:
+        """Called once at the end of each scheduler step.
+
+        Secondary tiers may override this for per-step cleanup or
+        deferred work submission.
+        """
+        return
+
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
