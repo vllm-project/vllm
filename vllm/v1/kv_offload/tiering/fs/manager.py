@@ -52,6 +52,14 @@ class FileSystemTierManager(SecondaryTierManager):
     submit_store / submit_load are non-blocking: they enqueue tasks and return.
     get_finished_jobs() polls job completion and returns completed JobResults.
 
+    Cross-process sharing:
+        In order to enable KV cache sharing between multiple vLLM instances
+        using the same ``root_dir`` (e.g., via a shared PVC) the environment
+        variable ``PYTHONHASHSEED`` must be set to the same fixed value
+        (e.g., "0") on all instances. Without this, each process initializes
+        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
+        random bytes, producing different block filenames for identical token
+        content.
     """
 
     def __init__(

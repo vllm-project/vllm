@@ -34,6 +34,9 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
@@ -51,6 +54,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -512,8 +516,13 @@ class Worker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+        """Get KV connector metadata from this worker if available.
+
+        Returned dict is keyed by `(pp_rank, tp_rank)`.
+        """
 
         if not has_kv_transfer_group():
             return None
@@ -524,8 +533,9 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -721,6 +731,11 @@ class Worker(WorkerBase):
         )
 
         activate_triton_jit_monitor()
+
+        # Freeze the worker heap so the GC won't scan static objects
+        # (model weights, KV caches, CUDA graphs) during inference.
+        freeze_gc_heap()
+        maybe_attach_gc_debug_callback()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
@@ -1115,6 +1130,8 @@ class Worker(WorkerBase):
         self._is_checkpoint_format = True
 
     def shutdown(self) -> None:
+        gc.unfreeze()
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
@@ -1147,7 +1164,10 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance()
-    override_envs_for_eplb(parallel_config)
+    override_envs_for_eplb(
+        parallel_config,
+        moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
+    )
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"
