@@ -12,6 +12,8 @@ from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    dequantize_combined_sparse_mla_decode_kv,
+    dequantize_global_slots_k_cache,
     sparse_prefill_combined_topk_size,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
@@ -198,7 +200,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 max_prefill_seq_len=max_model_len,
                 swa_only=False,
             ):
-                specs.append(((query_chunk_size, num_heads, combined_topk), torch.float32))
+                specs.append(
+                    ((query_chunk_size, num_heads, combined_topk), torch.float32)
+                )
         return tuple(specs)
 
     @classmethod
