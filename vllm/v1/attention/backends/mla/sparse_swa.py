@@ -309,7 +309,12 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         if self.dcp_world_size > 1:
-            is_valid_token.fill_(True)
+            # In DCP, slot_mapping < 0 can mean either "not this rank's cache
+            # owner" or "padded graph row". Attention metadata needs the
+            # former but must still mask the latter.
+            num_real_tokens = int(query_start_loc_cpu[-1].item())
+            is_valid_token.fill_(False)
+            is_valid_token[:num_real_tokens].fill_(True)
         else:
             is_valid_token.copy_(slot_mapping >= 0)
 

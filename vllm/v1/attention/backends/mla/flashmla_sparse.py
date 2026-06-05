@@ -612,7 +612,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         fp8_use_mixed_batch = (
             self.num_heads < MIN_HEADS_FOR_BF16_PREFILL and not self.is_deepseek_v4
         )
-        # DeepseekV4 has its own attention impl (DeepseekV4MLAAttention) that does not
+        # DeepseekV4 has its own attention impl (DeepseekV4Attention) that does not
         # consume fp8_extra_metadata. Skipping the build here avoids a
         # forced D2H sync on seq_lens that would otherwise fire on every
         # prefill-bearing step, lifting GPU utilization on long-prefill
@@ -666,6 +666,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         num_total = num_decode_tokens + num_prefill_tokens
         if num_total == 0:
             return {}
+        num_real_tokens = int(cm.query_start_loc_cpu[-1].item())
 
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
@@ -679,6 +680,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             cm.block_table_tensor[:num_decodes],
             block_size,
             cm.slot_mapping,
+            num_real_tokens,
             self.c128a_global_decode_buffer,
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
@@ -1050,6 +1052,7 @@ def build_c128a_topk_metadata(
     block_table: torch.Tensor,
     block_size: int,
     slot_mapping: torch.Tensor,
+    num_real_tokens: int,
     global_decode_buffer: torch.Tensor,
     decode_lens_buffer: torch.Tensor,
     prefill_buffer: torch.Tensor,
@@ -1091,6 +1094,7 @@ def build_c128a_topk_metadata(
         block_table.stride(0),
         block_size,
         slot_mapping,
+        num_real_tokens,
         BLOCK_SIZE=1024,
         DCP_WORLD_SIZE=dcp_world_size,
         DCP_RANK=dcp_rank,
@@ -1118,6 +1122,7 @@ def _build_c128a_topk_metadata_kernel(
     block_table_stride,
     block_size,
     slot_mapping_ptr,
+    num_real_tokens,
     BLOCK_SIZE: tl.constexpr,
     DCP_WORLD_SIZE: tl.constexpr,
     DCP_RANK: tl.constexpr,
@@ -1125,14 +1130,15 @@ def _build_c128a_topk_metadata_kernel(
 ):
     token_idx = tl.program_id(0)
     position = tl.load(positions_ptr + token_idx)
-    num_compressed = (position + 1) // compress_ratio
+    is_real_token = token_idx < num_real_tokens
+    num_compressed = tl.where(is_real_token, (position + 1) // compress_ratio, 0)
     num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
     is_decode = token_idx < num_decode_tokens
 
     if is_decode:
         # --- Decode: block-table lookup → global slot ids + count ---
         if DCP_WORLD_SIZE > 1:
-            is_valid_token = True
+            is_valid_token = is_real_token
         else:
             is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
         req_idx = tl.load(token_to_req_indices_ptr + token_idx)
@@ -1199,6 +1205,6 @@ def _build_c128a_topk_metadata_kernel(
             mask = offset < max_compressed_tokens
             tl.store(
                 prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
-                tl.where(offset < num_compressed, offset, -1),
+                tl.where(is_real_token & (offset < num_compressed), offset, -1),
                 mask=mask,
             )

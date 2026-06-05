@@ -23,6 +23,37 @@ def cp_local_to_global_indices(
     return torch.where(local_indices >= 0, global_indices, -1)
 
 
+def cp_is_global_indices_local(
+    global_indices: torch.Tensor,
+    cp_world_size: int,
+    cp_rank: int,
+    cp_kv_cache_interleave_size: int,
+) -> torch.Tensor:
+    safe_indices = torch.clamp(global_indices, min=0)
+    return (global_indices >= 0) & (
+        (safe_indices // cp_kv_cache_interleave_size) % cp_world_size == cp_rank
+    )
+
+
+def cp_global_to_local_indices(
+    global_indices: torch.Tensor,
+    cp_world_size: int,
+    cp_rank: int,
+    cp_kv_cache_interleave_size: int,
+) -> torch.Tensor:
+    safe_indices = torch.clamp(global_indices, min=0)
+    rank_stride = cp_world_size * cp_kv_cache_interleave_size
+    base = safe_indices // rank_stride * cp_kv_cache_interleave_size
+    remainder = safe_indices - base * cp_world_size
+    extra = torch.clip(
+        remainder - cp_rank * cp_kv_cache_interleave_size,
+        0,
+        cp_kv_cache_interleave_size,
+    )
+    local_indices = base + extra
+    return torch.where(global_indices >= 0, local_indices, -1)
+
+
 def get_cp_local_seq_lens(
     seq_lens: torch.Tensor,
     cp_world_size: int = 1,

@@ -28,7 +28,11 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.attention.ops.cp_mapping import cp_local_to_global_indices
+from vllm.v1.attention.ops.cp_mapping import (
+    cp_global_to_local_indices,
+    cp_is_global_indices_local,
+    cp_local_to_global_indices,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -37,6 +41,31 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _dcp_global_topk(
+    local_values: torch.Tensor,
+    local_global_indices: torch.Tensor,
+    topk_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dcp_group = get_dcp_group()
+    candidate_values = dcp_group.all_gather(local_values.contiguous(), dim=1)
+    candidate_indices = dcp_group.all_gather(local_global_indices.contiguous(), dim=1)
+    candidate_values = torch.where(
+        candidate_indices >= 0,
+        candidate_values,
+        torch.full_like(candidate_values, float("-inf")),
+    )
+
+    values, offsets = torch.topk(candidate_values, k=topk_tokens, dim=-1)
+    indices = torch.gather(candidate_indices, 1, offsets)
+    indices = torch.where(
+        values == float("-inf"),
+        torch.full_like(indices, -1),
+        indices,
+    ).to(torch.int32)
+
+    return values, indices
 
 
 def _topk_per_row_prefill_dcp(
@@ -91,38 +120,74 @@ def _topk_per_row_prefill_dcp(
         dcp_rank,
         cp_kv_cache_interleave_size,
     )
+    _, global_indices = _dcp_global_topk(local_values, global_indices, topk_tokens)
+    return global_indices
 
-    dcp_group = get_dcp_group()
-    candidate_values = dcp_group.all_gather(local_values.contiguous(), dim=1)
-    candidate_indices = dcp_group.all_gather(global_indices.contiguous(), dim=1)
-    candidate_values = torch.where(
-        candidate_indices >= 0,
-        candidate_values,
-        torch.full_like(candidate_values, float("-inf")),
-    )
-    k = min(topk_tokens, candidate_values.shape[1])
-    if k == 0:
+
+def _topk_per_row_decode_dcp(
+    logits: torch.Tensor,
+    seq_lens: torch.Tensor,
+    local_indices: torch.Tensor,
+    topk_tokens: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_kv_cache_interleave_size: int,
+) -> torch.Tensor:
+    num_rows = local_indices.shape[0]
+    if topk_tokens == 0:
         return torch.empty(
             (num_rows, 0),
             dtype=torch.int32,
             device=logits.device,
         )
-    final_values, final_offsets = torch.topk(candidate_values, k=k, dim=-1)
-    final_indices = torch.gather(candidate_indices, 1, final_offsets)
-    final_indices = torch.where(
-        final_values == float("-inf"),
-        torch.full_like(final_indices, -1),
-        final_indices,
+
+    local_lens = seq_lens.reshape(-1)[:num_rows].to(device=logits.device)
+    valid = (local_indices >= 0) & (local_indices < local_lens.unsqueeze(1))
+    safe_indices = torch.clamp(local_indices, min=0, max=logits.shape[1] - 1)
+    local_values = torch.gather(logits, 1, safe_indices.to(torch.int64))
+    local_values = torch.where(
+        valid,
+        local_values,
+        torch.full_like(local_values, float("-inf")),
+    )
+    local_global_indices = cp_local_to_global_indices(
+        torch.where(valid, local_indices, torch.full_like(local_indices, -1)),
+        dcp_world_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+    )
+
+    global_values, global_indices = _dcp_global_topk(
+        local_values,
+        local_global_indices,
+        topk_tokens,
+    )
+    is_local = cp_is_global_indices_local(
+        global_indices,
+        dcp_world_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+    )
+
+    local_values = torch.where(
+        is_local,
+        global_values,
+        torch.full_like(global_values, float("-inf")),
+    )
+    local_order = torch.topk(local_values, k=topk_tokens, dim=-1).indices
+    local_global_indices = torch.gather(global_indices, 1, local_order)
+    local_valid = torch.gather(is_local, 1, local_order)
+    local_indices = cp_global_to_local_indices(
+        local_global_indices,
+        dcp_world_size,
+        dcp_rank,
+        cp_kv_cache_interleave_size,
+    )
+    return torch.where(
+        local_valid,
+        local_indices,
+        torch.full_like(local_indices, -1),
     ).to(torch.int32)
-    if k < topk_tokens:
-        index_pad = torch.full(
-            (num_rows, topk_tokens - k),
-            -1,
-            dtype=torch.int32,
-            device=logits.device,
-        )
-        final_indices = torch.cat((final_indices, index_pad), dim=1)
-    return final_indices
 
 
 def _gather_workspace_shapes(
@@ -465,6 +530,19 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        if attn_metadata_narrowed.dcp_world_size > 1:
+            topk_indices.copy_(
+                _topk_per_row_decode_dcp(
+                    logits,
+                    seq_lens,
+                    topk_indices,
+                    topk_tokens,
+                    attn_metadata_narrowed.dcp_world_size,
+                    attn_metadata_narrowed.dcp_rank,
+                    attn_metadata_narrowed.cp_kv_cache_interleave_size,
+                )
             )
 
         if decode_metadata.requires_padding:
