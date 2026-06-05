@@ -5,13 +5,13 @@ import torch
 from torch import Generator
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
     random_sample,
 )
 from vllm.v1.sample.sampler import Sampler
-from vllm.triton_utils import HAS_TRITON
 
 DEVICE_TYPE = current_platform.device_type
 
