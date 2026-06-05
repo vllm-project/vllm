@@ -117,6 +117,7 @@ from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
+# Matches the Harmony final-channel header emitted before final text content.
 _HARMONY_FINAL_MESSAGE_PREFILL = "<|channel|>final<|message|>"
 
 
@@ -821,19 +822,21 @@ class OpenAIServingResponses(OpenAIServing):
         )
 
     @staticmethod
-    def _required_tool_json_schema(request: ResponsesRequest) -> str | dict:
+    def _required_tool_json_schema(request: ResponsesRequest) -> dict:
         json_schema = get_json_schema_from_tools(
             tool_choice=request.tool_choice,
             tools=deepcopy(request.tools),
         )
         if json_schema is None:
             raise ValueError("tool_choice='required' requires function tools.")
-        if isinstance(json_schema, dict):
-            max_items = request.max_tool_calls
-            if request.parallel_tool_calls is False:
-                max_items = min(max_items, 1) if max_items is not None else 1
-            if max_items is not None:
-                json_schema["maxItems"] = max_items
+        if not isinstance(json_schema, dict):
+            raise ValueError("tool_choice='required' requires a JSON object schema.")
+
+        max_items = request.max_tool_calls
+        if request.parallel_tool_calls is False:
+            max_items = min(max_items, 1) if max_items is not None else 1
+        if max_items is not None:
+            json_schema["maxItems"] = max_items
         return json_schema
 
     def _apply_harmony_required_tool_json_schema(
@@ -931,6 +934,7 @@ class OpenAIServingResponses(OpenAIServing):
         if not request.store or request.request_id not in self.msg_store:
             return
         for item in output_items:
+            # function_call conversion does not use previous outputs.
             msg = response_input_to_harmony(item, [])
             if msg is not None:
                 self.msg_store[request.request_id].append(msg)
@@ -980,7 +984,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
-        if self.use_harmony and self._use_harmony_required_tool_json_shim(request):
+        if self._use_harmony_required_tool_json_shim(request):
             assert isinstance(context, SimpleContext)
             final_res = context.final_output
             assert final_res is not None
@@ -1566,13 +1570,15 @@ class OpenAIServingResponses(OpenAIServing):
         previous_tool_json_text = ""
         history_tool_call_cnt = 0
         function_name_returned = False
-        parser = None
-        if not use_required_tool_json_shim and self.parser:
-            parser = self.parser(
+        parser = (
+            self.parser(
                 tokenizer,
                 request.tools,
                 chat_template_kwargs=self._effective_chat_template_kwargs(request),
             )
+            if self.parser and not use_required_tool_json_shim
+            else None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,
