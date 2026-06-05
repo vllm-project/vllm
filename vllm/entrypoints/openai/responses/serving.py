@@ -791,8 +791,8 @@ class OpenAIServingResponses(OpenAIServing):
         has_unsupported_tool_choice = request.tool_choice not in ("auto", "none")
         if has_unsupported_tool_choice and not is_required_function_call:
             raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
+                "Only 'auto', 'none', or 'required' (with function tools) "
+                "tool_choice is supported in response API with Harmony"
             )
 
         arrival_time = time.time()
