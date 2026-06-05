@@ -30,7 +30,7 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
-ARG ARG_PYTORCH_ROCM_ARCH
+ARG ARG_PYTORCH_ROCM_ARCH=gfx1250
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install build dependencies and utilities
@@ -345,7 +345,7 @@ ARG RIXL_BRANCH="39be1de8"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
 ARG UCX_BRANCH="bfb51733"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
+# ENV ROCM_PATH=/opt/rocm -> correct ROCM_PATH is set in base image
 ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
 ENV RIXL_BENCH_HOME=/usr/local/rixl_bench
@@ -429,7 +429,7 @@ ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
 # DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
 # it can be linked against DeepEP without arch mismatches.
 ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
+# ENV ROCM_PATH=/opt/rocm -> Correct rocm_path is set in base image
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
