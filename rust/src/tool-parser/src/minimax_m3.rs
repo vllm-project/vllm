@@ -600,9 +600,7 @@ mod tests {
                 "duplicate_demo": {
                     "tag": ["a", "b"]
                 },
-                "schema_mismatch_array": {
-                    "x": ["1", "2"]
-                },
+                "schema_mismatch_array": [1, 2],
                 "unknown_struct": {
                     "a": ["1", "2"]
                 }
