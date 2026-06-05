@@ -230,6 +230,25 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _collect_eos_token_ids(model_config) -> list[int] | None:
+    ids: set[int] = set()
+    for cfg in (model_config.hf_config, model_config.hf_text_config):
+        val = getattr(cfg, 'eos_token_id', None)
+        if val is not None:
+            if isinstance(val, int):
+                ids.add(val)
+            else:
+                ids.update(val)
+    gen_config = model_config.try_get_generation_config()
+    if gen_config and (val := gen_config.get('eos_token_id')) is not None:
+        if isinstance(val, int):
+            ids.add(val)
+        else:
+            ids.update(val)
+    return sorted(ids) if ids else None
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -613,7 +632,8 @@ class GPUModelRunner(
                     f"{self.speculative_config.method}"
                 )
             self.rejection_sampler = RejectionSampler(
-                self.sampler, self.speculative_config, self.device
+                self.sampler, self.speculative_config, self.device,
+                eos_token_ids=_collect_eos_token_ids(self.model_config),
             )
 
         self.num_spec_tokens = 0

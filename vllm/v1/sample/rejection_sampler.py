@@ -62,9 +62,11 @@ class RejectionSampler(nn.Module):
         sampler: Sampler,
         spec_config: SpeculativeConfig | None = None,
         device: torch.device | None = None,
+        eos_token_ids: list[int] | None = None,
     ):
         super().__init__()
         self.sampler = sampler
+        self.eos_token_ids = eos_token_ids
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -164,6 +166,17 @@ class RejectionSampler(nn.Module):
             metadata.cu_num_draft_tokens,
             sampling_metadata,
         )
+
+        # Suppress EOS at draft positions so MTP speculative decoding
+        # doesn't prematurely terminate tool-call generation.
+        # Use scalar column indexing (select + fill_) instead of list
+        # indexing to avoid the indexSelectSmallIndex CUDA kernel which
+        # can assert with large vocab sizes.
+        if self.eos_token_ids:
+            vocab_size = target_logits.shape[-1]
+            for eid in self.eos_token_ids:
+                if 0 <= eid < vocab_size:
+                    target_logits[:, eid].fill_(float('-inf'))
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
