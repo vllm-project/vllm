@@ -16,144 +16,47 @@ import cutlass
 import cutlass.cute as cute
 from cuda.bindings.driver import CUstream
 from cutlass._mlir import ir as _ir
-from cutlass._mlir.dialects import arith as _arith
 from cutlass._mlir.dialects import llvm as _llvm
 from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.pipeline import sm90 as pipeline
 
 
-@dsl_user_op
-def fused_fp8_mma_2n(
-    c0,
-    c1,
-    c2,
-    c3,
-    c4,
-    c5,
-    c6,
-    c7,
-    a0_lo,
-    a0_hi,
-    a1_lo,
-    a1_hi,
-    a2_lo,
-    a2_hi,
-    a3_lo,
-    a3_hi,
-    b0_lo,
-    b0_hi,
-    b1_lo,
-    b1_hi,
-    b2_lo,
-    b2_hi,
-    b3_lo,
-    b3_hi,
-    *,
-    loc=None,
-    ip=None,
-):
-    """Pack bf16 pairs + 2x mma.sync.m16n8k32.e4m3 (both N-atoms)."""
-    f32 = cutlass.Float32.mlir_type
-    i32 = _ir.IntegerType.get_signless(32)
-
-    def _pack2(lo_ir, hi_ir):
-        bf16_ty = lo_ir.type
-        vec_ty = _ir.VectorType.get([2], bf16_ty)
-        c0_ = _arith.constant(i32, 0, loc=loc, ip=ip)
-        c1_ = _arith.constant(i32, 1, loc=loc, ip=ip)
-        undef = _llvm.mlir_undef(vec_ty, loc=loc, ip=ip)
-        v0 = _llvm.insertelement(undef, lo_ir, c0_, loc=loc, ip=ip)
-        v1 = _llvm.insertelement(v0, hi_ir, c1_, loc=loc, ip=ip)
-        return _llvm.bitcast(i32, v1, loc=loc, ip=ip)
-
-    a0 = _pack2(a0_lo.ir_value(loc=loc, ip=ip), a0_hi.ir_value(loc=loc, ip=ip))
-    a1 = _pack2(a1_lo.ir_value(loc=loc, ip=ip), a1_hi.ir_value(loc=loc, ip=ip))
-    a2 = _pack2(a2_lo.ir_value(loc=loc, ip=ip), a2_hi.ir_value(loc=loc, ip=ip))
-    a3 = _pack2(a3_lo.ir_value(loc=loc, ip=ip), a3_hi.ir_value(loc=loc, ip=ip))
-
-    b0_n0 = _pack2(b0_lo.ir_value(loc=loc, ip=ip), b0_hi.ir_value(loc=loc, ip=ip))
-    b1_n0 = _pack2(b1_lo.ir_value(loc=loc, ip=ip), b1_hi.ir_value(loc=loc, ip=ip))
-
-    asm_str = (
-        "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
-        "{$0,$1,$2,$3},{$4,$5,$6,$7},{$8,$9},{$10,$11,$12,$13};"
+def _make_pred(tXgX, tXcX, dim_size):
+    num_vec = tXgX.shape[0][1]
+    num_mn = cute.size(tXgX, mode=[1])
+    num_k = cute.size(tXgX, mode=[2])
+    pred = cute.make_rmem_tensor(
+        cute.make_layout((num_vec, num_mn, num_k), stride=(num_mn, 1, 0)),
+        cutlass.Boolean,
     )
-    constraint = "=f,=f,=f,=f,r,r,r,r,r,r,0,1,2,3"
-    struct_ty = _llvm.StructType.get_literal([f32, f32, f32, f32])
-
-    args_n0 = [
-        a0,
-        a1,
-        a2,
-        a3,
-        b0_n0,
-        b1_n0,
-        c0.ir_value(loc=loc, ip=ip),
-        c1.ir_value(loc=loc, ip=ip),
-        c2.ir_value(loc=loc, ip=ip),
-        c3.ir_value(loc=loc, ip=ip),
-    ]
-    res0 = _llvm.inline_asm(
-        struct_ty, args_n0, asm_str, constraint, has_side_effects=True, loc=loc, ip=ip
-    )
-    r0 = _llvm.extractvalue(f32, res0, [0], loc=loc, ip=ip)
-    r1 = _llvm.extractvalue(f32, res0, [1], loc=loc, ip=ip)
-    r2 = _llvm.extractvalue(f32, res0, [2], loc=loc, ip=ip)
-    r3 = _llvm.extractvalue(f32, res0, [3], loc=loc, ip=ip)
-
-    b0_n1 = _pack2(b2_lo.ir_value(loc=loc, ip=ip), b2_hi.ir_value(loc=loc, ip=ip))
-    b1_n1 = _pack2(b3_lo.ir_value(loc=loc, ip=ip), b3_hi.ir_value(loc=loc, ip=ip))
-    args_n1 = [
-        a0,
-        a1,
-        a2,
-        a3,
-        b0_n1,
-        b1_n1,
-        c4.ir_value(loc=loc, ip=ip),
-        c5.ir_value(loc=loc, ip=ip),
-        c6.ir_value(loc=loc, ip=ip),
-        c7.ir_value(loc=loc, ip=ip),
-    ]
-    res1 = _llvm.inline_asm(
-        struct_ty, args_n1, asm_str, constraint, has_side_effects=True, loc=loc, ip=ip
-    )
-    r4 = _llvm.extractvalue(f32, res1, [0], loc=loc, ip=ip)
-    r5 = _llvm.extractvalue(f32, res1, [1], loc=loc, ip=ip)
-    r6 = _llvm.extractvalue(f32, res1, [2], loc=loc, ip=ip)
-    r7 = _llvm.extractvalue(f32, res1, [3], loc=loc, ip=ip)
-
-    return (
-        cutlass.Float32(r0),
-        cutlass.Float32(r1),
-        cutlass.Float32(r2),
-        cutlass.Float32(r3),
-        cutlass.Float32(r4),
-        cutlass.Float32(r5),
-        cutlass.Float32(r6),
-        cutlass.Float32(r7),
-    )
+    for rv in range(num_vec):
+        for mn in range(num_mn):
+            pred[rv, mn, 0] = cute.elem_less(tXcX[(0, rv), mn, 0, 0][0], dim_size)
+    return pred
 
 
 @dsl_user_op
-def ue8m0_to_f32(packed_i32, byte_idx, *, loc=None, ip=None):
-    """Extract ue8m0 byte from packed int32 → fp32 scale (2^(e-127))."""
+def fused_ue8m0_scale(sa_packed, sb_packed, byte_idx, *, loc=None, ip=None):
+    """Fused scale: 2^(ea+eb-254) from packed ue8m0 A and B scales."""
     f32 = cutlass.Float32.mlir_type
-    i32 = _ir.IntegerType.get_signless(32)
-    val = packed_i32.ir_value(loc=loc, ip=ip)
+    val_a = sa_packed.ir_value(loc=loc, ip=ip)
+    val_b = sb_packed.ir_value(loc=loc, ip=ip)
     idx = byte_idx.ir_value(loc=loc, ip=ip)
     res = _llvm.inline_asm(
         f32,
-        [val, idx],
+        [val_a, val_b, idx],
         "{"
-        ".reg .u32 shift, byte_val, f_bits;"
-        "shl.b32 shift, $2, 3;"
-        "shr.b32 byte_val, $1, shift;"
-        "and.b32 byte_val, byte_val, 0xFF;"
-        "shl.b32 f_bits, byte_val, 23;"
-        "mov.b32 $0, f_bits;"
+        ".reg .u32 ea, eb, combined;"
+        "prmt.b32 ea, $1, 0, $3;"
+        "and.b32 ea, ea, 0xFF;"
+        "prmt.b32 eb, $2, 0, $3;"
+        "and.b32 eb, eb, 0xFF;"
+        "add.u32 combined, ea, eb;"
+        "sub.u32 combined, combined, 127;"
+        "shl.b32 combined, combined, 23;"
+        "mov.b32 $0, combined;"
         "}",
-        "=f,r,r",
+        "=f,r,r,r",
         has_side_effects=False,
         loc=loc,
         ip=ip,
@@ -247,6 +150,15 @@ class LLFp8BlockGemm:
         tiled_mma = cute.make_tiled_mma(
             op, cute.make_layout(self.atom_layout), permutation_mnk=perm_mnk
         )
+        op_fp8 = cute.nvgpu.warp.MmaFP8Op(cutlass.Float8E4M3FN, self.acc_dtype, (16, 8, 32))
+        perm_mnk_fp8 = (
+            self.atom_layout[0] * 16,
+            self.atom_layout[1] * 8 * (self.tile_n // 8),
+            self.atom_layout[2] * 32,
+        )
+        tiled_mma_fp8 = cute.make_tiled_mma(
+            op_fp8, cute.make_layout(self.atom_layout), permutation_mnk=perm_mnk_fp8
+        )
         grid_m = cute.ceil_div(cute.size(mC, mode=[0]), bM)
         grid_n = cute.ceil_div(cute.size(mC, mode=[1]), bN)
         self.kernel(
@@ -260,11 +172,12 @@ class LLFp8BlockGemm:
             tiled_copy_A,
             tiled_copy_B,
             tiled_mma,
+            tiled_mma_fp8,
         ).launch(
             grid=[cute.size(grid_m), cute.size(grid_n), 1],
             block=[self.num_threads, 1, 1],
             stream=stream,
-            # use_pdl=True,
+            use_pdl=True,
         )
 
     @cute.kernel
@@ -280,6 +193,7 @@ class LLFp8BlockGemm:
         tiled_copy_A: cute.TiledCopy,
         tiled_copy_B: cute.TiledCopy,
         tiled_mma: cute.TiledMma,
+        tiled_mma_fp8: cute.TiledMma,
     ):
         bM, bN, bK = self.tile_m, self.tile_n, self.tile_k
         num_stages = self.num_stages
@@ -360,39 +274,9 @@ class LLFp8BlockGemm:
             tAcA = thr_A.partition_S(cA)
             tBcB = thr_B.partition_S(cB)
 
-            tApA = cute.make_rmem_tensor(
-                cute.make_layout(
-                    (
-                        tAgA.shape[0][1],
-                        cute.size(tAgA, mode=[1]),
-                        cute.size(tAgA, mode=[2]),
-                    ),
-                    stride=(cute.size(tAgA, mode=[1]), 1, 0),
-                ),
-                cutlass.Boolean,
-            )
-            for rv in range(tApA.shape[0]):
-                for m in range(tApA.shape[1]):
-                    tApA[rv, m, 0] = cute.elem_less(
-                        tAcA[(0, rv), m, 0, 0][0], mA.shape[0]
-                    )
+            tApA = _make_pred(tAgA, tAcA, mA.shape[0])
 
-            tBpB = cute.make_rmem_tensor(
-                cute.make_layout(
-                    (
-                        tBgB.shape[0][1],
-                        cute.size(tBgB, mode=[1]),
-                        cute.size(tBgB, mode=[2]),
-                    ),
-                    stride=(cute.size(tBgB, mode=[1]), 1, 0),
-                ),
-                cutlass.Boolean,
-            )
-            for rv in range(tBpB.shape[0]):
-                for n in range(tBpB.shape[1]):
-                    tBpB[rv, n, 0] = cute.elem_less(
-                        tBcB[(0, rv), n, 0, 0][0], mB.shape[0]
-                    )
+            tBpB = _make_pred(tBgB, tBcB, mB.shape[0])
 
             producer_state = pipeline.make_pipeline_state(
                 pipeline.PipelineUserType.Producer, num_stages
@@ -431,7 +315,9 @@ class LLFp8BlockGemm:
                 pred=tBpB,
             )
             sSB[producer_state.index] = gSB[packed_k]
-            # cute.arch.griddepcontrol_wait()
+            
+            cute.arch.griddepcontrol_wait()
+            
             cute.copy(
                 tiled_copy_A,
                 tAgA[None, None, None, 0],
@@ -522,9 +408,6 @@ class LLFp8BlockGemm:
                 tCsA_p = tCsA_v[None, None, None, consumer_state.index]
                 tCsB_p = tCsB_v[None, None, None, consumer_state.index]
 
-                a_s = tCrA[None, None, 0]
-                b_s = tCrB[None, None, 0]
-
                 # A+B scales from smem (loaded by DMA warps this iteration)
                 stage = consumer_state.index
                 sa0_packed = cute.make_rmem_tensor((1,), cutlass.Int32)
@@ -541,20 +424,11 @@ class LLFp8BlockGemm:
                     packed_k = scale_k_idx // 4
                     byte_k = scale_k_idx - packed_k * 4
 
-                    scale_a_m0 = ue8m0_to_f32(sa0_packed[0], byte_k)
-                    scale_a_m1 = ue8m0_to_f32(sa1_packed[0], byte_k)
-                    scale_b_val = ue8m0_to_f32(sb_packed[0], byte_k)
-                    scale_m0 = scale_a_m0 * scale_b_val
-                    scale_m1 = scale_a_m1 * scale_b_val
+                    scale_m0 = fused_ue8m0_scale(sa0_packed[0], sb_packed[0], byte_k)
+                    scale_m1 = fused_ue8m0_scale(sa1_packed[0], sb_packed[0], byte_k)
 
-                    p0 = cutlass.Float32(0.0)
-                    p1 = cutlass.Float32(0.0)
-                    p2 = cutlass.Float32(0.0)
-                    p3 = cutlass.Float32(0.0)
-                    p4 = cutlass.Float32(0.0)
-                    p5 = cutlass.Float32(0.0)
-                    p6 = cutlass.Float32(0.0)
-                    p7 = cutlass.Float32(0.0)
+                    tCrP = tiled_mma_fp8.make_fragment_C(tCgC)
+                    tCrP.fill(0.0)
                     for kb in cutlass.range(KB_PER_SCALE, unroll_full=True):
                         k_block = mma_warp_idx * K_PER_WARP + sg * KB_PER_SCALE + kb
                         cute.copy(
@@ -567,33 +441,16 @@ class LLFp8BlockGemm:
                             tCsB_p[None, None, k_block],
                             tCrB_v[None, None, 0],
                         )
-                        p0, p1, p2, p3, p4, p5, p6, p7 = fused_fp8_mma_2n(
-                            p0,
-                            p1,
-                            p2,
-                            p3,
-                            p4,
-                            p5,
-                            p6,
-                            p7,
-                            a_s[0],
-                            a_s[1],
-                            a_s[2],
-                            a_s[3],
-                            a_s[4],
-                            a_s[5],
-                            a_s[6],
-                            a_s[7],
-                            b_s[0],
-                            b_s[1],
-                            b_s[2],
-                            b_s[3],
-                            b_s[4],
-                            b_s[5],
-                            b_s[6],
-                            b_s[7],
+                        cute.gemm(
+                            tiled_mma_fp8,
+                            tCrP,
+                            cute.recast_tensor(tCrA[None, None, 0], cutlass.Float8E4M3FN),
+                            cute.recast_tensor(tCrB[None, None, 0], cutlass.Float8E4M3FN),
+                            tCrP,
                         )
 
+                    p0, p1, p2, p3 = tCrP[0], tCrP[1], tCrP[2], tCrP[3]
+                    p4, p5, p6, p7 = tCrP[4], tCrP[5], tCrP[6], tCrP[7]
                     tCrC[0] = tCrC[0] + p0 * scale_m0
                     tCrC[1] = tCrC[1] + p1 * scale_m0
                     tCrC[2] = tCrC[2] + p2 * scale_m1
@@ -608,8 +465,8 @@ class LLFp8BlockGemm:
 
             # Signal dependent kernels after GEMM is done
             if mma_tidx == 0:
-                # cute.arch.griddepcontrol_launch_dependents()
-                pass
+                cute.arch.griddepcontrol_launch_dependents()
+                # pass
             cute.arch.sync_threads()
 
             # Epilogue: warp reduction + global store
