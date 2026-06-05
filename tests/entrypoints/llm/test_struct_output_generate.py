@@ -1112,13 +1112,14 @@ def test_max_whitespace_cnt_e2e():
 
 
 def test_max_whitespace_cnt_disabled_e2e():
-    """Reverse test for max_whitespace_cnt: verify FSM allows unlimited
-    whitespace when max_whitespace_cnt=None (unbounded).
+    """Reverse test for max_whitespace_cnt: verify runaway whitespace occurs
+    when max_whitespace_cnt=None (unbounded).
 
-    The prompt asks the model to repeat a JSON string verbatim, including
-    multiple spaces after colons. Without a limit, the FSM allows the model
-    to output all those spaces. With max_whitespace_cnt=2, spaces would
-    be truncated.
+    Uses Qwen3.5-0.8B which is known to reproduce the whitespace bug
+    (issue #38696). With an ambiguous input like "465564867", the model
+    assigns high probability to whitespace tokens after JSON colons.
+    Without a limit, the FSM allows unlimited whitespace self-loops,
+    hitting max_tokens with finish_reason='length'.
     """
     json_schema = {
         "type": "object",
@@ -1131,7 +1132,7 @@ def test_max_whitespace_cnt_disabled_e2e():
     }
 
     llm = LLM(
-        model="Qwen/Qwen2.5-1.5B-Instruct",
+        model="Qwen/Qwen3.5-0.8B",
         enforce_eager=True,
         max_model_len=512,
         structured_outputs_config=dict(
@@ -1142,16 +1143,16 @@ def test_max_whitespace_cnt_disabled_e2e():
     )
 
     sampling_params = SamplingParams(
-        temperature=0.0,
+        temperature=1.0,
         max_tokens=256,
         structured_outputs=StructuredOutputsParams(json=json_schema),
     )
 
-    # Ask the model to echo this exact JSON with multiple spaces after colons
+    # Ambiguous input known to trigger whitespace runaway (issue #38696)
     prompt = (
-        "Repeat this JSON exactly as shown, including all spaces:\n"
-        '{"question":   "What is 2+2?",   "answer":   4}\n'
-        "Output only the JSON, nothing else."
+        "Output a JSON object with the following schema: "
+        f"{json_schema}. Input: 465564867. "
+        "Do not add any extra text."
     )
     outputs = llm.generate([prompt], sampling_params=sampling_params, use_tqdm=True)
 
@@ -1173,12 +1174,15 @@ def test_max_whitespace_cnt_disabled_e2e():
             else:
                 current_run = 0
 
-        # Without the limit, the FSM should allow >2 consecutive spaces.
-        # If max_consecutive_space <= 2, the limit is still being enforced
-        # (which means the fix is working even when we tried to disable it).
-        assert max_consecutive_space > 2, (
-            f"Expected >2 consecutive spaces (unbounded FSM), "
-            f"but got max_consecutive_space={max_consecutive_space}. "
-            f"This means the limit is still being enforced. "
+        finish_reason = output.outputs[0].finish_reason
+
+        # Without the limit, expect either:
+        # - finish_reason='length' (ran out of tokens due to runaway whitespace)
+        # - consecutive spaces > 2 (the limit that would normally be enforced)
+        assert finish_reason == "length" or max_consecutive_space > 2, (
+            f"Expected runaway whitespace symptom "
+            f"(finish_reason='length' or >2 consecutive spaces), "
+            f"but got finish_reason={finish_reason!r}, "
+            f"max_consecutive_space={max_consecutive_space}. "
             f"Output: {generated_text!r}"
         )
