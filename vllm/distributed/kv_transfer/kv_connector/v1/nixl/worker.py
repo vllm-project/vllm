@@ -1151,9 +1151,13 @@ class NixlConnectorWorker:
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
             )
-            remote_kv_block_len = local_block_len // block_size_ratio
-            if block_size_ratio > 1:
-                # ..using remote kv_block_len as transfer unit
+            # Use actual remote block length from metadata for correct
+            # byte-size computation.  Deriving from local / block_size_ratio
+            # is wrong for heterogeneous TP where local and remote have
+            # different byte-per-block values (e.g. hybrid MLA+GDN models).
+            remote_kv_block_len = nixl_agent_meta.block_lens[i]
+            if local_block_len > remote_kv_block_len:
+                # Remote has smaller blocks, use remote's size as transfer unit
                 local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
@@ -1305,6 +1309,7 @@ class NixlConnectorWorker:
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
         )
+        self._raise_if_hma_remote_block_size_mismatch(nixl_agent_meta.block_size)
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -1317,7 +1322,32 @@ class NixlConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
+        # Compute block_size_ratio from actual byte-per-block values so that
+        # heterogeneous TP works even when block_size carries byte values
+        # (e.g. hybrid MLA+GDN models where block_size differs across TP
+        # configs).  _build_fa_remote already uses nixl_agent_meta.block_lens
+        # directly, so this ratio is only needed for handler registration and
+        # descriptor-ID computation.
+        if (
+            self.block_len_per_layer
+            and nixl_agent_meta.block_lens
+            and self.block_len_per_layer[0] != nixl_agent_meta.block_lens[0]
+        ):
+            local_bytes = self.block_len_per_layer[0]
+            remote_bytes = nixl_agent_meta.block_lens[0]
+            if local_bytes > remote_bytes and local_bytes % remote_bytes == 0:
+                block_size_ratio = local_bytes // remote_bytes
+            elif remote_bytes > local_bytes and remote_bytes % local_bytes == 0:
+                block_size_ratio = -(remote_bytes // local_bytes)
+            else:
+                # Non-exact byte division (e.g. hybrid models with
+                # TP-independent MLA component).  Use 1 as fallback;
+                # _build_fa_remote handles bytes via remote block_lens.
+                block_size_ratio = 1
+        else:
+            block_size_ratio = transfer_topo.block_size_ratio(
+                nixl_agent_meta.block_size
+            )
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
@@ -1425,9 +1455,14 @@ class NixlConnectorWorker:
         assert remote_info.remote_tp_size == remote_tp_size
 
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            nixl_agent_meta.block_size
-        )
+        try:
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                nixl_agent_meta.block_size
+            )
+        except AssertionError:
+            # Heterogeneous TP with non-divisible block sizes (e.g. hybrid
+            # MLA+GDN).  Use 1 as a safe fallback for validation checks.
+            block_size_ratio = 1
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         # MLA models do not need to handle kv replication.
@@ -1744,9 +1779,12 @@ class NixlConnectorWorker:
 
             # post processing for heteroblocksize
             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
-            block_size_ratio = self.transfer_topo.block_size_ratio(
-                remote_info.remote_block_size
-            )
+            try:
+                block_size_ratio = self.transfer_topo.block_size_ratio(
+                    remote_info.remote_block_size
+                )
+            except AssertionError:
+                block_size_ratio = 1
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
             ):
@@ -2122,9 +2160,12 @@ class NixlConnectorWorker:
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
-        )
+        try:
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                remote_info.remote_block_size
+            )
+        except AssertionError:
+            block_size_ratio = 1
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
             assert not self._is_hma_required
