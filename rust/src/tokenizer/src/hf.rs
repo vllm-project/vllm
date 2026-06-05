@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -104,7 +105,8 @@ impl HuggingFaceTokenizer {
     /// Load from `tokenizer.json` with `fastokens`.
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
-        let t = FastokensTokenizer::from_file(path)
+        let tokenizer_json = Self::load_tokenizer_json_with_extra_tokens(path)?;
+        let t = FastokensTokenizer::from_json(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
         Ok(Self::from_fastokens_backend(t))
     }
@@ -130,6 +132,76 @@ impl HuggingFaceTokenizer {
                 Self::new_hf(path)
             }
         }
+    }
+}
+
+impl HuggingFaceTokenizer {
+    /// Read `tokenizer.json`, then merge in extra added tokens from `tokenizer_config.json`                                                                                                                                                                  
+    fn load_tokenizer_json_with_extra_tokens(path: &Path) -> Result<serde_json::Value> {
+        let tokenizer_json = fs::read_to_string(path)
+            .map_err(|error| tokenizer_error!("failed to read {}: {}", path.display(), error))?;
+        let mut tokenizer_value: serde_json::Value = serde_json::from_str(&tokenizer_json)
+            .map_err(|error| tokenizer_error!("failed to parse {}: {}", path.display(), error))?;
+
+        if let Some(parent) = path.parent() {
+            let config_path = parent.join("tokenizer_config.json");
+            if config_path.exists() {
+                if let Ok(config_text) = fs::read_to_string(&config_path) {
+                    if let Ok(config_value) =
+                        serde_json::from_str::<serde_json::Value>(&config_text)
+                    {
+                        merge_added_tokens_from_config(&mut tokenizer_value, &config_value);
+                    }
+                }
+            }
+        }
+
+        Ok(tokenizer_value)
+    }
+}
+
+/// Merge added_tokens in `tokenizer.json` and `tokenizer_config.json`.                                                                               
+fn merge_added_tokens_from_config(
+    tokenizer_json: &mut serde_json::Value,
+    config_json: &serde_json::Value,
+) {
+    use std::collections::HashSet;
+
+    let existing_ids: HashSet<u32> = tokenizer_json
+        .get("added_tokens")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.get("id").and_then(|id| id.as_u64()).map(|id| id as u32))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let decoder = match config_json.get("added_tokens_decoder").and_then(|v| v.as_object()) {
+        Some(d) => d,
+        None => return,
+    };
+
+    let added_tokens = match tokenizer_json.get_mut("added_tokens").and_then(|v| v.as_array_mut()) {
+        Some(a) => a,
+        None => return,
+    };
+
+    for (id_str, token_value) in decoder {
+        let id: u32 = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => continue,
+        };
+        if existing_ids.contains(&id) {
+            continue;
+        }
+
+        // Convert from decoder format to added_tokens array format by adding the "id" field.
+        let mut entry = token_value.clone();
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(id));
+        }
+        added_tokens.push(entry);
     }
 }
 
