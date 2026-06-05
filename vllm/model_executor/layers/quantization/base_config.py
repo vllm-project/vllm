@@ -178,8 +178,9 @@ class QuantizationConfig(ABC):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
