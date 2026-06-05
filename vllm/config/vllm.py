@@ -790,6 +790,8 @@ class VllmConfig:
             self.kv_transfer_config.kv_connector_extra_config.update(
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
+        elif kv_offloading_backend == "explicit":
+            self.kv_transfer_config.kv_connector = "ExOffloadingConnector"
         elif kv_offloading_backend == "lmcache":
             # Default to LMCache multi-process (MP) mode. The actual KV
             # storage capacity is managed by the standalone LMCache server
