@@ -713,6 +713,20 @@ class DeepseekV4MoE(nn.Module):
             self.experts.finalize_weights()
 
 
+def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
+    """Pick the CUDA sparse-MLA attention class for the configured backend.
+
+    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
+    FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
+    """
+    if (
+        vllm_config.attention_config.backend
+        == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
+    ):
+        return DeepseekV4FlashInferMLAAttention
+    return DeepseekV4FlashMLAAttention
+
+
 class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -727,17 +741,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
-        # An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects
-        # the FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
-        attn_cls: type[DeepseekV4Attention]
-        if (
-            vllm_config.attention_config.backend
-            == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
-        ):
-            attn_cls = DeepseekV4FlashInferMLAAttention
-        else:
-            attn_cls = DeepseekV4FlashMLAAttention
-        self.attn = attn_cls(
+        self.attn = _select_dsv4_attn_cls(vllm_config)(
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
