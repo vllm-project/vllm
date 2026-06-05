@@ -120,7 +120,24 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self) -> int:
-        return self.ctx.model_config.max_model_len
+        # For sliding-window realtime models (Voxtral-Mini-Realtime lineage),
+        # audio is processed in streaming chunks bounded by the decoder's
+        # sliding window. The number of audio-derived tokens active in the
+        # model context is therefore bounded by `text_config.sliding_window`,
+        # not by `max_model_len` (which is the cumulative session lifetime,
+        # not the concurrent context size).
+        #
+        # Without this cap, `compute_mm_encoder_budget` returns a budget
+        # proportional to `max_model_len`, the encoder cache pre-allocates
+        # `max_num_seqs * max_model_len` worth of audio feature space, and the
+        # decoder KV cache is starved on 16 GB GPUs (boot crashes with
+        # "KV cache memory needed > available"). Refs vllm-project/vllm#38233.
+        max_model_len = self.ctx.model_config.max_model_len
+        text_config = getattr(self.ctx.model_config.hf_config, "text_config", None)
+        sliding_window = getattr(text_config, "sliding_window", None)
+        if sliding_window is not None:
+            return min(sliding_window, max_model_len)
+        return max_model_len
 
     def get_max_audio_array_len(self) -> int:
         feature_extractor = self.get_feature_extractor()
@@ -334,9 +351,17 @@ class VoxtralForConditionalGeneration(
         self.downsample_factor = self.config.audio_config.downsample_factor
 
         with self._mark_language_model(vllm_config):
+            # Voxtral's text_config inherits from a Mistral 7B-class model but
+            # does not itself declare `architectures`. Without an explicit
+            # override, init_vllm_registered_model falls back to the
+            # Transformers backend, which does not propagate `sliding_window`
+            # to the attention layers, so SlidingWindowSpec is never produced
+            # and the KV cache pool is sized for max_model_len. Force the
+            # Mistral dispatch. Refs vllm-project/vllm#38233.
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
+                architectures=["MistralForCausalLM"],
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
