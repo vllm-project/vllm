@@ -278,6 +278,9 @@ print("caption:", caption_out)
 
 ### Video Inputs
 
+!!! note
+    Video processing uses PyAV by default. To use the OpenCV video backend, install with extra video dependencies using `pip install vllm[video]`.
+
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
 instead of using multi-image input.
 
@@ -839,7 +842,7 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
 4. This approach handles both mid-video corruption and end-of-video truncation
 
-Works with common video formats like MP4 when using OpenCV backends.
+Works with common video formats like MP4 when using OpenCV backends (requires `pip install vllm[video]`).
 
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
