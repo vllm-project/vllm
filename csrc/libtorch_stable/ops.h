@@ -164,6 +164,10 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 
 #endif
 
+// CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
+torch::stable::Tensor get_cuda_view_from_cpu_tensor(
+    torch::stable::Tensor& cpu_tensor);
+
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
     torch::stable::Tensor& output,
@@ -221,6 +225,13 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
                               std::optional<torch::stable::Tensor> scale_ub,
                               std::optional<torch::stable::Tensor> residual,
                               int64_t group_size, bool is_scale_transposed);
+
+void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
+                                  torch::stable::Tensor const& input,
+                                  torch::stable::Tensor& scales,
+                                  int64_t group_size,
+                                  std::optional<torch::stable::Tensor> scale_ub,
+                                  bool is_scale_transposed);
 
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,
