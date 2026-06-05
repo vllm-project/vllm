@@ -34,7 +34,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 #ifdef USE_ROCM
   // TODO: Remove this once we upgrade to torch 2.11.
-  // ROCm still uses torch 2.10, 
+  // ROCm still uses torch 2.10,
   // So we still need to use unstable torch ABI for now.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
   ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,

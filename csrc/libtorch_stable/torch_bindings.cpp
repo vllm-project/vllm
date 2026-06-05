@@ -690,12 +690,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
   cuda_utils.def(
       "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
 }
-  
+
 STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
-                        cuda_utils) {
+                          cuda_utils) {
   cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
-                    TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
+                  TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
 }
 
 #endif
