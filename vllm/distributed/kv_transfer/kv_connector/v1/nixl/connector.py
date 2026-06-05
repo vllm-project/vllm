@@ -44,6 +44,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import MambaSpec
+from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -93,6 +94,15 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
+
+        if vllm_config.kv_transfer_config.kv_role == "kv_both":
+            logger.warning_once(
+                "Using kv_role='kv_both' with NixlConnector is deprecated "
+                "and will be removed in a future release. Please set "
+                "kv_role='kv_producer' for prefill instances and "
+                "kv_role='kv_consumer' for decode instances. "
+            )
+
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
@@ -155,6 +165,14 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
+
+    def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
 
     def request_finished(
         self,

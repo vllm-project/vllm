@@ -15,6 +15,7 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -350,9 +351,21 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
-            # Reasoning just ended, so we shouldn't advance til
-            # next pass
             structured_req.reasoning_ended = True
+
+            # Reasoning just ended this step. Defer FSM advance until the next
+            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
+            # advancing on the closing boundary token can accept tokens that still
+            # belong to the reasoning stream. Structural tags are the only safe
+            # same-step exception: they model phased output (e.g. thinking tag ->
+            # answer tag), and speculative decoding must run grammar.validate_tokens
+            # on draft tokens produced immediately after that transition.
+            if (
+                self.vllm_config.speculative_config is not None
+                and structured_req.structured_output_key[0]
+                == StructuredOutputOptions.STRUCTURAL_TAG
+            ):
+                return True
 
         return False
 
