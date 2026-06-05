@@ -965,7 +965,7 @@ tenacity==9.1.2
     #   gpt-oss
     #   lm-eval
     #   plotly
-tensorizer==2.10.1
+tensorizer==2.12.1
     # via -r requirements/test/cuda.in
 termcolor==3.1.0
     # via gpt-oss
