@@ -4,7 +4,6 @@
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/csrc/stable/device.h>
 #include <torch/csrc/stable/c/shim.h>
-#include <torch/headeronly/version.h>
 #include <cuda_runtime.h>
 
 #include <array>
@@ -17,14 +16,16 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   STD_TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
   const auto dtype = cpu_tensor.scalar_type();
-  const auto layout = cpu_tensor.layout();
   const torch::stable::Device cuda_dev(torch::headeronly::DeviceType::CUDA);
 
   // handle empty tensor
   if (cpu_tensor.numel() == 0) {
-    return torch::stable::empty(cpu_tensor.sizes(), dtype, layout, cuda_dev);
+    return torch::stable::empty(cpu_tensor.sizes(), dtype, std::nullopt,
+                                cuda_dev);
   }
 
+#if defined(TORCH_VERSION_2_11_0) && \
+    TORCH_FEATURE_VERSION >= TORCH_VERSION_2_11_0
   std::array<StableIValue, 2> is_pinned_stack{
       torch::stable::detail::from(cpu_tensor),
       torch::stable::detail::from(std::nullopt)};
@@ -73,4 +74,10 @@ torch::stable::Tensor get_cuda_view_from_cpu_tensor(
   return torch::stable::from_blob(device_ptr, contiguous_cpu.sizes(),
                                   contiguous_cpu.strides(), cuda_dev,
                                   contiguous_cpu.scalar_type(), deleter);
+#else
+  // PyTorch 2.10 stable ABI can create a tensor from a blob, but it cannot
+  // attach a deleter or lifetime anchor to that storage. Returning a copied
+  // accelerator tensor is the safe fallback for older release images.
+  return torch::stable::to(cpu_tensor, cuda_dev, false, true);
+#endif
 }

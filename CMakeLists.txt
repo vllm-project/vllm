@@ -1071,12 +1071,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
+  if(Torch_VERSION VERSION_LESS "2.11.0")
+    set(VLLM_STABLE_TORCH_TARGET_VERSION 0x020A000000000000ULL)
+  else()
+    set(VLLM_STABLE_TORCH_TARGET_VERSION 0x020B000000000000ULL)
+  endif()
+
   # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.11.
-  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.11.
+  # This ensures we only use C-shim APIs available in the build PyTorch.
+  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION.
   target_compile_definitions(_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
+    TORCH_TARGET_VERSION=${VLLM_STABLE_TORCH_TARGET_VERSION})
 
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
