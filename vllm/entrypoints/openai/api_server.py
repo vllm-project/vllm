@@ -27,12 +27,22 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.server_utils import (
+from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
+from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.utils.api_utils import (
+    cli_env_setup,
+    log_non_default_args,
+    log_version_and_model,
+    process_lora_modules,
+)
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.server_utils import (
     engine_error_handler,
     exception_handler,
     generation_error_handler,
@@ -41,16 +51,6 @@ from vllm.entrypoints.openai.server_utils import (
     lifespan,
     log_response,
     validation_exception_handler,
-)
-from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
-from vllm.entrypoints.utils import (
-    cli_env_setup,
-    log_non_default_args,
-    log_version_and_model,
-    process_lora_modules,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -187,7 +187,7 @@ def build_app(
 
     register_models_api_router(app)
 
-    from vllm.entrypoints.sagemaker.api_router import (
+    from vllm.entrypoints.serve.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
 
@@ -254,12 +254,12 @@ def build_app(
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from vllm.entrypoints.openai.server_utils import AuthenticationMiddleware
+        from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
 
         app.add_middleware(AuthenticationMiddleware, tokens=tokens)
 
     if args.enable_request_id_headers:
-        from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware
+        from vllm.entrypoints.serve.utils.server_utils import XRequestIdMiddleware
 
         app.add_middleware(XRequestIdMiddleware)
 
