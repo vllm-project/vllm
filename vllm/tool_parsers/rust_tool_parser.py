@@ -33,7 +33,7 @@ def _rust_tool_parser_module() -> Any:
     except ImportError as exc:
         raise RuntimeError(
             "Rust tool parsing requires the vllm._rust_tool_parser PyO3 "
-            "extension. Rebuild vLLM with Rust extensions enabled."
+            "extension. Rebuild vLLM with Rust frontend/extensions enabled."
         ) from exc
     return _rust_tool_parser
 
