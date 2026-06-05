@@ -5696,7 +5696,6 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
-        explicit_scheduled_tokens: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5756,13 +5755,7 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        if explicit_scheduled_tokens is not None:
-            # VerifyAdaptiveController passes an exact per-request token
-            # distribution for ITL profiling; bypass all other heuristics.
-            num_reqs = len(explicit_scheduled_tokens)
-            num_scheduled_tokens_list = list(explicit_scheduled_tokens)
-            max_query_len = max(explicit_scheduled_tokens)
-        elif create_mixed_batch:
+        if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
@@ -6688,6 +6681,226 @@ class GPUModelRunner(
         """
         if self._verify_adaptive_controller is not None:
             self._verify_adaptive_controller.profile_cost_table(self)
+
+    @torch.inference_mode()
+    def _adaptive_profile_run(
+        self,
+        scheduled_tokens: list[int],
+        seq_lens: int = 1024,
+        n_warmup: int = 3,
+        n_measure: int = 5,
+    ) -> tuple[str, float, int]:
+        """Profile verifier forward latency for one (batch, query_len) shape.
+
+        Unlike ``_dummy_run``, this method constructs attention metadata and
+        invokes the target model in the same way as a real decode step would,
+        so the cuda-graph dispatcher naturally selects FCG / PCG / eager based
+        on the batch shape.  It is intentionally minimal: no LoRA, no EPLB, no
+        drafter, no sampler.
+
+        Crucially, all attention metadata / slot-mapping / block-table setup is
+        built **once**, and only the repeated ``self.model(...)`` forwards are
+        timed with CUDA events.  This excludes the (shape-independent) Python
+        metadata-construction overhead, which would otherwise dominate and
+        flatten the measured cost across shapes.
+
+        Args:
+            scheduled_tokens: per-request token counts, e.g. ``[ql] * bs``.
+                All requests are treated as decode (query == kv tokens so far).
+            seq_lens: simulated KV-context length set in seq_lens for attention
+                backends.  A realistic value (e.g. 1024) makes profiled
+                attention cost closer to real long-context inference.
+            n_warmup: untimed forwards before measurement.
+            n_measure: timed forwards; the returned latency is their average.
+
+        Returns:
+            ``(runtime_mode, avg_forward_ms, num_tokens_padded)`` where
+            runtime_mode is one of ``"FCG"`` / ``"PCG"`` / ``"eager"`` and
+            num_tokens_padded is the token count actually executed (after
+            cuda-graph padding).
+        """
+        num_scheduled_tokens = np.array(scheduled_tokens, dtype=np.int32)
+        num_reqs = len(scheduled_tokens)
+        num_tokens_unpadded = int(num_scheduled_tokens.sum())
+        max_query_len = int(num_scheduled_tokens.max())
+
+        assert num_tokens_unpadded <= self.max_num_tokens, (
+            f"adaptive profile: num_tokens={num_tokens_unpadded} > "
+            f"max_num_tokens={self.max_num_tokens}"
+        )
+
+        # Let the batch dispatcher decide FCG / PCG / eager exactly as it
+        # would during real inference.
+        _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
+            self._determine_batch_execution_and_padding(
+                num_tokens=num_tokens_unpadded,
+                num_reqs=num_reqs,
+                num_scheduled_tokens_np=num_scheduled_tokens,
+                max_num_scheduled_tokens=max_query_len,
+                use_cascade_attn=False,
+                allow_microbatching=False,
+                force_eager=False,
+            )
+        )
+
+        num_tokens_padded = batch_desc.num_tokens
+        num_reqs_padded = (
+            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        )
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.vllm_config.parallel_config.num_ubatches,
+        )
+
+        slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
+            num_tokens_padded=num_tokens_padded,
+            num_reqs_padded=num_reqs_padded,
+            num_tokens_unpadded=num_tokens_unpadded,
+            ubatch_slices=ubatch_slices_padded,
+        )
+        if slot_mappings_by_group is not None:
+            for sm in slot_mappings_by_group.values():
+                sm.fill_(-1)
+
+        with self.synchronize_input_prep():
+            # seq_lens / query_start_loc needed by attention backends in all
+            # modes (FULL graph needs padding; PCG/eager need the real values).
+            # Use the configured warmup_seq_lens so that attention cost reflects
+            # realistic long-context inference rather than trivial seq_len=1.
+            self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
+            self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+            self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
+
+            cum_num_tokens = self._get_cumsum_and_arange(
+                num_scheduled_tokens, self.query_pos.np
+            )
+            self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+            self.query_start_loc.copy_to_gpu()
+            self.input_batch.block_table.commit_block_table(num_reqs_padded)
+
+            pad_attn = _cudagraph_mode == CUDAGraphMode.FULL
+            attn_metadata, _ = self._build_attention_metadata(
+                num_tokens=num_tokens_unpadded,
+                num_tokens_padded=num_tokens_padded if pad_attn else None,
+                num_reqs=num_reqs_padded,
+                max_query_len=max_query_len,
+                ubatch_slices=(
+                    ubatch_slices_padded if pad_attn else ubatch_slices
+                ),
+                for_cudagraph_capture=False,
+                slot_mappings=slot_mappings_by_group,
+                use_spec_decode=self.speculative_config is not None,
+            )
+
+        # Inputs — identical construction to _dummy_run so that model kwargs
+        # (e.g. aux hidden states for DFlash/Eagle3) are always provided.
+        if ubatch_slices_padded is not None:
+            num_tokens_padded = ubatch_slices_padded[0].num_tokens
+            if num_tokens_across_dp is not None:
+                num_tokens_across_dp[:] = num_tokens_padded
+
+        # Real verifier decode steps are text-only (no new multimodal inputs),
+        # so we deliberately skip the vision-encoder path here.  Feeding dummy
+        # mm inputs would run the vision encoder every forward, adding a large
+        # token-count-independent cost that masks the LM decode latency we are
+        # trying to profile.  mm-wrapped models route through ``inputs_embeds``
+        # (their compiled inner LM expects an embeds tensor, not input_ids), so
+        # we still supply a dummy embeds buffer for them — just without the mm
+        # kwargs that would trigger the encoder.
+        model_kwargs = self._init_model_kwargs()
+        use_embeds = self.enable_prompt_embeds or (
+            self.supports_mm_inputs and not self.model_config.is_encoder_decoder
+        )
+        if use_embeds:
+            input_ids = None
+            inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
+        else:
+            input_ids = self.input_ids.gpu[:num_tokens_padded]
+            inputs_embeds = None
+
+        if self.uses_mrope:
+            positions = self.mrope_positions.gpu[:, :num_tokens_padded]
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
+        else:
+            positions = self.positions[:num_tokens_padded]
+
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            if self.intermediate_tensors is None:
+                self.intermediate_tensors = (
+                    self.model.make_empty_intermediate_tensors(
+                        batch_size=self.max_num_tokens,
+                        dtype=self.model_config.dtype,
+                        device=self.device,
+                    )
+                )
+            intermediate_tensors = self.sync_and_gather_intermediate_tensors(
+                num_tokens_padded, None, False
+            )
+
+        _mode_names = {
+            CUDAGraphMode.FULL: "FCG",
+            CUDAGraphMode.PIECEWISE: "PCG",
+            CUDAGraphMode.NONE: "eager",
+        }
+        if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
+            logger.debug(
+                "adaptive_profile shapes: num_reqs=%d num_reqs_padded=%d "
+                "num_tokens_unpadded=%d num_tokens_padded=%d max_query_len=%d "
+                "input_ids=%s inputs_embeds=%s positions=%s seq_lens[:nr]=%s "
+                "qsl[:nr+1]=%s mode=%s",
+                num_reqs,
+                num_reqs_padded,
+                num_tokens_unpadded,
+                num_tokens_padded,
+                max_query_len,
+                None if input_ids is None else tuple(input_ids.shape),
+                None if inputs_embeds is None else tuple(inputs_embeds.shape),
+                tuple(positions.shape),
+                self.seq_lens[:num_reqs].tolist(),
+                self.query_start_loc.np[: num_reqs + 1].tolist(),
+                _mode_names.get(_cudagraph_mode, str(_cudagraph_mode)),
+            )
+        avg_ms = 0.0
+        with set_forward_context(
+            attn_metadata,
+            self.vllm_config,
+            num_tokens=num_tokens_padded,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=_cudagraph_mode,
+            batch_descriptor=batch_desc,
+            ubatch_slices=ubatch_slices_padded,
+            slot_mapping=slot_mappings,
+        ):
+            def _forward() -> None:
+                self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+
+            for _ in range(max(n_warmup, 0)):
+                _forward()
+            torch.cuda.synchronize()
+
+            if n_measure > 0:
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()
+                for _ in range(n_measure):
+                    _forward()
+                end_ev.record()
+                torch.cuda.synchronize()
+                avg_ms = start_ev.elapsed_time(end_ev) / n_measure
+
+        mode_str = _mode_names.get(_cudagraph_mode, str(_cudagraph_mode))
+        return mode_str, avg_ms, int(num_tokens_padded)
 
     def _warmup_and_capture(
         self,

@@ -40,6 +40,11 @@ class VerifyAdaptiveConfig:
     """Start of the step-range (must be ≥ 2)."""
 
     # measurement
+    warmup_seq_lens: int = 1024
+    """Simulated KV-context length (seq_lens) used during cost profiling.
+    A larger value makes attention cost closer to real long-context inference.
+    Defaults to 1024."""
+
     n_warmup_iters: int = 3
     n_measure_iters: int = 5
 
@@ -73,6 +78,8 @@ class VerifyAdaptiveConfig:
                 f"min_query_len_per_req ({self.min_query_len_per_req}) > "
                 f"effective max_query_len_per_req ({eff_max_q})."
             )
+        if self.warmup_seq_lens < 1:
+            raise ValueError("warmup_seq_lens must be >= 1.")
         if self.n_warmup_iters < 0:
             raise ValueError("n_warmup_iters must be >= 0.")
         if self.n_measure_iters < 1:

@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm.distributed import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.verify_adaptive_config import VerifyAdaptiveConfig
 
@@ -132,11 +133,12 @@ class VerifyAdaptiveController:
         # req_id → recommended draft_len for the next verifier step
         self._adaptive_draft_lens: dict[str, int] = {}
 
-        logger.info(
-            "VerifyAdaptiveController: bs_levels=%s  ql_levels=%s",
-            self._batch_size_levels,
-            self._query_len_levels,
-        )
+        if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
+            logger.info(
+                "VerifyAdaptiveController: bs_levels=%s  ql_levels=%s",
+                self._batch_size_levels,
+                self._query_len_levels,
+            )
 
     def _build_batch_size_levels(self) -> list[int]:
         """Step-2 range from min_warmup_batch_size to cap."""
@@ -175,16 +177,15 @@ class VerifyAdaptiveController:
         if not self.config.enabled:
             return
 
-        logger.info(
-            "VerifyAdaptiveController: profiling %d ITL cost points "
-            "(%d bs × %d ql).",
-            len(self._batch_size_levels) * len(self._query_len_levels),
-            len(self._batch_size_levels),
-            len(self._query_len_levels),
-        )
+        if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
+            logger.info(
+                "VerifyAdaptiveController: profiling %d ITL cost points "
+                "(%d bs × %d ql).",
+                len(self._batch_size_levels) * len(self._query_len_levels),
+                len(self._batch_size_levels),
+                len(self._query_len_levels),
+            )
 
-        start_ev = torch.cuda.Event(enable_timing=True)
-        end_ev = torch.cuda.Event(enable_timing=True)
         max_tokens = getattr(runner, "max_num_tokens", None)
 
         for bs in self._batch_size_levels:
@@ -193,7 +194,7 @@ class VerifyAdaptiveController:
             for ql in self._query_len_levels:
                 num_tokens = bs * ql
                 if max_tokens is not None and num_tokens > max_tokens:
-                    logger.debug(
+                    logger.info(
                         "profile skip: bs=%d ql=%d num_tokens=%d > %d",
                         bs, ql, num_tokens, max_tokens,
                     )
@@ -201,43 +202,41 @@ class VerifyAdaptiveController:
 
                 sched_tokens = [ql] * bs
 
-                for _ in range(self.config.n_warmup_iters):
-                    runner._dummy_run(
-                        num_tokens,
-                        is_profile=True,
-                        skip_eplb=True,
-                        explicit_scheduled_tokens=sched_tokens,
-                    )
-                torch.cuda.synchronize()
-
-                start_ev.record()
-                for _ in range(self.config.n_measure_iters):
-                    runner._dummy_run(
-                        num_tokens,
-                        is_profile=True,
-                        skip_eplb=True,
-                        explicit_scheduled_tokens=sched_tokens,
-                    )
-                end_ev.record()
-                torch.cuda.synchronize()
-
-                elapsed_s = (
-                    start_ev.elapsed_time(end_ev)
-                    / 1000.0
-                    / self.config.n_measure_iters
+                # The runner builds metadata once and times only the repeated
+                # model forwards, so the returned latency is free of the
+                # shape-independent Python construction overhead.
+                runtime_mode, avg_ms, padded_tokens = runner._adaptive_profile_run(
+                    sched_tokens,
+                    self.config.warmup_seq_lens,
+                    self.config.n_warmup_iters,
+                    self.config.n_measure_iters,
                 )
+                elapsed_s = avg_ms / 1e3
+
                 self._cost_table[(bs, num_tokens)] = elapsed_s
                 self._sorted_sql_per_bs[bs].append(num_tokens)
-                logger.debug("cost(%d,%d)=%.3fms", bs, num_tokens, elapsed_s * 1e3)
+                if (
+                    get_tp_group().rank_in_group == 0
+                    and get_pp_group().is_first_rank
+                ):
+                    logger.info(
+                        "profile  bs=%-4d  ql=%-4d  sql=%-6d  padded=%-6d  "
+                        "seq_lens=%-6d  mode=%-6s  avg=%.3f ms",
+                        bs, ql, num_tokens, padded_tokens,
+                        self.config.warmup_seq_lens,
+                        runtime_mode,
+                        avg_ms,
+                    )
 
         self._sorted_bs = sorted(self._sorted_sql_per_bs.keys())
         for bs in self._sorted_bs:
             self._sorted_sql_per_bs[bs].sort()
 
-        logger.info(
-            "VerifyAdaptiveController: cost table ready (%d entries).",
-            len(self._cost_table),
-        )
+        if get_tp_group().rank_in_group == 0 and get_pp_group().is_first_rank:
+            logger.info(
+                "VerifyAdaptiveController: cost table ready (%d entries).",
+                len(self._cost_table),
+            )
 
     def process_draft_output(
         self,
@@ -294,7 +293,7 @@ class VerifyAdaptiveController:
         for req_id, draft_len in zip(active_req_ids, result["draft_lens"]):
             self._adaptive_draft_lens[req_id] = draft_len
 
-        logger.debug(
+        logger.info(
             "adaptive: bs_key=%d best_Q=%d best_S=%d score=%.4f draft_lens=%s",
             bs_key, result["best_Q"], result["best_S"],
             result["best_score"], result["draft_lens"],

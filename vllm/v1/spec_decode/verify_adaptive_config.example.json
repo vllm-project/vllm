@@ -6,6 +6,7 @@
   "query_len_step_per_req": 2,
   "min_query_len_per_req": 2,
   "max_query_len_per_req": null,
+  "warmup_seq_lens": 1024,
   "n_warmup_iters": 3,
   "n_measure_iters": 5
 }

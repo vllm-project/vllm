@@ -55,7 +55,7 @@ cost = ITL(batch_size, sum_query_len)
 sum_query_len = Σ_i query_lens[i] = B + Σ_i draft_lens[i]
 ```
 
-After JIT / CUDA-graph warmup (`compile_or_warm_up_model`), `_dummy_run` fills
+After JIT / CUDA-graph warmup (`compile_or_warm_up_model`), `_adaptive_profile_run` fills
 `cost_table[(bs, bs * ql)]` at discrete points:
 
 - **Batch axis**: explicit `warmup_batch_sizes`, or step-2 from
@@ -63,6 +63,9 @@ After JIT / CUDA-graph warmup (`compile_or_warm_up_model`), `_dummy_run` fills
 - **Per-request query_len axis**: from `min_query_len_per_req` in steps of
   `query_len_step_per_req`, capped at `max_query_len_per_req` (default:
   `num_speculative_tokens + 1`).
+- **Sequence context length**: controlled by `warmup_seq_lens` (default 1024).
+  Set this to a value representative of your production sequence length so
+  that FlashAttention kernel cost is realistic during profiling.
 
 ## Core algorithm (each decode step)
 
