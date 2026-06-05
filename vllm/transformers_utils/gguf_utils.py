@@ -255,6 +255,103 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
     return config
 
 
+def extract_eos_token_id_from_gguf(model: str) -> int | None:
+    """Extract EOS token ID from GGUF metadata.
+
+    GGUF files store the EOS token ID in tokenizer.ggml.eos_token_id field.
+    This may differ from HuggingFace's tokenizer config (e.g., Gemma models
+    use <end_of_turn> token ID 106 as EOS in GGUF, but HF tokenizer reports
+    <eos> token ID 1).
+
+    Args:
+        model: Path to GGUF model file
+
+    Returns:
+        EOS token ID from GGUF metadata, or None if not found
+    """
+    # Note: We don't check for .gguf extension here because HuggingFace Hub
+    # stores GGUF files as blob hashes without extensions. The caller is
+    # responsible for ensuring this is a valid GGUF file (via check_gguf_file).
+    try:
+        model_path = Path(model)
+        if not model_path.is_file():
+            return None
+
+        reader = gguf.GGUFReader(str(model_path))
+
+        eos_field = reader.get_field(Keys.Tokenizer.EOS_ID)
+        if eos_field is not None:
+            eos_token_id = int(eos_field.parts[-1][0])
+            logger.debug(
+                "Extracted eos_token_id=%d from GGUF metadata",
+                eos_token_id,
+            )
+            return eos_token_id
+
+        return None
+
+    except Exception as e:
+        logger.debug("Error extracting EOS token ID from GGUF: %s", e)
+        return None
+
+
+def maybe_patch_gguf_tokenizer(
+    tokenizer,
+    path_or_repo_id: str | Path,
+    gguf_file: str | None,
+) -> None:
+    """Patch ``tokenizer.eos_token_id`` from GGUF metadata when available.
+
+    GGUF files may store a different EOS token ID than the HuggingFace
+    tokenizer config (e.g., Gemma uses ``<end_of_turn>`` ID 106 as EOS in
+    GGUF, but HF reports ``<eos>`` ID 1). This helper mutates
+    ``tokenizer.eos_token_id`` in place to match the GGUF metadata.
+
+    Accepts either a local directory path or a HuggingFace repo id for
+    ``path_or_repo_id``; remote repo ids resolve to a local file via
+    ``hf_hub_download``.
+
+    Safe to call unconditionally — this is a no-op when ``gguf_file`` is
+    falsy, the file cannot be resolved, or the GGUF metadata has no EOS
+    token id.
+    """
+    if not gguf_file:
+        return
+
+    candidate = Path(path_or_repo_id) / gguf_file
+    if candidate.is_file():
+        gguf_path = candidate
+    else:
+        # Treat path_or_repo_id as a HuggingFace repo id
+        from huggingface_hub import hf_hub_download
+
+        try:
+            gguf_path = Path(
+                hf_hub_download(repo_id=str(path_or_repo_id), filename=gguf_file)
+            )
+        except Exception as e:
+            logger.debug(
+                "Could not resolve GGUF file %s from %s: %s",
+                gguf_file,
+                path_or_repo_id,
+                e,
+            )
+            return
+
+    gguf_eos_id = extract_eos_token_id_from_gguf(str(gguf_path))
+    if gguf_eos_id is None:
+        return
+
+    hf_eos_id = tokenizer.eos_token_id
+    if hf_eos_id != gguf_eos_id:
+        logger.info(
+            "Patching tokenizer eos_token_id from %d to %d (using GGUF metadata)",
+            hf_eos_id,
+            gguf_eos_id,
+        )
+        tokenizer.eos_token_id = gguf_eos_id
+
+
 def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,

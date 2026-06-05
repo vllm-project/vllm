@@ -8,7 +8,9 @@ from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
+from vllm.transformers_utils.gguf_utils import maybe_patch_gguf_tokenizer
 
 from .protocol import TokenizerLike
 
@@ -100,6 +102,8 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
     tokenizer.__class__ = TokenizerPool
 
+logger = init_logger(__name__)
+
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
@@ -168,6 +172,9 @@ class CachedHfTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> HfTokenizer:
+        # Save gguf_file before AutoTokenizer.from_pretrained() pops it from kwargs
+        gguf_file = kwargs.get("gguf_file")
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
@@ -211,5 +218,10 @@ class CachedHfTokenizer(TokenizerLike):
                 k: v.lower() for k, v in tokenizer.special_tokens_map.items()
             }
             tokenizer.add_special_tokens(special_tokens_map)
+
+        # Patch tokenizer EOS from GGUF metadata when applicable
+        # (gguf_file was saved above before AutoTokenizer.from_pretrained()
+        # popped it from kwargs).
+        maybe_patch_gguf_tokenizer(tokenizer, path_or_repo_id, gguf_file)
 
         return get_cached_tokenizer(tokenizer)
