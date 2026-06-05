@@ -647,14 +647,13 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
     _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
     _active_decoder_slots: ClassVar[int] = 0
     _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
+    _DEVICE_INDEX: ClassVar[int] = 0
 
     @classmethod
     def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
         import torch
 
-        return PyNvVideoCodecDecoderSlot(
-            torch.cuda.Stream(device=torch.accelerator.current_device_index())
-        )
+        return PyNvVideoCodecDecoderSlot(torch.cuda.Stream(device=cls._DEVICE_INDEX))
 
     @staticmethod
     @contextmanager
@@ -792,7 +791,7 @@ class PyNvVideoCodecVideoBackend(VideoBackend):
                         output_color_type=nvc.OutputColorType.RGB,
                         use_device_memory=True,
                         need_scanned_stream_metadata=False,
-                        gpu_id=torch.accelerator.current_device_index(),
+                        gpu_id=cls._DEVICE_INDEX,
                         cuda_stream=stream.cuda_stream,
                         decoder_cache_size=PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
                     )
