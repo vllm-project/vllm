@@ -2644,6 +2644,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 )
             return None
 
+        if type(layer) is VocabParallelEmbedding:
+            if quant_algo == "FP8":
+                return ModelOptFp8EmbeddingMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4EmbeddingMethod(self.nvfp4_config)
+            return None
+
         return None
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):

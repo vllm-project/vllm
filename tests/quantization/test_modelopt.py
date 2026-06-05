@@ -724,3 +724,101 @@ def test_modelopt_nvfp4_embedding_matches_full_dequant():
     expected = full[ids]
     torch.testing.assert_close(out, expected, atol=0.0, rtol=0.0)
     assert out.shape == (ids.shape[0], hidden)
+
+
+# ---------------------------------------------------------------------------
+# ModelOptMixedPrecisionConfig embedding dispatch
+# ---------------------------------------------------------------------------
+
+
+def _make_mixed_cfg(quantized_layers: dict):
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8Config,
+        ModelOptMixedPrecisionConfig,
+        ModelOptNvFp4Config,
+    )
+
+    return ModelOptMixedPrecisionConfig(
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+        quantized_layers=quantized_layers,
+        fp8_config=ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=None,
+            exclude_modules=[],
+        ),
+        nvfp4_config=ModelOptNvFp4Config(
+            quant_method="NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+            group_size=16,
+        ),
+    )
+
+
+def test_modelopt_mixed_config_dispatches_fp8_embedding():
+    """Embedding listed as FP8 in quantized_layers → ModelOptFp8EmbeddingMethod."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    cfg = _make_mixed_cfg({"model.embed_tokens": {"quant_algo": "FP8"}})
+    embed = VocabParallelEmbedding.__new__(VocabParallelEmbedding)
+    assert isinstance(
+        cfg.get_quant_method(embed, prefix="model.embed_tokens"),
+        ModelOptFp8EmbeddingMethod,
+    )
+
+
+def test_modelopt_mixed_config_dispatches_nvfp4_embedding():
+    """Embedding listed as NVFP4 in quantized_layers → ModelOptNvFp4EmbeddingMethod."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    cfg = _make_mixed_cfg({"model.embed_tokens": {"quant_algo": "NVFP4"}})
+    embed = VocabParallelEmbedding.__new__(VocabParallelEmbedding)
+    assert isinstance(
+        cfg.get_quant_method(embed, prefix="model.embed_tokens"),
+        ModelOptNvFp4EmbeddingMethod,
+    )
+
+
+def test_modelopt_mixed_config_embedding_not_in_quantized_layers():
+    """Embedding absent from quantized_layers → None (falls back to unquantized)."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        VocabParallelEmbedding,
+    )
+
+    cfg = _make_mixed_cfg({})
+    embed = VocabParallelEmbedding.__new__(VocabParallelEmbedding)
+    assert cfg.get_quant_method(embed, prefix="model.embed_tokens") is None
+
+
+def test_modelopt_mixed_config_lm_head_not_dispatched():
+    """ParallelLMHead (VocabParallelEmbedding subclass) is never quantized
+    via the embedding path — it must go through the linear path instead."""
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+    )
+
+    cfg = _make_mixed_cfg({"model.lm_head": {"quant_algo": "FP8"}})
+    lm_head = ParallelLMHead.__new__(ParallelLMHead)
+    # ParallelLMHead is a LinearBase subclass, so it takes the linear branch,
+    # not the embedding branch. get_quant_method returns a linear method, not
+    # an embedding method — assert it is NOT an embedding method.
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8EmbeddingMethod,
+        ModelOptNvFp4EmbeddingMethod,
+    )
+
+    result = cfg.get_quant_method(lm_head, prefix="model.lm_head")
+    assert not isinstance(result, (ModelOptFp8EmbeddingMethod, ModelOptNvFp4EmbeddingMethod))
