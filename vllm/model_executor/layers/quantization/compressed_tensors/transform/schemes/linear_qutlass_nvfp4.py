@@ -115,7 +115,7 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
             layer.weight_scale,
             layer.fused_alpha,
             x.dtype,
-            backend="cutlass"
+            backend="cutlass",
         )
 
         out = slice_nvfp4_output(out, output_size)
