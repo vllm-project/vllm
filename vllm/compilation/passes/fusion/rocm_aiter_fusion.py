@@ -445,14 +445,15 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 mxfp4_pattern_count += 2
 
             #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
-            AiterRMSFp8GroupQuantPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
-            ).register(self.patterns)
+            if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+                AiterRMSFp8GroupQuantPattern(
+                    epsilon, FP8_DTYPE, GroupShape(1, 128)
+                ).register(self.patterns)
 
-            # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
-            AiterFusedAddRMSFp8GroupQuantPattern(
-                epsilon, FP8_DTYPE, GroupShape(1, 128)
-            ).register(self.patterns)
+                # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
+                AiterFusedAddRMSFp8GroupQuantPattern(
+                    epsilon, FP8_DTYPE, GroupShape(1, 128)
+                ).register(self.patterns)
 
             # When quant_fp8 custom ops are disabled, both AITER and native
             # quant matchers trace through QuantFP8's native implementation.
