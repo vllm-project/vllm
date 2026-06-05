@@ -2,7 +2,6 @@
 // cache.h, which is no longer included here after cache ops moved to
 // _C_stable_libtorch).
 #include <torch/all.h>
-#include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
 #include <torch/library.h>
@@ -32,26 +31,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
-           &get_cuda_view_from_cpu_tensor);
-
   // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
-
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-           &silu_and_mul_per_block_quant);
 
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
@@ -177,19 +160,5 @@ TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("qr_max_size", &qr_max_size);
 }
 #endif
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
-  // Cuda utils
-
-  // Gets the specified device attribute.
-  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
-  cuda_utils.impl("get_device_attribute", &get_device_attribute);
-
-  // Gets the maximum shared memory per block device attribute.
-  cuda_utils.def(
-      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
-  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
-                  &get_max_shared_memory_per_block_device_attribute);
-}
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
