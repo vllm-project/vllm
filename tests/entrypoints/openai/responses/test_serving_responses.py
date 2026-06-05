@@ -185,7 +185,7 @@ def _harmony_required_tool_serving() -> OpenAIServingResponses:
     return serving
 
 
-def test_harmony_required_tool_json_output_becomes_function_call() -> None:
+def test_harmony_required_tool_json_output_becomes_function_call_and_replays() -> None:
     serving = _harmony_required_tool_serving()
     request = ResponsesRequest(
         input="Call get_weather for Paris.",
@@ -217,80 +217,6 @@ def test_harmony_required_tool_json_output_becomes_function_call() -> None:
     assert stored_msg.recipient == "functions.get_weather"
     assert stored_msg.content[0].text == '{"location": "Paris"}'
 
-
-def test_harmony_required_tool_json_rejects_missing_parameters() -> None:
-    request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-    )
-
-    with pytest.raises(ValueError, match="did not include object parameters"):
-        OpenAIServingResponses._parse_required_tool_json_output(
-            request,
-            '[{"name":"get_weather"}]',
-        )
-
-
-def test_harmony_required_tool_json_rejects_unknown_tool() -> None:
-    request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-    )
-
-    with pytest.raises(ValueError, match="unknown tool"):
-        OpenAIServingResponses._parse_required_tool_json_output(
-            request,
-            '[{"name":"get_time","parameters":{}}]',
-        )
-
-
-def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
-    single_tool_request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-        parallel_tool_calls=False,
-    )
-    limited_request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-        max_tool_calls=3,
-    )
-
-    single_tool_schema = OpenAIServingResponses._required_tool_json_schema(
-        single_tool_request
-    )
-    limited_schema = OpenAIServingResponses._required_tool_json_schema(limited_request)
-
-    assert isinstance(single_tool_schema, dict)
-    assert single_tool_schema["maxItems"] == 1
-    assert isinstance(limited_schema, dict)
-    assert limited_schema["maxItems"] == 3
-
-
-def test_harmony_required_tool_json_store_replays_function_call() -> None:
-    serving = _harmony_required_tool_serving()
-    request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-        store=True,
-    )
-    serving.msg_store[request.request_id] = []
-    output = CompletionOutput(
-        index=0,
-        text='[{"name":"get_weather","parameters":{"location":"Paris"}}]',
-        token_ids=[],
-        cumulative_logprob=0.0,
-        logprobs=None,
-        finish_reason="stop",
-        stop_reason=None,
-    )
-    serving._make_harmony_required_tool_json_output_items(request, output)
-
     prev_response = MagicMock()
     prev_response.id = request.request_id
     next_request = ResponsesRequest(
@@ -310,58 +236,90 @@ def test_harmony_required_tool_json_store_replays_function_call() -> None:
     assert messages[-1].content[0].text == "Continue."
 
 
-def test_harmony_required_tool_json_rejects_text_format_conflict() -> None:
-    serving = _harmony_required_tool_serving()
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ('[{"name":"get_weather"}]', "did not include object parameters"),
+        ('[{"name":"get_time","parameters":{}}]', "unknown tool"),
+    ],
+)
+def test_harmony_required_tool_json_rejects_invalid_output(
+    text: str,
+    match: str,
+) -> None:
     request = ResponsesRequest(
         input="Call get_weather for Paris.",
         tools=[_function_tool()],
         tool_choice="required",
-        text=ResponseTextConfig(
-            format=ResponseFormatTextJSONSchemaConfig(
-                type="json_schema",
-                name="weather_answer",
-                schema={"type": "object"},
-            )
+    )
+
+    with pytest.raises(ValueError, match=match):
+        OpenAIServingResponses._parse_required_tool_json_output(request, text)
+
+
+@pytest.mark.parametrize(
+    ("request_kwargs", "param"),
+    [
+        (
+            {
+                "text": ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="weather_answer",
+                        schema={"type": "object"},
+                    )
+                )
+            },
+            "text.format",
         ),
-    )
-
-    error = serving._validate_create_responses_input(request)
-
-    assert error is not None
-    assert error.error.type == "invalid_request_error"
-    assert error.error.param == "text.format"
-
-
-def test_harmony_required_tool_json_rejects_zero_max_tool_calls() -> None:
+        ({"max_tool_calls": 0}, "max_tool_calls"),
+        (
+            {"structured_outputs": StructuredOutputsParams(json={"type": "object"})},
+            "structured_outputs",
+        ),
+    ],
+)
+def test_harmony_required_tool_json_rejects_conflicting_options(
+    request_kwargs: dict,
+    param: str,
+) -> None:
     serving = _harmony_required_tool_serving()
     request = ResponsesRequest(
         input="Call get_weather for Paris.",
         tools=[_function_tool()],
         tool_choice="required",
-        max_tool_calls=0,
+        **request_kwargs,
     )
 
     error = serving._validate_create_responses_input(request)
 
     assert error is not None
     assert error.error.type == "invalid_request_error"
-    assert error.error.param == "max_tool_calls"
+    assert error.error.param == param
 
 
-def test_harmony_required_tool_json_rejects_structured_outputs_conflict() -> None:
-    serving = _harmony_required_tool_serving()
-    request = ResponsesRequest(
-        input="Call get_weather for Paris.",
-        tools=[_function_tool()],
-        tool_choice="required",
-        structured_outputs=StructuredOutputsParams(json={"type": "object"}),
+def test_harmony_required_tool_json_schema_honors_tool_call_limits() -> None:
+    single_tool_schema = OpenAIServingResponses._required_tool_json_schema(
+        ResponsesRequest(
+            input="Call get_weather for Paris.",
+            tools=[_function_tool()],
+            tool_choice="required",
+            parallel_tool_calls=False,
+        )
+    )
+    limited_schema = OpenAIServingResponses._required_tool_json_schema(
+        ResponsesRequest(
+            input="Call get_weather for Paris.",
+            tools=[_function_tool()],
+            tool_choice="required",
+            max_tool_calls=3,
+        )
     )
 
-    error = serving._validate_create_responses_input(request)
-
-    assert error is not None
-    assert error.error.type == "invalid_request_error"
-    assert error.error.param == "structured_outputs"
+    assert isinstance(single_tool_schema, dict)
+    assert single_tool_schema["maxItems"] == 1
+    assert isinstance(limited_schema, dict)
+    assert limited_schema["maxItems"] == 3
 
 
 @pytest.mark.parametrize(
