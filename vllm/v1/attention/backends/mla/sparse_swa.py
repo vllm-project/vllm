@@ -18,6 +18,11 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
+from vllm.v1.context_parallel.layout import (
+    ContextParallelLayout,
+    cp_global_to_local_block,
+    cp_global_to_local_pos,
+)
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -227,14 +232,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.decode_threshold = (
             self.reorder_batch_threshold + self.num_speculative_tokens
         )
-        parallel_config = self.vllm_config.parallel_config
-        self.dcp_world_size = parallel_config.decode_context_parallel_size
-        self.dcp_rank = 0
-        if self.dcp_world_size > 1:
-            from vllm.distributed.parallel_state import get_dcp_group
-
-            self.dcp_rank = get_dcp_group().rank_in_group
-        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.cp_layout = ContextParallelLayout.from_config(self.vllm_config)
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
@@ -308,7 +306,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices.copy_(x, non_blocking=True)
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
-        if self.dcp_world_size > 1:
+        if self.cp_layout.enabled:
             # In DCP, slot_mapping < 0 can mean either "not this rank's cache
             # owner" or "padded graph row". Attention metadata needs the
             # former but must still mask the latter.
@@ -332,10 +330,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 block_table,
                 block_table.stride(0),
                 self.block_size,
-                DCP_WORLD_SIZE=self.dcp_world_size,
-                DCP_RANK=self.dcp_rank,
-                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
                 TRITON_BLOCK_SIZE=1024,
+                **self.cp_layout.triton_kwargs(),
             )
 
         # Pre-compute DeepseekV4 prefill metadata shared across all attention layers.
@@ -508,37 +504,18 @@ def _compute_swa_indices_and_lens_kernel(
     start_pos = tl.maximum(pos - window_size + 1, 0)
     end_pos = pos + 1
 
-    start_base = (
-        start_pos
-        // CP_KV_CACHE_INTERLEAVE_SIZE
-        // DCP_WORLD_SIZE
-        * CP_KV_CACHE_INTERLEAVE_SIZE
-    )
-    start_remainder = start_pos - start_base * DCP_WORLD_SIZE
-    start_extra = tl.minimum(
-        tl.maximum(
-            start_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-            0,
-        ),
+    local_start = cp_global_to_local_pos(
+        start_pos,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
         CP_KV_CACHE_INTERLEAVE_SIZE,
     )
-    local_start = start_base + start_extra
-
-    end_base = (
-        end_pos
-        // CP_KV_CACHE_INTERLEAVE_SIZE
-        // DCP_WORLD_SIZE
-        * CP_KV_CACHE_INTERLEAVE_SIZE
-    )
-    end_remainder = end_pos - end_base * DCP_WORLD_SIZE
-    end_extra = tl.minimum(
-        tl.maximum(
-            end_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-            0,
-        ),
+    local_end = cp_global_to_local_pos(
+        end_pos,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
         CP_KV_CACHE_INTERLEAVE_SIZE,
     )
-    local_end = end_base + end_extra
 
     swa_len = local_end - local_start
     tl.store(swa_lens_ptr + token_idx, swa_len)
@@ -552,38 +529,28 @@ def _compute_swa_indices_and_lens_kernel(
         )
 
         pos_offset = start_pos + offset
-        virtual_block_size = block_size * DCP_WORLD_SIZE
-        block_indices = pos_offset // virtual_block_size
-        virtual_block_offsets = pos_offset - block_indices * virtual_block_size
-        is_local = (
-            virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-        ) % DCP_WORLD_SIZE == DCP_RANK
+        block_indices, block_offsets, is_local = cp_global_to_local_block(
+            pos_offset,
+            block_size,
+            DCP_WORLD_SIZE,
+            DCP_RANK,
+            CP_KV_CACHE_INTERLEAVE_SIZE,
+        )
         block_numbers = tl.load(
             block_table_ptr + req_idx * block_table_stride + block_indices,
             mask=(pos_offset < end_pos) & is_local,
         )
-        block_offsets = (
-            virtual_block_offsets // (DCP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-            virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
-        )
         slot_ids = block_numbers * block_size + block_offsets
 
-        pos_base = (
-            pos_offset
-            // CP_KV_CACHE_INTERLEAVE_SIZE
-            // DCP_WORLD_SIZE
-            * CP_KV_CACHE_INTERLEAVE_SIZE
+        local_offsets = (
+            cp_global_to_local_pos(
+                pos_offset,
+                DCP_WORLD_SIZE,
+                DCP_RANK,
+                CP_KV_CACHE_INTERLEAVE_SIZE,
+            )
+            - local_start
         )
-        pos_remainder = pos_offset - pos_base * DCP_WORLD_SIZE
-        pos_extra = tl.minimum(
-            tl.maximum(
-                pos_remainder - DCP_RANK * CP_KV_CACHE_INTERLEAVE_SIZE,
-                0,
-            ),
-            CP_KV_CACHE_INTERLEAVE_SIZE,
-        )
-        local_offsets = pos_base + pos_extra - local_start
 
         tl.store(
             swa_indices_ptr + token_idx * swa_indices_stride + local_offsets,

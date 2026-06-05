@@ -26,9 +26,10 @@ from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.cp_mapping import (
+from vllm.v1.context_parallel.layout import (
+    DEFAULT_CP_LAYOUT,
+    ContextParallelLayout,
     cp_global_to_local_pos,
-    get_cp_local_seq_lens,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
@@ -219,9 +220,7 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
-    dcp_world_size: int = 1
-    dcp_rank: int = 0
-    cp_kv_cache_interleave_size: int = 1
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
@@ -284,14 +283,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.use_fp4_indexer_cache
             or not current_platform.is_device_capability_family(100)
         ) and next_n not in self.natively_supported_next_n_fp4
-        parallel_config = self.vllm_config.parallel_config
-        self.dcp_world_size = parallel_config.decode_context_parallel_size
-        self.dcp_rank = 0
-        if self.dcp_world_size > 1:
-            from vllm.distributed.parallel_state import get_dcp_group
-
-            self.dcp_rank = get_dcp_group().rank_in_group
-        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.cp_layout = ContextParallelLayout.from_config(self.vllm_config)
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -516,9 +508,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.storage_block_size,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
-                cp_world_size=self.dcp_world_size,
-                cp_rank=self.dcp_rank,
-                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                cp_layout=self.cp_layout,
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
@@ -564,9 +554,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
-                    dcp_world_size=self.dcp_world_size,
-                    dcp_rank=self.dcp_rank,
-                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                    cp_layout=self.cp_layout,
                 )
                 # Non-DCP ranks skip empty chunks. DCP ranks keep them so all
                 # ranks enter the same prefill topk all-gather sequence.
@@ -615,12 +603,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens_is_local_view = (use_native and next_n > 1) or (
                     not use_native and max_decode_len > 1
                 )
-                if self.dcp_world_size > 1:
-                    compressed_decode_seq_lens = get_cp_local_seq_lens(
-                        seq_lens.reshape(-1) // self.compress_ratio,
-                        self.dcp_world_size,
-                        self.dcp_rank,
-                        self.cp_kv_cache_interleave_size,
+                if self.cp_layout.enabled:
+                    compressed_decode_seq_lens = self.cp_layout.local_seq_lens(
+                        seq_lens.reshape(-1) // self.compress_ratio
                     ).view_as(seq_lens)
                     num_elems = compressed_decode_seq_lens.numel()
                     seq_lens_buffer = self.expanded_seq_lens_buffer[:num_elems].view_as(
@@ -670,9 +655,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
-            dcp_world_size=self.dcp_world_size,
-            dcp_rank=self.dcp_rank,
-            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            cp_layout=self.cp_layout,
         )
 
         return attn_metadata
@@ -690,23 +673,18 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
-    dcp_world_size: int = 1,
-    dcp_rank: int = 0,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     compressed_seq_lens_cpu_chunk = compressed_seq_lens_cpu[start_idx:end_idx]
-    if dcp_world_size > 1:
-        compressed_seq_lens_cpu_chunk = get_cp_local_seq_lens(
-            compressed_seq_lens_cpu_chunk,
-            dcp_world_size,
-            dcp_rank,
-            cp_kv_cache_interleave_size,
+    if cp_layout.enabled:
+        compressed_seq_lens_cpu_chunk = cp_layout.local_seq_lens(
+            compressed_seq_lens_cpu_chunk
         )
     local_total_seq_lens = compressed_seq_lens_cpu_chunk.sum().item()
-    if local_total_seq_lens == 0 and dcp_world_size == 1:
+    if local_total_seq_lens == 0 and not cp_layout.enabled:
         return None
     total_seq_lens = local_total_seq_lens
-    if dcp_world_size > 1:
+    if cp_layout.enabled:
         total_seq_lens = max(total_seq_lens, 1)
 
     num_reqs = end_idx - start_idx
@@ -717,13 +695,8 @@ def build_prefill_chunk_metadata(
     # Assigning to slice avoids cpu sync.
     cu_seq_lens[:1] = 0
     compressed_seq_lens_chunk = compressed_seq_lens[start_idx:end_idx]
-    if dcp_world_size > 1:
-        compressed_seq_lens_chunk = get_cp_local_seq_lens(
-            compressed_seq_lens_chunk,
-            dcp_world_size,
-            dcp_rank,
-            cp_kv_cache_interleave_size,
-        )
+    if cp_layout.enabled:
+        compressed_seq_lens_chunk = cp_layout.local_seq_lens(compressed_seq_lens_chunk)
     torch.cumsum(compressed_seq_lens_chunk, dim=0, out=cu_seq_lens[1:])
 
     query_start_loc = (
@@ -755,9 +728,7 @@ def build_prefill_chunk_metadata(
         qs_stop,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
-        DCP_WORLD_SIZE=dcp_world_size,
-        DCP_RANK=dcp_rank,
-        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
+        **cp_layout.triton_kwargs(),
     )
 
     token_start = query_start_loc_cpu[start_idx].item()

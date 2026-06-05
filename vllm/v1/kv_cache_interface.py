@@ -98,7 +98,7 @@ class KVCacheSpec:
     A base class for specifying the KV cache format of one layer.
     """
 
-    # number of tokens in a block
+    # Number of tokens in one rank-local physical block.
     block_size: int
 
     @property
@@ -114,6 +114,14 @@ class KVCacheSpec:
     @property
     def storage_block_size(self) -> int:
         return self.block_size
+
+    def logical_block_size(
+        self,
+        dcp_world_size: int = 1,
+        pcp_world_size: int = 1,
+    ) -> int:
+        """Global token span represented by one rank-local physical block."""
+        return self.block_size * dcp_world_size * pcp_world_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """

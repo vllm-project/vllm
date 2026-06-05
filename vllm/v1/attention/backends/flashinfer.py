@@ -60,15 +60,15 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    get_dcp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.context_parallel.collectives import dcp_lse_reduce
+from vllm.v1.context_parallel.layout import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -217,7 +217,7 @@ class BatchDCPPrefillWrapper:
         dcp_a2a: bool = False,
     ):
         if dcp_a2a:
-            self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
+            self._dcp_combine = partial(dcp_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(
@@ -1347,7 +1347,7 @@ class FlashInferImpl(AttentionImpl):
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
         if dcp_a2a:
-            self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
+            self.dcp_combine = partial(dcp_lse_reduce, is_lse_base_on_e=False)
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 

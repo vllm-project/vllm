@@ -32,42 +32,13 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.context_parallel.collectives import dcp_softmax_reduce
+from vllm.v1.context_parallel.layout import ContextParallelLayout
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-
-
-def _merge_dcp_compressor_stats(
-    partial_m: torch.Tensor,
-    partial_s: torch.Tensor,
-    partial_v: torch.Tensor,
-    dcp_group: Any,
-) -> torch.Tensor:
-    valid = partial_s > 0
-    masked_m = torch.where(
-        valid,
-        partial_m,
-        torch.full_like(partial_m, -float("inf")),
-    )
-    gathered_m = dcp_group.all_gather(masked_m, dim=0).reshape(
-        (dcp_group.world_size,) + masked_m.shape
-    )
-    global_m = gathered_m.max(dim=0).values
-
-    scale = torch.exp(masked_m - global_m)
-    scale = torch.where(valid, scale, torch.zeros_like(scale))
-    rescaled_s = torch.where(valid, partial_s * scale, torch.zeros_like(partial_s))
-    rescaled_v = torch.where(valid, partial_v * scale, torch.zeros_like(partial_v))
-    reduce_payload = torch.stack((rescaled_s, rescaled_v))
-    global_s, global_v = dcp_group.all_reduce(reduce_payload).unbind(0)
-
-    return torch.where(
-        global_s > 0,
-        global_v / global_s,
-        torch.zeros_like(global_v),
-    )
 
 
 class CompressorBackend(AttentionBackend):
@@ -249,16 +220,12 @@ class DeepseekCompressor(nn.Module):
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
-        parallel_config = vllm_config.parallel_config
-        self.dcp_world_size = parallel_config.decode_context_parallel_size
-        self.dcp_rank = 0
+        self.cp_layout = ContextParallelLayout.from_config(vllm_config)
         self.dcp_group = None
-        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
-        if self.dcp_world_size > 1:
+        if self.cp_layout.enabled:
             from vllm.distributed.parallel_state import get_dcp_group
 
             self.dcp_group = get_dcp_group()
-            self.dcp_rank = self.dcp_group.rank_in_group
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
@@ -387,7 +354,7 @@ class DeepseekCompressor(nn.Module):
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
 
-        if self.dcp_world_size > 1:
+        if self.cp_layout.enabled:
             assert self.dcp_group is not None
             self._dcp_compress_and_insert(
                 state_cache=state_cache,
@@ -502,15 +469,13 @@ class DeepseekCompressor(nn.Module):
             STATE_WIDTH=state_width,
             COMPRESS_RATIO=self.compress_ratio,
             OVERLAP=self.overlap,
-            DCP_WORLD_SIZE=self.dcp_world_size,
-            DCP_RANK=self.dcp_rank,
-            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
             num_warps=4 if self.head_dim == 512 else 1,
+            **self.cp_layout.triton_kwargs(),
             **pdl_kwargs,
         )
 
         assert self.dcp_group is not None
-        compressed_kv = _merge_dcp_compressor_stats(
+        compressed_kv = dcp_softmax_reduce(
             partial_m,
             partial_s,
             partial_v,
@@ -540,10 +505,8 @@ class DeepseekCompressor(nn.Module):
                 TOKEN_STRIDE=self._token_stride,
                 SCALE_DIM=self._scale_dim,
                 KV_BLOCK_STRIDE=kv_cache.stride(0),
-                DCP_WORLD_SIZE=self.dcp_world_size,
-                DCP_RANK=self.dcp_rank,
-                CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
                 num_warps=4,
+                **self.cp_layout.triton_kwargs(),
                 **pdl_kwargs,
             )
         elif self.use_fp4_cache:

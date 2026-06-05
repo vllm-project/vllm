@@ -36,7 +36,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.attention.ops.cp_mapping import get_cp_local_seq_lens
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
@@ -827,24 +826,6 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
 
     return nums_dict, batch_ptr, token_chunk_offset_ptr
-
-
-def get_dcp_local_seq_lens(
-    seq_lens: torch.Tensor,
-    dcp_size: int = 1,
-    dcp_rank: int | None = None,
-    cp_kv_cache_interleave_size: int = 1,
-) -> torch.Tensor:
-    """While using dcp, kv_cache size stored on each rank may be different,
-    use this function to calculate split decode seq_lens of each dcp rank.
-    Only consider dcp now, we can extend the case of cp based on this.
-    """
-    return get_cp_local_seq_lens(
-        seq_lens,
-        dcp_size,
-        dcp_rank,
-        cp_kv_cache_interleave_size,
-    )
 
 
 def mamba_get_block_table_tensor(

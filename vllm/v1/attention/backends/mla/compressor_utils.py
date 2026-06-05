@@ -3,6 +3,11 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.context_parallel.layout import (
+    DEFAULT_CP_LAYOUT,
+    ContextParallelLayout,
+    cp_global_to_local_block,
+)
 
 
 @triton.jit
@@ -41,16 +46,12 @@ def _compressed_slot_mapping_kernel(
         is_valid = (pos + 1) % COMPRESS_RATIO == 0
         pos_after_compress = pos // COMPRESS_RATIO
 
-        virtual_block_size = block_size * CP_WORLD_SIZE
-        block_ids = pos_after_compress // virtual_block_size
-        virtual_offsets = pos_after_compress - block_ids * virtual_block_size
-        is_local = (
-            virtual_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-        ) % CP_WORLD_SIZE == CP_RANK
-        block_offsets = (
-            virtual_offsets // (CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
-            virtual_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+        block_ids, block_offsets, is_local = cp_global_to_local_block(
+            pos_after_compress,
+            block_size,
+            CP_WORLD_SIZE,
+            CP_RANK,
+            CP_KV_CACHE_INTERLEAVE_SIZE,
         )
         is_valid = is_valid & is_local
 
@@ -73,9 +74,7 @@ def get_compressed_slot_mapping(
     block_size: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
-    cp_world_size: int = 1,
-    cp_rank: int = 0,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT,
 ) -> torch.Tensor:
     if out is not None:
         # Guard: for padded / invalid sequences.
@@ -98,10 +97,8 @@ def get_compressed_slot_mapping(
         block_table.stride(0),
         block_size,
         compress_ratio,
-        CP_WORLD_SIZE=cp_world_size,
-        CP_RANK=cp_rank,
-        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
         PAD_ID=-1,
         TRITON_BLOCK_SIZE=1024,
+        **cp_layout.triton_kwargs("CP_WORLD_SIZE", "CP_RANK"),
     )
     return slot_mapping

@@ -18,7 +18,9 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
-from vllm.v1.attention.ops.cp_mapping import (
+from vllm.v1.context_parallel.layout import (
+    DEFAULT_CP_LAYOUT,
+    ContextParallelLayout,
     cp_global_to_local_pos,
     cp_is_local_pos,
 )
@@ -368,9 +370,7 @@ def dequantize_and_gather_k_cache_triton(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
-    dcp_world_size: int = 1,
-    dcp_rank: int = 0,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT,
 ) -> None:
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
@@ -401,9 +401,7 @@ def dequantize_and_gather_k_cache_triton(
         output_dim=512,
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
-        DCP_WORLD_SIZE=dcp_world_size,
-        DCP_RANK=dcp_rank,
-        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
+        **cp_layout.triton_kwargs(),
     )
 
 
@@ -420,11 +418,9 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
-    dcp_world_size: int = 1,
-    dcp_rank: int = 0,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT,
 ) -> None:
-    if dcp_world_size == 1 and has_cutedsl():
+    if not cp_layout.enabled and has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             dequantize_and_gather_k_cache_cutedsl,
@@ -443,9 +439,7 @@ def dequantize_and_gather_k_cache(
         block_table,
         block_size,
         offset,
-        dcp_world_size=dcp_world_size,
-        dcp_rank=dcp_rank,
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        cp_layout=cp_layout,
     )
 
 
@@ -552,9 +546,7 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
-    dcp_world_size: int = 1,
-    dcp_rank: int = 0,
-    cp_kv_cache_interleave_size: int = 1,
+    cp_layout: ContextParallelLayout = DEFAULT_CP_LAYOUT,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
@@ -589,9 +581,7 @@ def combine_topk_swa_indices(
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
-        DCP_WORLD_SIZE=dcp_world_size,
-        DCP_RANK=dcp_rank,
-        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
+        **cp_layout.triton_kwargs(),
     )
     return combined_indices, combined_lens
 

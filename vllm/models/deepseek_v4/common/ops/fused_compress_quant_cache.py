@@ -24,6 +24,7 @@ from typing import Any
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.context_parallel.layout import cp_global_to_local_block
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
 
@@ -152,15 +153,13 @@ def dsv4_dcp_compressor_partial_stats_kernel(
     pos = start + tokens
     mask_pos = pos >= 0
 
-    virtual_block_size = block_size * DCP_WORLD_SIZE
-    block_indices = pos // virtual_block_size
-    virtual_offsets = pos - block_indices * virtual_block_size
-    is_local = (
-        virtual_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
-    ) % DCP_WORLD_SIZE == DCP_RANK
-    local_block_offsets = (
-        virtual_offsets // (DCP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-    ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_offsets % CP_KV_CACHE_INTERLEAVE_SIZE)
+    block_indices, local_block_offsets, is_local = cp_global_to_local_block(
+        pos,
+        block_size,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
     mask_pos = mask_pos & is_local
 
     block_numbers = tl.load(
@@ -238,18 +237,16 @@ def dsv4_dcp_finalize_sparse_attn_kernel(
         return
 
     compressed_pos = position // COMPRESS_RATIO
-    virtual_block_size = kv_block_size * DCP_WORLD_SIZE
-    kv_block_idx = compressed_pos // virtual_block_size
-    virtual_offset = compressed_pos - kv_block_idx * virtual_block_size
-    is_local = (
-        virtual_offset // CP_KV_CACHE_INTERLEAVE_SIZE
-    ) % DCP_WORLD_SIZE == DCP_RANK
+    kv_block_idx, local_block_offset, is_local = cp_global_to_local_block(
+        compressed_pos,
+        kv_block_size,
+        DCP_WORLD_SIZE,
+        DCP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
     if not is_local:
         return
 
-    local_block_offset = (
-        virtual_offset // (DCP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
-    ) * CP_KV_CACHE_INTERLEAVE_SIZE + (virtual_offset % CP_KV_CACHE_INTERLEAVE_SIZE)
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
     block_number = tl.load(
         kv_block_table_ptr + req_idx * kv_block_table_stride + kv_block_idx
