@@ -256,6 +256,9 @@ class Scheduler(SchedulerInterface):
         # based on its (DP-aligned) forward-pass counter; when True, new
         # prefills are deferred this step. Always false for non-DP cases.
         self.throttle_prefills = False
+        # Flag to track whether the last cadence-aligned prefill batch
+        # fully drained the waiting queue.
+        self._prefill_capacity_bound = False
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -373,9 +376,11 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
-        # DP prefill balancing: on a throttled step defer all prefill compute.
-        defer_prefills = self.throttle_prefills and any(
-            not r.is_prefill_chunk for r in self.running
+        # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
+        # all prefill compute unless saturated.
+        defer_prefills = (
+            (self.throttle_prefills and not self._prefill_capacity_bound)
+            and any(not r.is_prefill_chunk for r in self.running)
         )
 
         # First, schedule the RUNNING requests.
@@ -869,6 +874,11 @@ class Scheduler(SchedulerInterface):
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
                 self.skipped_waiting.prepend_requests(step_skipped_waiting)
+
+            # DP prefill balancing: on a step that admitted prefills (release),
+            # record whether it was capacity-bound.
+            if not defer_prefills:
+                self._prefill_capacity_bound = bool(self.waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

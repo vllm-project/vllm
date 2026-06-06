@@ -311,51 +311,86 @@ def test_throttle_prefills_excludes_remote_kv_resume():
     assert "r1" in output.num_scheduled_tokens
 
 
-def test_throttle_prefills_defers_inflight_chunk():
-    """On a throttled step, an in-progress prefill chunk (a running request
-    still in its prompt phase) is deferred while decoding requests keep running;
-    once the cadence opens, the chunk resumes.
-    """
+def test_throttle_defers_inflight_prefill_chunk():
+    """DP prefill balancing throttles ALL prefill compute on a throttled step,
+    not just new admissions: an in-progress (chunked) prefill already in the
+    running queue is also deferred, so the step runs decode-only, while a
+    separate decode keeps being scheduled."""
     scheduler = create_scheduler(
-        max_num_seqs=16, max_num_batched_tokens=64, max_model_len=2048
+        max_num_seqs=16, max_num_batched_tokens=50, enable_chunked_prefill=True
     )
 
-    def _output(req_ids, sampled):
-        return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={r: i for i, r in enumerate(req_ids)},
-            sampled_token_ids=sampled,
+    # A short request that finishes prefill in one step -> a running decode.
+    (decode_req,) = create_requests(num_requests=1, num_tokens=4, req_ids=["dec0"])
+    scheduler.add_request(decode_req)
+    output = scheduler.schedule()
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0"],
+            req_id_to_index={"dec0": 0},
+            sampled_token_ids=[[0]],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
-        )
+        ),
+    )
+    assert decode_req in scheduler.running and not decode_req.is_prefill_chunk
 
-    # D: short request driven into the decoding state.
-    (d,) = create_requests(num_requests=1, num_tokens=8, req_ids=["D"])
-    scheduler.add_request(d)
-    out = scheduler.schedule()
-    assert "D" in out.num_scheduled_tokens
-    scheduler.update_from_output(out, _output(["D"], [[0]]))
+    # A long request (80 tokens, budget 50) -> prefilled in chunks.
+    (chunk_req,) = create_requests(num_requests=1, num_tokens=80, req_ids=["chk0"])
+    scheduler.add_request(chunk_req)
+    output = scheduler.schedule()  # first chunk of chk0 + decode of dec0
+    assert output.num_scheduled_tokens["chk0"] > 0
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["dec0", "chk0"],
+            req_id_to_index={"dec0": 0, "chk0": 1},
+            sampled_token_ids=[[0], []],  # no token sampled for partial prefill
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    assert chunk_req.is_prefill_chunk  # still mid-prefill, in running
 
-    # P: long prompt that needs multiple chunks; admit its first chunk while D
-    # decodes (P still prefilling -> empty sampled token list).
-    (p,) = create_requests(num_requests=1, num_tokens=200, req_ids=["P"])
-    scheduler.add_request(p)
-    out = scheduler.schedule()
-    assert "P" in out.num_scheduled_tokens
-    scheduler.update_from_output(out, _output(["D", "P"], [[0], []]))
-    assert p in scheduler.running and p.num_computed_tokens < p.num_prompt_tokens
-
-    # Throttled step: P's in-progress chunk is deferred, D keeps decoding.
+    # Throttled step: the in-flight prefill chunk is deferred, the decode runs.
     scheduler.throttle_prefills = True
-    out = scheduler.schedule()
-    assert "D" in out.num_scheduled_tokens
-    assert "P" not in out.num_scheduled_tokens
+    output = scheduler.schedule()
+    assert "chk0" not in output.num_scheduled_tokens
+    assert "dec0" in output.num_scheduled_tokens
 
-    # Cadence open: P's prefill resumes.
+    # When the cadence opens again, the prefill chunk resumes.
     scheduler.throttle_prefills = False
-    out = scheduler.schedule()
-    assert "P" in out.num_scheduled_tokens
+    output = scheduler.schedule()
+    assert "chk0" in output.num_scheduled_tokens
+
+
+def test_throttle_capacity_bound_guard_admits():
+    """Saturation guard: if a cadence-aligned release step cannot drain the
+    waiting prefill queue (it ran out of token budget), the throttle backs off on
+    the next step so the backlog cannot grow into a TTFT avalanche -- prefills are
+    admitted even though throttle_prefills is set."""
+    scheduler = create_scheduler(
+        max_num_seqs=16, max_num_batched_tokens=200, enable_chunked_prefill=True
+    )
+    a, b = create_requests(num_requests=2, num_tokens=200, req_ids=["a", "b"])
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+
+    # Release step (throttle off): `a` fills the 200-token budget; `b` cannot be
+    # reached, so the waiting queue is not drained -> capacity-bound.
+    output = scheduler.schedule()
+    assert "a" in output.num_scheduled_tokens
+    assert "b" not in output.num_scheduled_tokens
+    assert scheduler._prefill_capacity_bound
+
+    # Throttle. Because the previous release was capacity-bound, the guard backs
+    # off and `b` is admitted rather than stalling the backlog.
+    scheduler.throttle_prefills = True
+    output = scheduler.schedule()
+    assert "b" in output.num_scheduled_tokens
 
 
 def test_no_mm_input_chunking():
