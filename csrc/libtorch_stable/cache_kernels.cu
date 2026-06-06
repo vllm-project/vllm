@@ -17,6 +17,15 @@
 #include <cassert>
 #include <cfloat>
 
+// NaN/Inf detection for cache writes.
+// Global atomic counter for NaN detections in cache writes.
+// Read from Python side via cudaMemcpyFromSymbol.
+static __device__ int64_t g_nan_cache_write_count = 0;
+
+__device__ __forceinline__ bool isnan_or_inf_float(float x) {
+  return isnan(x) || isinf(x);
+}
+
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
 typedef __hip_bfloat16 __nv_bfloat16;
@@ -317,7 +326,7 @@ __global__ void reshape_and_cache_flash_kernel(
     const int64_t head_stride, const int64_t key_stride,
     const int64_t value_stride, const int num_heads, const int head_size,
     const int block_size, const float* k_scale, const float* v_scale,
-    const int kv_scale_stride) {
+    const int kv_scale_stride, const bool detect_nans) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -390,6 +399,27 @@ __global__ void reshape_and_cache_flash_kernel(
 
       vectorize_with_alignment<VEC_SIZE>(v_src_h, v_dst_h, head_size, lane, 32,
                                          v_op);
+    }
+  }
+
+  // NaN detection: check source values if enabled
+  if (detect_nans && threadIdx.x == 0) {
+    // Check a sample of key values (first few elements)
+    const int check_count = min(n_elems, 8);  // Check first 8 elements
+    for (int i = 0; i < check_count; i++) {
+      float val = static_cast<float>(key_src[i]);
+      if (isnan_or_inf_float(val)) {
+        atomicAdd(&g_nan_cache_write_count, 1);
+        break;  // Count once per token
+      }
+    }
+    // Check a sample of value values
+    for (int i = 0; i < check_count; i++) {
+      float val = static_cast<float>(value_src[i]);
+      if (isnan_or_inf_float(val)) {
+        atomicAdd(&g_nan_cache_write_count, 1);
+        break;  // Count once per token
+      }
     }
   }
 }
@@ -737,7 +767,7 @@ void reshape_and_cache(
           head_stride, key_stride, value_stride, num_heads, head_size,       \
           block_size, reinterpret_cast<const float*>(k_scale.data_ptr()),    \
           reinterpret_cast<const float*>(v_scale.data_ptr()),                \
-          kv_scale_stride);
+          kv_scale_stride, detect_nans);
 
 void reshape_and_cache_flash(
     torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -749,7 +779,8 @@ void reshape_and_cache_flash(
     torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
     const std::string& kv_cache_dtype,
     torch::stable::Tensor& k_scale,    // [1] or [num_heads]
-    torch::stable::Tensor& v_scale) {  // [1] or [num_heads]
+    torch::stable::Tensor& v_scale,    // [1] or [num_heads]
+    const bool detect_nans) {
   // NOTE(woosuk): In vLLM V1, key.size(0) can be different from
   // slot_mapping.size(0) because of padding for CUDA graphs.
   // In vLLM V0, key.size(0) is always equal to slot_mapping.size(0) because
@@ -808,6 +839,17 @@ void reshape_and_cache_flash(
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
+}
+
+int64_t get_nan_cache_write_count() {
+  int64_t count;
+  cudaMemcpyFromSymbol(&count, g_nan_cache_write_count, sizeof(int64_t));
+  return count;
+}
+
+void reset_nan_cache_write_count() {
+  int64_t zero = 0;
+  cudaMemcpyToSymbol(g_nan_cache_write_count, &zero, sizeof(int64_t));
 }
 
 // KV_T is the data type of key and value tensors.

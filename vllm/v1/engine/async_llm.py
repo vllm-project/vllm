@@ -663,6 +663,19 @@ class AsyncLLM(EngineClient):
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None
                     )
+                    if iteration_stats is not None and envs.VLLM_DEBUG_KV_CACHE_NANS:
+                        try:
+                            from vllm._custom_ops import (
+                                get_nan_cache_write_count,
+                                reset_nan_cache_write_count,
+                            )
+
+                            nan_count = get_nan_cache_write_count()
+                            if nan_count > 0:
+                                reset_nan_cache_write_count()
+                                iteration_stats.record_kv_cache_nan(nan_count)
+                        except Exception:
+                            pass
 
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the

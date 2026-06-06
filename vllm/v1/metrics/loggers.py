@@ -135,6 +135,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+        self.num_kv_cache_nans: int = 0
 
     def _enable_perf_stats(self) -> bool:
         return self.vllm_config.observability_config.enable_mfu_metrics
@@ -146,6 +147,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
+        self.num_kv_cache_nans += iteration_stats.num_kv_cache_nans
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
         # Compute summary metrics for tracked stats
@@ -261,6 +263,9 @@ class LoggingStatLogger(StatLoggerBase):
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
             log_args.append(self.num_corrupted_reqs)
+        if self.num_kv_cache_nans > 0:
+            log_parts.append("KV Cache NaNs: %d")
+            log_args.append(self.num_kv_cache_nans)
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
@@ -537,6 +542,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.counter_corrupted_requests = create_metric_per_engine(
                 counter_corrupted_requests, per_engine_labelvalues
+            )
+
+        if envs.VLLM_DEBUG_KV_CACHE_NANS:
+            counter_kv_cache_nans = self._counter_cls(
+                name="vllm:kv_cache_nans",
+                documentation=(
+                    "NaN values detected in KV cache writes, "
+                    "by layer and phase (prefill/decode)."
+                ),
+                labelnames=labelnames + ["layer", "phase"],
+            )
+            self.counter_kv_cache_nans = create_metric_per_engine(
+                counter_kv_cache_nans, per_engine_labelvalues
             )
 
         counter_prefix_cache_queries = self._counter_cls(
@@ -1146,6 +1164,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
             )
+        if envs.VLLM_DEBUG_KV_CACHE_NANS and hasattr(self, 'counter_kv_cache_nans'):
+            if iteration_stats.num_kv_cache_nans > 0:
+                self.counter_kv_cache_nans[engine_idx].labels(
+                    layer="all", phase="all"
+                ).inc(iteration_stats.num_kv_cache_nans)
         self.counter_num_preempted_reqs[engine_idx].inc(
             iteration_stats.num_preempted_reqs
         )

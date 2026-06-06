@@ -748,7 +748,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                        Tensor! value_cache,"
       "                        Tensor slot_mapping,"
       "                        str kv_cache_dtype,"
-      "                        Tensor k_scale, Tensor v_scale) -> ()");
+      "                        Tensor k_scale, Tensor v_scale,"
+      "                        bool detect_nans=False) -> ()");
+
+  // NaN detection: get and reset the NaN cache write counter.
+  ops.def("get_nan_cache_write_count() -> int");
+  ops.def("reset_nan_cache_write_count() -> ()");
 
   // Concat kv_c and k_pe and cache them.
   ops.def(
@@ -855,6 +860,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("swap_blocks", TORCH_BOX(&swap_blocks));
   ops.impl("reshape_and_cache", TORCH_BOX(&reshape_and_cache));
   ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
+  ops.impl("get_nan_cache_write_count", TORCH_BOX(&get_nan_cache_write_count));
+  ops.impl("reset_nan_cache_write_count",
+           TORCH_BOX(&reset_nan_cache_write_count));
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
