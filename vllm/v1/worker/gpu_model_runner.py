@@ -6449,10 +6449,10 @@ class GPUModelRunner(
                         )
                         torch.accelerator.synchronize()
                         free_after = torch.cuda.mem_get_info()[0]
-                        mem_samples.append(mem_before - free_after)
+                        mem_samples.append(max(mem_before - free_after, 0))
 
-                    first_capture = mem_samples[0]
                     # Use at least 1 MiB per graph for driver overhead
+                    first_capture = max(mem_samples[0], 1 << 20)
                     per_graph = max(
                         mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )
