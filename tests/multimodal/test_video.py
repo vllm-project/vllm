@@ -10,8 +10,12 @@ import pytest
 from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
+    DynamicVideoBackend,
+    Molmo2VideoBackend,
     VideoLoader,
+    get_video_loader_backend_for_processor,
 )
+from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
 from .utils import create_long_gop_video, create_video_from_image
 
@@ -52,6 +56,50 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+# ============================================================================
+# Video Processor → Video Loader Tests (via model repo)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "model_repo, expected_loader_cls",
+    [
+        pytest.param(
+            "allenai/Molmo2-4B",
+            Molmo2VideoBackend,
+            id="molmo2",
+        ),
+        pytest.param(
+            "zai-org/GLM-4.1V-9B-Thinking",
+            DynamicVideoBackend,
+            id="glm4v",
+        ),
+    ],
+)
+def test_video_processor_from_model_repo(
+    model_repo: str,
+    expected_loader_cls: type,
+):
+    """Test that a model repo resolves to the correct video loader backend.
+
+    The test downloads the preprocessor config from HuggingFace Hub,
+    extracts the ``video_processor_type`` field, and verifies it maps
+    to the expected backend and loader class.
+    """
+    video_processor = get_video_processor_cls_name_from_config(model_repo)
+    assert video_processor is not None, (
+        f"Model repo {model_repo!r} did not contain a video_processor_type "
+        f"in its preprocessor config"
+    )
+
+    backend = get_video_loader_backend_for_processor(video_processor)
+    loader = VIDEO_LOADER_REGISTRY.load(backend)
+    assert isinstance(loader, expected_loader_cls), (
+        f"{model_repo!r}: backend={backend!r} loaded "
+        f"{type(loader)}, expected {expected_loader_cls}"
+    )
 
 
 def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
