@@ -187,3 +187,48 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+### Serving a sliding-window realtime model (Voxtral): windows, concurrency, duration
+
+For a sliding-window realtime model such as `Voxtral-Mini-4B-Realtime-2602`, per-stream
+KV memory is bounded by the attention window, not by `--max-model-len`. This gives two
+operator levers.
+
+**Concurrency — narrow the window.** The decoder's sliding window sets per-stream KV cost,
+so narrowing it raises how many streams fit in KV:
+
+```bash
+vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
+  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+```
+
+Per-stream KV (in blocks) plateaus at, per KV group (decoder + audio encoder):
+
+```text
+blocks_per_stream = cdiv(min(sliding_window - 1 + max_num_batched_tokens, max_model_len), block_size) + 1
+```
+
+so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_stream`, and
+`num_gpu_blocks` scales with VRAM. vLLM logs this at startup as
+`Maximum concurrency for ... tokens per request: Nx`.
+
+!!! note
+    That `Nx` is a **KV-admission ceiling** (how many streams *fit* in KV), not measured
+    sustained throughput; real capacity is `min(KV ceiling, compute, max_num_seqs)`. Narrowing
+    the window trades a little transcription fidelity for KV headroom — measure on your audio.
+
+**Duration — `--max-model-len` and unbounded streaming.** For realtime, `--max-model-len`
+doubles as a duration cap (≈ 1 text token per 80 ms of audio, so the 131072 default ≈ 2 h 55).
+A session that reaches it is finished gracefully (`FINISHED_LENGTH_CAPPED`) so the client can
+reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
+
+```bash
+  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 4096
+```
+
+- `--enable-realtime-unbounded` (default off): periodically re-anchors the RoPE position clock
+  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache and a
+  sliding-window decoder; rejected at startup otherwise.
+- `--realtime-reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
+  Must be smaller than `max_model_len - sliding_window`.
