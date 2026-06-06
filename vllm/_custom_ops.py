@@ -3937,3 +3937,31 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
+
+
+def get_nan_cache_write_count() -> int:
+    return torch.ops._C.get_nan_cache_write_count()
+
+
+def reset_nan_cache_write_count() -> None:
+    torch.ops._C.reset_nan_cache_write_count()
+
+
+def _check_nan_in_cache_source(
+    x: torch.Tensor, layer_name: str, num_tokens_to_check: int = 1024
+) -> int:
+    from vllm.envs import VLLM_DEBUG_KV_CACHE_NANS
+
+    if not VLLM_DEBUG_KV_CACHE_NANS:
+        return 0
+    if not x.is_cuda:
+        return 0
+    flat = x.view(-1)[:num_tokens_to_check]
+    nan_mask = torch.isnan(flat)
+    count = nan_mask.sum().item()
+    if count > 0:
+        print(
+            f"[kv-cache-nans] {count} NaN(s) detected in '{layer_name}' "
+            f"(checked first {num_tokens_to_check} elements)"
+        )
+    return count

@@ -690,6 +690,20 @@ class AsyncLLM(EngineClient):
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
+                    if iteration_stats is not None:
+                        from vllm._custom_ops import (
+                            get_nan_cache_write_count,
+                            reset_nan_cache_write_count,
+                        )
+
+                        from vllm.envs import VLLM_DEBUG_KV_CACHE_NANS
+
+                        if VLLM_DEBUG_KV_CACHE_NANS:
+                            iteration_stats.num_kv_cache_nans = (
+                                get_nan_cache_write_count()
+                            )
+                            reset_nan_cache_write_count()
+
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.
