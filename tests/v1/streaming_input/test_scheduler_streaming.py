@@ -193,6 +193,30 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.num_tokens >= scheduler.max_model_len
         assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
+    def test_full_length_non_resumable_request_not_clamped(self):
+        # Regression: the streaming graceful-cap clamp in the WAITING loop must
+        # apply ONLY to resumable streaming sessions. A classic (resumable=False)
+        # request whose prompt is exactly max_model_len must schedule ALL its
+        # tokens in one step. Without the `request.resumable` gate the clamp
+        # `min(num_new_tokens, max_model_len - 1 - num_computed)` drops the last
+        # token (schedules 1023 not 1024), so the request can never complete --
+        # the bug that hit pooling/embedding requests at prompt_len ==
+        # max_model_len (allowed for pooling; rejected for generate at
+        # validation, which is why generation tests never caught it).
+        scheduler = create_scheduler()  # max_model_len = 1024
+        req = DummyRequest(
+            request_id="classic",
+            resumable=False,
+            prompt_token_ids=list(range(1024)),  # == max_model_len
+            max_tokens=1,
+        )
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+
+        # All 1024 prompt tokens scheduled this step, not clamped to 1023.
+        assert output.num_scheduled_tokens["classic"] == 1024
+        assert req.status != RequestStatus.FINISHED_LENGTH_CAPPED
+
     def test_update_request_as_session(self):
         scheduler = create_scheduler()
 
