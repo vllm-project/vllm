@@ -209,6 +209,9 @@ pub struct StructuredOutputsParams {
     pub whitespace_pattern: Option<String>,
     /// Structural tag configuration (JSON-encoded string).
     pub structural_tag: Option<String>,
+    /// Structured-output backend, mirroring the Python `_backend`.
+    #[serde(rename = "_backend")]
+    pub backend: Option<String>,
 }
 
 /// Engine-core-facing sampling parameters for text generation.

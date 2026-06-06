@@ -9,7 +9,9 @@ use super::types::ChatCompletionRequest;
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::lora::LoraModelResolution;
-use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
+use crate::routes::openai::utils::structured_outputs::{
+    convert_from_response_format, ensure_structured_output_backend,
+};
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
@@ -86,10 +88,11 @@ pub(crate) fn prepare_chat_request(
         .or((request.echo && !request.stream).then_some(top_logprobs));
     let include_prompt_logprobs = prompt_logprobs.is_some();
 
-    let structured_outputs = convert_from_response_format(
+    let mut structured_outputs = convert_from_response_format(
         request.response_format.as_ref(),
         &request.structured_outputs,
     )?;
+    ensure_structured_output_backend(&mut structured_outputs);
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
