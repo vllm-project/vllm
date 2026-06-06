@@ -67,6 +67,24 @@ def test_audio_media_io_encode_base64(dummy_audio):
         assert decoded == b"dummy_wav_data"
         mock_write.assert_called_once()
 
+def test_load_audio_propagates_import_error():
+    """ImportError from PlaceholderModule must not be swallowed as ValueError."""
+    from io import BytesIO
+
+    import vllm.multimodal.media.audio as audio_module
+    from vllm.multimodal.media.audio import load_audio_pyav
+
+    class _FakeAv:
+        def open(self, *args, **kwargs):
+            raise ImportError("Please install vllm[audio]")
+
+    original_av = audio_module.av
+    audio_module.av = _FakeAv()
+    try:
+        with pytest.raises(ImportError, match=r"vllm\[audio\]"):
+            load_audio_pyav(BytesIO(b"dummy"))
+    finally:
+        audio_module.av = original_av
 
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
