@@ -1,0 +1,50 @@
+group: Models - Basic
+depends_on:
+  - image-build-xpu
+steps:
+- label: Basic Models Tests (Initialization)
+  key: basic-models-tests-initialization
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+    # Run a subset of model initialization tests
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s models/test_initialization.py::test_can_initialize_small_subset'
+    
+- label: Basic Models Tests (Extra Initialization) %N
+  key: basic-models-tests-extra-initialization
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+    # Only when vLLM model source is modified - test initialization of a large
+    # subset of supported models (the complement of the small subset in the above
+    # test.) Also run if model initialization test file is modified
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pip install matplotlib ftfy &&
+      pip install open-clip-torch --no-deps &&
+      pytest -v -s models/test_initialization.py -k "not test_can_initialize_small_subset" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+  parallelism: 16
