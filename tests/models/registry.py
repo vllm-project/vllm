@@ -1574,6 +1574,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         min_transformers_version="5.8.0",
     ),
+    "BailingMTPModel": _HfExamplesInfo(
+        # TODO: replace with the official Bailing MTP checkpoint once published.
+        "inclusionAI/bailing-moe-v2-5",
+        trust_remote_code=True,
+        speculative_model="inclusionAI/bailing-moe-v2-5",
+        is_available_online=False,
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
