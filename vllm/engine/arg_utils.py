@@ -488,6 +488,7 @@ class EngineArgs:
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
+    dbo_prefill_min_seq_len: int = ParallelConfig.dbo_prefill_min_seq_len
     disable_nccl_for_dp_synchronization: bool | None = (
         ParallelConfig.disable_nccl_for_dp_synchronization
     )
@@ -1085,6 +1086,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dbo-prefill-token-threshold",
             **parallel_kwargs["dbo_prefill_token_threshold"],
+        )
+        parallel_group.add_argument(
+            "--dbo-prefill-min-seq-len",
+            **parallel_kwargs["dbo_prefill_min_seq_len"],
         )
         parallel_group.add_argument(
             "--disable-nccl-for-dp-synchronization",
@@ -1986,6 +1991,7 @@ class EngineArgs:
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,
+            dbo_prefill_min_seq_len=self.dbo_prefill_min_seq_len,
             disable_nccl_for_dp_synchronization=self.disable_nccl_for_dp_synchronization,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
