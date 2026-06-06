@@ -706,6 +706,9 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
+        if request.tool_choice == "none":
+            return (DeltaMessage(content=delta_text) if delta_text else None), False
+
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
         if (
