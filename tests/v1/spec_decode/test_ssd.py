@@ -33,6 +33,9 @@ HIDDEN = 64  # small for tests
 @pytest.fixture()
 def predictor() -> OutcomePredictor:
     """Return a CPU OutcomePredictor with small hidden size."""
+    # mlp_hidden must match what from_pretrained uses (default=256 is too large
+    # for tiny HIDDEN=64 tests, so we keep mlp_hidden=32 and pass it explicitly
+    # to from_pretrained in the roundtrip test)
     return OutcomePredictor(hidden_size=HIDDEN, K=K, mlp_hidden=32)
 
 
@@ -164,10 +167,12 @@ class TestOutcomePredictor:
         save_path = str(tmp_path / "predictor.pt")
         torch.save(predictor.state_dict(), save_path)
 
+        # mlp_hidden must match the fixture's value (32) to avoid size mismatch
         loaded = OutcomePredictor.from_pretrained(
             path=save_path,
             hidden_size=HIDDEN,
             K=K,
+            mlp_hidden=32,
         )
         loaded.mlp[0].weight  # confirm it loaded
 
@@ -188,8 +193,11 @@ class TestSSDAsyncOverlapInit:
     def _make_ssd(self) -> SSDAsyncOverlap:
         """Create SSDAsyncOverlap with mocked CUDA primitives."""
         with (
-            patch("torch.cuda.Stream", return_value=MagicMock()),
-            patch("torch.cuda.Event", return_value=MagicMock()),
+            # side_effect (not return_value) so each Stream()/Event() call
+            # returns a *distinct* mock — return_value reuses the same instance.
+            # Accept *args/**kwargs because Stream(device=...) passes keywords.
+            patch("torch.cuda.Stream", side_effect=lambda *a, **kw: MagicMock()),
+            patch("torch.cuda.Event", side_effect=lambda *a, **kw: MagicMock()),
         ):
             return SSDAsyncOverlap(
                 outcome_predictor_path=None,
