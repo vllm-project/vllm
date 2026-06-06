@@ -1439,6 +1439,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     self._get_least_loaded_engine_index,
                 )
                 eng_index = decision.rank
+                request.dp_prefix_cache_prefix_len = (
+                    decision.dp_prefix_cache_prefix_len
+                )
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
