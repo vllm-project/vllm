@@ -122,6 +122,14 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
         key = args_str[key_start:i].strip()
+
+        # String value: <|"|>...<|"|>
+        if (
+            key.startswith(STRING_DELIM)
+            and key.endswith(STRING_DELIM)
+            and len(key) >= 2 * len(STRING_DELIM)
+        ):
+            key = key[len(STRING_DELIM) : -len(STRING_DELIM)]
         i += 1  # skip ':'
 
         # Parse value

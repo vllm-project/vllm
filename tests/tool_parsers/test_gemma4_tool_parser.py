@@ -155,6 +155,21 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("left:108.,right:22.8", partial=False)
         assert result == {"left": 108.0, "right": 22.8}
 
+    def test_string_delim_wrapped_key_is_stripped(self):
+        """Keys wrapped in <|"|>...<|"|> should parse to clean strings (issue #N)."""
+        result = _parse_gemma4_args('record_map:{<|"|>3<|"|>:<|"|>new text<|"|>}')
+        assert result == {"record_map": {"3": "new text"}}
+
+    def test_string_delim_wrapped_key_nested(self):
+        """Nested dict keys with <|"|> wrappers should also be stripped."""
+        result = _parse_gemma4_args('outer:{<|"|>k1<|"|>:{<|"|>k2<|"|>:<|"|>v<|"|>}}')
+        assert result == {"outer": {"k1": {"k2": "v"}}}
+
+    def test_bare_keys_still_parse_unchanged(self):
+        """Regression guard: bare-identifier keys (the common case) unchanged."""
+        result = _parse_gemma4_args('location:<|"|>Paris<|"|>,count:42')
+        assert result == {"location": "Paris", "count": 42}
+
     @pytest.mark.timeout(5)
     def test_malformed_partial_array(self):
         result = _parse_gemma4_args(":[t:[]")
