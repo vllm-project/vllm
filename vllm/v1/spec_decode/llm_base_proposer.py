@@ -434,7 +434,25 @@ class SpecDecodeBaseProposer:
         if not self._enable_probabilistic_draft_probs or sampling_metadata.all_greedy:
             return self._greedy_sample(hidden_states), None
         logits = self.model.compute_logits(hidden_states)
-        return self._sample_from_logits(logits, sampling_metadata)
+        if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+        draft_token_ids, draft_probs = self._sample_from_logits(
+            logits, sampling_metadata
+        )
+        if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
+            draft_token_ids = self.vocab_mapping.map_draft_to_target_ids(
+                draft_token_ids
+            )
+            # draft_probs is in draft-vocab space; passing it to the rejection
+            # sampler (which indexes by target vocab IDs) would cause wrong
+            # probability lookups or out-of-bounds access. Drop it here to
+            # fall back to greedy rejection sampling.
+            # TODO: remap draft_probs to target-vocab space for lossless
+            # probabilistic rejection sampling with heterogeneous vocabularies.
+            draft_probs = None
+        return draft_token_ids, draft_probs
 
     def take_last_draft_probs(self) -> torch.Tensor | None:
         return self._last_draft_probs
