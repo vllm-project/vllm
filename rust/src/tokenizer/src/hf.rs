@@ -105,6 +105,9 @@ impl HuggingFaceTokenizer {
     /// Load from `tokenizer.json` with `fastokens`.
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
+        // FIXME(Isotr0py): This is a temporary workaround for fastokens missing tokens in `tokenizer_config.json`,
+        // revert to FastokensTokenizer::from_file after fastokens fix it.
+        // See: https://github.com/crusoecloud/fastokens/pull/36 and https://github.com/vllm-project/vllm/pull/44683
         let tokenizer_json = Self::load_tokenizer_json_with_extra_tokens(path)?;
         let t = FastokensTokenizer::from_json(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
