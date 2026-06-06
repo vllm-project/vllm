@@ -511,7 +511,7 @@ class Gemma4ToolParser(ToolParser):
             return None
 
         try:
-            return self._extract_streaming(
+            return self._extract_streaming_delta_segments(
                 previous_text=previous_text,
                 current_text=current_text,
                 delta_text=delta_text,
@@ -519,6 +519,90 @@ class Gemma4ToolParser(ToolParser):
         except Exception:
             logger.exception("Error in Gemma4 streaming tool call extraction")
             return None
+
+    def _extract_streaming_delta_segments(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+    ) -> DeltaMessage | None:
+        """Replay a multi-boundary delta through the existing parser."""
+
+        def extract_once() -> DeltaMessage | None:
+            return self._extract_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+            )
+
+        boundary_count = delta_text.count(self.tool_call_start_token)
+        boundary_count += delta_text.count(self.tool_call_end_token)
+        if boundary_count <= 1:
+            return extract_once()
+
+        processed_current_text = current_text
+        if self.buffered_delta_text:
+            if not processed_current_text.endswith(self.buffered_delta_text):
+                return extract_once()
+            processed_current_text = processed_current_text[
+                : -len(self.buffered_delta_text)
+            ]
+        if not processed_current_text.endswith(delta_text):
+            return extract_once()
+
+        pattern = (
+            f"({re.escape(self.tool_call_start_token)}|"
+            f"{re.escape(self.tool_call_end_token)})"
+        )
+        segments = [segment for segment in re.split(pattern, delta_text) if segment]
+        segment_previous_text = processed_current_text[: -len(delta_text)]
+        combined = DeltaMessage()
+        tool_calls_by_index: dict[int, DeltaToolCall] = {}
+
+        for segment in segments:
+            segment_current_text = segment_previous_text + segment
+            message = self._extract_streaming(
+                previous_text=segment_previous_text,
+                current_text=segment_current_text,
+                delta_text=segment,
+            )
+            segment_previous_text = segment_current_text
+            if message is None:
+                continue
+
+            if message.content:
+                combined.content = (combined.content or "") + message.content
+
+            for tool_call in message.tool_calls:
+                merged = tool_calls_by_index.get(tool_call.index)
+                if merged is None:
+                    merged = DeltaToolCall(
+                        index=tool_call.index,
+                        function=DeltaFunctionCall(),
+                    )
+                    tool_calls_by_index[tool_call.index] = merged
+                    combined.tool_calls.append(merged)
+
+                if merged.id is None and tool_call.id is not None:
+                    merged.id = tool_call.id
+                if merged.type is None and tool_call.type is not None:
+                    merged.type = tool_call.type
+                if tool_call.function is None:
+                    continue
+                merged_function = merged.function
+                if merged_function is None:
+                    merged_function = DeltaFunctionCall()
+                    merged.function = merged_function
+                if tool_call.function.name is not None and merged_function.name is None:
+                    merged_function.name = tool_call.function.name
+                if tool_call.function.arguments is not None:
+                    merged_function.arguments = (
+                        merged_function.arguments or ""
+                    ) + tool_call.function.arguments
+
+        if not (combined.content or combined.tool_calls):
+            return None
+        return combined
 
     def _extract_streaming(
         self,
