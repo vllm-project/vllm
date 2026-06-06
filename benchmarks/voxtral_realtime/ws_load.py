@@ -38,12 +38,13 @@ def load_pcm16(audio_path: str, loops: int = 1) -> bytes:
     audio, _ = load_audio(audio_path, sr=SAMPLE_RATE, mono=True)
     pcm = (audio * 32767).astype(np.int16).tobytes()
     # Repeat the clip so a single session accumulates enough decoder positions
-    # to cross the re-anchor threshold (the unbounded-duration fast-test).
+    # to cross the re-anchor threshold (the unbounded-duration test).
     return pcm * max(1, loops)
 
 
 async def run_one(
-    idx, uri, model, pcm, frame_bytes, frame_dt, duration_cap, collect_text, pace=True
+    idx, uri, model, pcm, frame_bytes, frame_dt, duration_cap, collect_text,
+    pace=True, start_byte=0
 ):
     res = {
         "stream": idx,
@@ -53,16 +54,17 @@ async def run_one(
         "frames_sent": 0,
         "audio_seconds_sent": 0.0,
         "first_partial_latency_s": None,
-        "frame_to_partial_latencies_s": [],
         "final_text": None,
         "wall_seconds": None,
-        # (elapsed_s, latency_s) per partial -- to detect latency growth over a
-        # long run (a leak / O(n) slowdown would show as a rising trend).
+        "audio_sent_wall_s": None,   # wall time when the last audio frame was sent
+        "flush_latency_s": None,     # transcription.done arrival - last audio frame
+        # (elapsed_s, cumulative_words) per partial: raw transcription-progress
+        # timeline, for offline inspection of how output tracks the audio clock.
         "lat_timeline": [],
     }
     t_start = time.perf_counter()
-    pending_send_ts: list[float] = []
     first_partial_seen = False
+    cum_words = 0
     try:
         async with websockets.connect(uri, max_size=None, ping_interval=20) as ws:
             hello = json.loads(await ws.recv())
@@ -76,7 +78,7 @@ async def run_one(
             done = asyncio.Event()
 
             async def receiver():
-                nonlocal first_partial_seen
+                nonlocal first_partial_seen, cum_words
                 while not done.is_set():
                     try:
                         msg = json.loads(await ws.recv())
@@ -88,19 +90,19 @@ async def run_one(
                         if not first_partial_seen:
                             first_partial_seen = True
                             res["first_partial_latency_s"] = now - t_start
-                        if pending_send_ts:
-                            lat = now - pending_send_ts[-1]
-                            res["frame_to_partial_latencies_s"].append(lat)
-                            res["lat_timeline"].append(
-                                (round(now - t_start, 1), round(lat, 4))
-                            )
+                        delta = msg.get("delta", "")
                         if collect_text:
-                            res["final_text"] = (res["final_text"] or "") + msg.get(
-                                "delta", ""
-                            )
+                            res["final_text"] = (res["final_text"] or "") + delta
+                        cum_words += len(delta.split())
+                        res["lat_timeline"].append((round(now - t_start, 3), cum_words))
                     elif mtype == "transcription.done":
                         if collect_text and msg.get("text"):
                             res["final_text"] = msg["text"]
+                        res["flush_latency_s"] = (
+                            time.perf_counter()
+                            - t_start
+                            - (res["audio_sent_wall_s"] or 0.0)
+                        )
                         res["ok"] = True
                         done.set()
                         return
@@ -112,7 +114,7 @@ async def run_one(
             recv_task = asyncio.create_task(receiver())
 
             total = len(pcm)
-            sent = 0
+            sent = start_byte % max(total, 1)
             next_send = time.perf_counter()
             while sent < total and not done.is_set():
                 if duration_cap > 0 and res["audio_seconds_sent"] >= duration_cap:
@@ -127,11 +129,10 @@ async def run_one(
                         }
                     )
                 )
-                pending_send_ts.append(time.perf_counter())
-                if len(pending_send_ts) > 1024:
-                    del pending_send_ts[:512]
                 res["frames_sent"] += 1
-                res["audio_seconds_sent"] = sent / 2 / SAMPLE_RATE
+                res["audio_seconds_sent"] = (
+                    res["frames_sent"] * frame_bytes / 2 / SAMPLE_RATE
+                )
                 if pace:
                     next_send += frame_dt
                     slack = next_send - time.perf_counter()
@@ -142,6 +143,7 @@ async def run_one(
                     # (NOT real-time; wall vs audio is meaningless in this mode).
                     await asyncio.sleep(0)
 
+            res["audio_sent_wall_s"] = time.perf_counter() - t_start
             await ws.send(
                 json.dumps({"type": "input_audio_buffer.commit", "final": True})
             )
@@ -173,7 +175,7 @@ def summarize(results):
         for r in results
         if r["first_partial_latency_s"] is not None
     ]
-    perframe = [x for r in results for x in r["frame_to_partial_latencies_s"]]
+    flush = [r["flush_latency_s"] for r in results if r["flush_latency_s"] is not None]
     return {
         "n_streams": len(results),
         "n_ok": len(ok),
@@ -185,13 +187,11 @@ def summarize(results):
             "p95": pct(first, 95),
             "max": max(first) if first else None,
         },
-        "frame_to_partial_latency_s": {
-            "count": len(perframe),
-            "mean": statistics.fmean(perframe) if perframe else None,
-            "p50": pct(perframe, 50),
-            "p95": pct(perframe, 95),
-            "p99": pct(perframe, 99),
-            "max": max(perframe) if perframe else None,
+        "flush_latency_s": {
+            "mean": statistics.fmean(flush) if flush else None,
+            "p50": pct(flush, 50),
+            "p95": pct(flush, 95),
+            "max": max(flush) if flush else None,
         },
     }
 
@@ -205,9 +205,15 @@ async def main_async(args):
     frame_bytes = samples_per_frame * 2
     frame_dt = args.frame_ms / 1000.0
     uri = f"ws://{args.host}:{args.port}/v1/realtime"
+    # De-sync: each stream starts at a different position in the audio, so at any
+    # instant the streams carry different content (no perfectly-aligned batches).
+    stagger_bytes = (
+        int(args.pos_stagger_s * SAMPLE_RATE) * 2 // frame_bytes
+    ) * frame_bytes
     print(
         f"[ws_load] {args.n} streams -> {uri} frame={args.frame_ms}ms "
-        f"audio={len(pcm) / 2 / SAMPLE_RATE:.1f}s cap={args.duration_cap}s",
+        f"audio={len(pcm) / 2 / SAMPLE_RATE:.1f}s cap={args.duration_cap}s "
+        f"pos-stagger={args.pos_stagger_s}s/stream",
         file=sys.stderr,
     )
     tasks = [
@@ -221,6 +227,7 @@ async def main_async(args):
             args.duration_cap,
             not args.no_text,
             not args.no_pace,
+            start_byte=i * stagger_bytes,
         )
         for i in range(args.n)
     ]
@@ -257,6 +264,13 @@ def main():
         type=int,
         default=1,
         help="repeat the audio clip N times per stream (unbounded-duration test)",
+    )
+    ap.add_argument(
+        "--pos-stagger-s",
+        type=float,
+        default=0.0,
+        help="start stream i at i*this many seconds into the audio (de-sync so "
+        "concurrent streams carry different content, not perfectly-aligned batches)",
     )
     ap.add_argument("--out", default="ws_load_results.json")
     asyncio.run(main_async(ap.parse_args()))
