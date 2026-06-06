@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import EngineArgs, LLMEngine, SamplingParams
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 
 PROMPTS = [
     "A robot may not injure a human being ",
@@ -9,6 +10,11 @@ PROMPTS = [
     "What is the meaning of life?",
     "What does the fox say? " * 20,  # Test long prompt
 ]
+
+
+def get_engine_input(engine: LLMEngine, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 def test_reset_prefix_cache_e2e(monkeypatch):
@@ -31,7 +37,8 @@ def test_reset_prefix_cache_e2e(monkeypatch):
 
     # No preempt case:
     for i, prompt in enumerate(PROMPTS):
-        engine.add_request("ground_truth_" + str(i), prompt, sampling_params)
+        engine_input = get_engine_input(engine, prompt)
+        engine.add_request("ground_truth_" + str(i), engine_input, sampling_params)
 
     ground_truth_results = {}
     while engine.has_unfinished_requests():
@@ -42,7 +49,8 @@ def test_reset_prefix_cache_e2e(monkeypatch):
 
     # Preempt case:
     for i, prompt in enumerate(PROMPTS):
-        engine.add_request("preempted_" + str(i), prompt, sampling_params)
+        engine_input = get_engine_input(engine, prompt)
+        engine.add_request("preempted_" + str(i), engine_input, sampling_params)
 
     step_id = 0
     preempted_results = {}

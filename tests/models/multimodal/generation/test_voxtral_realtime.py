@@ -16,7 +16,8 @@ from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.renderers.inputs.preprocess import parse_model_prompt
+from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 
 from ....utils import ROCM_ENGINE_KWARGS
 
@@ -51,6 +52,11 @@ EXPECTED_TEXT = [
         "I don't believe it. It just continues. My, oh, my."
     ),
 ]
+
+
+def get_engine_input(engine: LLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 def _normalize(texts: list[str]) -> list[str]:
@@ -168,7 +174,10 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
         request_id = f"session-{i}"
 
         async for resp in async_engine.generate(
-            prompt=buffer.get_input_stream(),
+            prompt=(
+                StreamingInput(get_engine_input(async_engine, prompt))
+                async for prompt in buffer.get_input_stream()
+            ),
             sampling_params=sampling_params,
             request_id=request_id,
         ):

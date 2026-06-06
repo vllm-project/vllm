@@ -8,6 +8,7 @@ for processing prompts with various sampling parameters.
 import argparse
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -29,6 +30,11 @@ def create_test_prompts() -> list[tuple[str, SamplingParams]]:
     ]
 
 
+def get_engine_input(engine: LLMEngine, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
+
+
 def process_requests(engine: LLMEngine, test_prompts: list[tuple[str, SamplingParams]]):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
@@ -37,7 +43,8 @@ def process_requests(engine: LLMEngine, test_prompts: list[tuple[str, SamplingPa
     while test_prompts or engine.has_unfinished_requests():
         if test_prompts:
             prompt, sampling_params = test_prompts.pop(0)
-            engine.add_request(str(request_id), prompt, sampling_params)
+            engine_input = get_engine_input(engine, prompt)
+            engine.add_request(str(request_id), engine_input, sampling_params)
             request_id += 1
 
         request_outputs: list[RequestOutput] = engine.step()

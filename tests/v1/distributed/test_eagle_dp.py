@@ -10,6 +10,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
+from vllm.renderers.inputs.preprocess import parse_model_prompt
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -24,6 +25,11 @@ else:
 # See https://github.com/vllm-project/vllm/pull/30018 and
 # tests/v1/determinism/utils.py for the documented limitation.
 IS_DEVICE_CAPABILITY_BELOW_90 = not current_platform.has_device_capability(90)
+
+
+def get_engine_input(engine: AsyncLLM, prompt: str):
+    parsed_prompt = parse_model_prompt(engine.model_config, prompt)
+    return engine.renderer.render_cmpl([parsed_prompt])[0]
 
 
 @pytest.mark.asyncio
@@ -84,7 +90,9 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
 
     async def generate_with_timeout(given_engine: AsyncLLM):
         async for out in given_engine.generate(
-            request_id="test-eagle-dp", prompt=prompt, sampling_params=sampling_params
+            request_id="test-eagle-dp",
+            prompt=get_engine_input(given_engine, prompt),
+            sampling_params=sampling_params,
         ):
             token_ids = out.outputs[0].token_ids
             assert len(token_ids) == num_expected_tokens
