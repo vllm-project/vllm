@@ -208,11 +208,27 @@ mod tests {
     }
 
     #[test]
-    fn tojson_preserves_arbitrary_precision_number_spelling() {
+    fn tojson_uses_standard_serde_json_number_spelling() {
         let payload = serde_json::from_str(r#"{"x":2,"y":1.00}"#).unwrap();
         let rendered = render("{{ payload|tojson }}", payload);
 
-        assert_eq!(rendered, "{\"x\": 2, \"y\": 1.00}");
+        // TODO: we cannot preserve the original number precision by enabling `serde_json`'s
+        // `arbitrary_precision` feature, otherwise the following test
+        // `serialized_json_numbers_do_not_leak_serde_private_representation` will fail.
+        // See issue: https://github.com/mitsuhiko/minijinja/issues/641
+        assert_eq!(rendered, "{\"x\": 2, \"y\": 1.0}");
+    }
+
+    #[test]
+    fn serialized_json_numbers_do_not_leak_serde_private_representation() {
+        let payload: serde_json::Value = serde_json::from_str(r#"{"x":2,"y":1.00}"#).unwrap();
+        let rendered = render("{{ payload }}", payload);
+
+        // TODO: we cannot preserve the original number precision by enabling `serde_json`'s
+        // `arbitrary_precision` feature, otherwise this will fail.
+        // See issue: https://github.com/mitsuhiko/minijinja/issues/641
+        assert!(!rendered.contains("$serde_json::private::Number"));
+        assert_eq!(rendered, r#"{"x": 2, "y": 1.0}"#);
     }
 
     #[test]
