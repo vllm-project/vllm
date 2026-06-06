@@ -322,6 +322,7 @@ def FusedMoE(
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
         swiglu_limit=swiglu_limit,
+        max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
     )
 
     logger.debug("FusedMoEConfig = %s", moe_config)

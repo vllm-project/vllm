@@ -1265,6 +1265,8 @@ class FusedMoEConfig:
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
 
+    max_capture_size: int = 0
+
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
     rocm_aiter_fmoe_enabled: bool = False
