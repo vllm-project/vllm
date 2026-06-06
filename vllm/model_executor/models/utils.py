@@ -838,7 +838,10 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
-    return torch.narrow(y, 0, start, chunk)
+    out = torch.narrow(y, 0, start, chunk)
+    # narrow() returns a view; clone when it aliases the input (no-pad case),
+    # since a functional custom op must not return a view of an input.
+    return out.clone() if y is x else out
 
 
 def sequence_parallel_chunk_impl_fake(x: torch.Tensor) -> torch.Tensor:
