@@ -1444,16 +1444,7 @@ def use_cascade_attention(
         )
         flash_decoding_ctas *= num_prefix_tiles
 
-    # FA2 uses 128 threads per block, allowing each SM to run 2 blocks concurrently.
-    # Therefore, the effective SM count is num_sms * 2
-    # ref:https://github.com/vllm-project/flash-attention/blob/dd62dac706b1cf7895bd99b18c6cb7e7e117ee25/csrc/flash_attn/flash_api.cpp#L316
-    # FA3 directly using num_sms pass to num_splits_heuristic
-    # ref:https://github.com/vllm-project/flash-attention/blob/dd62dac706b1cf7895bd99b18c6cb7e7e117ee25/hopper/flash_api.cpp#L501
-    flash_decoding_time = (
-        cdiv(flash_decoding_ctas, 2 * num_sms)
-        if fa_version == 2
-        else cdiv(flash_decoding_ctas, num_sms)
-    )
+    flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
     # Use cascade attention if it is faster than FlashDecoding.
     return cascade_time < flash_decoding_time
 
