@@ -1096,6 +1096,253 @@ async fn version_returns_engine_vllm_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn tokenize_text_returns_token_ids() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"prompt": "hello"}).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let expected_token_ids = bytes_to_token_ids(b"hello");
+    assert_eq!(json["tokens"], json!(expected_token_ids));
+    assert_eq!(json["count"], expected_token_ids.len());
+    assert!(json["max_model_len"].as_u64().expect("max_model_len") > 0);
+    assert!(json["token_strs"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_text_with_return_token_strs_enabled() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"prompt": "hi", "return_token_strs": true}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let expected_token_ids = bytes_to_token_ids(b"hi");
+    assert_eq!(json["tokens"], json!(expected_token_ids));
+    assert_eq!(json["count"], expected_token_ids.len());
+    assert_eq!(json["token_strs"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_token_ids_passes_through() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({"prompt": [10, 20, 30]}).to_string()))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["tokens"], json!([10, 20, 30]));
+    assert_eq!(json["count"], 3);
+    assert!(json["token_strs"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_token_ids_with_return_token_strs() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"prompt": [999], "return_token_strs": true}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["tokens"], json!([999]));
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["token_strs"], json!(["<image>"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_wrong_model_returns_not_found() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "non-existent-model", "prompt": "hello"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "model_not_found");
+    assert_eq!(json["error"]["param"], "model");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_valid_model_name_succeeds() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": "hi"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let expected_token_ids = bytes_to_token_ids(b"hi");
+    assert_eq!(json["tokens"], json!(expected_token_ids));
+    assert_eq!(json["count"], expected_token_ids.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_special_token_in_text() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"prompt": "<image>hello", "return_token_strs": true}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let expected_tokens = vec![
+        999u32,
+        b'h' as u32,
+        b'e' as u32,
+        b'l' as u32,
+        b'l' as u32,
+        b'o' as u32,
+    ];
+    assert_eq!(json["tokens"], json!(expected_tokens));
+    assert_eq!(json["count"], expected_tokens.len());
+    assert_eq!(json["token_strs"], json!(["<image>"]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_empty_prompt_returns_empty_tokens() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"prompt": "", "return_token_strs": true}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["count"], 0);
+    assert_eq!(json["tokens"], json!([]));
+    assert_eq!(json["token_strs"], json!([]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenize_missing_prompt_returns_json_parse_error() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/tokenize")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "Qwen/Qwen1.5-0.5B-Chat"}).to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["code"], "json_parse_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn server_info_endpoint_is_dev_mode_only() {
     let mut app = test_app().await;
     let response = app

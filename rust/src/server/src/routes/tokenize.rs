@@ -1,7 +1,9 @@
 use std::mem::take;
 use std::sync::Arc;
 
-use axum::{Json, extract::State};
+use axum::Json;
+use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport;
 use vllm_text::Prompt;
@@ -68,8 +70,9 @@ pub(crate) struct TokenizeResponse {
 /// Handle a tokenize request by routing to the appropriate variant handler.
 pub async fn tokenize(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<TokenizeRequest>,
+    body: Result<Json<TokenizeRequest>, JsonRejection>,
 ) -> Result<Json<TokenizeResponse>, ApiError> {
+    let Json(body) = body.map_err(|err| ApiError::json_parse_error(err.body_text()))?;
     match body {
         Completion(req) => completion_tokenize(state, req).await,
     }
