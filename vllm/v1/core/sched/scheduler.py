@@ -252,12 +252,9 @@ class Scheduler(SchedulerInterface):
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
-        # DP prefill-balancing gate. The DP engine core sets this each step
-        # based on its (DP-aligned) forward-pass counter; when True, new
-        # prefills are deferred this step. Always false for non-DP cases.
-        self.throttle_prefills = False
-        # Flag to track whether the last cadence-aligned prefill batch
-        # fully drained the waiting queue.
+        # DP prefill balancing: Flag to track whether the last cadence-aligned
+        # prefill batch fully drained the waiting queue. Prefill throttling
+        # is disabled in this case.
         self._prefill_capacity_bound = False
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
@@ -340,7 +337,7 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
-    def schedule(self) -> SchedulerOutput:
+    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -379,9 +376,8 @@ class Scheduler(SchedulerInterface):
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
-            (self.throttle_prefills and not self._prefill_capacity_bound)
-            and any(not r.is_prefill_chunk for r in self.running)
-        )
+            throttle_prefills and not self._prefill_capacity_bound
+        ) and any(not r.is_prefill_chunk for r in self.running)
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -1923,9 +1919,6 @@ class Scheduler(SchedulerInterface):
 
     def set_pause_state(self, pause_state: PauseState) -> None:
         self._pause_state = pause_state
-
-    def set_throttle_prefills(self, throttle_prefills: bool) -> None:
-        self.throttle_prefills = throttle_prefills
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:

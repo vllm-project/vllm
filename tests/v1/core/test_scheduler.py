@@ -238,8 +238,7 @@ def test_schedule_prefills_gating(has_running: bool):
     # Add a new WAITING (prefill) request, with prefills gated off.
     (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
     scheduler.add_request(new_req)
-    scheduler.throttle_prefills = True
-    output = scheduler.schedule()
+    output = scheduler.schedule(throttle_prefills=True)
 
     if has_running:
         # There is running work to protect, so the new prefill is deferred...
@@ -248,7 +247,6 @@ def test_schedule_prefills_gating(has_running: bool):
         # ...while the running/decode request keeps being scheduled.
         assert "run0" in output.num_scheduled_tokens
         # When the cadence allows prefills again, the request is admitted.
-        scheduler.throttle_prefills = False
         output = scheduler.schedule()
 
     # No running work to protect (or cadence now open): the prefill is admitted.
@@ -305,8 +303,7 @@ def test_throttle_prefills_excludes_remote_kv_resume():
     # Throttle prefills. r2's load is complete, so it must be promoted and
     # scheduled (a resume, not a fresh prefill) even though the running decode
     # (r1) would otherwise make this a throttled step.
-    scheduler.throttle_prefills = True
-    output = scheduler.schedule()
+    output = scheduler.schedule(throttle_prefills=True)
     assert "r2" in output.num_scheduled_tokens
     assert "r1" in output.num_scheduled_tokens
 
@@ -356,13 +353,11 @@ def test_throttle_defers_inflight_prefill_chunk():
     assert chunk_req.is_prefill_chunk  # still mid-prefill, in running
 
     # Throttled step: the in-flight prefill chunk is deferred, the decode runs.
-    scheduler.throttle_prefills = True
-    output = scheduler.schedule()
+    output = scheduler.schedule(throttle_prefills=True)
     assert "chk0" not in output.num_scheduled_tokens
     assert "dec0" in output.num_scheduled_tokens
 
     # When the cadence opens again, the prefill chunk resumes.
-    scheduler.throttle_prefills = False
     output = scheduler.schedule()
     assert "chk0" in output.num_scheduled_tokens
 
@@ -388,8 +383,7 @@ def test_throttle_capacity_bound_guard_admits():
 
     # Throttle. Because the previous release was capacity-bound, the guard backs
     # off and `b` is admitted rather than stalling the backlog.
-    scheduler.throttle_prefills = True
-    output = scheduler.schedule()
+    output = scheduler.schedule(throttle_prefills=True)
     assert "b" in output.num_scheduled_tokens
 
 
