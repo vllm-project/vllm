@@ -35,25 +35,9 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-cleanup_docker() {
-  # Get Docker's root directory
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  if [ -z "$docker_root" ]; then
-    echo "Failed to determine Docker root directory."
-    exit 1
-  fi
-  echo "Docker root directory: $docker_root"
-
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
-  threshold=70
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
-  else
-    echo "Disk usage is below $threshold%. No cleanup needed."
-  fi
+report_docker_usage() {
+  echo "--- Docker usage"
+  docker system df || true
 }
 
 cleanup_network() {
@@ -66,6 +50,108 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+prepare_artifact_image() {
+  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
+    return 1
+  fi
+  if ! command -v buildkite-agent >/dev/null 2>&1; then
+    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
+    return 1
+  fi
+
+  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
+  local archive=""
+  local metadata_file=""
+  local base_image="${VLLM_CI_BASE_IMAGE:-rocm/vllm-dev:ci_base}"
+  local artifact_image=""
+  local artifact_key=""
+  local base_digest=""
+  local wheel_dir=""
+  local context_dir=""
+  local workspace_dir=""
+
+  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
+  wheel_dir="${artifact_work_dir}/wheels"
+  context_dir="${artifact_work_dir}/context"
+  workspace_dir="${context_dir}/workspace"
+  mkdir -p "${wheel_dir}" "${context_dir}/wheels" "${workspace_dir}"
+
+  echo "--- Downloading ROCm wheel artifact"
+  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
+    echo "Failed to download ${artifact_glob}"
+    return 1
+  fi
+  buildkite-agent artifact download \
+    "artifacts/vllm-rocm-install/ci-base-image.txt" \
+    "${artifact_work_dir}" >/dev/null 2>&1 || true
+
+  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
+  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
+    echo "ROCm wheel artifact archive was not found"
+    return 1
+  fi
+
+  metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
+  if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
+    base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  fi
+
+  echo "--- Preparing local ROCm test image"
+  echo "Base image: ${base_image}"
+  docker pull "${base_image}" || return 1
+  base_digest=$(
+    docker image inspect \
+      --format='{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' \
+      "${base_image}" 2>/dev/null || printf '%s' "${base_image}"
+  )
+
+  artifact_key=$(
+    {
+      printf 'base-image:%s\n' "${base_digest}"
+      sha256sum "${archive}"
+    } | sha256sum | cut -c1-24
+  )
+  artifact_image="rocm/vllm-ci-artifact:${artifact_key}"
+
+  if docker image inspect "${artifact_image}" >/dev/null 2>&1; then
+    echo "Using existing local ROCm artifact image: ${artifact_image}"
+    image_name="${artifact_image}"
+    return 0
+  fi
+
+  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
+  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
+    echo "ROCm wheel artifact did not contain a wheel"
+    return 1
+  fi
+  if [[ ! -d "${wheel_dir}/tests" ]]; then
+    echo "ROCm wheel artifact did not contain the test workspace"
+    return 1
+  fi
+
+  cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
+  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
+    | tar -C "${workspace_dir}" -xf - || return 1
+  cat > "${context_dir}/Dockerfile" <<'EOF'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY wheels/ /tmp/vllm-wheels/
+COPY workspace/ /vllm-workspace/
+RUN python3 -m pip install --no-deps --force-reinstall /tmp/vllm-wheels/*.whl \
+    && rm -rf /tmp/vllm-wheels
+WORKDIR /vllm-workspace
+EOF
+
+  echo "--- Building local ROCm test image"
+  docker build \
+    --pull=false \
+    --build-arg "BASE_IMAGE=${base_image}" \
+    -t "${artifact_image}" \
+    "${context_dir}" || return 1
+  image_name="${artifact_image}"
+  return 0
 }
 
 is_multi_node() {
@@ -254,19 +340,35 @@ re_quote_pytest_markers() {
 echo "--- ROCm info"
 rocminfo
 
-# --- Docker housekeeping ---
-cleanup_docker
+# --- Docker status ---
+report_docker_usage
 
 # --- Pull test image ---
 echo "--- Pulling container"
-image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
+artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-docker pull "${image_name}"
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  if docker container inspect "${container_name}" >/dev/null 2>&1; then
+    docker rm -f "${container_name}" || true
+  fi
+  if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" ]]; then
+    docker image rm -f "${image_name}" || true
+  else
+    # Keep images by default so later jobs on the same AMD node can reuse layers.
+    echo "Keeping ROCm test image locally: ${image_name}"
+  fi
+  if [[ -n "${artifact_work_dir}" ]]; then
+    rm -rf "${artifact_work_dir}"
+  fi
 }
 trap remove_docker_container EXIT
+
+if ! prepare_artifact_image; then
+  echo "Using full ROCm CI image: ${image_name}"
+  docker pull "${image_name}" || exit 1
+fi
 
 # --- Prepare commands ---
 echo "--- Running container"

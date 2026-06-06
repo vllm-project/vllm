@@ -27,14 +27,14 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "cuda_vec_utils.cuh"
+#include "../../cuda_vec_utils.cuh"
 #include "cuda_utils.h"
 
 #include "nvfp4_utils.cuh"
 static_assert(CVT_FP4_ELTS_PER_THREAD == 16,
               "MXFP4 experts quant requires PACK16 mode (CUDA >= 12.9)");
 
-#include "launch_bounds_utils.h"
+#include "libtorch_stable/launch_bounds_utils.h"
 
 namespace vllm {
 

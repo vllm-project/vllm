@@ -27,6 +27,16 @@ except ImportError:
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
+_HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+
+
+def _ensure_hipb_mm_extension_initialized() -> None:
+    import aiter
+
+    device = torch.accelerator.current_device_index()
+    if device not in _HIPB_MM_INITIALIZED_DEVICES:
+        aiter.hipb_create_extension()
+        _HIPB_MM_INITIALIZED_DEVICES.add(device)
 
 
 def is_aiter_found() -> bool:
@@ -144,6 +154,7 @@ def _rocm_aiter_fused_moe_impl(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -171,6 +182,7 @@ def _rocm_aiter_fused_moe_impl(
         intermediate_pad=intermediate_pad,
         bias1=bias1,
         bias2=bias2,
+        moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
     )
 
 
@@ -194,6 +206,7 @@ def _rocm_aiter_fused_moe_fake(
     intermediate_pad: int = 0,
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -619,6 +632,43 @@ def _rocm_aiter_preshuffled_per_token_w8a8_gemm_fake(
 ) -> torch.Tensor:
     m = A.shape[0]
     n = B.shape[0]
+    return torch.empty(m, n, dtype=output_dtype, device=A.device)
+
+
+def _rocm_aiter_hipb_mm_fp8_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    from aiter import hipb_mm
+
+    _ensure_hipb_mm_extension_initialized()
+    return hipb_mm(
+        A,
+        B,
+        solution_index=-1,
+        bias=bias,
+        out_dtype=output_dtype,
+        scaleA=As,
+        scaleB=Bs,
+        scaleOut=None,
+        bpreshuffle=True,
+    )
+
+
+def _rocm_aiter_hipb_mm_fp8_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[1]
     return torch.empty(m, n, dtype=output_dtype, device=A.device)
 
 
@@ -1282,6 +1332,18 @@ class rocm_aiter_ops:
         - Triton ops: triton_rotary_embed, triton_fp8_bmm, triton_gemm_a8w8_blockscale
     """
 
+    _MOE_DISPATCH_POLICY: int | None = None
+
+    @classmethod
+    @if_aiter_supported
+    def get_moe_dispatch_policy(cls) -> int:
+        """Cached MoE sorting dispatch policy."""
+        if cls._MOE_DISPATCH_POLICY is None:
+            import vllm.envs as envs
+
+            cls._MOE_DISPATCH_POLICY = envs.VLLM_ROCM_AITER_MOE_DISPATCH_POLICY
+        return cls._MOE_DISPATCH_POLICY
+
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
@@ -1293,6 +1355,7 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
     _FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
+    _LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
     # TODO: Consolidate under _LINEAR_ENABLED
     _FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
     # TODO: Consolidate under VLLM_ROCM_USE_AITER_ROPE
@@ -1325,6 +1388,7 @@ class rocm_aiter_ops:
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
         cls._FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
         cls._FP4BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP4BMM
+        cls._LINEAR_HIPBMM_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
         cls._FP4_GEMM_DYNAMIC_QUANT_ASM = envs.VLLM_ROCM_USE_AITER_FP4_ASM_GEMM
         cls._TRITON_ROTARY_EMBED = envs.VLLM_ROCM_USE_AITER_TRITON_ROPE
         cls._MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
@@ -1499,6 +1563,13 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def is_linear_hipbmm_enabled(cls) -> bool:
+        from vllm.platforms.rocm import on_mi3xx
+
+        return cls.is_linear_enabled() and on_mi3xx() and cls._LINEAR_HIPBMM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_gfx950
 
@@ -1651,6 +1722,12 @@ class rocm_aiter_ops:
                 op_name="_rocm_aiter_preshuffled_per_token_w8a8_gemm",
                 op_func=_rocm_aiter_preshuffled_per_token_w8a8_gemm_impl,
                 fake_impl=_rocm_aiter_preshuffled_per_token_w8a8_gemm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_hipb_mm_fp8",
+                op_func=_rocm_aiter_hipb_mm_fp8_impl,
+                fake_impl=_rocm_aiter_hipb_mm_fp8_fake,
             )
 
             direct_register_custom_op(
@@ -1844,6 +1921,17 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def hipb_mm_fp8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
     def triton_gemm_a8w8_blockscale(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -1890,6 +1978,7 @@ class rocm_aiter_ops:
         intermediate_pad: int = 0,
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
+        moe_sorting_dispatch_policy: int = 0,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -1911,6 +2000,7 @@ class rocm_aiter_ops:
             intermediate_pad,
             bias1,
             bias2,
+            moe_sorting_dispatch_policy,
         )
 
     @staticmethod
@@ -2377,6 +2467,7 @@ class rocm_aiter_ops:
         alibi_slopes: torch.Tensor | None = None,
         return_lse: bool = False,
         out: torch.Tensor | None = None,
+        sink_ptr: torch.Tensor | None = None,
     ):
         """
         Flash attention with variable length sequences.
@@ -2405,6 +2496,7 @@ class rocm_aiter_ops:
             alibi_slopes=alibi_slopes,
             return_lse=return_lse,
             out=out,
+            sink_ptr=sink_ptr,
         )
 
     @staticmethod

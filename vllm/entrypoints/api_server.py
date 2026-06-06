@@ -22,7 +22,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.utils import with_cancellation
+from vllm.entrypoints.serve.utils.api_utils import with_cancellation
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext

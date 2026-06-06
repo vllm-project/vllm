@@ -24,7 +24,10 @@ from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
-from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
+from vllm.tool_parsers.qwen3xml_tool_parser import (
+    Qwen3XMLToolParser,
+    StreamingXMLToolCallParser,
+)
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
@@ -69,6 +72,23 @@ AREA_PARAMS = {
         "shape": {"type": "string"},
         "dimensions": {"type": "object"},
         "precision": {"type": "integer"},
+    },
+}
+
+QUESTION_PARAMS = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "multiSelect": {"type": "boolean"},
+                    "answer": {"type": "string"},
+                },
+            },
+        },
     },
 }
 
@@ -146,6 +166,47 @@ def assert_tool_calls(
         assert json.loads(actual_tool_call.function.arguments) == json.loads(
             expected_tool_call.function.arguments
         )
+
+
+def test_qwen3xml_deferred_array_parses_json_literals():
+    parser = StreamingXMLToolCallParser()
+    parser.set_tools(
+        [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "AskUserQuestion",
+                    "parameters": QUESTION_PARAMS,
+                },
+            )
+        ]
+    )
+
+    delta = parser.parse_single_streaming_chunks(
+        """<tool_call>
+<function=AskUserQuestion>
+<parameter=questions>
+[{"question": "Pick a color", "multiSelect": false, "answer": null}]
+</parameter>
+</function>
+</tool_call>"""
+    )
+
+    arguments = "".join(
+        tool_call.function.arguments or ""
+        for tool_call in delta.tool_calls or []
+        if tool_call.function and tool_call.function.arguments is not None
+    )
+
+    assert json.loads(arguments) == {
+        "questions": [
+            {
+                "question": "Pick a color",
+                "multiSelect": False,
+                "answer": None,
+            }
+        ]
+    }
 
 
 def stream_delta_message_generator(

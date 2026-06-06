@@ -423,11 +423,6 @@ def test_processing_correctness(
         )
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
-    if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
-        pytest.skip(
-            "Qwen-VL tokenizer requires downloading a font file from "
-            "servers that often refuse connections in CI"
-        )
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
             "Voxtral Realtime doesn't make use of any place-holder "

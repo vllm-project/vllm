@@ -101,7 +101,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual mypy-3.10
+    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -303,6 +303,18 @@ review process:
 - Note that not all CI checks will be executed due to limited computational
   resources. The reviewer will add `ready` label to the PR when the PR is
   ready to merge or a full CI run is needed.
+
+### Escalating Stalled Contributions
+
+If you have an important contribution that has not yet received maintainer attention, please email us at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
 
 ## Thank You
 

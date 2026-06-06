@@ -200,7 +200,6 @@ def test_flashinfer_b12x_moe(
                 use_monolithic=False,
             ),
             experts,
-            inplace=False,
         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)

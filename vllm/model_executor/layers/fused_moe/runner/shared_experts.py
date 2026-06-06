@@ -119,7 +119,6 @@ class SharedExperts:
 
         if experts_order == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             assert self._stream is not None
-            assert self._moe_config.disable_inplace
 
             # Record that the clone will be used by shared_experts_stream
             # to avoid gc issue from deallocation of hidden_states_clone

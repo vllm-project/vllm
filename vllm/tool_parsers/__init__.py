@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_tool_parser",
         "MinimaxToolParser",
     ),
+    "minicpm5": (
+        "minicpm5xml_tool_parser",
+        "MiniCPM5XMLToolParser",
+    ),
     "mistral": (
         "mistral_tool_parser",
         "MistralToolParser",

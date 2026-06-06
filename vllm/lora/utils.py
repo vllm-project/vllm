@@ -4,7 +4,6 @@
 import os
 from typing import TYPE_CHECKING
 
-import huggingface_hub
 import regex as re
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
@@ -37,6 +36,7 @@ from vllm.lora.layers import (
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
+from vllm.transformers_utils.repo_utils import hf_api
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -340,7 +340,9 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         error_log = "Error downloading the ModelScope model"
     else:
         # Otherwise, we assume the path is a Hugging Face Hub repo.
-        download_fn = lambda: huggingface_hub.snapshot_download(repo_id=lora_path)
+        download_fn = lambda: hf_api().snapshot_download(
+            repo_id=lora_path,
+        )
         download_exceptions = (HfHubHTTPError, HFValidationError)
         error_log = "Error downloading the HuggingFace model"
 
