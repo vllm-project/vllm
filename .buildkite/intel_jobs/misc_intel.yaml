@@ -74,9 +74,5 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/kv_offload/tiering/test_tiering_offloading.py &&
-      pytest -v -s v1/kv_offload/test_worker.py &&
-      pytest -v -s v1/kv_offload/test_file_mapper.py &&
-      pytest -v -s v1/kv_offload/tiering/test_fs_tier.py &&
-      pytest -v -s v1/kv_offload/cpu/test_shared_offload_region.py &&
+      pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py -k "not test_fs_tiering_offloading"'
