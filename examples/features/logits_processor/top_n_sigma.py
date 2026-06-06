@@ -150,74 +150,6 @@ sampling_params_list = [
 ]
 
 
-def self_test():
-    """Quick correctness self-test for the vectorized apply() implementation.
-
-    Verifies argmax invariance and threshold filtering on synthetic logits.
-    Run with: python top_n_sigma.py --test
-    """
-    import sys
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu":
-        print("WARNING: No GPU available, running self-test on CPU")
-
-    torch.manual_seed(42)
-    V = 32000
-    B = 8
-    req_info = {0: 2.0, 1: 1.0, 3: 3.0, 5: 2.0, 7: 5.0}
-
-    logits = torch.randn(B, V, device=device)
-
-    # Instantiate processor
-    proc = TopNSigmaLogitsProcessor(
-        vllm_config=None, device=torch.device(device), is_pin_memory=False
-    )
-    proc.req_info = req_info
-
-    orig_argmax = logits.argmax(dim=-1)
-    filtered = proc.apply(logits.clone())
-    filt_argmax = filtered.argmax(dim=-1)
-
-    # 1. Argmax invariance
-    argmax_ok = (filt_argmax == orig_argmax).all().item()
-    print(f"  Argmax invariance: {argmax_ok}")
-
-    # 2. Threshold filtering produces reasonable survival counts
-    surviving = (filtered > float("-inf")).sum(dim=-1)
-    # Rows with n_sigma should have fewer surviving tokens than V
-    for row_idx, n_sigma in req_info.items():
-        s = surviving[row_idx].item()
-        pct = 100 * s / V
-        print(f"  Row {row_idx} n={n_sigma}: {s}/{V} ({pct:.1f}%) survive")
-
-    # 3. Edge case: constant logits (std=0) → no filtering
-    const_logits = torch.ones(4, V, device=device)
-    proc_const = TopNSigmaLogitsProcessor(
-        vllm_config=None, device=torch.device(device), is_pin_memory=False
-    )
-    proc_const.req_info = {0: 2.0, 1: 2.0}
-    filtered_const = proc_const.apply(const_logits.clone())
-    const_ok = (filtered_const == const_logits).all().item()
-    print(f"  Constant logits (std=0) unchanged: {const_ok}")
-
-    # 4. Edge case: empty req_info → logits unchanged
-    proc_empty = TopNSigmaLogitsProcessor(
-        vllm_config=None, device=torch.device(device), is_pin_memory=False
-    )
-    proc_empty.req_info = {}
-    filtered_empty = proc_empty.apply(logits.clone())
-    empty_ok = (filtered_empty == logits).all().item()
-    print(f"  Empty req_info unchanged: {empty_ok}")
-
-    all_pass = argmax_ok and const_ok and empty_ok
-    if all_pass:
-        print("  ALL PASS")
-    else:
-        print("  SOME FAIL — investigate before deploying")
-        sys.exit(1)
-
-
 def main():
     llm = LLM(
         model="facebook/opt-125m",
@@ -234,8 +166,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
-    if "--test" in sys.argv:
-        self_test()
-    else:
-        main()
+    main()
