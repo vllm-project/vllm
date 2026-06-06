@@ -102,6 +102,11 @@ def _nvfp4_swizzled_scale_coord(
 
 
 @triton.jit
+def _nvfp4_linear_scale_coord(slot_in_block, scale_group_idx):
+    return slot_in_block + scale_group_idx * 0, scale_group_idx + slot_in_block * 0
+
+
+@triton.jit
 def _load_k_tile_nvfp4(
     key_data_ptr,
     key_scale_cache_ptr,
@@ -145,9 +150,14 @@ def _load_k_tile_nvfp4(
     high = (raw_bytes >> 4) & 0x0F
     nibble = tl.where((offs_d[:, None] & 1) == 0, low, high)
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
+        )
     scale_offset = (
         physical_block_idx[None, :] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
@@ -209,9 +219,14 @@ def _load_v_tile_nvfp4(
     high = (raw_bytes >> 4) & 0x0F
     nibble = tl.where((offs_d[None, :] & 1) == 0, low, high)
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
     scale_offset = (
         physical_block_idx[:, None] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
@@ -268,9 +283,14 @@ def _load_k_tile_nvfp4_bytewise(
         other=0,
     )
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
+        )
     scale_offset = (
         physical_block_idx[None, :] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
@@ -327,9 +347,14 @@ def _load_k_tile_nvfp4_bytewise_transposed(
         other=0,
     )
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
     scale_offset = (
         physical_block_idx[:, None] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
@@ -386,9 +411,14 @@ def _load_v_tile_nvfp4_bytewise(
         other=0,
     )
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :]
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+        )
     scale_offset = (
         physical_block_idx[:, None] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
