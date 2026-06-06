@@ -9,6 +9,7 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    build_harmony_preamble,
     create_tool_definition,
     extract_function_from_recipient,
     get_encoding,
@@ -1085,6 +1086,33 @@ class TestGetSystemMessage:
             match="reasoning_effort='max' is not supported by Harmony",
         ):
             get_system_message(reasoning_effort="max")
+
+
+class TestBuildHarmonyPreamble:
+    def test_system_instruction_env_behavior_preserved(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "1")
+        instructions = "TOP_LEVEL_SENTINEL_123"
+
+        messages = build_harmony_preamble(instructions=instructions)
+
+        assert len(messages) == 1
+        assert messages[0].author.role == Role.SYSTEM
+        assert instructions in messages[0].content[0].model_identity
+
+    def test_responses_can_force_instructions_to_developer(self, monkeypatch) -> None:
+        monkeypatch.setenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "1")
+        instructions = "ZXQ_7429_OK"
+
+        messages = build_harmony_preamble(
+            instructions=instructions,
+            force_developer_instructions=True,
+        )
+
+        assert len(messages) == 2
+        assert messages[0].author.role == Role.SYSTEM
+        assert instructions not in (messages[0].content[0].model_identity or "")
+        assert messages[1].author.role == Role.DEVELOPER
+        assert messages[1].content[0].instructions == instructions
 
 
 class TestResponseInputToHarmonyReasoningItem:

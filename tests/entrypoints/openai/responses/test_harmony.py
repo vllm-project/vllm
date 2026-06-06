@@ -1095,13 +1095,15 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     assert tool_call_found, "MCP tool call not found in output_messages"
     assert tool_response_found, "MCP tool response not found in output_messages"
 
-    # No developer messages expected for elevated tools
+    # Elevated tools must not be serialized as developer function tools.
+    # The developer message may still carry request instructions.
     developer_msgs = [
         msg
         for msg in (Message.from_dict(raw) for raw in response1.input_messages)
         if msg.author.role == "developer"
     ]
-    assert len(developer_msgs) == 0, "No developer message expected for elevated tools"
+    for msg in developer_msgs:
+        assert msg.content[0].tools is None
 
     # Second turn
     response2 = await client.responses.create(

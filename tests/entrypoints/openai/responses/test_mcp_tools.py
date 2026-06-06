@@ -187,8 +187,16 @@ class TestMCPEnabled:
         )
         assert tool_response_found, "No Python tool response found"
 
-        for message in response.input_messages:
-            assert Message.from_dict(message).author.role != "developer"
+        parsed_input_messages = [
+            Message.from_dict(message) for message in response.input_messages
+        ]
+        developer_msgs = [
+            message
+            for message in parsed_input_messages
+            if message.author.role == "developer"
+        ]
+        for message in developer_msgs:
+            assert message.content[0].tools is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("model_name", [MODEL_NAME])

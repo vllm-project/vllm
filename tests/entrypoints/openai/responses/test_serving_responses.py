@@ -25,6 +25,7 @@ from openai.types.responses.tool import (
     Mcp,
     Tool,
 )
+from openai_harmony import Role
 
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -34,6 +35,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    render_for_completion,
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import (
@@ -235,6 +240,34 @@ def test_harmony_required_function_call_output_replays() -> None:
     assert messages[0].content[0].text == '{"location": "Paris"}'
     assert messages[-1].author.role == "user"
     assert messages[-1].content[0].text == "Continue."
+
+
+def test_harmony_responses_instructions_render_as_developer(monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "1")
+    serving = _harmony_required_tool_serving()
+    instructions = "ZXQ_7429_OK"
+    request = ResponsesRequest(
+        input="Please follow the instruction.",
+        instructions=instructions,
+    )
+
+    messages = serving._construct_input_messages_with_harmony(
+        request,
+        prev_response=None,
+    )
+
+    assert messages[0].author.role == Role.SYSTEM
+    assert instructions not in (messages[0].content[0].model_identity or "")
+    assert messages[1].author.role == Role.DEVELOPER
+    assert messages[1].content[0].instructions == instructions
+    assert messages[-1].author.role == Role.USER
+    assert messages[-1].content[0].text == "Please follow the instruction."
+    rendered_prompt = get_encoding().decode(render_for_completion(messages))
+    system_segment, developer_segment = rendered_prompt.split(
+        "<|start|>developer", maxsplit=1
+    )
+    assert instructions not in system_segment
+    assert f"# Instructions\n\n{instructions}" in developer_segment
 
 
 @pytest.mark.parametrize(
