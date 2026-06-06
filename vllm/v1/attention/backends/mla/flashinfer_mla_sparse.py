@@ -1,23 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FlashInfer MLA Sparse Attention Backend.
-
-This backend uses the FlashInfer TRT-LLM MLA kernel with sparse_mla_top_k
-for models like DeepSeek-V3.2 that use index-based sparse attention.
-
-For sparse MLA:
-- block_tables shape changes from [batch_size, max_num_blocks] (dense)
-  to [batch_size, q_len_per_request, sparse_mla_top_k] (sparse)
-- The sparse indices represent physical cache slot positions to attend to
-- sparse_mla_top_k parameter must be set to the topk value
-"""
+"""FlashInfer sparse MLA attention backend."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, NoReturn
 
 import numpy as np
 import torch
-from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -52,33 +41,19 @@ logger = init_logger(__name__)
 FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
-class FlashInferMLASparseBackend(AttentionBackend):
-    """FlashInfer MLA backend with sparse attention support.
+def _raise_unspecialized_dispatch(method: str) -> NoReturn:
+    raise RuntimeError(
+        "FLASHINFER_MLA_SPARSE is an architecture dispatcher. "
+        f"Call specialize(device_capability) before {method}()."
+    )
 
-    This backend uses the FlashInfer TRT-LLM MLA kernel with sparse_mla_top_k
-    for models like DeepSeek-V3.2 that use index-based sparse attention.
-    """
 
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
-        "float16",
-        "bfloat16",
-        "fp8",
-        "fp8_e4m3",
-    ]
-
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [32, 64]
+class _FlashInferMLASparseBackendBase(AttentionBackend):
+    """Common metadata for concrete FlashInfer sparse MLA backends."""
 
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE"
-
-    @staticmethod
-    def get_impl_cls() -> type["FlashInferMLASparseImpl"]:
-        return FlashInferMLASparseImpl
 
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLASparseMetadataBuilder"]:
@@ -96,9 +71,29 @@ class FlashInferMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+
+class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
+    """FlashInfer sparse MLA backend using the TRTLLM-gen launcher."""
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [32, 64]
+
+    @staticmethod
+    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
+        return FlashInferMLASparseImpl
+
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # FlashInfer sparse MLA targets Blackwell (SM 10.x)
         return capability.major == 10
 
     @classmethod
@@ -113,10 +108,15 @@ class FlashInferMLASparseBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        # FlashInfer MLA sparse kernel requires qk_nope_head_dim in [128, 192]
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        if kv_cache_dtype == "fp8_ds_mla":
+            return (
+                "FLASHINFER_MLA_SPARSE SM10 does not support fp8_ds_mla kv-cache dtype"
+            )
+
+        # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
@@ -143,6 +143,239 @@ class FlashInferMLASparseBackend(AttentionBackend):
     @classmethod
     def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return "HND"
+
+
+class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
+    """FlashInfer sparse MLA backend using the SM120 sparse wrapper."""
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_ds_mla",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # SM120 must share a block size with the sparse-MLA indexer cache.
+        return [64]
+
+    @staticmethod
+    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
+        from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+            FlashInferMLASparseSM120Impl,
+        )
+
+        return FlashInferMLASparseSM120Impl
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 12
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        from vllm.config import get_current_vllm_config
+        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+
+        if not has_flashinfer_sparse_mla_sm120():
+            return (
+                "FLASHINFER_MLA_SPARSE SM120 requires FlashInfer's "
+                "sparse-sm120 MLA wrapper"
+            )
+        if dtype != torch.bfloat16:
+            return "dtype not supported"
+        if kv_cache_dtype not in (
+            None,
+            "auto",
+            "fp8",
+            "fp8_e4m3",
+            "fp8_ds_mla",
+        ):
+            return "kv_cache_dtype not supported"
+        if block_size is not None and block_size != 64:
+            return "block_size not supported"
+        vllm_config = get_current_vllm_config()
+        if vllm_config.model_config is not None:
+            hf_text_config = vllm_config.model_config.hf_text_config
+            index_topk = getattr(hf_text_config, "index_topk", None)
+            if index_topk is None:
+                return (
+                    "FLASHINFER_MLA_SPARSE SM120 requires a model with "
+                    "index_topk config"
+                )
+            if int(index_topk) != 2048:
+                return (
+                    "FLASHINFER_MLA_SPARSE SM120 requires index_topk=2048; "
+                    f"got {index_topk}"
+                )
+        return None
+
+    @classmethod
+    def normalize_kv_cache_dtype(
+        cls,
+        kv_cache_dtype: CacheDType,
+    ) -> CacheDType:
+        if kv_cache_dtype in ("auto", "fp8", "fp8_e4m3"):
+            return "fp8_ds_mla"
+        return kv_cache_dtype
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,  # assumed to be 1 for MLA
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        if cache_dtype_str in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
+            # fp8_ds_mla packed layout: 512 NoPE + 16 scales + 128 RoPE.
+            return (num_blocks, block_size, 656)
+        return (num_blocks, block_size, head_size)
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return None
+
+
+class FlashInferMLASparseBackend(AttentionBackend):
+    """Public FlashInfer sparse MLA backend dispatcher."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER_MLA_SPARSE"
+
+    @staticmethod
+    def _variant_for_capability(
+        device_capability: DeviceCapability,
+    ) -> type[AttentionBackend]:
+        if device_capability.major == 12:
+            return FlashInferMLASparseSM120Backend
+        return FlashInferMLASparseTRTLLMBackend
+
+    @classmethod
+    def specialize(
+        cls,
+        device_capability: DeviceCapability,
+    ) -> type[AttentionBackend]:
+        return cls._variant_for_capability(device_capability)
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major in (10, 12)
+
+    @staticmethod
+    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
+        _raise_unspecialized_dispatch("get_impl_cls")
+
+    @classmethod
+    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
+        _raise_unspecialized_dispatch("get_supported_kernel_block_sizes")
+
+    @staticmethod
+    def get_builder_cls() -> type["FlashInferMLASparseMetadataBuilder"]:
+        _raise_unspecialized_dispatch("get_builder_cls")
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
+    def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: DeviceCapability,
+        attn_type: str,
+        use_non_causal: bool = False,
+        use_batch_invariant: bool = False,
+        use_kv_connector: bool = False,
+    ) -> list[str]:
+        return cls._variant_for_capability(device_capability).validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            use_per_head_quant_scales=use_per_head_quant_scales,
+            device_capability=device_capability,
+            attn_type=attn_type,
+            use_non_causal=use_non_causal,
+            use_batch_invariant=use_batch_invariant,
+            use_kv_connector=use_kv_connector,
+        )
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        return cls._variant_for_capability(device_capability).supports_combination(
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            use_mla,
+            has_sink,
+            use_sparse,
+            device_capability,
+        )
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        _raise_unspecialized_dispatch("get_kv_cache_shape")
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        _raise_unspecialized_dispatch("get_required_kv_cache_layout")
+
+    @classmethod
+    def normalize_kv_cache_dtype(
+        cls,
+        kv_cache_dtype: CacheDType,
+    ) -> CacheDType:
+        _raise_unspecialized_dispatch("normalize_kv_cache_dtype")
 
 
 @dataclass
@@ -347,6 +580,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             self.bmm2_scale = 1.0
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
+
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
         o = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),

@@ -210,6 +210,26 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm120() -> bool:
+    """Return ``True`` if FlashInfer's SM120 sparse-MLA wrapper is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.mla import BatchMLAPagedAttentionWrapper
+        from flashinfer.sparse_mla_sm120 import (
+            sparse_mla_sm120_decode_dsv4_autotune,
+        )
+        from flashinfer.swa_indices import compute_swa_indices_and_lens
+    except ImportError:
+        return False
+    return (
+        hasattr(BatchMLAPagedAttentionWrapper, "run_sparse_mla")
+        and callable(sparse_mla_sm120_decode_dsv4_autotune)
+        and callable(compute_swa_indices_and_lens)
+    )
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (

@@ -1002,6 +1002,34 @@ def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
     return fp32_bits.view(torch.float32)
 
 
+def deepgemm_post_process_weight_scale_block(
+    ws: torch.Tensor,
+    mn: int,
+    k: int,
+    quant_block_shape: tuple[int, ...],
+    num_groups: int,
+    is_sfa: bool = False,
+) -> torch.Tensor:
+    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
+        # Scales already in E8M0 from checkpoint; upcast to fp32 and let
+        # DeepGEMM pack the layout expected by the target architecture.
+        ws = _upcast_e8m0_to_fp32(ws)
+    else:
+        assert ws.dtype == torch.float32, (
+            f"Expected tensor scales dtype to be torch.float32 or "
+            f"torch.float8_e8m0fnu or torch.uint8, got {ws.dtype} instead"
+        )
+
+    return transform_sf_into_required_layout(
+        sf=ws,
+        mn=mn,
+        k=k,
+        recipe=(1, quant_block_shape[0], quant_block_shape[1]),
+        num_groups=num_groups,
+        is_sfa=is_sfa,
+    )
+
+
 def deepgemm_post_process_fp8_weight_block(
     wq: torch.Tensor,
     ws: torch.Tensor,
@@ -1015,11 +1043,7 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
-    if ws.dtype == torch.float8_e8m0fnu:
-        # Scales already in E8M0 from checkpoint — upcast to fp32
-        # and skip requantization (weights already have power-of-two scales).
-        ws = _upcast_e8m0_to_fp32(ws)
-    else:
+    if ws.dtype != torch.float8_e8m0fnu:
         assert ws.dtype == torch.float32, (
             f"Expected tensor scales dtype to be torch.float32 or "
             f"torch.float8_e8m0fnu, got {ws.dtype} instead"
@@ -1037,16 +1061,12 @@ def deepgemm_post_process_fp8_weight_block(
         r = wq.size(0) // g
         wq = wq.view(g, r, d)
         ws = ws.view(g, r // quant_block_shape[0], d // quant_block_shape[1])
-        # Pre-transform scale with recipe=(1, 128, 128) to broadcast + pack
-        # into TMA-aligned UE8M0 (INT32) layout. At runtime fp8_einsum uses
-        # recipe=(1, 1, 128) which sees INT dtype and skips re-transform.
-        dg_ws = transform_sf_into_required_layout(
-            sf=ws,
+        dg_ws = deepgemm_post_process_weight_scale_block(
+            ws=ws,
             mn=r,
             k=d,
-            recipe=(1, quant_block_shape[0], quant_block_shape[1]),
+            quant_block_shape=quant_block_shape,
             num_groups=g,
-            is_sfa=False,
         )
         return wq, dg_ws
 
@@ -1056,21 +1076,12 @@ def deepgemm_post_process_fp8_weight_block(
         wq = wq.unsqueeze(0)
         ws = ws.unsqueeze(0)
 
-    # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
-    recipe = (1, 128, 128)
-
-    # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
-    # DeepGemm uses the `transform_sf_into_required_layout` function to
-    # represent scales in the correct format.
-    dg_ws = transform_sf_into_required_layout(
-        sf=ws,
+    dg_ws = deepgemm_post_process_weight_scale_block(
+        ws=ws,
         mn=wq.size(1),
         k=wq.size(2),
-        recipe=recipe,
+        quant_block_shape=quant_block_shape,
         num_groups=wq.size(0),
-        # is the scale factors for A in (Refers to the argument A in A @ B).
-        # Weights are B.
-        is_sfa=False,
     )
 
     if original_ndim == 2:

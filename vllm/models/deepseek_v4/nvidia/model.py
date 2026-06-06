@@ -56,10 +56,12 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
-    DeepseekV4FlashInferMLAAttention,
+    DeepseekV4FlashInferSM120Attention,
+    DeepseekV4FlashInferTRTLLMAttention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -716,14 +718,31 @@ class DeepseekV4MoE(nn.Module):
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
-    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
-    FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
+    The generic CUDA backend selector does not instantiate DSv4 layers directly,
+    so map generic sparse-MLA choices to the DSv4-specialized attention class.
+    Without an explicit backend, SM12 defaults to FlashInfer while the other
+    CUDA arches keep the FlashMLA path.
     """
-    if (
-        vllm_config.attention_config.backend
-        == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
+    backend = vllm_config.attention_config.backend
+    device_capability = current_platform.get_device_capability()
+    flashinfer_cls = (
+        DeepseekV4FlashInferSM120Attention
+        if device_capability is not None and device_capability.major == 12
+        else DeepseekV4FlashInferTRTLLMAttention
+    )
+    if backend in (
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4,
     ):
-        return DeepseekV4FlashInferMLAAttention
+        return flashinfer_cls
+    if backend in (
+        AttentionBackendEnum.FLASHMLA_SPARSE,
+        AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+    ):
+        return DeepseekV4FlashMLAAttention
+
+    if device_capability is not None and device_capability.major == 12:
+        return DeepseekV4FlashInferSM120Attention
     return DeepseekV4FlashMLAAttention
 
 
