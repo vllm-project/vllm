@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from typing_extensions import override
 
 from vllm.logger import init_logger
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
@@ -89,11 +90,18 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._block_size: int = primary_kv_view.strides[0]
 
-        # Create file mapper
+        # A single full-attention group has a parallelism-invariant offloaded
+        # block, so share its cache across parallel sizes. Replicated KV (MLA,
+        # small-GQA) is world_size-scaled and fails closed on the load size check.
+        kv_cache_groups = offloading_spec.kv_cache_config.kv_cache_groups
+        parallel_agnostic = len(kv_cache_groups) == 1 and isinstance(
+            kv_cache_groups[0].kv_cache_spec, FullAttentionSpec
+        )
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
             gpu_blocks_per_file=offloading_spec.block_size_factor,
+            parallel_agnostic=parallel_agnostic,
         )
 
         # Write config file
