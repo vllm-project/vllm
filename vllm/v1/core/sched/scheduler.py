@@ -792,6 +792,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    request.async_kv_load_start_time_ns = time.time_ns()
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
@@ -815,9 +816,15 @@ class Scheduler(SchedulerInterface):
                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
                     )
                 if request.status == RequestStatus.WAITING:
+                    request.trace_end_queuing()
+                    if request.num_computed_tokens > 0:
+                        request.decode_start_time_ns = time.time_ns()
+                    else:
+                        request.prefill_start_time_ns = time.time_ns()
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                    request.prefill_start_time_ns = time.time_ns()
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
@@ -963,6 +970,10 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+
+        # Close active prefill or decode spans
+        request.trace_preempt()
+
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -1390,6 +1401,11 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
+            if generated_token_ids:
+                request.trace_end_prefill()
+                if request.decode_start_time_ns is None:
+                    request.decode_start_time_ns = time.time_ns()
+
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
@@ -1801,6 +1817,9 @@ class Scheduler(SchedulerInterface):
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
+    def get_request(self, request_id: str) -> Request | None:
+        return self.requests.get(request_id)
+
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[tuple[str, int]]:
@@ -1868,6 +1887,9 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
         assert request.is_finished()
+
+        # End active spans and clean up
+        request.trace_cleanup()
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -2150,6 +2172,8 @@ class Scheduler(SchedulerInterface):
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
             self._update_waiting_for_remote_kv(request)
+            request.trace_end_kv_transfer()
+
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:

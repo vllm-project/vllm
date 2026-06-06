@@ -240,6 +240,9 @@ class SchedulerOutput:
     # preventing stale NaN/data from corrupting attention or SSM computation.
     new_block_ids_to_zero: list[int] | None = None
 
+    # Start time of the batch in nanoseconds (used for tracing metrics)
+    batch_start_time_ns: int | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
