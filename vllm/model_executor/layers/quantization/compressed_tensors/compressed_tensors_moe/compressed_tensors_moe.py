@@ -25,6 +25,31 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
+# cohere start
+def _normalize_weight_actorder(sd: dict | None) -> dict | None:
+    """Map ``actorder="weight"``/``"static"`` to ``None``. They produce
+    byte-identical on-disk tensor layouts (llm-compressor inverse-permutes
+    weights back to natural order at save time and emits no ``weight_g_idx``),
+    so schemes differing only in this field are equivalent for MoE dispatch.
+    """
+    if sd is None:
+        return sd
+    w = sd.get("weights")
+    if w is None or not w.actorder:
+        return sd
+    # Coerce plain-string values (stored via `use_enum_values=True`) back to
+    # the enum so Aliasable ``__eq__`` handles the static↔weight alias.
+    # NOTE: use ``==`` (not ``!=``). ``Aliasable`` overrides ``__eq__`` but
+    # not ``__ne__``, so ``!=`` falls through to ``str.__ne__`` and would
+    # incorrectly report ``"static" != "weight"`` as ``True``.
+    if ActivationOrdering(w.actorder) == ActivationOrdering.WEIGHT:
+        return {**sd, "weights": w.model_copy(update={"actorder": None})}
+    return sd
+
+
+# cohere end
+
+
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     @staticmethod
     def get_moe_method(
@@ -39,10 +64,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             layer_name + proj_name
             for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
         ]
+        # cohere start
         # TODO: refactor this to use expert_mapping and check all layer numbers
+        # Normalize actorder="weight"/"static" -> None (layout-equivalent on disk)
+        # so mixed-scheme MoE ckpts pass the equality check below.
         all_scheme_dicts = [
-            quant_config.get_scheme_dict(layer, name) for name in unfused_names
+            _normalize_weight_actorder(quant_config.get_scheme_dict(layer, name))
+            for name in unfused_names
         ]
+        # cohere end
         scheme_dict = all_scheme_dicts.pop()
 
         # multiple schemes found

@@ -146,7 +146,14 @@ Additional but relevant model/runtime deltas:
 
 These are mostly enablement and tuning changes; they are easy to overlook during rebase because they live outside "obvious model files".
 
-## 8) compressed_tensors_moe.py (MoE scheme matching + W4A8 load path)
+## 8) compressed_tensors_moe (MoE scheme matching + W4A8 load path)
+
+Upstream v0.21 split MoE dispatch into
+`compressed_tensors/compressed_tensors_moe/` (router in
+`compressed_tensors_moe.py`, WNA16 Marlin in
+`compressed_tensors_moe_wna16_marlin.py`). Cohere-specific logic from the
+legacy monolithic `compressed_tensors_moe.py` must be ported into those
+package files on every upstream sync — not only the top-level shim.
 
 ### MoE quantization scheme equality
 
@@ -161,6 +168,16 @@ may be shared or cached elsewhere). Only `ActivationOrdering.WEIGHT` is
 normalized; other actorder values pass through unchanged. Without this step,
 mixed-metadata MoE layers (e.g. up AWQ vs down GPTQ-static) can spuriously
 fail the “All MoE projections need to have same quantization scheme” check.
+
+### WNA16 Marlin `is_k_full` under TP
+
+`CompressedTensorsWNA16MarlinMoEMethod.create_weights` must use Cohere's
+`is_k_full` rule: only `actorder="group"` needs full-K w2 scales and
+`is_k_full=False` under TP. Upstream's `(not self.actorder)` check treats
+`actorder="weight"`/`"static"` as falsy-for-`is_k_full` and, with TP>1,
+derives an effective Marlin `group_size` of 16 (`size_k / num_groups`) that
+the kernel does not support — server startup fails with
+`Invalid thread config ... group_size = 16, is_k_full = 0`.
 
 ### W4A8 weight post-processing
 
@@ -223,6 +240,8 @@ LoRA adapter serving for `Cohere2MoE` is implemented in `cohere2_moe.py` (regist
 - **Double-replacement guard** (`load_weights`): the `stacked_params_mapping` loop skips remapping when the target `param_name` is already present in `name` (e.g., `qkv_proj` contains `v_proj` as a substring), preventing incorrect double-replacement.
 
 - **Dummy LoRA for CI** (`tests/cohere/scripts/create_dummy_lora.py`): when the c5 checkpoint is saved as a `cohere2_vision` top-level config, read attention dimensions from `text_config` (same keys as `cohere2moe`). vLLM maps `base_model.model.model.layers...` LoRA weights onto `language_model.model.layers...` via `parse_fine_tuned_lora_name` and `Cohere2VisionForConditionalGeneration.hf_to_vllm_mapper`.
+
+- **`lm_head` skip on vision load** (`cohere2_vision.Cohere2VisionForConditionalGeneration.load_weights`): use `AutoWeightsLoader(self, skip_prefixes=["lm_head"])`. Quantized vision checkpoints (int4/fp4) can still ship `lm_head.*` tensors even though the wrapper has no top-level `lm_head` module (logits go through the nested `language_model` with tied embeddings). Upstream v0.21 uses plain `AutoWeightsLoader(self)`; the fork must keep this skip inside `# cohere start/end` or merge resolution will drop it.
 
 ## 10) Optional FP32 Final-Logits Projection
 

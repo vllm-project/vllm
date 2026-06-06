@@ -206,16 +206,19 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # In the case where we have actorder/g_idx,
-        # we do not partition the w2 scales
-        load_full_w2 = self.actorder and self.group_size != -1
+        # cohere start
+        # Only actorder="group" requires runtime g_idx permutation and
+        # therefore full-K w2 scales. "weight"/"static" reorders at quant time,
+        # so TP sharding of scales and is_k_full work normally.
+        load_full_w2 = (self.actorder == "group") and self.group_size != -1
         w2_scales_size = (
             intermediate_size_full if load_full_w2 else intermediate_size_per_partition
         )
 
-        self.is_k_full = (not self.actorder) or (
+        self.is_k_full = (self.actorder != "group") or (
             intermediate_size_per_partition == intermediate_size_full
         )
+        # cohere end
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1

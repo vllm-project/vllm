@@ -363,7 +363,11 @@ class Cohere2VisionForConditionalGeneration(
         return next(self.parameters()).dtype
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        # cohere start
+        # Checkpoints may ship lm_head.* tensors even without a top-level
+        # lm_head module (tied embeddings on the nested language_model).
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head"])
+        # cohere end
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _process_image_input(
