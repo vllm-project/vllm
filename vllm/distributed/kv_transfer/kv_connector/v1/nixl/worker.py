@@ -1151,13 +1151,9 @@ class NixlConnectorWorker:
             local_block_len = self.get_backend_aware_kv_block_len(
                 layer_idx=i, first_split=True, mamba_view=False
             )
-            # Use actual remote block length from metadata for correct
-            # byte-size computation.  Deriving from local / block_size_ratio
-            # is wrong for heterogeneous TP where local and remote have
-            # different byte-per-block values (e.g. hybrid MLA+GDN models).
-            remote_kv_block_len = nixl_agent_meta.block_lens[i]
-            if local_block_len > remote_kv_block_len:
-                # Remote has smaller blocks, use remote's size as transfer unit
+            remote_kv_block_len = local_block_len // block_size_ratio
+            if block_size_ratio > 1:
+                # ..using remote kv_block_len as transfer unit
                 local_block_len = remote_kv_block_len
 
             local_block_len = local_block_len // num_attn_reads
