@@ -66,7 +66,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-# Optional ROCm AITER Triton kernels for the GDN decode fast-path.
+# Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
@@ -236,6 +236,74 @@ def _log_gdn_backend_decision(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
         )
+
+
+def _resolve_gdn_decode_backend(ssm_state_dtype: torch.dtype) -> str:
+    """Resolve the GDN decode backend. Returns ``"flashinfer"``
+    or ``"triton"``.
+
+    FlashInfer requires SM90+, a PyTorch build with CUDA 13+,
+    and ``state.dtype in (bfloat16, float32)``.
+    Respect ``--gdn-decode-backend`` engine arg.
+    """
+    additional_config = get_current_vllm_config().additional_config
+    assert isinstance(additional_config, dict)
+    backend_cfg = additional_config.get("gdn_decode_backend", "auto")
+    backend = str(backend_cfg).strip().lower()
+
+    cuda_version = torch.version.cuda
+    cuda_major = int(cuda_version.split(".")[0]) if cuda_version else 0
+    # FlashInfer GDN decode kernel has known issues on CUDA 12.x;
+    # only enable on CUDA 13+.
+    cuda_supports_fi_gdn = cuda_major >= 13
+
+    platform_supports_fi_gdn = (
+        current_platform.is_cuda() and current_platform.has_device_capability(90)
+    )
+    supports_fi_gdn = platform_supports_fi_gdn and cuda_supports_fi_gdn
+    state_dtype_ok = ssm_state_dtype in (torch.bfloat16, torch.float32)
+
+    if backend == "triton":
+        use_flashinfer = False
+    elif backend == "flashinfer":
+        if not platform_supports_fi_gdn:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but cannot be "
+                "used on the current platform (requires CUDA SM90+). "
+                "Falling back to Triton/FLA."
+            )
+            use_flashinfer = False
+        elif not cuda_supports_fi_gdn:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but the "
+                "PyTorch build is using CUDA %s; the FlashInfer GDN "
+                "decode kernel has known issues on CUDA 12.x and is only "
+                "enabled on CUDA 13+. Falling back to Triton/FLA.",
+                cuda_version,
+            )
+            use_flashinfer = False
+        elif not state_dtype_ok:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but the "
+                "Mamba SSM cache dtype is %s; FlashInfer's "
+                "gated_delta_rule_decode_pretranspose only supports "
+                "bfloat16/float32 state. Falling back to Triton/FLA.",
+                ssm_state_dtype,
+            )
+            use_flashinfer = False
+        else:
+            use_flashinfer = True
+    else:
+        # Default / unset: implicit auto -- use FlashInfer when the
+        # platform, CUDA toolkit version, and SSM-state dtype support it.
+        use_flashinfer = supports_fi_gdn and state_dtype_ok
+
+    if not use_flashinfer:
+        logger.info_once("Using Triton/FLA GDN decode kernel")
+        return "triton"
+
+    logger.info_once("Using FlashInfer GDN decode kernel")
+    return "flashinfer"
 
 
 def fi_chunk_gated_delta_rule(
@@ -558,6 +626,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
 
+        _, ssm_state_dtype = self.get_state_dtype()
+        self.gdn_decode_backend = _resolve_gdn_decode_backend(ssm_state_dtype)
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -841,6 +912,28 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         return query, key, value
 
+    def _rearrange_mixed_qkv_for_fi(
+        self, mixed_qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Copy-free unpack of ``mixed_qkv`` into FlashInfer's layout:
+        ``q``, ``k`` -> ``[B, 1, H, K]``; ``v`` -> ``[B, 1, HV, V]``.
+        """
+        query, key, value = torch.split(
+            mixed_qkv,
+            [
+                self.key_dim // self.tp_size,
+                self.key_dim // self.tp_size,
+                self.value_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        query, key = map(
+            lambda x: rearrange(x, "l (h d) -> l 1 h d", d=self.head_k_dim),
+            (query, key),
+        )
+        value = rearrange(value, "l (h d) -> l 1 h d", d=self.head_v_dim)
+        return query, key, value
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -897,8 +990,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 projected_states_ba,
                 z,
                 core_attn_out,
-                fast_kernel=True,
                 layer_name=_encode_layer_name(self.prefix),
+                use_aiter=True,
             )
 
             self._output_projection(core_attn_out, z, output, num_tokens)
@@ -958,7 +1051,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b,
             a,
             core_attn_out,
-            fast_kernel=False,
             layer_name=_encode_layer_name(self.prefix),
         )
 
@@ -1206,7 +1298,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
         the packed layout and falls through to ``_forward_core``.
 
         Args:
@@ -1237,7 +1329,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
-            return self._forward_core_decode_fast(
+            return self._forward_core_decode_aiter(
                 qkvz=qkvz,
                 ba=ba,
                 z_out=z_out,
@@ -1391,6 +1483,19 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+
+        # In a pure non-spec batch that mixes prefills with 1-token decodes, peel
+        # the decodes (the contiguous decode-first front slice) off to the
+        # recurrent update kernel and run only the prefill tail through the chunk
+        # kernel. The metadata builder rebases chunk_indices/chunk_offsets to the
+        # same prefill-only tail, so both must agree on this condition.
+        split_non_spec = (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes > 0
+        )
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
                 "mixed_qkv_non_spec must be provided for prefill path"
@@ -1402,6 +1507,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_non_spec = a
                 b_non_spec = b
 
+            if split_non_spec:
+                # fused_post_conv_prep + chunk run on the prefill tail only.
+                conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
+                a_prefill = a_non_spec[num_decode_tokens:]
+                b_prefill = b_non_spec[num_decode_tokens:]
+            else:
+                conv_output_prefill = mixed_qkv_non_spec
+                a_prefill = a_non_spec
+                b_prefill = b_non_spec
+
             (
                 query_non_spec,
                 key_non_spec,
@@ -1409,9 +1524,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec,
                 beta_non_spec,
             ) = fused_post_conv_prep(
-                conv_output=mixed_qkv_non_spec,
-                a=a_non_spec,
-                b=b_non_spec,
+                conv_output=conv_output_prefill,
+                a=a_prefill,
+                b=b_prefill,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
                 num_k_heads=self.num_k_heads // self.tp_size,
@@ -1459,12 +1574,50 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
-        # 2.2: Process the remaining part
+        # 2.2: Process the peeled non-spec decode part (single-token decodes
+        # sharing a batch with prefills) with the same recurrent update kernel as
+        # the spec path. Writes per-token states in-place into the pool; the
+        # decode state slots are disjoint from the prefill slots updated in 2.3,
+        # so the ordering is irrelevant. q/k/v are materialized contiguous by
+        # rearrange_mixed_qkv (the layout-robust path). The FlashInfer/packed
+        # decode kernels are intentionally NOT used here: they require q/k/v as
+        # views into the full q/k/v/z packed projection stride, which the prefill
+        # conv output slice (q/k/v only) cannot provide.
+        if split_non_spec:
+            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            )
+            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log,
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                dt_bias=self.dt_bias,
+                q=query_decode,
+                k=key_decode,
+                v=value_decode,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ],
+                ssm_state_indices=non_spec_state_indices_tensor,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            core_attn_out_decode = None
+
+        # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
         if attn_metadata.num_prefills > 0:
-            assert non_spec_state_indices_tensor is not None
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
-            assert has_initial_state is not None
-            initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
+            # State indices, initial-state mask and cu_seqlens for the chunk
+            # kernel are precomputed by the metadata builder (the prefill tail
+            # when decodes are peeled off, else the full non-spec batch), so they
+            # don't need to be re-derived per layer.
+            prefill_state_indices = attn_metadata.prefill_state_indices
+            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            initial_state = ssm_state[prefill_state_indices].contiguous()
+            initial_state[~prefill_has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1476,15 +1629,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=attn_metadata.prefill_query_start_loc,
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
             # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
+            if split_non_spec:
+                # Stitch the peeled decode outputs in front of the prefill
+                # outputs (decode-first order).
+                core_attn_out_non_spec = torch.cat(
+                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -1523,7 +1681,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-    def _forward_core_decode_fast(
+    def _forward_core_decode_aiter(
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,
@@ -1589,6 +1747,63 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
+    def _fi_decode(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        b_bhv: torch.Tensor,
+        a_bhv: torch.Tensor,
+        ssm_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        out_bthv: torch.Tensor,
+    ) -> None:
+        """Call FlashInfer's gated_delta_rule_decode_pretranspose.
+
+        ``q``/``k``/``v`` are passed straight through as strided views
+        (no ``.contiguous()``). FI's CuTe kernel only requires
+        ``stride(-1) == 1`` on q/k/v, which the post-split views from
+        :meth:`_rearrange_mixed_qkv_for_fi` already satisfy.
+
+        Args:
+            q, k: ``[B, T=1, H, K]`` strided view from
+                ``self._rearrange_mixed_qkv_for_fi``.
+            v: ``[B, T=1, HV, V]`` strided view from
+                ``self._rearrange_mixed_qkv_for_fi``.
+            b_bhv, a_bhv: ``[B, HV]`` (the non-spec slice).
+            ssm_state: ``[pool_size, HV, V, K]``, dtype matches the
+                Mamba SSM cache dtype (bf16 or fp32 in supported cases).
+            state_indices: ``[B]`` int32/int64 pool indices, passed
+                straight to FlashInfer. CUDAGraph-padded entries
+                (NULL_BLOCK_ID=0) are handled correctly by the kernel,
+                so no remap is needed.
+            out_bthv: pre-allocated ``[B, 1, HV, V]`` view of
+                ``core_attn_out`` to be written in place.
+        """
+        a = a_bhv.unsqueeze(1)
+        b = b_bhv.unsqueeze(1)
+
+        # `.detach()` on `nn.Parameter`s: FI ingests via `from_dlpack`
+        # which rejects `requires_grad=True`. detach is a free view
+        # and preserves strides, so the FI compile cache stays stable.
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+
+        gated_delta_rule_decode_pretranspose(
+            q=q,
+            k=k,
+            v=v,
+            state=None,
+            A_log=self.A_log.detach(),
+            a=a,
+            dt_bias=self.dt_bias.detach(),
+            b=b,
+            scale=self.head_k_dim**-0.5,
+            output=out_bthv,
+            use_qk_l2norm=True,
+            initial_state=ssm_state,
+            initial_state_indices=state_indices,
+        )
+
     def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
@@ -1629,18 +1844,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        fused_recurrent_gated_delta_rule_packed_decode(
-            mixed_qkv=mixed_qkv_non_spec,
-            a=a,
-            b=b,
-            A_log=self.A_log,
-            dt_bias=self.dt_bias,
-            scale=self.head_k_dim**-0.5,
-            initial_state=ssm_state,
-            out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-            use_qk_l2norm_in_kernel=True,
-        )
+        if self.gdn_decode_backend == "flashinfer":
+            q, k_t, v_t = self._rearrange_mixed_qkv_for_fi(mixed_qkv_non_spec)
+            self._fi_decode(
+                q,
+                k_t,
+                v_t,
+                b_bhv=b,
+                a_bhv=a,
+                ssm_state=ssm_state,
+                state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                out_bthv=out_buf,
+            )
+        else:
+            fused_recurrent_gated_delta_rule_packed_decode(
+                mixed_qkv=mixed_qkv_non_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim**-0.5,
+                initial_state=ssm_state,
+                out=out_buf,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                use_qk_l2norm_in_kernel=True,
+            )
         return
 
 
@@ -1649,17 +1877,17 @@ def qwen_gdn_attention_core(
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Custom op dispatching to _forward_core or _forward_core_rocm.
 
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When ``fast_kernel=False`` (standard path):
+    When ``use_aiter=False`` (standard path):
         qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When ``fast_kernel=True`` (AITER Triton fast path, ROCm only):
+    When ``use_aiter=True`` (AITER Triton path, ROCm only):
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
@@ -1668,7 +1896,7 @@ def qwen_gdn_attention_core(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if fast_kernel:
+    if use_aiter:
         self._forward_core_rocm(
             qkvz=qkv_or_qkvz,
             ba=b_or_ba,
@@ -1689,8 +1917,8 @@ def gdn_attention_core_fake(
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Fake implementation for torch.compile."""
     return
