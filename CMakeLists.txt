@@ -590,8 +590,11 @@ endif()
 
 if (VLLM_GPU_LANG STREQUAL "HIP")
   # Add QuickReduce kernels (ROCm-only; not part of stable ABI migration).
+  # TODO: Remove the cuda_view when ROCm upgrade to torch 2.11.
   list(APPEND VLLM_EXT_SRC
     "csrc/custom_quickreduce.cu"
+    "csrc/cuda_view.cu"
+    "csrc/libtorch_stable/cuda_utils_kernels.cu"
   )
 # if ROCM endif
 endif()
@@ -621,7 +624,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(VLLM_STABLE_EXT_SRC
     "csrc/libtorch_stable/torch_bindings.cpp"
-    "csrc/libtorch_stable/cuda_view.cu"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
     "csrc/libtorch_stable/quantization/w8a8/fp8/common.cu"
@@ -649,6 +651,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
+      "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
@@ -1071,20 +1074,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
-  # Set TORCH_TARGET_VERSION for stable ABI compatibility.
-  # This ensures we only use C-shim APIs available in PyTorch 2.11.
-  # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
-  # which is currently set to 2.11.
-  target_compile_definitions(_C_stable_libtorch PRIVATE
-    TORCH_TARGET_VERSION=0x020B000000000000ULL)
-
   # Needed to use cuda/hip APIs from C-shim
   if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+    # This ensures we only use C-shim APIs available in PyTorch 2.11.
+    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+    # which is currently set to 2.11.
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
   elseif(VLLM_GPU_LANG STREQUAL "HIP")
+    # Set TORCH_TARGET_VERSION for stable ABI compatibility.
+    # This ensures we only use C-shim APIs available in PyTorch 2.10.
+    # _C_stable_libtorch is abi compatible with PyTorch >= TORCH_TARGET_VERSION
+    # which is currently set to 2.10.
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020A000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_ROCM)
   endif()
 
@@ -1302,7 +1310,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     set(VLLM_ROCM_HAS_GFX1100 ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
-      "csrc/rocm/q_gemm_rdna3_wmma.cu")
+      "csrc/rocm/q_gemm_rdna3_wmma.cu"
+      "csrc/rocm/moe_q_gemm_rdna3.cu")
   endif()
 
   define_extension_target(

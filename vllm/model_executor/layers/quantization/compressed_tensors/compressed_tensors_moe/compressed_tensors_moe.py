@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -81,6 +82,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f"but got format: {CompressionFormat.pack_quantized.value} "
                     f" and bits: {weight_quant.num_bits}",
                 )
+
+            # Native ROCm HIP kernels (RDNA3, etc.)
+            if current_platform.is_rocm():
+                from . import rocm_moe
+
+                if rocm_moe.is_supported(weight_quant):
+                    return rocm_moe.make_method(
+                        weight_quant, input_quant, layer.moe_config
+                    )
 
             from .compressed_tensors_moe_wna16 import (
                 CompressedTensorsWNA16MoEMethod,

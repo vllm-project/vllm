@@ -326,6 +326,7 @@ class FusedMoE(PluggableLayer):
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=max_num_batched_tokens,
+            max_capture_size=compilation_config.max_cudagraph_capture_size,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -887,7 +888,10 @@ class FusedMoE(PluggableLayer):
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
-        if quant_method_name == "CompressedTensorsWNA16MoEMethod":
+        if quant_method_name in (
+            "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsWNA16RDNA3MoEMethod",
+        ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
             else:
