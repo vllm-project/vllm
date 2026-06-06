@@ -56,6 +56,7 @@ steps:
   - tests/models/test_utils.py
   - tests/models/test_vision.py
   - tests/models/transformers/fusers/
+  - tests/models/test_granitemoe.py
   device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/
+    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/ models/test_granitemoe.py

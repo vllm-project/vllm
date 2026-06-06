@@ -434,7 +434,11 @@ class GraniteMoeModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         new_weights = {}
         for n, p in weights:
-            if n.endswith(".block_sparse_moe.input_linear.weight"):
+            # The renaming and parameter loading logic is the same for weight
+            # and weight_scale tensors so we can reuse them without issues.
+            if n.endswith(".block_sparse_moe.input_linear.weight") or n.endswith(
+                ".block_sparse_moe.input_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         ".block_sparse_moe.input_linear.weight",
@@ -449,7 +453,9 @@ class GraniteMoeModel(nn.Module):
                     assert w3_name not in new_weights
                     new_weights[w1_name] = w1_param
                     new_weights[w3_name] = w3_param
-            elif n.endswith(".block_sparse_moe.output_linear.weight"):
+            elif n.endswith(".block_sparse_moe.output_linear.weight") or n.endswith(
+                ".block_sparse_moe.output_linear.weight_scale"
+            ):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         ".block_sparse_moe.output_linear.weight",
