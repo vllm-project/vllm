@@ -2006,6 +2006,242 @@ def accumulate_indexed_d512_split_sparse_mla_attention(
     )
 
 
+@triton.jit
+def _indexed_d512_chunked_merge_acc_kernel(
+    max_score_ptr,
+    acc_ptr,
+    chunk_max_score_ptr,
+    chunk_acc_ptr,
+    stride_state_t: tl.constexpr,
+    stride_state_h: tl.constexpr,
+    stride_acc_t: tl.constexpr,
+    stride_acc_h: tl.constexpr,
+    stride_acc_d: tl.constexpr,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    HEAD_BLOCK: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    head_block_idx = tl.program_id(1)
+    dim_block = tl.program_id(2)
+    head_offsets = head_block_idx * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    dim_offsets = dim_block * BLOCK_D + tl.arange(0, BLOCK_D)
+    head_mask = head_offsets < num_heads
+    dim_mask = dim_offsets < head_dim
+
+    running_max = tl.load(
+        max_score_ptr + token_idx * stride_state_t + head_offsets * stride_state_h,
+        mask=head_mask,
+        other=-float("inf"),
+    ).to(tl.float32)
+    chunk_max = tl.load(
+        chunk_max_score_ptr
+        + token_idx * stride_state_t
+        + head_offsets * stride_state_h,
+        mask=head_mask,
+        other=-float("inf"),
+    ).to(tl.float32)
+    next_max = tl.maximum(running_max, chunk_max)
+    running_valid = running_max != -float("inf")
+    chunk_valid = chunk_max != -float("inf")
+    running_scale = tl.where(running_valid, tl.exp(running_max - next_max), 0.0)
+    chunk_scale = tl.where(chunk_valid, tl.exp(chunk_max - next_max), 0.0)
+
+    running_acc = tl.load(
+        acc_ptr
+        + token_idx * stride_acc_t
+        + head_offsets[:, None] * stride_acc_h
+        + dim_offsets[None, :] * stride_acc_d,
+        mask=head_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    chunk_acc = tl.load(
+        chunk_acc_ptr
+        + token_idx * stride_acc_t
+        + head_offsets[:, None] * stride_acc_h
+        + dim_offsets[None, :] * stride_acc_d,
+        mask=head_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    ).to(tl.float32)
+    merged_acc = (
+        running_acc * running_scale[:, None] + chunk_acc * chunk_scale[:, None]
+    )
+    tl.store(
+        acc_ptr
+        + token_idx * stride_acc_t
+        + head_offsets[:, None] * stride_acc_h
+        + dim_offsets[None, :] * stride_acc_d,
+        merged_acc,
+        mask=head_mask[:, None] & dim_mask[None, :],
+    )
+
+
+@triton.jit
+def _indexed_d512_chunked_merge_state_kernel(
+    max_score_ptr,
+    denom_ptr,
+    chunk_max_score_ptr,
+    chunk_denom_ptr,
+    stride_state_t: tl.constexpr,
+    stride_state_h: tl.constexpr,
+    num_heads: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    head_mask = head_idx < num_heads
+
+    running_max = tl.load(
+        max_score_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        mask=head_mask,
+        other=-float("inf"),
+    ).to(tl.float32)
+    running_denom = tl.load(
+        denom_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        mask=head_mask,
+        other=0.0,
+    ).to(tl.float32)
+    chunk_max = tl.load(
+        chunk_max_score_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        mask=head_mask,
+        other=-float("inf"),
+    ).to(tl.float32)
+    chunk_denom = tl.load(
+        chunk_denom_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        mask=head_mask,
+        other=0.0,
+    ).to(tl.float32)
+    next_max = tl.maximum(running_max, chunk_max)
+    running_valid = running_max != -float("inf")
+    chunk_valid = chunk_max != -float("inf")
+    running_scale = tl.where(running_valid, tl.exp(running_max - next_max), 0.0)
+    chunk_scale = tl.where(chunk_valid, tl.exp(chunk_max - next_max), 0.0)
+    next_denom = running_denom * running_scale + chunk_denom * chunk_scale
+
+    tl.store(
+        max_score_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        next_max,
+        mask=head_mask,
+    )
+    tl.store(
+        denom_ptr + token_idx * stride_state_t + head_idx * stride_state_h,
+        next_denom,
+        mask=head_mask,
+    )
+
+
+def accumulate_indexed_d512_chunked_sparse_mla_attention(
+    q: torch.Tensor,
+    kv_flat: torch.Tensor,
+    indices: torch.Tensor,
+    lens: torch.Tensor,
+    scale: float,
+    scores: torch.Tensor,
+    max_score: torch.Tensor,
+    denom: torch.Tensor,
+    acc: torch.Tensor,
+    chunk_max_score: torch.Tensor,
+    chunk_denom: torch.Tensor,
+    chunk_acc: torch.Tensor,
+    head_block_size: int = 32,
+    candidate_block_size: int = 64,
+    value_block_size: int = 128,
+) -> None:
+    if q.dim() == 4:
+        assert q.shape[1] == 1
+        q = q[:, 0]
+
+    assert q.dim() == 3, f"Expected q shape [T, H, D], got {q.shape}"
+    assert kv_flat.dim() == 2
+    assert indices.dim() == 2
+    assert indices.shape[0] == q.shape[0]
+    assert lens.shape[0] == q.shape[0]
+    assert kv_flat.shape[-1] == q.shape[-1]
+    assert q.shape[-1] == 512
+    assert scores.shape[0] == q.shape[0]
+    assert scores.shape[1] == max_score.shape[1]
+    assert 0 < scores.shape[2] <= 1152
+    assert max_score.shape == denom.shape == chunk_max_score.shape == chunk_denom.shape
+    assert acc.shape == chunk_acc.shape == (*max_score.shape, q.shape[-1])
+    assert max_score.dtype == torch.float32
+    assert denom.dtype == torch.float32
+    assert acc.dtype == torch.float32
+    assert chunk_max_score.dtype == torch.float32
+    assert chunk_denom.dtype == torch.float32
+    assert chunk_acc.dtype == torch.float32
+    assert scores.dtype == torch.float32
+    assert q.is_cuda and kv_flat.is_cuda and indices.is_cuda and lens.is_cuda
+    assert scores.is_cuda and max_score.is_cuda and denom.is_cuda and acc.is_cuda
+    assert chunk_max_score.is_cuda and chunk_denom.is_cuda and chunk_acc.is_cuda
+    assert head_block_size in (8, 16, 32)
+    assert candidate_block_size in (32, 64, 128)
+    assert value_block_size in (32, 64, 128)
+
+    num_tokens, _, head_dim = q.shape
+    num_heads = max_score.shape[1]
+    chunk_size = scores.shape[2]
+    max_score.fill_(float("-inf"))
+    denom.zero_()
+    acc.zero_()
+
+    merge_acc_grid = (
+        num_tokens,
+        triton.cdiv(num_heads, head_block_size),
+        triton.cdiv(head_dim, value_block_size),
+    )
+    merge_state_grid = (num_tokens, num_heads)
+    for candidate_start in range(0, indices.shape[1], chunk_size):
+        candidate_end = min(candidate_start + chunk_size, indices.shape[1])
+        chunk_candidates = candidate_end - candidate_start
+        chunk_lens = torch.clamp(
+            lens - candidate_start,
+            min=0,
+            max=chunk_candidates,
+        )
+        accumulate_indexed_d512_split_sparse_mla_attention(
+            q=q,
+            kv_flat=kv_flat,
+            indices=indices[:, candidate_start:candidate_end],
+            lens=chunk_lens,
+            scale=scale,
+            scores=scores[:, :, :chunk_candidates],
+            max_score=chunk_max_score,
+            denom=chunk_denom,
+            acc=chunk_acc,
+            head_block_size=head_block_size,
+            candidate_block_size=candidate_block_size,
+            value_block_size=value_block_size,
+        )
+        _indexed_d512_chunked_merge_acc_kernel[merge_acc_grid](
+            max_score,
+            acc,
+            chunk_max_score,
+            chunk_acc,
+            max_score.stride(0),
+            max_score.stride(1),
+            acc.stride(0),
+            acc.stride(1),
+            acc.stride(2),
+            num_heads,
+            head_dim,
+            HEAD_BLOCK=head_block_size,
+            BLOCK_D=value_block_size,
+            num_warps=4,
+            num_stages=3,
+        )
+        _indexed_d512_chunked_merge_state_kernel[merge_state_grid](
+            max_score,
+            denom,
+            chunk_max_score,
+            chunk_denom,
+            max_score.stride(0),
+            max_score.stride(1),
+            num_heads,
+            num_warps=4,
+            num_stages=3,
+        )
+
+
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=4, num_stages=2),
