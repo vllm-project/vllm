@@ -47,8 +47,8 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
-from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
+from vllm.utils.layer_utils import extract_layer_index
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
@@ -117,17 +117,13 @@ def _expand_transfer_regions(
     is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
-    assert len(base_addrs) == len(block_lens), (
-        "Mooncake transfer regions require matching numbers of base addresses "
-        f"and block lengths, got {len(base_addrs)} and {len(block_lens)}."
-    )
-    assert len(base_addrs) == len(layer_names), (
-        "Mooncake transfer regions require matching numbers of base addresses "
-        f"and layer names, got {len(base_addrs)} and {len(layer_names)}."
-    )
-    assert len(base_addrs) == len(layer_indices), (
-        "Mooncake transfer regions require matching numbers of base addresses "
-        f"and layer indices, got {len(base_addrs)} and {len(layer_indices)}."
+    assert (
+        len(base_addrs) == len(block_lens) == len(layer_names) == len(layer_indices)
+    ), (
+        "Mooncake transfer regions require matching metadata lengths, got "
+        f"base_addrs={len(base_addrs)}, block_lens={len(block_lens)}, "
+        f"layer_names={len(layer_names)}, "
+        f"layer_indices={len(layer_indices)}."
     )
     regions: list[TransferRegion] = []
     for base_addr, block_len, layer_name, layer_index in zip(
@@ -353,6 +349,14 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     if callable(is_dense):
         return bool(is_dense())
     return None
+
+
+def _get_num_attn_module_for_model(model_config: Any) -> int:
+    return 2 if model_config.hf_config.model_type == "longcat_flash" else 1
+
+
+def _extract_layer_index_for_model(model_config: Any, layer_name: str) -> int:
+    return extract_layer_index(layer_name, _get_num_attn_module_for_model(model_config))
 
 
 class MooncakeXferMetadata(
@@ -1303,8 +1307,7 @@ class MooncakeConnectorWorker:
         # Prepare for heterogeneous TP (one P pairs to multiple D)
         send_meta.need_send = len(remote_tp_ranks)
         logger.debug(
-            "Mooncake request %s will be served by %d consumer TP workers: "
-            "TP ranks=%s",
+            "Mooncake request %s will be served by %d consumer TP workers: TP ranks=%s",
             send_meta.transfer_id,
             send_meta.need_send,
             remote_tp_ranks,
@@ -1535,7 +1538,7 @@ class MooncakeConnectorWorker:
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            layer_index = extract_layer_index(layer_name)
+            layer_index = _extract_layer_index_for_model(self.model_config, layer_name)
             assert self.start_layer <= layer_index < self.end_layer, (
                 "Mooncake registered layer is outside this PP shard: "
                 f"layer={layer_name}, index={layer_index}, "
