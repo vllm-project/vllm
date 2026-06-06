@@ -293,7 +293,7 @@ class _StagingCopier:
 
     def issue(self, dst: int, src: int, size: int) -> None:
         if self._mode == "sync":
-            self._cudart.cudaMemcpy(dst, src, size)
+            self._cudart.cudaMemcpy(ctypes.c_void_p(dst), ctypes.c_void_p(src), size)
         elif self._mode == "async":
             self._ensure_context()
             assert self._memcpy_async is not None
@@ -409,13 +409,14 @@ class MooncakeStoreConfig:
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
             ),
             enable_offload=bool(config.get("enable_offload", False)),
-            enable_dummy_client=bool(
+            enable_dummy_client=_parse_bool(
                 _get_config_or_env_value(
                     config,
                     "enable_dummy_client",
                     "MOONCAKE_ENABLE_DUMMY_CLIENT",
                     False,
-                )
+                ),
+                name="enable_dummy_client",
             ),
             real_client_address=_get_config_or_env_value(
                 config, "real_client_address", "MOONCAKE_REAL_CLIENT_ADDRESS", ""
@@ -439,6 +440,22 @@ def _get_config_or_env_value(
     if env_value not in (None, ""):
         return env_value
     return config.get(key, default)
+
+
+def _parse_bool(value: Any, *, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        raise ValueError(f"{name} must be a boolean value, got {value!r}")
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "t", "yes", "y", "on"):
+            return True
+        if normalized in ("0", "false", "f", "no", "n", "off"):
+            return False
+    raise ValueError(f"{name} must be a boolean value, got {value!r}")
 
 
 def _parse_size(value: Any) -> int:
@@ -915,9 +932,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 zip(starts, ends, group_indices, strict=True)
             ):
                 db = self.token_databases[g_idx]
-                addr, size, _ = db.prepare_value(s, e, block_ids_per_group[g_idx])
+                addr, size_list_for_key, _ = db.prepare_value(
+                    s, e, block_ids_per_group[g_idx]
+                )
                 addrs.append(addr)
-                sizes.append(size)
+                sizes.append(size_list_for_key)
 
                 if self.enable_kv_event:
                     token_ids = (
@@ -950,11 +969,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     slot_base = self.staging_pool.slot_addr(slots[key_idx])
                     staged_key_addrs: list[int] = []
                     offset = 0
-                    for src_addr, size in zip(gpu_addrs, key_sizes, strict=True):
+                    for src_addr, chunk_size in zip(gpu_addrs, key_sizes, strict=True):
                         dst_addr = slot_base + offset
-                        self._copier.issue(dst_addr, src_addr, size)
+                        self._copier.issue(dst_addr, src_addr, chunk_size)
                         staged_key_addrs.append(dst_addr)
-                        offset += size
+                        offset += chunk_size
                     staged_addrs.append(staged_key_addrs)
                 self._copier.sync()
                 addrs = staged_addrs
@@ -1148,12 +1167,12 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                addr, size, block_id = db.prepare_value(
+                addr, size_list_for_key, block_id = db.prepare_value(
                     start, end, req_meta.block_ids[g_idx]
                 )
                 key_list.append(key.to_string())
                 addr_list.append(addr)
-                size_list.append(size)
+                size_list.append(size_list_for_key)
                 block_id_list.append(block_id)
 
         # Rotate aligned lists by tp_rank for load balancing.

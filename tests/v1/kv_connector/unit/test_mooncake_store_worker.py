@@ -1463,6 +1463,59 @@ def test_config_pr40900_unchanged(tmp_path):
     assert cfg.enable_offload is False
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("0", False),
+        ("false", False),
+        ("False", False),
+        ("off", False),
+        ("1", True),
+        ("true", True),
+        ("on", True),
+    ],
+)
+def test_config_parses_enable_dummy_client_env_bool(
+    tmp_path, monkeypatch, env_value, expected
+):
+    config_path = _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "global_segment_size": "4GB",
+            "local_buffer_size": "4GB",
+            "protocol": "rdma",
+            "device_name": "mlx5_0",
+            "master_server_address": "10.0.0.7:50051",
+            "enable_dummy_client": not expected,
+            "real_client_address": "127.0.0.1:50051",
+        },
+    )
+    monkeypatch.setenv("MOONCAKE_ENABLE_DUMMY_CLIENT", env_value)
+
+    cfg = worker.MooncakeStoreConfig.from_file(config_path)
+
+    assert cfg.enable_dummy_client is expected
+
+
+def test_config_rejects_invalid_enable_dummy_client_env(tmp_path, monkeypatch):
+    config_path = _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "global_segment_size": "4GB",
+            "local_buffer_size": "4GB",
+            "protocol": "rdma",
+            "device_name": "mlx5_0",
+            "master_server_address": "10.0.0.7:50051",
+        },
+    )
+    monkeypatch.setenv("MOONCAKE_ENABLE_DUMMY_CLIENT", "maybe")
+
+    with pytest.raises(ValueError, match="enable_dummy_client must be a boolean"):
+        worker.MooncakeStoreConfig.from_file(config_path)
+
+
 def test_config_embedded_rejects_zero_segment():
     with pytest.raises(
         ValueError, match=r"embedded mode requires global_segment_size > 0"

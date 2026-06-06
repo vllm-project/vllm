@@ -4,27 +4,26 @@
 
 ### 1. Install Mooncake
 
-We need to use our own version of Mooncake for GB200.
+Install Mooncake from an official, auditable source. Do not vendor pre-built
+Mooncake wheels into this repository.
 
-#### Option A: Install from pre-built wheel (recommended)
-
-NOTE: this wheel is pre-compiled only for Grace-Blackwell and Grace-Hopper (ARM64) platforms. For AMD64 (including Intel platforms), users still need to go with Option B and manual compile for now. We will add a pre-compiled wheel later.
+#### Option A: Install from PyPI (recommended)
 
 ```bash
-# Make sure your vllm venv is activated
-uv pip install scripts/mooncake/mooncake_transfer_engine-0.3.10.post1-cp312-cp312-manylinux_2_39_aarch64.whl
+# Make sure your vLLM venv is activated
+uv pip install mooncake-transfer-engine==0.3.10
 ```
 
-#### Option B: Build from source
+#### Option B: Build from official source
 
 ```shell
-git clone https://github.com/ivanium/Mooncake
+git clone https://github.com/kvcache-ai/Mooncake
 cd Mooncake
-git checkout yifan/dev
+git checkout v0.3.10.post1
 # NOTE: Install necessary dependencies
 ./scripts/dev_compile.sh
 # NOTE: Please check to ensure compile succeeded before installing
-# NOTE: Please ensure to activate vllm venv before installing
+# NOTE: Please ensure to activate vLLM venv before installing
 ./scripts/dev_install.sh
 ```
 
