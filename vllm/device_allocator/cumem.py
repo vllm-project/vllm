@@ -53,6 +53,8 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    # True when sleep() skipped unmap_and_release (e.g. sleep level 3 weights)
+    preserved_during_sleep: bool = False
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -174,7 +176,12 @@ class CuMemAllocator:
         )
         return data.handle
 
-    def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
+    def sleep(
+        self,
+        offload_tags: tuple[str, ...] | str | None = None,
+        *,
+        preserve_tags_on_gpu: frozenset[str] | None = None,
+    ) -> None:
         """
         Put the allocator in sleep mode.
         All data in the memory allocation with the specified tag will be
@@ -183,6 +190,8 @@ class CuMemAllocator:
         Args:
             offload_tags: The tags of the memory allocation that will be
                 offloaded. The rest of the memory allocation will be discarded.
+            preserve_tags_on_gpu: If set, allocations with these tags are
+                left mapped on GPU (no backup, no unmap). Used for sleep level 3.
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -198,6 +207,15 @@ class CuMemAllocator:
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
+
+            # by default, all data is not preserved during sleep,
+            # which means it will be discarded/backed up on CPU
+            data.preserved_during_sleep = False
+            # mark the weights on the GPU as preserved during sleep
+            if preserve_tags_on_gpu and data.tag in preserve_tags_on_gpu:
+                data.preserved_during_sleep = True
+                continue
+
             total_bytes += handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
@@ -237,9 +255,13 @@ class CuMemAllocator:
                 back to GPU memory.
         """
         for ptr, data in self.pointer_to_data.items():
+            if data.preserved_during_sleep:
+                data.preserved_during_sleep = False
+                continue
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
