@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from importlib.util import find_spec
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
@@ -13,6 +13,10 @@ from vllm.config import (
     get_layers_from_vllm_config,
     replace,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.spec_decode.vocab_mapping import VocabMapping
+
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -117,6 +121,7 @@ class SpecDecodeBaseProposer:
         self.use_heterogeneous_vocab: bool = (
             self.speculative_config.use_heterogeneous_vocab
         )
+        self.vocab_mapping: VocabMapping | None = None
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -404,9 +409,10 @@ class SpecDecodeBaseProposer:
             return self.model.get_top_tokens(hidden_states)
         if self.use_heterogeneous_vocab:
             logits = self.model.compute_logits(hidden_states)
+            assert self.vocab_mapping is not None
             logits = self.vocab_mapping.constrain_draft_logits(logits)
             draft_token_ids = logits.argmax(dim=-1)
-            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)       
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
     def _sample_from_logits(
@@ -584,6 +590,7 @@ class SpecDecodeBaseProposer:
 
             if self.use_heterogeneous_vocab:
                 # Map target token IDs to draft vocab space (TLI algorithm)
+                assert self.vocab_mapping is not None
                 input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
 
             if not self.constant_draft_positions:
@@ -720,12 +727,11 @@ class SpecDecodeBaseProposer:
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         # Map target token IDs to draft vocab space (TLI algorithm)
         if self.use_heterogeneous_vocab:
+            assert self.vocab_mapping is not None
             target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
                 target_token_ids
             )
-            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
-                next_token_ids
-            )
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,

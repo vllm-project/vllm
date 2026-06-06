@@ -10,7 +10,6 @@ from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tokenizers.registry import get_tokenizer
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
@@ -32,9 +31,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self._raise_if_draft_tp_mismatch()
 
-        self.use_heterogeneous_vocab = (
-            self.speculative_config.use_heterogeneous_vocab
-        )
+        self.use_heterogeneous_vocab = self.speculative_config.use_heterogeneous_vocab
 
         spec = self.speculative_config
         if self.use_heterogeneous_vocab:

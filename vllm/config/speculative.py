@@ -1028,7 +1028,7 @@ class SpeculativeConfig:
         if self.use_heterogeneous_vocab and not self.uses_draft_model():
             raise ValueError(
                 "use_heterogeneous_vocab only works with method='draft_model'"
-        )
+            )
 
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
