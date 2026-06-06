@@ -75,4 +75,4 @@ steps:
       'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/kv_offload &&
-      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py -k "not test_fs_tiering_offloading"'
+      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
