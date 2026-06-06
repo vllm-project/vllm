@@ -191,7 +191,7 @@ class BOSEOSFilter(Pooler):
                 pooled_data = pooled_data[1:]
             if int(token_ids[-1]) == self.eos_token_id:
                 pooled_data = pooled_data[:-1]
-            pooled_outputs[i] = pooled_data.squeeze(-1)
+            pooled_outputs[i] = pooled_data
 
         return pooled_outputs
 
