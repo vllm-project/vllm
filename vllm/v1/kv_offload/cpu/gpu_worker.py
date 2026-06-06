@@ -44,8 +44,10 @@ def _select_swap_blocks_fn(
     if gpu_to_cpu:
         return ops.swap_blocks_batch
     # Fall back to the C++ DMA path on platforms where Triton isn't usable
-    # (e.g. ROCm builds without Triton).
-    if not HAS_TRITON:
+    # (e.g. ROCm builds without Triton) or where GPU kernels cannot directly
+    # dereference CPU pointers (XPU lacks CUDA's unified virtual address space,
+    # so the Triton kernel's tl.load(cpu_ptr) is invalid on XPU).
+    if not HAS_TRITON or current_platform.is_xpu():
         return ops.swap_blocks_batch
     page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
     # Triton wins only on small, 8-byte-aligned payloads.
