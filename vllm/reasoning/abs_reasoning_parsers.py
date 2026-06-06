@@ -31,6 +31,8 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
+    engine_based_streaming: bool = False
+
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
         # Optional vLLM ModelConfig from the server. Use get (not pop) so composite
@@ -54,6 +56,19 @@ class ReasoningParser:
     def reasoning_end_str(self) -> str | None:
         """Set `reasoning_end_str` to the strings that delimit
         the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
+        """
+        return None
+
+    def has_reasoning_ended(self) -> bool | None:
+        """Whether the parser has finished processing the reasoning end.
+
+        Grammar-based parsers may defer terminal processing when the
+        detokenizer holds back text.  This method returns the parser's
+        *processed* state, not a raw token-ID check.
+
+        Returns ``None`` by default, meaning callers should fall back
+        to :meth:`is_reasoning_end`.  Subclasses override to return
+        ``True``/``False`` based on internal engine state.
         """
         return None
 

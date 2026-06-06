@@ -62,6 +62,31 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
+    engine_based: bool = False
+
+    def advance(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+    ) -> tuple[str, list[int]]:
+        if self.engine_based:
+            return delta_text, delta_token_ids
+        return (
+            self.previous_text + delta_text,
+            self.previous_token_ids + delta_token_ids,
+        )
+
+    def commit(
+        self,
+        current_text: str,
+        current_token_ids: list[int],
+    ) -> None:
+        if self.engine_based:
+            self.previous_text = ""
+            self.previous_token_ids = []
+        else:
+            self.previous_text = current_text
+            self.previous_token_ids = current_token_ids
 
 
 class Parser:
@@ -100,14 +125,18 @@ class Parser:
         self.model_tokenizer = tokenizer
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
-        self._stream_state = StreamState()
-
         if self.__class__.reasoning_parser_cls is not None:
             self._reasoning_parser = self.__class__.reasoning_parser_cls(
                 tokenizer, *args, **kwargs
             )
         if self.__class__.tool_parser_cls is not None:
             self._tool_parser = self.__class__.tool_parser_cls(tokenizer, tools)
+
+        self._engine_based = (
+            self._reasoning_parser is None
+            or self._reasoning_parser.engine_based_streaming
+        ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
+        self._stream_state = StreamState(engine_based=self._engine_based)
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -706,11 +735,28 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice == "none":
-            return (DeltaMessage(content=delta_text) if delta_text else None), False
-
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
+
+        if request.tool_choice == "none":
+            if self._engine_based:
+                # Engine-backed parsers route content extraction through
+                # extract_tool_calls_streaming, so run the full pipeline
+                # and strip tool_calls after.
+                delta_message = self.extract_tool_calls_streaming(
+                    previous_text,
+                    current_text,
+                    delta_text,
+                    previous_token_ids,
+                    current_token_ids,
+                    delta_token_ids,
+                    request,  # type: ignore[arg-type]
+                )
+                if delta_message:
+                    delta_message.tool_calls = []
+                return delta_message, False
+            return (DeltaMessage(content=delta_text) if delta_text else None), False
+
         if (
             supports_required_and_named
             and request.tool_choice
@@ -825,8 +871,7 @@ class DelegatingParser(Parser):
             ):
                 state.reasoning_ended = True
 
-        current_text = state.previous_text + delta_text
-        current_token_ids = state.previous_token_ids + delta_token_ids
+        current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
 
         # Reasoning extraction
@@ -839,16 +884,39 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            if self.is_reasoning_end_streaming(current_token_ids, delta_token_ids):
+            # Hand off remaining content to tool parser
+            reasoning_end = self.is_reasoning_end_streaming(
+                current_token_ids, delta_token_ids
+            )
+            # has_reasoning_ended() three-valued logic:
+            #   True  — reasoning end confirmed (overrides is_reasoning_end)
+            #   False — end NOT yet processed (blocks transition even if
+            #           token IDs matched, e.g. deferred terminal)
+            #   None  — unsupported (fall through to is_reasoning_end)
+            processed = (
+                self._reasoning_parser.has_reasoning_ended()
+                if self._reasoning_parser
+                else None
+            )
+            if not reasoning_end and processed is True:
+                reasoning_end = True
+            if reasoning_end and processed is not False:
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
-                current_text = (
-                    delta_message.content
-                    if delta_message and delta_message.content
-                    else ""
-                )
-                delta_text = current_text
-                delta_token_ids = current_token_ids
+                if self._engine_based:
+                    current_text = (
+                        self.model_tokenizer.decode(current_token_ids)
+                        if current_token_ids
+                        else ""
+                    )
+                    if delta_message:
+                        delta_message.content = None
+                else:
+                    current_text = (
+                        delta_message.content
+                        if delta_message and delta_message.content
+                        else ""
+                    )
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
@@ -859,9 +927,10 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
-            # A boundary delta may carry both reasoning and tool call,
-            # save it before the tool parser overwrites delta_message.
-            reasoning = delta_message.reasoning if delta_message else None
+            reasoning_from_this_batch = (
+                delta_message.reasoning if delta_message else None
+            )
+
             delta_message, state.function_name_returned = (
                 self._extract_tool_calls_streaming(
                     previous_text=state.previous_text,
@@ -876,10 +945,12 @@ class DelegatingParser(Parser):
                     function_name_returned=state.function_name_returned,
                 )
             )
-            if reasoning:
-                if not delta_message:
-                    delta_message = DeltaMessage()
-                delta_message.reasoning = reasoning
+
+            if reasoning_from_this_batch:
+                if delta_message is None:
+                    delta_message = DeltaMessage(reasoning=reasoning_from_this_batch)
+                elif not delta_message.reasoning:
+                    delta_message.reasoning = reasoning_from_this_batch
 
             if (
                 delta_message
@@ -896,8 +967,7 @@ class DelegatingParser(Parser):
         ):
             delta_message = DeltaMessage(content=delta_text)
 
-        state.previous_text = current_text
-        state.previous_token_ids = current_token_ids
+        state.commit(current_text, current_token_ids)
 
         if finished:
             self._append_unstreamed_tool_args(delta_message)

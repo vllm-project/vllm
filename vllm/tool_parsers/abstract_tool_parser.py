@@ -57,6 +57,7 @@ class ToolParser:
     # extract_tool_calls / extract_tool_calls_streaming methods for
     # required/named tool_choice, treating them the same as "auto".
     supports_required_and_named: bool = True
+    engine_based_streaming: bool = False
 
     def __init__(
         self,
