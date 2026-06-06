@@ -26,8 +26,13 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
-    def pop_request(self) -> Request:
-        """Pop a request from the queue according to the policy."""
+    def pop_first_request(self) -> Request:
+        """Pop the most urgent request from the queue according to the policy."""
+        pass
+
+    @abstractmethod
+    def pop_last_request(self) -> Request:
+        """Pop the least urgent request from the queue according to the policy."""
         pass
 
     @abstractmethod
@@ -57,6 +62,11 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
+    def copy(self) -> "RequestQueue":
+        """Create a shallow copy of the queue."""
+        pass
+
+    @abstractmethod
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
         pass
@@ -79,9 +89,13 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         """Add a request to the queue according to FCFS policy."""
         self.append(request)
 
-    def pop_request(self) -> Request:
-        """Pop a request from the queue according to FCFS policy."""
+    def pop_first_request(self) -> Request:
+        """Pop the earliest request from the queue"""
         return self.popleft()
+
+    def pop_last_request(self) -> Request:
+        """Pop the last request from the queue"""
+        return self.pop()
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
@@ -115,6 +129,10 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         self.clear()
         self.extend(filtered_requests)
 
+    def copy(self) -> "FCFSRequestQueue":
+        """Create a copy of the queue."""
+        return FCFSRequestQueue(self)
+
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
         return len(self) > 0
@@ -145,11 +163,17 @@ class PriorityRequestQueue(RequestQueue):
         """Add a request to the queue according to priority policy."""
         heapq.heappush(self._heap, request)
 
-    def pop_request(self) -> Request:
-        """Pop a request from the queue according to priority policy."""
+    def pop_first_request(self) -> Request:
+        """Pop the request with the smallest priority value from the queue."""
         if not self._heap:
             raise IndexError("pop from empty heap")
         return heapq.heappop(self._heap)
+
+    def pop_last_request(self) -> Request:
+        """Pop the request with the largest priority value from the queue."""
+        max_req = max(self._heap)
+        self.remove_request(max_req)
+        return max_req
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
@@ -182,6 +206,12 @@ class PriorityRequestQueue(RequestQueue):
         requests_to_remove = requests if isinstance(requests, set) else set(requests)
         self._heap = [r for r in self._heap if r not in requests_to_remove]
         heapq.heapify(self._heap)
+
+    def copy(self) -> "PriorityRequestQueue":
+        """Create a copy of the queue."""
+        queue = PriorityRequestQueue()
+        queue._heap = self._heap[:]
+        return queue
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""

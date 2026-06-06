@@ -25,6 +25,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import FCFSRequestQueue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -102,8 +103,8 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     # Verify requests moved from waiting to running
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == len(requests)
-    for i, request in enumerate(requests):
-        assert scheduler.running[i] == request
+    for running_req, request in zip(scheduler.running, requests, strict=True):
+        assert running_req == request
 
 
 def test_schedule_multimodal_requests():
@@ -341,7 +342,7 @@ def test_stop_via_update_from_output():
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+        scheduler.running.add_request(req)
         req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
@@ -375,7 +376,7 @@ def test_stop_via_update_from_output():
 
     # Verify first request stopped, second continues
     assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == requests[1].request_id
+    assert scheduler.running.peek_request().request_id == requests[1].request_id
     assert requests[0].status == RequestStatus.FINISHED_STOPPED
     assert requests[0].request_id in scheduler.finished_req_ids
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID]
@@ -387,7 +388,7 @@ def test_stop_via_update_from_output():
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+        scheduler.running.add_request(req)
         req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
@@ -418,7 +419,7 @@ def test_stop_via_update_from_output():
 
     # Verify first request stopped on custom token
     assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == requests[1].request_id
+    assert scheduler.running.peek_request().request_id == requests[1].request_id
     assert requests[0].status == RequestStatus.FINISHED_STOPPED
     assert requests[0].stop_reason == 42
     assert requests[0].request_id in scheduler.finished_req_ids
@@ -431,7 +432,7 @@ def test_stop_via_update_from_output():
     for req in requests:
         req.num_computed_tokens = req.num_tokens
         scheduler.requests[req.request_id] = req
-        scheduler.running.append(req)
+        scheduler.running.add_request(req)
         req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(
@@ -462,7 +463,7 @@ def test_stop_via_update_from_output():
 
     # Verify first request stopped due to length
     assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == requests[1].request_id
+    assert scheduler.running.peek_request().request_id == requests[1].request_id
     assert requests[0].status == RequestStatus.FINISHED_LENGTH_CAPPED
     assert requests[0].request_id in scheduler.finished_req_ids
     assert list(requests[0].output_token_ids) == [10, 11]  # Truncated to max_tokens
@@ -473,7 +474,7 @@ def test_stop_via_update_from_output():
     requests = create_requests(num_requests=1, max_tokens=10, ignore_eos=True)
     requests[0].num_computed_tokens = requests[0].num_tokens
     scheduler.requests[requests[0].request_id] = requests[0]
-    scheduler.running.append(requests[0])
+    scheduler.running.add_request(requests[0])
 
     scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -724,7 +725,7 @@ def test_preempt_during_execution():
     # of the second request because the KV cache is full.
     _ = scheduler.schedule()
     assert len(scheduler.running) == 1
-    assert scheduler.running[0] == requests[0]
+    assert scheduler.running.peek_request() == requests[0]
     assert requests[1].status == RequestStatus.PREEMPTED
 
     model_runner_output1 = ModelRunnerOutput(
@@ -755,8 +756,8 @@ def test_scheduler_reset_prefix_cache():
     # Verify requests moved from waiting to running
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == len(requests)
-    for i, request in enumerate(requests):
-        assert scheduler.running[i] == request
+    for running_req, request in zip(scheduler.running, requests, strict=True):
+        assert running_req == request
 
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
@@ -770,8 +771,8 @@ def test_scheduler_reset_prefix_cache():
     assert len(scheduler.waiting) == len(requests)
     assert len(scheduler.running) == 0
 
-    for i, request in enumerate(requests):
-        assert scheduler.waiting[i] == request
+    for waiting_req, request in zip(scheduler.waiting, requests, strict=True):
+        assert waiting_req == request
 
 
 def test_reset_connector_cache_no_connector_is_no_op_success():
@@ -849,8 +850,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
     scheduler.update_draft_token_ids(draft_token_ids)
 
-    for i in range(len(requests)):
-        running_req = scheduler.running[i]
+    for i, running_req in enumerate(scheduler.running):
         # The prompt token
         assert running_req.num_computed_tokens == 1
         # The prompt token and the sampled token
@@ -1621,7 +1621,7 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     output = scheduler.schedule()
     if is_async:
         assert _num_waiting_requests(scheduler) == 2
-        assert scheduler.running == []
+        assert len(scheduler.running) == 0
         _step_until_kv_transfer_finished(scheduler, req_ids)
         output = scheduler.schedule()
 
@@ -2557,7 +2557,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
     scheduler.requests = {request.request_id: request}
-    scheduler.running = [request]
+    scheduler.running = FCFSRequestQueue([request])
     scheduler.waiting = Mock()
     scheduler.kv_cache_manager = Mock()
     scheduler.kv_cache_manager.take_events.return_value = None
@@ -3358,7 +3358,9 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
 
     # Just one request should be running.
     output = scheduler.schedule()
-    scheduled_tokens = output.num_scheduled_tokens[scheduler.running[0].request_id]
+    scheduled_tokens = output.num_scheduled_tokens[
+        scheduler.running.peek_request().request_id
+    ]
     assert scheduled_tokens == NUM_TOKENS
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 1
@@ -3377,14 +3379,16 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
 
     # Just one request should be running.
     output = scheduler.schedule()
-    scheduled_tokens = output.num_scheduled_tokens[scheduler.running[0].request_id]
+    scheduled_tokens = output.num_scheduled_tokens[
+        scheduler.running.peek_request().request_id
+    ]
     assert scheduled_tokens == NUM_TOKENS
     assert len(scheduler.running) == 1
     assert len(scheduler.waiting) == 0
 
     # update_state_after_alloc should be called for loading external cache
     scheduler.ec_connector.update_state_after_alloc.assert_called_with(
-        scheduler.running[0], 0
+        scheduler.running.peek_request(), 0
     )
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
 
@@ -3593,7 +3597,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
     assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 96
     assert scheduled_cached_reqs.all_token_ids[request_low.request_id][95] == 100
-    assert scheduler.running[0].request_id == request_low.request_id
+    assert scheduler.running.peek_request().request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
 
     ## Encoder-cache-specific checks:
