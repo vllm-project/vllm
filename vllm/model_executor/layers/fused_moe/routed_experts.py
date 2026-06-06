@@ -610,6 +610,7 @@ class RoutedExperts(PluggableLayer):
         if quant_method_name in (
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsWNA16RDNA3MoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
