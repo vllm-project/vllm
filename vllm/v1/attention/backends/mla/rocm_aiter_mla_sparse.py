@@ -342,6 +342,27 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     reduce_partial_map: torch.Tensor | None = None
 
 
+def _needs_fp8_pad_to_64_for_aiter_native(num_heads: int) -> bool:
+    """Workaround: only ``nhead==32`` is broken on gfx950 + FP8 sparse decode.
+
+    The AITER MLA decode kernel has a native
+    ``q.fp8 + kv.fp8 + max_seqlen_q==1`` path for ``nhead==64`` on gfx950
+    (asm_mla.cu, ``gqa_ratio==64``).  ``nhead==16``/``64`` are also
+    natively supported.  ``nhead==32`` (DSv3.2 TP=4 per-rank) is not:
+    the python wrapper folds it to ``nhead==16`` which lacks a working
+    sparse fp8 kernel on this arch and silently produces empty output.
+
+    Padding ``nhead 32 -> 64`` (Q-head replication; MQA is per-head
+    independent so this is exact) routes to the native ``gqa_ratio==64``
+    kernel.  TODO: remove once AITER ships a native sparse fp8 kernel
+    for ``nhead==32``/``max_seqlen_q==1`` on gfx950.
+    """
+    if not current_platform.is_rocm():
+        return False
+    device_name = getattr(current_platform, "get_device_name", lambda: "")().lower()
+    return "mi35" in device_name and num_heads == 32
+
+
 @dataclass
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
@@ -420,6 +441,15 @@ class ROCMAiterMLASparseMetadataBuilder(
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+
+        # Match what forward_mqa will pass to the kernel when the gfx950
+        # FP8 pad-to-64 workaround triggers; get_mla_metadata_info_v1's
+        # buffer sizes depend on both nhead and q_dtype.
+        if kv_cache_dtype_str == "fp8" and _needs_fp8_pad_to_64_for_aiter_native(
+            self.num_heads
+        ):
+            q_dtype = dtypes.fp8
+            self._num_attention_heads = 64
 
         (
             (work_meta_data_size, work_meta_data_type),
@@ -644,15 +674,24 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
+        # Cached so forward_mqa avoids the device-name lookup per call.
+        # See _needs_fp8_pad_to_64_for_aiter_native.
+        self._fp8_pad_to_64_for_aiter_native = _needs_fp8_pad_to_64_for_aiter_native(
+            self.num_heads
+        )
+
     def _forward_mla(
         self,
         layer: AttentionLayer,
         q: torch.Tensor,  # [sq, heads, d_qk]
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         attn_metadata: ROCMAiterMLASparseMetadata,
+        fp8_pad_factor: int = 1,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        if fp8_pad_factor > 1:
+            mla_num_heads *= fp8_pad_factor
         output = torch.empty(
             [num_tokens, mla_num_heads, self.kv_lora_rank],
             dtype=attn_metadata.attn_out_dtype,
@@ -689,6 +728,12 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             **mla_kwargs,
         )
 
+        if fp8_pad_factor > 1:
+            # Undo the gfx950 FP8 nhead-pad (see forward_mqa); duplicate
+            # heads are identical so every fp8_pad_factor-th row is the
+            # exact original output.  contiguous() because downstream
+            # reshapes (e.g. _v_up_proj) require it.
+            output = output[:, ::fp8_pad_factor, :].contiguous()
         return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, output)
 
     def forward_mqa(
@@ -721,16 +766,32 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        # write the latent and rope to kv cache
+        # FP8 KV: view uint8 storage as fp8 (kernel applies _k_scale on
+        # read) and pre-quant Q with _q_scale.  On gfx950 nhead=32 also
+        # needs to be padded up to 64 to hit the native fp8 kernel
+        # (see _needs_fp8_pad_to_64_for_aiter_native); MQA-style
+        # attention is per-head independent, so duplicating Q heads
+        # gives an exact result we can subsample after the kernel.
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        fold_factor = 1
         if fp8_attention:
+            if kv_c_and_k_pe_cache.dtype != current_platform.fp8_dtype():
+                kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
+                    current_platform.fp8_dtype()
+                )
             original_q_shape = q.shape
-            kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
-            q = q.view(original_q_shape)
+            q_flat, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
+            q = q_flat.view(original_q_shape)
+            if self._fp8_pad_to_64_for_aiter_native:
+                fold_factor = 64 // self.num_heads
+                q = q.repeat_interleave(fold_factor, dim=1)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         attn_out = self._forward_mla(
-            layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
+            layer,
+            mla_padded_q,
+            kv_c_and_k_pe_cache,
+            attn_metadata,
+            fp8_pad_factor=fold_factor,
         )
 
         return attn_out, None

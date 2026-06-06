@@ -944,9 +944,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_range = getattr(self, "k_range", torch.tensor(1.0))
         v_range = getattr(self, "v_range", torch.tensor(1.0))
 
-        self._q_scale.copy_(torch.abs(q).max() / q_range)
-        # kv_c_normed is the compressed KV representation; use it for k/v
-        kv_abs_max = torch.abs(kv_c_normed).max()
+        self._q_scale.copy_(q.abs().amax() / q_range)
+        # concat_and_cache_mla writes both kv_c_normed and k_pe into the
+        # FP8 cache with this _k_scale; k_pe (RoPE, ~[-1,1]) is typically
+        # much larger than kv_c_normed (~[-0.1,0.1] after RMSNorm), so
+        # calibrating on kv_c_normed alone saturates k_pe to ±FP8 max
+        # and destroys positional information.
+        kv_abs_max = torch.maximum(kv_c_normed.abs().amax(), k_pe.abs().amax())
         self._k_scale.copy_(kv_abs_max / k_range)
         self._v_scale.copy_(kv_abs_max / v_range)
         self._q_scale_float = self._q_scale.item()
