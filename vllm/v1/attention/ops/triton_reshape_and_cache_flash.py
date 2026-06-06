@@ -85,6 +85,11 @@ def _nvfp4_swizzled_scale_coord(
 
 
 @triton.jit
+def _nvfp4_linear_scale_coord(slot_in_block, scale_group_idx):
+    return slot_in_block + scale_group_idx * 0, scale_group_idx + slot_in_block * 0
+
+
+@triton.jit
 def _reshape_cache_nvfp4_kernel(
     key_ptr,  # [num_tokens, num_heads, head_size]
     value_ptr,  # [num_tokens, num_heads, head_size]
@@ -218,9 +223,14 @@ def _reshape_cache_nvfp4_kernel(
     tl.store(key_data_cache_ptr + key_data_base + byte_offsets, key_packed)
     tl.store(value_data_cache_ptr + value_data_base + byte_offsets, value_packed)
 
-    swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-        slot_in_block, scale_group_idx, SCALE_DIM
-    )
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block, scale_group_idx
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block, scale_group_idx, SCALE_DIM
+        )
     tl.store(
         key_scale_cache_ptr
         + block_idx * stride_k_scale_blk

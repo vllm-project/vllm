@@ -365,7 +365,12 @@ def test_reshape_and_cache_flash(
             data_hnd = data_cache.permute(0, 2, 1, 3)
             scale_hnd = scale_cache.permute(0, 2, 1, 3)
             result_hnd = dequant_nvfp4_kv_cache(
-                data_hnd, scale_hnd, global_scale, head_size, block_size
+                data_hnd,
+                scale_hnd,
+                global_scale,
+                head_size,
+                block_size,
+                triton_scale_layout=True,
             )
             return result_hnd.permute(0, 2, 1, 3)  # back to [N, T, H, D]
 

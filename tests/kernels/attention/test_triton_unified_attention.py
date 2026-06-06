@@ -790,6 +790,7 @@ def test_triton_unified_attn_nvfp4_kv(
             k_scale.item(),
             head_size,
             block_size,
+            triton_scale_layout=True,
         )
         .permute(0, 2, 1, 3)
         .to(dtype)
@@ -802,6 +803,7 @@ def test_triton_unified_attn_nvfp4_kv(
             v_scale.item(),
             head_size,
             block_size,
+            triton_scale_layout=True,
         )
         .permute(0, 2, 1, 3)
         .to(dtype)
@@ -955,6 +957,7 @@ def test_triton_unified_attn_nvfp4_mixed_raw_current_kv(
             k_scale.item(),
             head_size,
             block_size,
+            triton_scale_layout=True,
         )
         .permute(0, 2, 1, 3)
         .to(dtype)
@@ -967,6 +970,7 @@ def test_triton_unified_attn_nvfp4_mixed_raw_current_kv(
             v_scale.item(),
             head_size,
             block_size,
+            triton_scale_layout=True,
         )
         .permute(0, 2, 1, 3)
         .to(dtype)
