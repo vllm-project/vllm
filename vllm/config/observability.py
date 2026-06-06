@@ -67,8 +67,7 @@ class ObservabilityConfig:
 
     enable_mm_processor_stats: bool = False
     """Enable collection of timing statistics for multimodal processor operations.
-    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
-    argument."""
+    Exposed as ``--enable-mm-processor-stats`` CLI flag."""
 
     enable_logging_iteration_details: bool = False
     """Enable detailed logging of iteration details.

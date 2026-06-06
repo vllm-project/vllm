@@ -25,6 +25,12 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_profile_router(app)
 
+    from vllm.entrypoints.serve.mm_processor.api_router import (
+        attach_router as attach_mm_processor_router,
+    )
+
+    attach_mm_processor_router(app)
+
     from vllm.entrypoints.serve.tokenize.api_router import (
         attach_router as attach_tokenize_router,
     )

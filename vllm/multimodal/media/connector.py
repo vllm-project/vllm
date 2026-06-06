@@ -289,9 +289,17 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
+        timing_ctx: Any | None = None,
+        stage_prefix: str | None = None,
     ) -> _M:  # type: ignore[type-var]
         if url[:5].lower() == "data:":
-            return self._load_data_url(url, media_io)
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
+            )
+            with decode_cm:
+                return self._load_data_url(url, media_io)
 
         url_spec = parse_url(url)
 
@@ -300,20 +308,51 @@ class MediaConnector:
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
-                return media_io.load_bytes(cached)
+                fetch_cm = (
+                    timing_ctx.record(f"{stage_prefix}_fetch_bytes")
+                    if timing_ctx and stage_prefix
+                    else contextlib.nullcontext()
+                )
+                with fetch_cm:
+                    pass  # cache hit, negligible time
+                decode_cm = (
+                    timing_ctx.record(f"{stage_prefix}_decode")
+                    if timing_ctx and stage_prefix
+                    else contextlib.nullcontext()
+                )
+                with decode_cm:
+                    return media_io.load_bytes(cached)
 
             connection = self.connection
-            data = connection.get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+            fetch_cm = (
+                timing_ctx.record(f"{stage_prefix}_fetch_bytes")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
             )
+            with fetch_cm:
+                data = connection.get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+                self._put_cached_bytes(url, data)
 
-            self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
+            )
+            with decode_cm:
+                return media_io.load_bytes(data)
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
+            )
+            with decode_cm:
+                return self._load_file_url(url_spec, media_io)
 
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
@@ -324,14 +363,22 @@ class MediaConnector:
         media_io: MediaIO[_M],
         *,
         fetch_timeout: int | None = None,
+        timing_ctx: Any | None = None,
+        stage_prefix: str | None = None,
     ) -> _M:
         loop = asyncio.get_running_loop()
 
         if url[:5].lower() == "data:":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_data_url, url, media_io
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
             )
-            return await future
+            with decode_cm:
+                future = loop.run_in_executor(
+                    global_thread_pool, self._load_data_url, url, media_io
+                )
+                return await future
 
         url_spec = parse_url(url)
 
@@ -342,35 +389,63 @@ class MediaConnector:
                 global_thread_pool, self._get_cached_bytes, url
             )
             if cached is not None:
+                decode_cm = (
+                    timing_ctx.record(f"{stage_prefix}_decode")
+                    if timing_ctx and stage_prefix
+                    else contextlib.nullcontext()
+                )
+                with decode_cm:
+                    future = loop.run_in_executor(
+                        global_thread_pool, media_io.load_bytes, cached
+                    )
+                    return await future
+
+            connection = self.connection
+            fetch_cm = (
+                timing_ctx.record(f"{stage_prefix}_fetch_bytes")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
+            )
+            with fetch_cm:
+                data = await connection.async_get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+                await loop.run_in_executor(
+                    global_thread_pool, self._put_cached_bytes, url, data
+                )
+
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
+            )
+            with decode_cm:
                 future = loop.run_in_executor(
-                    global_thread_pool, media_io.load_bytes, cached
+                    global_thread_pool, media_io.load_bytes, data
                 )
                 return await future
 
-            connection = self.connection
-            data = await connection.async_get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
-
-            await loop.run_in_executor(
-                global_thread_pool, self._put_cached_bytes, url, data
-            )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
-
         if url_spec.scheme == "file":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_file_url, url_spec, media_io
+            decode_cm = (
+                timing_ctx.record(f"{stage_prefix}_decode")
+                if timing_ctx and stage_prefix
+                else contextlib.nullcontext()
             )
-            return await future
+            with decode_cm:
+                future = loop.run_in_executor(
+                    global_thread_pool, self._load_file_url, url_spec, media_io
+                )
+                return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
 
     def fetch_audio(
         self,
         audio_url: str,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[np.ndarray, int | float]:
         """
         Load audio from a URL.
@@ -381,11 +456,15 @@ class MediaConnector:
             audio_url,
             audio_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            timing_ctx=timing_ctx,
+            stage_prefix="audio",
         )
 
     async def fetch_audio_async(
         self,
         audio_url: str,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[np.ndarray, int | float]:
         """
         Asynchronously fetch audio from a URL.
@@ -396,6 +475,8 @@ class MediaConnector:
             audio_url,
             audio_io,
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+            timing_ctx=timing_ctx,
+            stage_prefix="audio",
         )
 
     def fetch_image(
@@ -403,6 +484,7 @@ class MediaConnector:
         image_url: str,
         *,
         image_mode: str = "RGB",
+        timing_ctx: Any | None = None,
     ) -> Image.Image:
         """
         Load a PIL image from an HTTP or base64 data URL.
@@ -418,6 +500,8 @@ class MediaConnector:
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                timing_ctx=timing_ctx,
+                stage_prefix="image",
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
@@ -428,6 +512,7 @@ class MediaConnector:
         image_url: str,
         *,
         image_mode: str = "RGB",
+        timing_ctx: Any | None = None,
     ) -> Image.Image:
         """
         Asynchronously load a PIL image from an HTTP or base64 data URL.
@@ -443,6 +528,8 @@ class MediaConnector:
                 image_url,
                 image_io,
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+                timing_ctx=timing_ctx,
+                stage_prefix="image",
             )
         except UnidentifiedImageError as e:
             # convert to ValueError to be properly caught upstream
@@ -454,6 +541,7 @@ class MediaConnector:
         *,
         image_mode: str = "RGB",
         video_processor: str | None = None,
+        timing_ctx: Any | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -472,6 +560,8 @@ class MediaConnector:
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            timing_ctx=timing_ctx,
+            stage_prefix="video",
         )
 
     async def fetch_video_async(
@@ -480,6 +570,7 @@ class MediaConnector:
         *,
         image_mode: str = "RGB",
         video_processor: str | None = None,
+        timing_ctx: Any | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -500,6 +591,8 @@ class MediaConnector:
             video_url,
             video_io,
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+            timing_ctx=timing_ctx,
+            stage_prefix="video",
         )
 
     def fetch_image_embedding(

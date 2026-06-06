@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache, partial
@@ -1138,6 +1139,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        timing_ctx: TimingContext | None = None,
     ) -> tuple[list[int], BatchFeature, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data
@@ -1148,14 +1151,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        processed_data = self._call_hf_processor(
-            prompt=prompt_text,
-            mm_data=processor_data,
-            mm_kwargs=hf_processor_mm_kwargs,
-            tok_kwargs=tokenization_kwargs,
-        )
+        with timing_ctx.record("hf_data_prep") if timing_ctx else nullcontext():
+            processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        with timing_ctx.record("hf_processor_call") if timing_ctx else nullcontext():
+            processed_data = self._call_hf_processor(
+                prompt=prompt_text,
+                mm_data=processor_data,
+                mm_kwargs=hf_processor_mm_kwargs,
+                tok_kwargs=tokenization_kwargs,
+            )
         processed_data.update(passthrough_data)
 
         input_ids = processed_data.pop("input_ids")
@@ -1216,6 +1222,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        timing_ctx: TimingContext | None = None,
     ) -> BatchFeature:
         """
         Apply the HF processor on the multi-modal data only.
@@ -1234,6 +1242,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_items=mm_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
+                timing_ctx=timing_ctx,
             )
 
             return mm_processed_data
@@ -1241,16 +1250,19 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         valid_mm_items = mm_items.select(
             {k for k, c in mm_items.get_all_counts().items() if c > 0}
         )
-        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        processed_data = self.info.ctx.call_hf_processor(
-            partial(
-                call_hf_processor_mm_only,
-                self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            ),
-            processor_data,
-            dict(**hf_processor_mm_kwargs, **tokenization_kwargs),
-        )
+        with timing_ctx.record("hf_data_prep") if timing_ctx else nullcontext():
+            processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+
+        with timing_ctx.record("hf_processor_call") if timing_ctx else nullcontext():
+            processed_data = self.info.ctx.call_hf_processor(
+                partial(
+                    call_hf_processor_mm_only,
+                    self.info.get_hf_processor(**hf_processor_mm_kwargs),
+                ),
+                processor_data,
+                dict(**hf_processor_mm_kwargs, **tokenization_kwargs),
+            )
         processed_data.update(passthrough_data)
 
         return processed_data
@@ -1263,6 +1275,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         enable_hf_prompt_update: bool,
+        timing_ctx: TimingContext | None = None,
     ) -> tuple[list[int], BatchFeature, bool]:
         """
         Apply the HF processor on the prompt text and multi-modal data.
@@ -1282,6 +1295,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_items=mm_items,
                     hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                     tokenization_kwargs=tokenization_kwargs,
+                    timing_ctx=timing_ctx,
                 )
 
             prompt_ids = self._apply_hf_processor_text_only(prompt, tokenization_kwargs)
@@ -1292,6 +1306,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
+            timing_ctx=timing_ctx,
         )
 
         return prompt_ids, mm_processed_data, False
@@ -1400,25 +1415,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        with timing_ctx.record("apply_hf_processor"):
-            (
-                prompt_ids,
-                mm_processed_data,
-                is_update_applied,
-            ) = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
-                mm_items=inputs.mm_data_items,
-                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
-                tokenization_kwargs=inputs.tokenization_kwargs,
-                enable_hf_prompt_update=True,
-            )
-
-        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+        (
+            prompt_ids,
             mm_processed_data,
-            self._get_mm_fields_config(
-                mm_processed_data, inputs.hf_processor_mm_kwargs
-            ),
+            is_update_applied,
+        ) = self._apply_hf_processor_main(
+            prompt=inputs.prompt,
+            mm_items=inputs.mm_data_items,
+            hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=inputs.tokenization_kwargs,
+            enable_hf_prompt_update=True,
+            timing_ctx=timing_ctx,
         )
+
+        with timing_ctx.record("hf_postprocess") if timing_ctx else nullcontext():
+            mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+                mm_processed_data,
+                self._get_mm_fields_config(
+                    mm_processed_data, inputs.hf_processor_mm_kwargs
+                ),
+            )
 
         # Use overrides if provided; fallback to data-dependent hashing.
         with timing_ctx.record("get_mm_hashes"):
@@ -1466,25 +1482,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
-        with timing_ctx.record("apply_hf_processor"):
-            (
-                prompt_ids,
-                mm_missing_processed_data,
-                is_update_applied,
-            ) = self._apply_hf_processor_main(
-                prompt=inputs.prompt,
-                mm_items=mm_missing_data_items,
-                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
-                tokenization_kwargs=inputs.tokenization_kwargs,
-                enable_hf_prompt_update=False,
-            )
-
-        mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+        (
+            prompt_ids,
             mm_missing_processed_data,
-            self._get_mm_fields_config(
-                mm_missing_processed_data, inputs.hf_processor_mm_kwargs
-            ),
+            is_update_applied,
+        ) = self._apply_hf_processor_main(
+            prompt=inputs.prompt,
+            mm_items=mm_missing_data_items,
+            hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=inputs.tokenization_kwargs,
+            enable_hf_prompt_update=False,
+            timing_ctx=timing_ctx,
         )
+
+        with timing_ctx.record("hf_postprocess") if timing_ctx else nullcontext():
+            mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+                mm_missing_processed_data,
+                self._get_mm_fields_config(
+                    mm_missing_processed_data, inputs.hf_processor_mm_kwargs
+                ),
+            )
 
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,

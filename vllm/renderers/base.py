@@ -407,6 +407,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         raise NotImplementedError
 
@@ -414,6 +416,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self,
         messages: list["ChatCompletionMessageParam"],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list["ConversationMessage"], DictPrompt]:
         return self.render_messages(messages, params)
 
@@ -692,19 +696,30 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenization_kwargs: dict[str, Any] | None,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> "MultiModalInput":
-        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
-
         if skip_mm_cache and self._readonly_mm_processor is not None:
             mm_processor = self._readonly_mm_processor
         else:
             mm_processor = self.get_mm_processor()
 
+        # If no external timing_ctx provided, create one (offline LLM path).
+        if timing_ctx is None:
+            mm_req_id = (
+                f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+            )
+            timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
+        assert mm_req_id is not None
         mm_uuid_items = self._process_mm_uuids(
-            mm_data, mm_data_items, mm_uuid_items, mm_req_id
+            mm_data,
+            mm_data_items,
+            mm_uuid_items,
+            mm_req_id,
         )
 
         mm_processor_inputs = MMProcessorInputs(
@@ -714,10 +729,9 @@ class BaseRenderer(ABC, Generic[_T]):
             hf_processor_mm_kwargs=mm_processor_kwargs or {},
             tokenization_kwargs=tokenization_kwargs or {},
         )
-        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
         with set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            mm_inputs = mm_processor.apply(mm_processor_inputs, timing_ctx)
 
         self.update_mm_cache_stats()
 
@@ -728,6 +742,8 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> TokensInput | MultiModalInput:
         """Process token inputs, with multimodal preprocessing offloaded
         to the shared thread pool in the async variant.
@@ -743,6 +759,8 @@ class BaseRenderer(ABC, Generic[_T]):
                 tokenization_kwargs=None,  # Tokenization already done in Step 2
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
+                timing_ctx=timing_ctx,
+                mm_req_id=mm_req_id,
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -789,6 +807,8 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TokensPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
 
@@ -801,6 +821,8 @@ class BaseRenderer(ABC, Generic[_T]):
                 tokenization_kwargs=None,
                 mm_uuids=prompt.get("multi_modal_uuids"),
                 skip_mm_cache=skip_mm_cache,
+                timing_ctx=timing_ctx,
+                mm_req_id=mm_req_id,
             )
         else:
             engine_input = tokens_input(prompt_token_ids)
@@ -817,22 +839,36 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return self._process_tokens(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+        return self._process_tokens(
+            prompt,  # type: ignore[arg-type]
+            skip_mm_cache=skip_mm_cache,
+            timing_ctx=timing_ctx,
+            mm_req_id=mm_req_id,
+        )
 
     async def _process_singleton_async(
         self,
         prompt: SingletonTokPrompt,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+        return await self._process_tokens_async(
+            prompt,  # type: ignore[arg-type]
+            skip_mm_cache=skip_mm_cache,
+            timing_ctx=timing_ctx,
+            mm_req_id=mm_req_id,
+        )
 
     def _process_enc_dec(
         self,
@@ -895,12 +931,19 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
             engine_input = self._process_enc_dec(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
         else:
-            engine_input = self._process_singleton(prompt, skip_mm_cache=skip_mm_cache)
+            engine_input = self._process_singleton(
+                prompt,
+                skip_mm_cache=skip_mm_cache,
+                timing_ctx=timing_ctx,
+                mm_req_id=mm_req_id,
+            )
 
         engine_input["arrival_time"] = arrival_time
 
@@ -912,6 +955,8 @@ class BaseRenderer(ABC, Generic[_T]):
         arrival_time: float,
         *,
         skip_mm_cache: bool = False,
+        timing_ctx: Any | None = None,
+        mm_req_id: str | None = None,
     ) -> EngineInput:
         engine_input: EngineInput
         if "encoder_prompt" in prompt:
@@ -921,7 +966,10 @@ class BaseRenderer(ABC, Generic[_T]):
             )
         else:
             engine_input = await self._process_singleton_async(
-                prompt, skip_mm_cache=skip_mm_cache
+                prompt,
+                skip_mm_cache=skip_mm_cache,
+                timing_ctx=timing_ctx,
+                mm_req_id=mm_req_id,
             )
 
         engine_input["arrival_time"] = arrival_time
@@ -993,8 +1041,11 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+        timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
         rendered = [
-            self.render_messages(conversation, chat_params)
+            self.render_messages(conversation, chat_params, timing_ctx=timing_ctx)
             for conversation in conversations
         ]
 
@@ -1009,7 +1060,13 @@ class BaseRenderer(ABC, Generic[_T]):
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
-            self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)
+            self.process_for_engine(
+                prompt,
+                arrival_time,
+                skip_mm_cache=skip_mm_cache,
+                timing_ctx=timing_ctx,
+                mm_req_id=mm_req_id,
+            )
             for prompt in tok_prompts
         ]
 
@@ -1029,8 +1086,18 @@ class BaseRenderer(ABC, Generic[_T]):
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
+        # Create TimingContext early so media loading can be timed.
+        # This TimingContext is shared across all stages of this request.
+        timing_ctx = None
+        mm_req_id = None
+        if self._mm_timing_registry is not None:
+            mm_req_id = (
+                f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+            )
+            timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
         rendered = [
-            self.render_messages_async(conversation, chat_params)
+            self.render_messages_async(conversation, chat_params, timing_ctx=timing_ctx)
             for conversation in conversations
         ]
 
@@ -1047,7 +1114,11 @@ class BaseRenderer(ABC, Generic[_T]):
         eng_prompts = await asyncio.gather(
             *(
                 self.process_for_engine_async(
-                    p, arrival_time, skip_mm_cache=skip_mm_cache
+                    p,
+                    arrival_time,
+                    skip_mm_cache=skip_mm_cache,
+                    timing_ctx=timing_ctx,
+                    mm_req_id=mm_req_id,
                 )
                 for p in tok_prompts
             )

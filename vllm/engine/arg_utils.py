@@ -1354,6 +1354,10 @@ class EngineArgs:
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
         )
+        observability_group.add_argument(
+            "--enable-mm-processor-stats",
+            **observability_kwargs["enable_mm_processor_stats"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)

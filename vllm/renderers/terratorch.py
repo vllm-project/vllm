@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -22,6 +24,8 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 
@@ -45,6 +49,8 @@ class TerratorchRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
+        *,
+        timing_ctx: Any | None = None,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
         model_config = self.model_config
 
