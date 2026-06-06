@@ -241,7 +241,8 @@ class Scheduler(SchedulerInterface):
             scheduler_block_size=self.block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
-            watermark=self.scheduler_config.watermark,
+            watermark_scale=self.scheduler_config.watermark_scale,
+            num_spec_tokens=self.num_spec_tokens,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -757,6 +758,7 @@ class Scheduler(SchedulerInterface):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                    num_running_reqs=len(self.running),
                 )
 
                 if new_blocks is None:
