@@ -810,16 +810,22 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Clamp to max_model_len. Mirrors the RUNNING-path guard
-                    # above for streaming/resumable requests whose accumulated
-                    # token count can grow past max_model_len across successive
-                    # `_update_request_as_session` calls (continuous Voxtral
-                    # realtime audio sessions). Run before spec-decode padding so
-                    # a length-capped session drops to <=0 and the padding block
-                    # (gated on num_new_tokens == 1) is naturally skipped.
-                    num_new_tokens = min(
-                        num_new_tokens,
-                        self.max_model_len - 1 - num_computed_tokens,
-                    )
+                    # above, but ONLY for streaming/resumable sessions whose
+                    # accumulated token count can grow past max_model_len across
+                    # successive `_update_request_as_session` resumes (continuous
+                    # Voxtral realtime audio). Classic one-shot prefills must NOT
+                    # be clamped here: a pooling/embedding request with
+                    # prompt_len == max_model_len would otherwise lose its last
+                    # token and hang (generate rejects that length at validation,
+                    # pooling does not). They keep the upstream invariant below.
+                    # Run before spec-decode padding so a length-capped session
+                    # drops to <=0 and the padding block (gated on
+                    # num_new_tokens == 1) is naturally skipped.
+                    if request.resumable:
+                        num_new_tokens = min(
+                            num_new_tokens,
+                            self.max_model_len - 1 - num_computed_tokens,
+                        )
 
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
@@ -852,8 +858,13 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    if num_new_tokens <= 0:
-                        # Length-capped: the request has reached max_model_len
+                    if not request.resumable:
+                        # Classic one-shot prefill: preserve the upstream
+                        # invariant. A non-resumable request is never clamped
+                        # above, so it always has tokens to schedule here.
+                        assert num_new_tokens > 0
+                    elif num_new_tokens <= 0:
+                        # Resumable streaming session has reached max_model_len
                         # and can never make progress. Finish it gracefully
                         # (finish_requests removes it from the waiting queues)
                         # instead of asserting and crashing the engine, and
