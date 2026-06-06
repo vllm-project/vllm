@@ -14,7 +14,7 @@ from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 # -----------------------------------------------------------------------
 # Model definitions: (model_name, colbert_dim, extra vllm_runner kwargs)
 # -----------------------------------------------------------------------
-COLBERT_MODELS = {
+COLBERT_MODELS: dict[str, dict] = {
     "bert": {
         "model": "answerdotai/answerai-colbert-small-v1",
         "colbert_dim": 96,
