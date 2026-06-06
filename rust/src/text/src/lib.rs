@@ -91,6 +91,11 @@ impl TextLlm {
         self.backend.tokenizer()
     }
 
+    /// Return the max_model_len reported by engine
+    pub fn max_model_len(&self) -> u32 {
+        self.max_model_len
+    }
+
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
