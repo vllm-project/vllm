@@ -336,6 +336,7 @@ class IterationStats:
         self.time_to_first_tokens_iter: list[float] = []
         self.inter_token_latencies_iter: list[float] = []
         self.num_corrupted_reqs: int = 0
+        self.num_kv_cache_nans: int = 0
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -478,6 +479,10 @@ class IterationStats:
         # Count corrupted requests when they finish (only once per request)
         if req_stats.is_corrupted:
             self.num_corrupted_reqs += 1
+
+    def record_kv_cache_nan(self, count: int = 1) -> None:
+        """Record NaN detections in KV cache writes."""
+        self.num_kv_cache_nans += count
 
 
 class LoRAStats:

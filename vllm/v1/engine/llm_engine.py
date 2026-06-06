@@ -297,6 +297,19 @@ class LLMEngine:
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = IterationStats() if self.log_stats else None
+            if iteration_stats is not None and envs.VLLM_DEBUG_KV_CACHE_NANS:
+                try:
+                    from vllm._custom_ops import (
+                        get_nan_cache_write_count,
+                        reset_nan_cache_write_count,
+                    )
+
+                    nan_count = get_nan_cache_write_count()
+                    if nan_count > 0:
+                        reset_nan_cache_write_count()
+                        iteration_stats.record_kv_cache_nan(nan_count)
+                except Exception:
+                    pass
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
                 engine_core_timestamp=outputs.timestamp,

@@ -1,6 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""Custom ops for vLLM.
+
+This module provides Python wrappers for custom CUDA operations.
+
+NaN Detection:
+    When VLLM_DEBUG_KV_CACHE_NANS=1 is set, cache write operations will
+    check source tensors for NaN/Inf values and log warnings. A Prometheus
+    counter 'vllm:kv_cache_nans' tracks total detections with layer and
+    phase labels.
+"""
+
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
@@ -2659,6 +2670,35 @@ def reshape_and_cache(
     )
 
 
+def _check_nan_in_cache_source(
+    key: torch.Tensor,
+    value: torch.Tensor,
+) -> None:
+    """Check source tensors for NaN/Inf values before cache write.
+
+    This is a debug-only function that should only be called when
+    VLLM_DEBUG_KV_CACHE_NANS is enabled.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if key.is_cuda:
+        # For CUDA tensors, use a lightweight check.
+        # Check first few elements as a sample.
+        key_flat = key.view(-1)[:min(1024, key.numel())]
+        if key_flat.isnan().any() or key_flat.isinf().any():
+            logger.warning(
+                "NaN/Inf detected in key tensor before cache write. "
+                "shape=%s, dtype=%s", key.shape, key.dtype)
+    if value.is_cuda:
+        value_flat = value.view(-1)[:min(1024, value.numel())]
+        if value_flat.isnan().any() or value_flat.isinf().any():
+            logger.warning(
+                "NaN/Inf detected in value tensor before cache write. "
+                "shape=%s, dtype=%s", value.shape, value.dtype)
+
+
 def reshape_and_cache_flash(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -2668,7 +2708,11 @@ def reshape_and_cache_flash(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
+    detect_nans: bool = False,
 ) -> None:
+    if envs.VLLM_DEBUG_KV_CACHE_NANS or detect_nans:
+        _check_nan_in_cache_source(key, value)
+        detect_nans = True
     torch.ops._C_cache_ops.reshape_and_cache_flash(
         key,
         value,
@@ -2678,6 +2722,7 @@ def reshape_and_cache_flash(
         kv_cache_dtype,
         k_scale,
         v_scale,
+        detect_nans,
     )
 
 
@@ -2689,9 +2734,25 @@ def concat_and_cache_mla(
     kv_cache_dtype: str,
     scale: torch.Tensor,
 ) -> None:
+    if envs.VLLM_DEBUG_KV_CACHE_NANS:
+        _check_nan_in_cache_source(kv_c, k_pe)
     torch.ops._C_cache_ops.concat_and_cache_mla(
         kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
     )
+
+
+def get_nan_cache_write_count() -> int:
+    """Get the number of NaN values detected in KV cache writes.
+
+    Returns:
+        Total count of NaN detections since last reset.
+    """
+    return torch.ops._C_cache_ops.get_nan_cache_write_count()
+
+
+def reset_nan_cache_write_count() -> None:
+    """Reset the NaN cache write counter to zero."""
+    torch.ops._C_cache_ops.reset_nan_cache_write_count()
 
 
 def concat_and_cache_mla_rope_fused(
