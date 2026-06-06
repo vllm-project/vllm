@@ -304,6 +304,18 @@ class LLMEngine:
             )
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
+            if iteration_stats is not None:
+                from vllm._custom_ops import (
+                    get_nan_cache_write_count,
+                    reset_nan_cache_write_count,
+                )
+
+                from vllm.envs import VLLM_DEBUG_KV_CACHE_NANS
+
+                if VLLM_DEBUG_KV_CACHE_NANS:
+                    iteration_stats.num_kv_cache_nans = get_nan_cache_write_count()
+                    reset_nan_cache_write_count()
+
         # 3) Abort any reqs that finished due to stop strings.
         with record_function_or_nullcontext("llm_engine step: abort_requests"):
             self.engine_core.abort_requests(processed_outputs.reqs_to_abort)

@@ -668,6 +668,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_generation_tokens, per_engine_labelvalues
         )
 
+        self._kv_cache_nans_counter = Counter(
+            "vllm:num_kv_cache_nans_total",
+            "Number of NaN values detected in KV cache writes",
+        )
+
         self.counter_request_success: dict[FinishReason, dict[int, Counter]] = {}
         counter_request_success_base = self._counter_cls(
             name="vllm:request_success",
@@ -1160,6 +1165,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
+        if iteration_stats.num_kv_cache_nans > 0:
+            self._kv_cache_nans_counter.inc(iteration_stats.num_kv_cache_nans)
         self.histogram_iteration_tokens[engine_idx].observe(
             iteration_stats.prompt_token_stats.computed
             + iteration_stats.num_generation_tokens
