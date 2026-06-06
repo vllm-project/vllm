@@ -115,9 +115,6 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
-        # DeepSeek V4 uses 448 NoPE + 64 RoPE = 512; see
-        # vllm/models/deepseek_v4/sparse_mla.py:
-        # DeepseekV4FlashMLABackend.get_supported_head_sizes.
         return [576]
 
     @classmethod
