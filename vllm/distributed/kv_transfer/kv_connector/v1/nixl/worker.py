@@ -1309,7 +1309,6 @@ class NixlConnectorWorker:
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
         )
-        self._raise_if_hma_remote_block_size_mismatch(nixl_agent_meta.block_size)
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
