@@ -14,8 +14,12 @@ from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 MODEL_NAME = "Qwen/Qwen2.5-Omni-3B"
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def server():
+    # Use module scope so the server is started once and shared across all
+    # tests in this file. Starting a new vLLM server per test on XPU can
+    # cause the second server startup to hang silently and exceed the
+    # wait-for-server timeout, resulting in RuntimeError.
     args = [
         "--max-model-len",
         "16384",

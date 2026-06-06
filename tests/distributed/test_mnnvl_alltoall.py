@@ -343,6 +343,90 @@ def test_one_sided_manager_lifecycle(world_size):
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: One-sided manager grows workspace across heterogeneous MoE layers
+# ---------------------------------------------------------------------------
+#
+# Models with heterogeneous MoE quantization — most notably a quantized base
+# MoE combined with an unquantized MTP head — can call initialize() multiple
+# times with different per-token dispatch payload sizes. The shared workspace
+# must grow to the union and the MoeAlltoAll must be rebuilt; otherwise a
+# later layer's combine call overruns the workspace sized for the first
+# layer's smaller payload and trips FlashInfer's combinePayloadOffset assert.
+# ---------------------------------------------------------------------------
+
+
+def _one_sided_workspace_grow_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+
+    cpu_group = get_dp_group().cpu_group
+    manager = FlashInferNVLinkOneSidedManager(cpu_group)
+
+    base_kwargs = dict(
+        max_num_tokens=1024,
+        top_k=2,
+        num_experts=world_size * 8,
+        hidden_size=4096,
+    )
+    nvfp4_kwargs = dict(
+        dispatch_dtype_bytes_per_elem=0,
+        dispatch_scale_bytes_per_token=base_kwargs["hidden_size"] // 16,
+    )
+    bf16_kwargs = dict(
+        dispatch_dtype_bytes_per_elem=2,
+        dispatch_scale_bytes_per_token=0,
+    )
+
+    # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    nvfp4_workspace_size = manager.workspace_size
+    nvfp4_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Second init: bf16-like (hidden_bytes = hidden * 2). Models the case of
+    # a quantized base MoE followed by an unquantized MoE layer (e.g. an MTP
+    # head). Per-token dispatch payload is ~4x larger, so the union workspace
+    # must grow and MoeAlltoAll must be rebuilt.
+    manager.initialize(**base_kwargs, **bf16_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size > nvfp4_workspace_size
+    assert manager.moe_alltoall is not nvfp4_moe_alltoall
+    bf16_workspace_size = manager.workspace_size
+    bf16_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Third init: back to NVFP4-like shape. Existing workspace already covers
+    # it, so initialize() must no-op — no shrink, no rebuild.
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size == bf16_workspace_size
+    assert manager.moe_alltoall is bf16_moe_alltoall
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_manager_workspace_grow(world_size):
+    """A later initialize() with a larger per-token payload must grow the
+    workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
+    payload must no-op."""
+    _spawn_workers(
+        _one_sided_workspace_grow_worker,
+        world_size,
+        dp_size=world_size,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3: AgRs dispatch/combine with value validation
 # ---------------------------------------------------------------------------
 #

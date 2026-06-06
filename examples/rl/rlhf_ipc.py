@@ -70,10 +70,14 @@ class TrainModel:
             self.llm_handle.init_weight_transfer_engine.remote(dict(init_info=dict()))
         )
 
-    def broadcast_weights(self, llm_handle: ray.actor.ActorHandle):
+    def broadcast_weights(
+        self, llm_handle: ray.actor.ActorHandle, packed: bool = False
+    ):
         """Broadcast weights to the inference engine using IPC."""
         self.llm_handle = llm_handle
-        trainer_args = IPCTrainerSendWeightsArgs(mode="ray", llm_handle=llm_handle)
+        trainer_args = IPCTrainerSendWeightsArgs(
+            send_mode="ray", llm_handle=llm_handle, packed=packed
+        )
         IPCWeightTransferEngine.trainer_send_weights(
             iterator=self.train_model.named_parameters(),
             trainer_args=trainer_args,
@@ -141,10 +145,10 @@ ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
-# Generate text with the updated model.
-outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
+outputs_packed = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
-for output in outputs_updated:
+print("Results after packed/chunked IPC weight sync:")
+for output in outputs_packed:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")

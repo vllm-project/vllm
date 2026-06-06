@@ -1,29 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import asyncio
-import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Awaitable, Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
-import numpy as np
 from fastapi import Request
-from openai.types.responses import ToolChoiceFunction
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
-from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -33,8 +27,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
     GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -46,17 +38,17 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import ChatParams, TokenizeParams
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -64,15 +56,12 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.async_utils import collect_from_async_generator
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -133,7 +122,7 @@ class ServeContext(Generic[RequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing:
+class OpenAIServing(BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -164,7 +153,7 @@ class OpenAIServing:
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
         # omit it to avoid per-chunk overhead.
-        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+        from vllm.entrypoints.serve.utils.fingerprint import get_system_fingerprint
 
         try:
             self.system_fingerprint: str | None = get_system_fingerprint(
@@ -173,205 +162,6 @@ class OpenAIServing:
         except Exception:
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
-
-    async def beam_search(
-        self,
-        prompt: EngineInput,
-        request_id: str,
-        params: BeamSearchParams,
-        lora_request: LoRARequest | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-    ) -> AsyncGenerator[RequestOutput, None]:
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
-        ignore_eos = params.ignore_eos
-        temperature = params.temperature
-        length_penalty = params.length_penalty
-        include_stop_str_in_output = params.include_stop_str_in_output
-
-        tokenizer = self.renderer.get_tokenizer()
-        eos_token_id = tokenizer.eos_token_id
-        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
-
-        if prompt["type"] == "embeds":
-            raise NotImplementedError("Embedding prompt not supported for beam search")
-
-        # Extract prompt tokens and text based on model type
-        decoder_prompt = (
-            prompt if prompt["type"] != "enc_dec" else prompt["decoder_prompt"]
-        )
-        prompt_text = decoder_prompt.get("prompt")
-        prompt_token_ids = decoder_prompt["prompt_token_ids"]
-
-        tokenized_length = len(prompt_token_ids)
-
-        logprobs_num = 2 * beam_width
-        sampling_params = SamplingParams(
-            logprobs=logprobs_num,
-            max_tokens=1,
-            temperature=temperature,
-        )
-        all_beams = [
-            BeamSearchSequence(
-                orig_prompt=prompt,
-                tokens=prompt_token_ids,
-                cum_logprob=0,
-                logprobs=[],
-                lora_request=lora_request,
-            )
-        ]
-        completed = []
-
-        for _ in range(max_tokens):
-            tasks = []
-            request_id_batch = f"{request_id}-{random_uuid()}"
-
-            for i, beam in enumerate(all_beams):
-                prompt_item = beam.get_prompt()
-                lora_request_item = beam.lora_request
-                request_id_item = f"{request_id_batch}-beam-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.engine_client.generate(
-                            prompt_item,
-                            sampling_params,
-                            request_id_item,
-                            lora_request=lora_request_item,
-                            trace_headers=trace_headers,
-                        )
-                    )
-                )
-                tasks.append(task)
-
-            output = [x[0] for x in await asyncio.gather(*tasks)]
-
-            new_beams = []
-            # Store all new tokens generated by beam
-            all_beams_token_id = []
-            # Store the cumulative probability of all tokens
-            # generated by beam search
-            all_beams_logprob = []
-            # Iterate through all beam inference results
-            for i, result in enumerate(output):
-                current_beam = all_beams[i]
-
-                # check for error finish reason and abort beam search
-                if result.outputs[0].finish_reason == "error":
-                    # yield error output and terminate beam search
-                    yield RequestOutput(
-                        request_id=request_id,
-                        prompt=prompt_text,
-                        outputs=[
-                            CompletionOutput(
-                                index=0,
-                                text="",
-                                token_ids=[],
-                                cumulative_logprob=None,
-                                logprobs=None,
-                                finish_reason="error",
-                            )
-                        ],
-                        finished=True,
-                        prompt_token_ids=prompt_token_ids,
-                        prompt_logprobs=None,
-                    )
-                    return
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    all_beams_token_id.extend(list(logprobs.keys()))
-                    all_beams_logprob.extend(
-                        [
-                            current_beam.cum_logprob + obj.logprob
-                            for obj in logprobs.values()
-                        ]
-                    )
-
-            # Handle the token for the end of sentence (EOS)
-            all_beams_token_id = np.array(all_beams_token_id)
-            all_beams_logprob = np.array(all_beams_logprob)
-
-            if not ignore_eos:
-                # Get the index position of eos token in all generated results
-                eos_idx = np.where(all_beams_token_id == eos_token_id)[0]
-                for idx in eos_idx:
-                    current_beam = all_beams[idx // logprobs_num]
-                    result = output[idx // logprobs_num]
-                    assert result.outputs[0].logprobs is not None
-                    logprobs_entry = result.outputs[0].logprobs[0]
-                    completed.append(
-                        BeamSearchSequence(
-                            orig_prompt=prompt,
-                            tokens=current_beam.tokens + [eos_token_id]
-                            if include_stop_str_in_output
-                            else current_beam.tokens,
-                            logprobs=current_beam.logprobs + [logprobs_entry],
-                            cum_logprob=float(all_beams_logprob[idx]),
-                            finish_reason="stop",
-                            stop_reason=eos_token_id,
-                        )
-                    )
-                # After processing, set the log probability of the eos condition
-                # to negative infinity.
-                all_beams_logprob[eos_idx] = -np.inf
-
-            # Processing non-EOS tokens
-            # Get indices of the top beam_width probabilities
-            topn_idx = np.argpartition(np.negative(all_beams_logprob), beam_width)[
-                :beam_width
-            ]
-
-            for idx in topn_idx:
-                current_beam = all_beams[idx // logprobs_num]
-                result = output[idx // logprobs_num]
-                token_id = int(all_beams_token_id[idx])
-                assert result.outputs[0].logprobs is not None
-                logprobs_entry = result.outputs[0].logprobs[0]
-                new_beams.append(
-                    BeamSearchSequence(
-                        orig_prompt=prompt,
-                        tokens=current_beam.tokens + [token_id],
-                        logprobs=current_beam.logprobs + [logprobs_entry],
-                        lora_request=current_beam.lora_request,
-                        cum_logprob=float(all_beams_logprob[idx]),
-                    )
-                )
-
-            all_beams = new_beams
-
-        completed.extend(all_beams)
-        sorted_completed = sorted(completed, key=sort_beams_key, reverse=True)
-        best_beams = sorted_completed[:beam_width]
-
-        for beam in best_beams:
-            if beam.tokens[-1] == eos_token_id and not ignore_eos:
-                # Skip the eos token in the text.
-                tokens = beam.tokens[tokenized_length:-1]
-            else:
-                tokens = beam.tokens[tokenized_length:]
-            beam.text = tokenizer.decode(tokens)
-
-        yield RequestOutput(
-            request_id=request_id,
-            prompt=prompt_text,
-            outputs=[
-                CompletionOutput(
-                    text=beam.text,  # type: ignore
-                    cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens[tokenized_length:],
-                    index=i,
-                    logprobs=beam.logprobs,
-                    finish_reason=beam.finish_reason
-                    if beam.finish_reason is not None
-                    else "length",
-                    stop_reason=beam.stop_reason,
-                )
-                for (i, beam) in enumerate(best_beams)
-            ],
-            finished=True,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,
-        )
 
     @staticmethod
     def create_error_response(
@@ -653,124 +443,6 @@ class OpenAIServing:
                         request.request_id,
                         exc_info=True,
                     )
-
-    @staticmethod
-    def _parse_tool_calls_from_content(
-        request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike | None,
-        enable_auto_tools: bool,
-        tool_parser_cls: type[ToolParser] | None,
-        content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        # When the Mistral grammar factory injected structured outputs,
-        # let the parser handle the output.
-        use_mistral_tool_parser = (
-            isinstance(request, ChatCompletionRequest)
-            and is_mistral_tool_parser(tool_parser_cls)
-            and request._grammar_from_tool_parser
-        )
-
-        function_calls = list[FunctionCall]()
-        if (
-            not use_mistral_tool_parser
-            and request.tool_choice
-            and isinstance(request.tool_choice, ToolChoiceFunction)
-        ):
-            # Forced Function Call (Responses API)
-            if content is None:
-                return [], None
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            not use_mistral_tool_parser
-            and request.tool_choice
-            and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
-        ):
-            # Named function with standard JSON-based parsing
-            if content is None:
-                return [], None
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            not use_mistral_tool_parser
-            and request.tool_choice == "required"
-            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
-        ):
-            # "required" with standard JSON-based parsing
-            tool_calls = []
-            with contextlib.suppress(ValidationError):
-                content = content or ""
-                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
-                    content
-                )
-            for tool_call in tool_calls:
-                function_calls.append(
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                )
-            content = None  # Clear content since tool is called.
-        elif tool_parser_cls and (
-            use_mistral_tool_parser
-            or (
-                enable_auto_tools
-                and (
-                    request.tool_choice == "auto"
-                    or request.tool_choice is None
-                    or (
-                        not tool_parser_cls.supports_required_and_named
-                        and request.tools
-                        and (
-                            request.tool_choice == "required"
-                            or isinstance(
-                                request.tool_choice,
-                                ChatCompletionNamedToolChoiceParam,
-                            )
-                        )
-                    )
-                )
-            )
-        ):
-            # Automatic Tool Call Parsing (also used as fallback for
-            # required/named when supports_required_and_named=False)
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
-
-            try:
-                tool_parser = tool_parser_cls(tokenizer, request.tools)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-                if content and content.strip() == "":
-                    content = None
-            else:
-                # No tool calls.
-                return None, content
-
-        return function_calls, content
 
     @staticmethod
     def _get_decoded_token(

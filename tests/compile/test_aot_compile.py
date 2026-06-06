@@ -465,7 +465,10 @@ def test_standalone_compile_correctness():
         common_args,
         common_args,
         env1={"VLLM_USE_STANDALONE_COMPILE": "1"},
-        env2={"VLLM_USE_STANDALONE_COMPILE": "0"},
+        env2={
+            "VLLM_USE_STANDALONE_COMPILE": "0",
+            "VLLM_USE_MEGA_AOT_ARTIFACT": "0",
+        },
     )
 
 

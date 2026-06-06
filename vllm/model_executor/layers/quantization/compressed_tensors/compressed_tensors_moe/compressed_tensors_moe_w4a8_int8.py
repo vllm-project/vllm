@@ -11,15 +11,25 @@ from compressed_tensors.quantization import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
+    SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
+    convert_to_w4a8_int8_moe_format,
+    make_w4a8_int8_moe_kernel,
+    make_w4a8_int8_moe_quant_config,
+    select_w4a8_int8_moe_backend,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
@@ -48,6 +58,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         self.has_bias = self.moe.has_bias
         self.weight_quant = weight_quant
         self.input_quant = input_quant
+        self.static_input_scales = False  # always dynamic per token
+        # Weight can be channel-wise (group_size=None) or group-wise
+        self.group_size = (
+            weight_quant.group_size if (weight_quant.group_size is not None) else -1
+        )
 
         # Validate scheme: weights=W4 (channel or group),
         # activations=dynamic TOKEN (A8)
@@ -61,16 +76,8 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 "W4A8-int MoE needs dynamic per-token activation quantization."
             )
 
-        # Weight can be channel-wise (group_size=None) or group-wise
-        self.group_size = (
-            weight_quant.group_size if (weight_quant.group_size is not None) else -1
-        )
         if weight_quant.num_bits != 4:
             raise ValueError("This method only supports 4-bit weights (num_bits=4).")
-
-        # CPU only
-        if not current_platform.is_cpu():
-            raise ValueError("CompressedTensorsW4A8Int8MoEMethod is CPU-only.")
 
         # Arm: check _dyn ops availability
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
@@ -82,7 +89,26 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
                     f"""PyTorch {torch.__version__} lacks _dyn_quant_* 4bit ops;
                     install a newer build."""
                 ) from err
-        self.static_input_scales = False  # always dynamic per token
+
+        # Construct QuantKey for weights from QuantizationArgs
+        # W4A8 INT4: 4-bit weights (stored as int8), static quantization
+        if self.group_size == -1:
+            # Channel-wise quantization
+            group_shape = GroupShape(-1, 1)
+            scale_dtype = torch.float32
+        else:
+            # Group-wise quantization
+            group_shape = GroupShape(1, self.group_size)
+            scale_dtype = torch.bfloat16
+
+        weight_scale_desc = ScaleDesc(scale_dtype, static=True, group_shape=group_shape)
+        weight_key = QuantKey(torch.int8, weight_scale_desc, symmetric=True)
+
+        self.backend, self.experts_cls = select_w4a8_int8_moe_backend(
+            moe,
+            weight_key,
+            activation_key=None,  # unquantized inputs
+        )
 
     # ---- parameter creation ----
     def create_weights(
@@ -182,72 +208,20 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     # post-load packing to dyn-4bit KleidiAI kernel's format
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        E = layer.w13_weight.shape[0]
-        H = layer.w13_in_features
-        I2 = layer.w13_out_features
-        IN = layer.w2_in_features
-        g = layer.group_size
-
-        def _pack_matrix(
-            int4_as_int8_2d: torch.Tensor,
-            scales_2d: torch.Tensor,
-            bias_1d: torch.Tensor | None,
-            in_features: int,
-            out_features: int,
-        ) -> torch.Tensor:
-            # int4 values are stored as int8 in [-8,7].
-            # Shift to unsigned nibble and pack pairs along input-dim.
-            tmp = int4_as_int8_2d.add(8)  # [out, in]
-            uint8_nibbles = ((tmp[:, 1::2] << 4) | tmp[:, ::2]).to(
-                torch.uint8
-            )  # [out, in//2]
-
-            # KleidiAI groupwise kernels accepts float32 scales
-            # KleidiAI groupwise kernels accepts bfloat16 scales
-            scale_dtype = torch.float32 if g == -1 else torch.bfloat16
-            scales = scales_2d.to(scale_dtype)
-            bias = None if bias_1d is None else bias_1d.to(torch.float32)
-            return torch.ops.aten._dyn_quant_pack_4bit_weight(
-                uint8_nibbles,
-                scales,
-                bias,
-                g if g != -1 else in_features,
-                in_features,
-                out_features,
+        # Use oracle to pack weights.
+        w13_packed, w2_packed, w13_weight_scale, w2_weight_scale, w13_bias, w2_bias = (
+            convert_to_w4a8_int8_moe_format(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_scale=layer.w13_weight_scale,
+                w2_weight_scale=layer.w2_weight_scale,
+                group_size=self.group_size,
+                w13_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
             )
+        )
 
-        # Pack per expert
-        w13_packed_list = []
-        w2_packed_list = []
-
-        has_w13_bias = hasattr(layer, "w13_bias") and layer.w13_bias is not None
-        has_w2_bias = hasattr(layer, "w2_bias") and layer.w2_bias is not None
-
-        for e in range(E):
-            w13_packed_list.append(
-                _pack_matrix(
-                    layer.w13_weight[e],  # [2I, H]
-                    layer.w13_weight_scale[e],  # [2I, H/g or 1]
-                    layer.w13_bias[e] if has_w13_bias else None,  # [2I]
-                    H,
-                    I2,
-                )
-            )
-            w2_packed_list.append(
-                _pack_matrix(
-                    # w2 shape is [H, IN]; we need [out, in] == [H, IN].
-                    layer.w2_weight[e],  # [H, IN]
-                    layer.w2_weight_scale[e],  # [H, IN/g or 1]
-                    layer.w2_bias[e] if has_w2_bias else None,  # [H]
-                    IN,
-                    layer.w2_out_features,  # in_features=IN, out_features=H
-                )
-            )
-
-        # each packed tensor has identical shape per expert; stack on dim 0
-        w13_packed = torch.stack(w13_packed_list, dim=0)
-        w2_packed = torch.stack(w2_packed_list, dim=0)
-
+        # Register packed weights as parameters
         replace_parameter(
             layer,
             "w13_weight_packed",
@@ -259,7 +233,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             torch.nn.Parameter(w2_packed, requires_grad=False),
         )
 
-        # free raw tensors/scales/bias now that they're packed into the payload.
         replace_parameter(
             layer, "w13_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
         )
@@ -269,36 +242,46 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(
             layer,
             "w13_weight_scale",
-            torch.nn.Parameter(torch.empty(0), requires_grad=False),
+            torch.nn.Parameter(w13_weight_scale, requires_grad=False),
         )
         replace_parameter(
             layer,
             "w2_weight_scale",
-            torch.nn.Parameter(torch.empty(0), requires_grad=False),
+            torch.nn.Parameter(w2_weight_scale, requires_grad=False),
         )
-        if has_w13_bias:
+
+        if self.has_bias:
             replace_parameter(
                 layer,
                 "w13_bias",
-                torch.nn.Parameter(torch.empty(0), requires_grad=False),
+                torch.nn.Parameter(w13_bias, requires_grad=False),
             )
-        if has_w2_bias:
+        if self.has_bias:
             replace_parameter(
                 layer,
                 "w2_bias",
-                torch.nn.Parameter(torch.empty(0), requires_grad=False),
+                torch.nn.Parameter(w2_bias, requires_grad=False),
             )
+
+        quant_config = self.get_fused_moe_quant_config(layer)
+        assert quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_w4a8_int8_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+        )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        # CPU dynamic 4-bit MoE path does not use modular kernels or
-        # fused_experts; quant config is not needed.
-        return None
+        # Determine block shape from group_size
+        # group_size=-1 means channel-wise: (-1, 1)
+        # group_size=N means group-wise: (1, N)
+        block_shape = (-1, 1) if self.group_size == -1 else (1, self.group_size)
 
-    @property
-    def is_monolithic(self) -> bool:
-        return True
+        return make_w4a8_int8_moe_quant_config(block_shape=block_shape)
 
     def apply_monolithic(
         self,
@@ -307,43 +290,43 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert layer.activation in (
-            MoEActivation.SILU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-        ), "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
-        assert layer.expert_map is None, """expert_map/EP not implemented
-        for CPU dyn-4bit MoE."""
-
-        def _act_kind(s: MoEActivation) -> int:
-            # 0 = SwiGLU_Gu (SiLU(g)*u), 1 = SwiGLU_Ug (SiLU(u)*g), 2 = SiLU
-            if s == MoEActivation.SWIGLUSTEP:
-                return 0
-            if s == MoEActivation.SWIGLUOAI:
-                return 1
-            if s == MoEActivation.SILU:
-                return 2
-            raise ValueError(f"Unknown activation '{s}'")
-
-        # Apply topk softmax on router output
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=layer.top_k,
-            use_grouped_topk=layer.use_grouped_topk,
-            renormalize=layer.renormalize,
-        )
-
-        return torch.ops._C.dynamic_4bit_int_moe(
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
-            topk_ids.to(torch.long),
-            topk_weights,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
-            layer.w2_out_features,
-            layer.w2_in_features,
-            layer.w13_out_features,
-            layer.group_size,
-            layer.apply_router_weight_on_input,
-            int(_act_kind(layer.activation)),
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
