@@ -39,18 +39,26 @@ FP4_DTYPE = torch.uint8
 
 
 _RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
+_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 
-# TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
-# and remove this check.
+# TODO: extend rmsnorm quant kernels to support mixed dtypes, and remove this
+# check.
 def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
-    """Prevent fusion when rms_norm input and weight dtypes differ."""
+    """Prevent fusion when rms_norm inputs have unsupported mixed dtypes."""
     for node in match.nodes:
         if node.target == _RMS_NORM_OP:
             # rms_norm(x, weight, epsilon, variance_size)
-            x, weight = node.args[0], node.args[1]
-            if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-                return x.meta["val"].dtype == weight.meta["val"].dtype
+            tensors = (node.args[0], node.args[1])
+        elif node.target == _FUSED_ADD_RMS_NORM_OP:
+            # fused_add_rms_norm(x, x_residual, weight, epsilon, variance_size)
+            tensors = (node.args[0], node.args[1], node.args[2])
+        else:
+            continue
+
+        if all(isinstance(tensor, fx.Node) for tensor in tensors):
+            dtypes = {tensor.meta["val"].dtype for tensor in tensors}
+            return len(dtypes) == 1
     return True
 
 

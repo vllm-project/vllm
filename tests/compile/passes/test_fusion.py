@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -16,6 +16,7 @@ from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
     RMSNormQuantFusionPass,
+    _rms_input_weight_dtype_match,
 )
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -57,6 +58,38 @@ from vllm.utils.deep_gemm import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+
+
+def _fused_add_rms_norm_match(
+    x_dtype: torch.dtype,
+    residual_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+) -> SimpleNamespace:
+    graph = torch.fx.Graph()
+    x = graph.placeholder("x")
+    residual = graph.placeholder("residual")
+    weight = graph.placeholder("weight")
+    x.meta["val"] = torch.empty(1, 16, dtype=x_dtype)
+    residual.meta["val"] = torch.empty(1, 16, dtype=residual_dtype)
+    weight.meta["val"] = torch.empty(16, dtype=weight_dtype)
+    fused_add = graph.call_function(
+        torch.ops.vllm_ir.fused_add_rms_norm.default,
+        args=(x, residual, weight, 1e-6, None),
+    )
+
+    return SimpleNamespace(nodes=[fused_add])
+
+
+def test_rms_quant_fusion_rejects_mixed_dtype_fused_add_rms_norm():
+    assert not _rms_input_weight_dtype_match(
+        _fused_add_rms_norm_match(torch.bfloat16, torch.bfloat16, torch.float32)
+    )
+    assert not _rms_input_weight_dtype_match(
+        _fused_add_rms_norm_match(torch.bfloat16, torch.float32, torch.bfloat16)
+    )
+    assert _rms_input_weight_dtype_match(
+        _fused_add_rms_norm_match(torch.bfloat16, torch.bfloat16, torch.bfloat16)
+    )
 
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
