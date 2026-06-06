@@ -122,6 +122,14 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
         key = args_str[key_start:i].strip()
+        # Strip STRING_DELIM from dict keys — the value parser already
+        # strips it from values, but the key parser was taking keys
+        # verbatim, leaving <|"|> sentinel characters embedded in
+        # dict-key positions when Gemma4 emits a string-quoted key.
+        if key.startswith(STRING_DELIM):
+            key = key[len(STRING_DELIM) :]
+        if key.endswith(STRING_DELIM):
+            key = key[: -len(STRING_DELIM)]
         i += 1  # skip ':'
 
         # Parse value

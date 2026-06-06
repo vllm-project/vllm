@@ -160,6 +160,30 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args(":[t:[]")
         assert isinstance(result, dict)
 
+    def test_string_quoted_dict_key(self):
+        """Dict keys wrapped in STRING_DELIM are stripped, matching value behavior.
+
+        The value parser strips <|\"|> from values, but the key parser
+        was taking keys verbatim, leaving sentinel characters embedded
+        in dict-key positions when Gemma4 emits a string-quoted key.
+        """
+        result = _parse_gemma4_args('<|"|>123<|"|>:<|"|>value<|"|>')
+        assert result == {"123": "value"}
+
+    def test_string_quoted_dict_keys_in_nested_object(self):
+        """Nested objects with string-quoted keys."""
+        result = _parse_gemma4_args(
+            'nested:{<|"|>key_1<|"|>:<|"|>val1<|"|>,<|"|>key_2<|"|>:42}'
+        )
+        assert result == {"nested": {"key_1": "val1", "key_2": 42}}
+
+    def test_mixed_quoted_and_unquoted_keys(self):
+        """Keys without delimiters are unaffected."""
+        result = _parse_gemma4_args(
+            'name:<|"|>test<|"|>,<|"|>quoted_key<|"|>:<|"|>val<|"|>'
+        )
+        assert result == {"name": "test", "quoted_key": "val"}
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
