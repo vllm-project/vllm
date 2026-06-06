@@ -1381,11 +1381,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         cache: BaseMultiModalProcessorCache,
         mm_data_items: MultiModalDataItems,
-        mm_cache_keys: MultiModalHashes,
+        mm_hashes: MultiModalHashes,
         coupled_groups: Sequence[Sequence[tuple[str, int]]],
     ) -> tuple[MultiModalIsCached, MultiModalDataItems]:
         mm_is_cached = {
-            modality: cache.is_cached(keys) for modality, keys in mm_cache_keys.items()
+            modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
         }
 
         # An item needs (re)processing if it is not cached. Expand that miss
@@ -1444,15 +1444,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _merge_mm_kwargs(
         self,
         cache: BaseMultiModalProcessorCache,
-        mm_cache_keys: MultiModalHashes,
+        mm_hashes: MultiModalHashes,
         mm_needs_processing: MultiModalIsCached,
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
-        # Need to touch all cache keys before update to avoid a key in the
-        # updated list being evicted during update
-        for keys in mm_cache_keys.values():
-            for item_hash in keys:
+        # Need to touch all mm hashes before update to avoid hash in updated
+        # list evict during update
+        for hashes in mm_hashes.values():
+            for item_hash in hashes:
                 cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
@@ -1461,11 +1461,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         merged_prompt_updates = defaultdict[str, list[Sequence[ResolvedPromptUpdate]]](
             list
         )
-        for modality, keys in mm_cache_keys.items():
+        for modality, hashes in mm_hashes.items():
             missing_kwargs = mm_missing_kwargs.get(modality, [])
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
-            for item_idx, item_hash in enumerate(keys):
+            for item_idx, item_hash in enumerate(hashes):
                 # Every item the HF processor reprocessed (``needs_processing``)
                 # has a freshly computed output; pass it to the cache. For a
                 # genuinely-missing item this stores the new entry; for a
@@ -1575,7 +1575,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_needs_processing, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
-                mm_cache_keys=mm_cache_keys,
+                mm_hashes=mm_cache_keys,
                 coupled_groups=coupled_groups,
             )
 
@@ -1611,7 +1611,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         with timing_ctx.record("merge_mm_kwargs"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
-                mm_cache_keys=mm_cache_keys,
+                mm_hashes=mm_cache_keys,
                 mm_needs_processing=mm_needs_processing,
                 mm_missing_kwargs=mm_missing_kwargs,
                 mm_missing_prompt_updates=mm_missing_prompt_updates,
