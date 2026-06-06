@@ -1536,6 +1536,11 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
              if no remapping is needed.
         None: If the remapped name is not found in params_dict.
     """
+    # Already in vLLM's expected form (e.g. weights pre-renamed by a
+    # `WeightsMapper` from the quant config). Skip the regex remap, which
+    # would otherwise double-apply the `.attn` prefix and drop the weight.
+    if name in params_dict:
+        return name
     if name.endswith(".kv_scale"):
         logger.warning_once(
             "DEPRECATED. Found kv_scale in the checkpoint. "
