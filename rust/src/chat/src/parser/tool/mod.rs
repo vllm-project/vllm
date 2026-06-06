@@ -4,10 +4,11 @@ use std::sync::LazyLock;
 
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, GraniteToolParser, HermesToolParser,
-    HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
-    MinimaxM2ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
+    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
+    GraniteToolParser, HermesToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser,
+    Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
+    ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
@@ -23,6 +24,7 @@ pub mod names {
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
     pub const GRANITE: &str = "granite";
+    pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
     pub const HY_V3: &str = "hy_v3";
     // Matches the Python CLI name `--tool-call-parser internlm`, which Python
@@ -66,6 +68,7 @@ impl ToolParserFactory {
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
             .register_parser::<GraniteToolParser>(names::GRANITE)
+            .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
@@ -110,6 +113,7 @@ impl ToolParserFactory {
             .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("granite-3", names::GRANITE)
+            .register_pattern("granite-4", names::GRANITE4)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("minimax", names::MINIMAX_M2)
             .register_pattern("mm-m2", names::MINIMAX_M2);
