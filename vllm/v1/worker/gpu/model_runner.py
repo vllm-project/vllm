@@ -465,7 +465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict, _packed_backing = init_kv_cache(
+        kv_caches_dict, packed_backing = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -475,7 +475,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kernel_block_sizes,
             self.vllm_config,
         )
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        packed_block_stride = None
+        if packed_backing is not None:
+            self.cross_layers_kv_cache = packed_backing
+            packed_block_stride = next(
+                t.block_stride
+                for t in self.kv_cache_config.kv_cache_tensors
+                if t.block_stride > 0
+            )
+        self.kv_connector = get_kv_connector(
+            self.vllm_config, kv_caches_dict,
+            cross_layers_kv_cache=packed_backing,
+            packed_block_stride=packed_block_stride,
+        )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""

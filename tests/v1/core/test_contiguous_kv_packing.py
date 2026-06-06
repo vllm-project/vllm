@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for contiguous KV cache packing in _get_kv_cache_config_deepseek_v4."""
 
 from unittest.mock import MagicMock
@@ -41,9 +43,7 @@ def _make_groups(n_c4, n_c128, n_swa):
 
     mla_group = KVCacheGroupSpec(
         layer_names=list(mla_specs.keys()),
-        kv_cache_spec=UniformTypeKVCacheSpecs(
-            block_size=256, kv_cache_specs=mla_specs
-        ),
+        kv_cache_spec=UniformTypeKVCacheSpecs(block_size=256, kv_cache_specs=mla_specs),
     )
 
     swa_specs = {}
@@ -52,9 +52,7 @@ def _make_groups(n_c4, n_c128, n_swa):
 
     swa_group = KVCacheGroupSpec(
         layer_names=list(swa_specs.keys()),
-        kv_cache_spec=UniformTypeKVCacheSpecs(
-            block_size=256, kv_cache_specs=swa_specs
-        ),
+        kv_cache_spec=UniformTypeKVCacheSpecs(block_size=256, kv_cache_specs=swa_specs),
     )
 
     return [mla_group, swa_group]
@@ -71,34 +69,22 @@ def _run(n_c4=3, n_c128=2, n_swa=5, mem=100 * 1024 * 1024):
     return _get_kv_cache_config_deepseek_v4(_mock_vllm_config(), groups, mem)
 
 
-class TestContiguousPacking:
-    def test_all_tensors_share_one_backing_size(self):
-        _, tensors = _run()
-        backing_sizes = set(t.backing_size for t in tensors)
-        assert len(backing_sizes) == 1
-        assert backing_sizes.pop() > 0
-
-    def test_offsets_are_monotonically_increasing(self):
-        _, tensors = _run()
-        offsets = [t.offset for t in tensors]
-        for i in range(1, len(offsets)):
-            assert offsets[i] > offsets[i - 1]
-
-    def test_offsets_are_non_overlapping(self):
-        _, tensors = _run()
-        for i in range(len(tensors) - 1):
-            end = tensors[i].offset + tensors[i].size
-            assert end <= tensors[i + 1].offset
-
-    def test_regions_fit_within_backing(self):
+class TestInterleavedPacking:
+    def test_all_tensors_have_block_stride(self):
         _, tensors = _run()
         for t in tensors:
-            assert t.offset + t.size <= t.backing_size
+            assert t.block_stride > 0
 
-    def test_regions_exactly_fill_backing(self):
+    def test_all_tensors_share_same_size(self):
         _, tensors = _run()
-        total = sum(t.size for t in tensors)
-        assert total == tensors[0].backing_size
+        sizes = set(t.size for t in tensors)
+        assert len(sizes) == 1
+        assert sizes.pop() > 0
+
+    def test_offsets_within_one_block(self):
+        _, tensors = _run()
+        for t in tensors:
+            assert t.offset < t.block_stride
 
     def test_all_layers_accounted_for(self):
         n_c4, n_c128, n_swa = 5, 4, 7
@@ -109,39 +95,35 @@ class TestContiguousPacking:
         expected = n_c4 * 2 + n_c128 + n_swa
         assert len(all_names) == expected
 
-    def test_swa_and_c4_mla_share_tensor(self):
+    def test_mla_and_swa_in_separate_tensors(self):
         _, tensors = _run(n_c4=3, n_swa=3)
         for t in tensors:
             names = t.shared_by
-            has_mla = any("c4_mla" in n for n in names)
+            has_mla = any("c4_mla" in n or "c4_idx" in n or "c128" in n for n in names)
             has_swa = any("swa" in n for n in names)
-            if has_mla or has_swa:
-                assert has_mla and has_swa, (
-                    "SWA and C4 MLA with same page_size should share a tensor"
-                )
+            assert not (has_mla and has_swa), (
+                "MLA and SWA layers must be in separate tensors"
+            )
 
-
-class TestContiguousSliceCorrectness:
-    def test_slices_are_contiguous_and_independent(self):
-        _, tensors = _run()
-        backing_size = tensors[0].backing_size
-        backing = torch.zeros(backing_size, dtype=torch.uint8)
-
+    def test_strided_views_are_independent(self):
+        num_blocks, tensors = _run()
+        backing = torch.zeros(tensors[0].size, dtype=torch.uint8)
         views = []
         for t in tensors:
-            v = backing[t.offset : t.offset + t.size]
-            assert v.is_contiguous()
+            page_size = t.block_stride // 1
+            v = torch.as_strided(
+                backing,
+                size=(num_blocks, page_size),
+                stride=(t.block_stride, 1),
+                storage_offset=t.offset,
+            )
             views.append(v)
 
         for i, v in enumerate(views):
             v.fill_(i + 1)
-            for j, other in enumerate(views):
-                if j <= i:
-                    continue
-                assert other.sum() == 0, f"View {i} corrupted view {j}"
 
         for i, v in enumerate(views):
-            assert v.sum() == (i + 1) * v.numel()
+            assert (v == i + 1).all(), f"View {i} was corrupted"
 
 
 if __name__ == "__main__":
