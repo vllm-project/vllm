@@ -34,6 +34,7 @@ from vllm.v1.attention.backends.mla.sparse_mla_env import (
 )
 from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
     accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead,
+    accumulate_indexed_d512_chunked_sparse_mla_attention,
     accumulate_indexed_d512_split_sparse_mla_attention,
     accumulate_indexed_sparse_mla_attention_chunk,
     build_combined_sparse_mla_decode_valid_mask,
@@ -74,6 +75,27 @@ def _use_indexed_d512_split_prefill(
         and head_dim == 512
         and num_prefills == 1
         and 512 < combined_topk <= _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
+        and max_prefill_seq_len >= _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS
+    )
+
+
+def _use_indexed_d512_chunked_prefill(
+    *,
+    compress_ratio: int,
+    head_dim: int,
+    num_prefills: int,
+    combined_topk: int,
+    max_prefill_seq_len: int,
+    swa_only: bool,
+) -> bool:
+    return (
+        envs.VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL
+        and envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL
+        and not swa_only
+        and compress_ratio in (4, 128)
+        and head_dim == 512
+        and num_prefills == 1
+        and combined_topk > _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
         and max_prefill_seq_len >= _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS
     )
 
@@ -202,6 +224,29 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             ):
                 specs.append(
                     ((query_chunk_size, num_heads, combined_topk), torch.float32)
+                )
+            elif _use_indexed_d512_chunked_prefill(
+                compress_ratio=compress_ratio,
+                head_dim=head_dim,
+                num_prefills=1,
+                combined_topk=combined_topk,
+                max_prefill_seq_len=max_model_len,
+                swa_only=False,
+            ):
+                chunked_score_width = min(
+                    combined_topk,
+                    _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
+                )
+                specs.extend(
+                    (
+                        (
+                            (query_chunk_size, num_heads, chunked_score_width),
+                            torch.float32,
+                        ),
+                        ((query_chunk_size, num_heads), torch.float32),
+                        ((query_chunk_size, num_heads), torch.float32),
+                        ((query_chunk_size, num_heads, head_dim), torch.float32),
+                    )
                 )
         return tuple(specs)
 
@@ -573,6 +618,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         else:
             max_score_buffer, denom_buffer, output_buffer = state_buffers[:3]
         indexed_d512_scores = None
+        indexed_d512_chunked_buffers = None
         if (
             state_buffers is not None
             and envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL
@@ -585,6 +631,17 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and len(state_buffers) == 4
         ):
             indexed_d512_scores = state_buffers[3]
+        elif (
+            state_buffers is not None
+            and envs.VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL
+            and envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL
+            and layer.compress_ratio in (4, 128)
+            and q.shape[-1] == 512
+            and kv.shape[0] == 1
+            and combined_indices.shape[-1] > _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
+            and len(state_buffers) == 7
+        ):
+            indexed_d512_chunked_buffers = state_buffers[3:7]
 
         for token_start in range(0, q.shape[0], query_chunk_size):
             token_end = min(token_start + query_chunk_size, q.shape[0])
@@ -595,7 +652,17 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             max_score = max_score_buffer[:num_tokens]
             denom = denom_buffer[:num_tokens]
             subset_acc = output_buffer[:num_tokens]
-            if indexed_d512_scores is not None:
+            can_use_indexed_d512_scores = (
+                indexed_d512_scores is not None
+                and indexed_d512_scores.shape[0] >= num_tokens
+                and indexed_d512_scores.shape[2] >= combined_indices.shape[-1]
+            )
+            can_use_indexed_d512_chunked = (
+                indexed_d512_chunked_buffers is not None
+                and indexed_d512_chunked_buffers[0].shape[0] >= num_tokens
+            )
+            if can_use_indexed_d512_scores:
+                assert indexed_d512_scores is not None
                 accumulate_indexed_d512_split_sparse_mla_attention(
                     q=q_chunk,
                     kv_flat=kv_flat,
@@ -608,6 +675,28 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     scores=indexed_d512_scores[
                         :num_tokens, :, : combined_indices.shape[-1]
                     ],
+                )
+            elif can_use_indexed_d512_chunked:
+                assert indexed_d512_chunked_buffers is not None
+                (
+                    indexed_d512_scores,
+                    chunk_max_score,
+                    chunk_denom,
+                    chunk_acc,
+                ) = indexed_d512_chunked_buffers
+                accumulate_indexed_d512_chunked_sparse_mla_attention(
+                    q=q_chunk,
+                    kv_flat=kv_flat,
+                    indices=indices_chunk_full,
+                    lens=lens_chunk,
+                    scale=layer.scale,
+                    max_score=max_score,
+                    denom=denom,
+                    acc=subset_acc,
+                    scores=indexed_d512_scores[:num_tokens],
+                    chunk_max_score=chunk_max_score[:num_tokens],
+                    chunk_denom=chunk_denom[:num_tokens],
+                    chunk_acc=chunk_acc[:num_tokens],
                 )
             else:
                 max_score.fill_(float("-inf"))
@@ -839,8 +928,13 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         workspace_manager = current_workspace_manager()
         triton_sparse_mla_enabled = is_triton_sparse_mla_enabled(q.device)
+        indexed_d512_split_prefill = False
+        indexed_d512_chunked_prefill = False
         if triton_sparse_mla_enabled:
-            query_chunk_size = min(q.shape[0], triton_sparse_mla_query_chunk_size())
+            query_chunk_size = min(
+                max_query_chunk_tokens,
+                triton_sparse_mla_query_chunk_size(),
+            )
             indexed_d512_split_prefill = _use_indexed_d512_split_prefill(
                 compress_ratio=int(self.compress_ratio),
                 head_dim=int(self.head_dim),
@@ -849,12 +943,40 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 max_prefill_seq_len=int(seq_lens_cpu.max().item()),
                 swa_only=swa_only,
             )
+            if not indexed_d512_split_prefill:
+                indexed_d512_chunked_prefill = _use_indexed_d512_chunked_prefill(
+                    compress_ratio=int(self.compress_ratio),
+                    head_dim=int(self.head_dim),
+                    num_prefills=int(num_prefills),
+                    combined_topk=int(combined_topk),
+                    max_prefill_seq_len=int(seq_lens_cpu.max().item()),
+                    swa_only=swa_only,
+                )
             extra_specs: list[tuple[tuple[int, ...], torch.dtype]] = []
             if indexed_d512_split_prefill:
                 extra_specs.append(
                     (
                         (query_chunk_size, self.n_local_heads, combined_topk),
                         torch.float32,
+                    )
+                )
+            elif indexed_d512_chunked_prefill:
+                chunked_score_width = min(
+                    combined_topk,
+                    _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
+                )
+                extra_specs.extend(
+                    (
+                        (
+                            (query_chunk_size, self.n_local_heads, chunked_score_width),
+                            torch.float32,
+                        ),
+                        ((query_chunk_size, self.n_local_heads), torch.float32),
+                        ((query_chunk_size, self.n_local_heads), torch.float32),
+                        (
+                            (query_chunk_size, self.n_local_heads, q.shape[-1]),
+                            torch.float32,
+                        ),
                     )
                 )
             (
