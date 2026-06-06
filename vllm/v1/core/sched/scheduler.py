@@ -1150,7 +1150,9 @@ class Scheduler(SchedulerInterface):
             self._reanchor_sw_cache = sw
         return sw
 
-    def _reanchor_session(self, request: Request, reanchor_reqs: dict[str, int]) -> bool:
+    def _reanchor_session(
+        self, request: Request, reanchor_reqs: dict[str, int]
+    ) -> bool:
         """[EXPERIMENTAL] Re-anchor a streaming session's RoPE position clock down
         by D tokens so it never reaches max_model_len (unbounded duration).
 

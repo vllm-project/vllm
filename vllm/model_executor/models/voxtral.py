@@ -119,18 +119,17 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self) -> int:
-        # For sliding-window realtime models (Voxtral-Mini-Realtime lineage),
-        # audio is processed in streaming chunks bounded by the decoder's
-        # sliding window. The number of audio-derived tokens active in the
-        # model context is therefore bounded by `text_config.sliding_window`,
-        # not by `max_model_len` (which is the cumulative session lifetime,
-        # not the concurrent context size).
-        #
-        # Without this cap, `compute_mm_encoder_budget` returns a budget
-        # proportional to `max_model_len`, the encoder cache pre-allocates
-        # `max_num_seqs * max_model_len` worth of audio feature space, and the
-        # decoder KV cache is starved on 16 GB GPUs (boot crashes with
-        # "KV cache memory needed > available"). Refs vllm-project/vllm#38233.
+        # Cap the audio-token budget by the decoder's sliding window whenever the
+        # text config declares one. This fires for the Voxtral-Mini-Realtime
+        # lineage; the standard Voxtral variants ship `text_config.sliding_window
+        # = None` and are unaffected (they keep `max_model_len`). For a
+        # sliding-window decoder the audio-derived tokens active in context are
+        # bounded by the window, not by `max_model_len` (the cumulative session
+        # lifetime). Without this cap, `compute_mm_encoder_budget` scales with
+        # `max_model_len`, the encoder cache pre-allocates
+        # `max_num_seqs * max_model_len` of audio feature space, and the decoder
+        # KV cache is starved on 16 GB GPUs (boot crash: "KV cache memory needed
+        # > available"). Refs vllm-project/vllm#38233.
         max_model_len = self.ctx.model_config.max_model_len
         text_config = getattr(self.ctx.model_config.hf_config, "text_config", None)
         sliding_window = getattr(text_config, "sliding_window", None)
@@ -350,13 +349,13 @@ class VoxtralForConditionalGeneration(
         self.downsample_factor = self.config.audio_config.downsample_factor
 
         with self._mark_language_model(vllm_config):
-            # Voxtral's text_config inherits from a Mistral 7B-class model but
-            # does not itself declare `architectures`. Without an explicit
-            # override, init_vllm_registered_model falls back to the
-            # Transformers backend, which does not propagate `sliding_window`
-            # to the attention layers, so SlidingWindowSpec is never produced
-            # and the KV cache pool is sized for max_model_len. Force the
-            # Mistral dispatch. Refs vllm-project/vllm#38233.
+            # Pin the Mistral dispatch for the text backbone. Defensive: on the
+            # standard mistral load path `architectures` is already set and this
+            # is a no-op. It only matters for a config that reaches here with
+            # `architectures` unset and an unrecognized `model_type`, where
+            # init_vllm_registered_model would otherwise select the Transformers
+            # backend (which would not produce a SlidingWindowSpec, sizing the KV
+            # pool for max_model_len). Relates to vllm-project/vllm#38233.
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,

@@ -190,11 +190,10 @@ class Request:
         # request's RoPE position clock is periodically re-anchored (the live
         # sliding window is shifted down by a multiple of the block size) so a
         # session can run indefinitely without the absolute position counter
-        # ever reaching max_model_len. `reanchor_offset` accumulates the total
-        # number of tokens that have been folded away by re-anchoring, so an
-        # absolute/logical token index can be recovered as
-        # `reanchor_offset + <current clock value>`. See Scheduler's re-anchor
-        # path. Only set for realtime sliding-window models with
+        # ever reaching max_model_len. `reanchor_offset` is a diagnostic
+        # accumulator of the total number of tokens folded away by re-anchoring
+        # (used only in the re-anchor log line). See Scheduler's re-anchor path.
+        # Only set for realtime sliding-window models with
         # `--enable-realtime-unbounded`.
         self.reanchor_stream = False
         self.reanchor_offset = 0

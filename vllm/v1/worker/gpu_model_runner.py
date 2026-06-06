@@ -1180,15 +1180,21 @@ class GPUModelRunner(
                     "Re-anchor: request %s absent from persistent batch "
                     "(idx=%s, D=%s); skipping key re-rotation.", req_id, idx, D)
                 continue
-            # Regime tripwire: the row must already carry the rebased (small)
-            # clock, NOT the pre-rebase value near max_model_len. Logged so the
-            # n=1 fast-test can confirm full-re-add before trusting transcript.
+            # By this point the persistent-batch row must already carry the
+            # rebased (small) clock from full re-add, not the pre-rebase value
+            # near max_model_len; the clock is logged below for observability.
             clock = int(ib.num_computed_tokens_cpu[idx])
             for gid, group in enumerate(groups):
                 head_size = group.kv_cache_spec.head_size
-                is_neox = head_size == 128  # decoder NeoX(128) vs encoder GPT-J(64)
+                # The Voxtral decoder is NeoX-style with a 128-dim rotary and
+                # rope_theta=1e6 -- the only RoPE params the shipped realtime
+                # model uses. Assert so a variant with different params fails
+                # loudly here instead of silently mis-rotating cached keys.
+                assert head_size in (64, 128), (
+                    f"re-anchor: unexpected rotary head_size {head_size}")
+                is_neox = head_size == 128
                 d_grp = D if is_neox else pool * D
-                base = 1.0e6  # rope_theta for both Voxtral groups
+                base = 1.0e6  # Voxtral rope_theta
                 bt = ib.block_table.block_tables[gid]
                 n = int(bt.num_blocks_per_row[idx])
                 if n <= 0:
@@ -1198,19 +1204,11 @@ class GPUModelRunner(
                 # new tokens) are zeroed by _update_states and overwritten by the
                 # forward pass, so re-rotating them is a harmless no-op. R(-d_grp)
                 # is position-independent, so a uniform rotation of every key in
-                # the row is exactly right (incl. the block_pool_size-packed
-                # encoder, whose frames all shift by pool*D).
+                # the row is exactly right. (The non-NeoX branch is defensive: no
+                # shipped realtime model currently paged-caches RoPE-rotated
+                # encoder keys, so only the decoder group is exercised today.)
                 live = bt.block_table.np[idx, :n].copy()
                 live_t = torch.from_numpy(live).to(self.device, torch.long)
-                if not getattr(self, "_reanchor_dbg_done", False):
-                    logger.info(
-                        "Re-anchor dbg: req=%s D=%d clock=%d group=%d "
-                        "head=%d d_grp=%d n_blocks=%d kv_shape=%s",
-                        req_id, D, clock, gid, head_size, d_grp, n,
-                        tuple(fctx[group.layer_names[0]].kv_cache.shape)
-                        if not isinstance(
-                            fctx[group.layer_names[0]].kv_cache, (list, tuple))
-                        else "list")
                 for layer_name in group.layer_names:
                     kv = fctx[layer_name].kv_cache
                     if isinstance(kv, (list, tuple)):
@@ -1220,7 +1218,6 @@ class GPUModelRunner(
                     key = kv[live_t, 0]
                     kv[live_t, 0] = _apply_inverse_rotary(
                         key, d_grp, head_size, base, is_neox)
-            self._reanchor_dbg_done = True
             logger.info(
                 "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
                 req_id, D, clock)

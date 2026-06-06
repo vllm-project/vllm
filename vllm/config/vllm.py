@@ -1001,6 +1001,20 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
+        if self.scheduler_config.enable_realtime_unbounded and (
+            self.cache_config is not None
+        ):
+            # RoPE re-anchoring re-rotates cached keys in place, which is invalid
+            # under a quantized KV cache. Reject at startup rather than aborting
+            # the engine at the first re-anchor event (hours into a stream).
+            from vllm.utils.torch_utils import is_quantized_kv_cache
+
+            if is_quantized_kv_cache(self.cache_config.cache_dtype):
+                raise ValueError(
+                    "enable_realtime_unbounded requires a non-fp8 KV cache; "
+                    f"got cache_dtype={self.cache_config.cache_dtype!r}."
+                )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (

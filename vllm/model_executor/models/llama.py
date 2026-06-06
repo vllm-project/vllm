@@ -203,11 +203,13 @@ class LlamaAttention(nn.Module):
             if is_sliding:
                 sliding_window = config.sliding_window
         elif (cfg_sw := getattr(config, "sliding_window", None)) is not None:
-            # Uniform sliding window across all layers (Mistral 7B v0.1/v0.2,
-            # Voxtral-Mini-Realtime lineage). Without this branch, configs that
-            # declare `sliding_window` without an explicit `layer_types` list
-            # silently fall back to full attention — breaking KV cache sizing
-            # for streaming workloads. See vllm-project/vllm#38233.
+            # Defensive: honor a uniform sliding window for a config that reaches
+            # here without an explicit `layer_types` list. Redundant on shipped
+            # paths -- the mistral loader injects `layer_types`, and
+            # `Attention.__init__` already falls back to
+            # `cache_config.sliding_window` for non-interleaved configs -- so
+            # this only guards non-standard loaders. Relates to
+            # vllm-project/vllm#38233.
             sliding_window = cfg_sw
 
         attn_cls = (

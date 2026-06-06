@@ -245,7 +245,8 @@ class SchedulerOutput:
     # clock down by this step. The worker rebases the request's persistent-batch
     # row and re-rotates its live cached keys by the constant rotation R(-D) so
     # the session can run indefinitely without the position counter reaching
-    # max_model_len. See Scheduler._reanchor_session / GPUModelRunner._reanchor_requests.
+    # max_model_len. See Scheduler._reanchor_session /
+    # GPUModelRunner._reanchor_requests.
     reanchor_reqs: dict[str, int] | None = None
 
     @classmethod

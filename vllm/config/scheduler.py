@@ -76,10 +76,12 @@ class SchedulerConfig:
     per-stream KV cost stays constant (bounded by the sliding window). Requires
     a non-fp8 KV cache. Off by default."""
 
-    realtime_reanchor_margin_tokens: int = 4096
+    realtime_reanchor_margin_tokens: int = Field(default=4096, ge=1)
     """[EXPERIMENTAL] With `enable_realtime_unbounded`, re-anchor a streaming
     session's sliding window this many tokens before its position clock would
-    reach max_model_len. Must be larger than the model's sliding window."""
+    reach max_model_len. Must be smaller than
+    `(max_model_len - sliding_window)`; a value too close to max_model_len
+    leaves no room to re-anchor and silently disables the feature."""
 
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
