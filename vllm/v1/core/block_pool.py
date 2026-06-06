@@ -397,7 +397,10 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        evicted = self.cached_block_hash_to_block.pop(block_hash, block.block_id) is not None
+        evicted = (
+            self.cached_block_hash_to_block.pop(block_hash, block.block_id)
+            is not None
+        )
 
         # Reset the block hash regardless of whether it was found in the
         # cache. The block is being reused for new tokens, so its old hash
