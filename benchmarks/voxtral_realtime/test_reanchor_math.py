@@ -18,12 +18,14 @@ import torch
 
 
 def _inv_freq(rotary_dim: int, base: float) -> torch.Tensor:
-    return 1.0 / (base ** (
-        torch.arange(0, rotary_dim, 2, dtype=torch.float64) / rotary_dim))
+    return 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float64) / rotary_dim)
+    )
 
 
-def forward_rotary(x: torch.Tensor, pos: int, rotary_dim: int, base: float,
-                   is_neox: bool) -> torch.Tensor:
+def forward_rotary(
+    x: torch.Tensor, pos: int, rotary_dim: int, base: float, is_neox: bool
+) -> torch.Tensor:
     """Rotate x by +pos (vLLM convention)."""
     half = rotary_dim // 2
     ang = float(pos) * _inv_freq(rotary_dim, base)
@@ -39,8 +41,9 @@ def forward_rotary(x: torch.Tensor, pos: int, rotary_dim: int, base: float,
     return torch.cat([out, pas], dim=-1) if pas.numel() else out
 
 
-def apply_inverse_rotary(key: torch.Tensor, D: int, rotary_dim: int, base: float,
-                         is_neox: bool) -> torch.Tensor:
+def apply_inverse_rotary(
+    key: torch.Tensor, D: int, rotary_dim: int, base: float, is_neox: bool
+) -> torch.Tensor:
     """Rotate a key by R(-D): the production re-anchor op. cos(-Df)=cos(Df),
     sin(-Df)=-sin(Df)  ->  R(-D) = R(D)^T."""
     half = rotary_dim // 2
@@ -62,29 +65,36 @@ def main():
     cases = [("decoder NeoX", 128, 1e6, True), ("encoder GPT-J", 64, 1e6, False)]
     ok = True
     for name, rdim, base, neox in cases:
-        for (p, D) in [(5000, 4096), (9000, 7000), (3000, 2048), (120000, 100000)]:
+        for p, D in [(5000, 4096), (9000, 7000), (3000, 2048), (120000, 100000)]:
             k = torch.randn(4, rdim, dtype=torch.float32)
             # (1) re-anchor identity: R(-D)·R(p)·k == R(p-D)·k
-            cached = forward_rotary(k, p, rdim, base, neox)         # key in KV cache
+            cached = forward_rotary(k, p, rdim, base, neox)  # key in KV cache
             reanchored = apply_inverse_rotary(cached, D, rdim, base, neox)
             target = forward_rotary(k, p - D, rdim, base, neox)
             err1 = (reanchored - target).abs().max().item()
             # (2) relative-score preservation: q@i vs k@j  ==  q@(i-D) vs (reanchored)
-            i, j = p + 60, p                                        # j within window below i
+            i, j = p + 60, p  # j within window below i
             q = torch.randn(4, rdim, dtype=torch.float32)
-            s_orig = (forward_rotary(q, i, rdim, base, neox)
-                      * forward_rotary(k, j, rdim, base, neox)).sum(-1)
+            s_orig = (
+                forward_rotary(q, i, rdim, base, neox)
+                * forward_rotary(k, j, rdim, base, neox)
+            ).sum(-1)
             kj_re = apply_inverse_rotary(
-                forward_rotary(k, j, rdim, base, neox), D, rdim, base, neox)
+                forward_rotary(k, j, rdim, base, neox), D, rdim, base, neox
+            )
             s_re = (forward_rotary(q, i - D, rdim, base, neox) * kj_re).sum(-1)
             err2 = (s_orig - s_re).abs().max().item()
             status = "OK" if (err1 < 1e-3 and err2 < 1e-3) else "FAIL"
             if status == "FAIL":
                 ok = False
-            print(f"  [{status}] {name:14s} p={p:6d} D={D:6d}  "
-                  f"reanchor-identity err={err1:.1e}  rel-score err={err2:.1e}")
-    print("\nRESULT:", "PASS — R(-D) re-rotation preserves in-window scores"
-          if ok else "FAIL")
+            print(
+                f"  [{status}] {name:14s} p={p:6d} D={D:6d}  "
+                f"reanchor-identity err={err1:.1e}  rel-score err={err2:.1e}"
+            )
+    print(
+        "\nRESULT:",
+        "PASS — R(-D) re-rotation preserves in-window scores" if ok else "FAIL",
+    )
     return 0 if ok else 1
 
 
