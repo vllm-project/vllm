@@ -186,6 +186,7 @@ class Fp8Config(QuantizationConfig):
                 from vllm.model_executor.layers.quantization.online.fp8 import (
                     Fp8PerTensorOnlineLinearMethod,
                 )
+
                 online_method = Fp8PerTensorOnlineLinearMethod()
                 online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return online_method
@@ -212,6 +213,7 @@ class Fp8Config(QuantizationConfig):
                 from vllm.model_executor.layers.quantization.online.fp8 import (
                     Fp8PerTensorOnlineMoEMethod,
                 )
+
                 return Fp8PerTensorOnlineMoEMethod(layer=layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
