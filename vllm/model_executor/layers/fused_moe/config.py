@@ -1268,6 +1268,8 @@ class FusedMoEConfig:
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
 
+    max_capture_size: int = 0
+
     def __post_init__(self):
         if self.dp_size > 1:
             logger.debug_once(
