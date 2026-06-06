@@ -2258,13 +2258,7 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        # No Concurrent Partial Prefills so far.
-        if (
-            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
-            or self.max_long_partial_prefills
-            != SchedulerConfig.max_long_partial_prefills
-        ):
-            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
+        # Concurrent Partial Prefills are now supported in V1.
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(

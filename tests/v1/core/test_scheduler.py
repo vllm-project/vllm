@@ -155,6 +155,7 @@ def test_schedule_partial_requests():
     scheduler = create_scheduler(
         model="llava-hf/llava-1.5-7b-hf",
         max_num_batched_tokens=1024,
+
     )
     mm_positions = [[PlaceholderRange(offset=100, length=600)] for _ in range(3)]
     requests = create_requests(
@@ -269,6 +270,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         max_num_batched_tokens=1024,
         long_prefill_token_threshold=400,
         enable_prefix_caching=enable_prefix_caching,
+
     )
     requests = create_requests(
         num_requests=3,
