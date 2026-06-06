@@ -235,6 +235,39 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+def _apply_inverse_rotary(
+    key: torch.Tensor, d: int, rotary_dim: int, base: float, is_neox: bool
+) -> torch.Tensor:
+    """Re-rotate an already position-rotated key by the constant R(-d).
+
+    Used by RoPE re-anchoring (unbounded realtime). cos(-d.f)=cos(d.f),
+    sin(-d.f)=-sin(d.f) -> R(-d)=R(d)^T. Validated to ~1e-6 against the vLLM
+    rotary convention for both NeoX and GPT-J styles in
+    benchmarks/voxtral_realtime/test_reanchor_math.py. ``key`` is
+    [..., head_size] with the leading ``rotary_dim`` dims rotary.
+    """
+    half = rotary_dim // 2
+    inv_freq = 1.0 / (
+        base
+        ** (
+            torch.arange(0, rotary_dim, 2, dtype=torch.float64, device=key.device)
+            / rotary_dim
+        )
+    )
+    angle = float(d) * inv_freq
+    cos = torch.cos(angle).to(key.dtype)
+    sin = torch.sin(angle).to(key.dtype)
+    rot, passthru = key[..., :rotary_dim], key[..., rotary_dim:]
+    if is_neox:
+        x1, x2 = rot[..., :half], rot[..., half:]
+        out = torch.cat([x1 * cos + x2 * sin, -x1 * sin + x2 * cos], dim=-1)
+    else:  # GPT-J interleaved
+        x1, x2 = rot[..., 0::2], rot[..., 1::2]
+        o1, o2 = x1 * cos + x2 * sin, -x1 * sin + x2 * cos
+        out = torch.stack([o1, o2], dim=-1).flatten(-2)
+    return torch.cat([out, passthru], dim=-1) if passthru.numel() else out
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -1104,6 +1137,93 @@ class GPUModelRunner(
         """Zero the KV cache memory for the given block IDs."""
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
+
+    def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
+        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded realtime.
+
+        The scheduler has already rebased each request's position clock down by
+        ``D`` (dropping the oldest D tokens, all older than the sliding window)
+        AND the persistent-batch row has been fully rewritten from that rebased
+        state by ``_update_states`` -- a resumed Voxtral realtime session is
+        re-scheduled with WAITING status, so it is re-added as a fresh row whose
+        token ids, counters and block table already reflect the rebase. The one
+        thing the scheduler cannot do is the only thing left here: re-rotate the
+        live cached keys by the constant ``R(-D)`` in every KV group so each
+        key's effective RoPE position drops by D, while every in-window relative
+        attention score is preserved exactly (benchmarks/voxtral_realtime/
+        test_reanchor_math.py proves the identity for both groups).
+
+        Runs at the between-steps barrier (after _update_states, before the
+        forward pass writes this step's new keys). Invalid under fp8 KV.
+        """
+        if not reanchor_reqs:
+            return
+        assert not is_quantized_kv_cache(self.cache_config.cache_dtype), (
+            "realtime re-anchoring requires a non-fp8 KV cache"
+        )
+        ib = self.input_batch
+        fctx = self.compilation_config.static_forward_context
+        groups = self.kv_cache_config.kv_cache_groups
+        # The audio encoder's RoPE positions run at block_pool_size x the decoder
+        # (whisper positions are expanded by this factor), so its constant shift
+        # is pool * D; the decoder (text) group shifts by D.
+        audio_cfg = getattr(self.model_config.hf_config, "audio_config", None)
+        pool = getattr(audio_cfg, "block_pool_size", None) or getattr(
+            self.model_config.hf_config, "downsample_factor", 1) or 1
+        for req_id, D in reanchor_reqs.items():
+            idx = ib.req_id_to_index.get(req_id)
+            if idx is None or D <= 0:
+                # Full re-add regime: the rebased request MUST be in the batch
+                # (it was scheduled this step). If not, the keys would silently
+                # desync from the rebased clock -- surface it loudly.
+                logger.warning(
+                    "Re-anchor: request %s absent from persistent batch "
+                    "(idx=%s, D=%s); skipping key re-rotation.", req_id, idx, D)
+                continue
+            # Regime tripwire: the row must already carry the rebased (small)
+            # clock, NOT the pre-rebase value near max_model_len. Logged so the
+            # n=1 fast-test can confirm full-re-add before trusting transcript.
+            clock = int(ib.num_computed_tokens_cpu[idx])
+            for gid, group in enumerate(groups):
+                head_size = group.kv_cache_spec.head_size
+                is_neox = head_size == 128  # decoder NeoX(128) vs encoder GPT-J(64)
+                d_grp = D if is_neox else pool * D
+                base = 1.0e6  # rope_theta for both Voxtral groups
+                bt = ib.block_table.block_tables[gid]
+                n = int(bt.num_blocks_per_row[idx])
+                if n <= 0:
+                    continue
+                # Whole rebased row: leading evicted/null blocks were dropped
+                # scheduler-side; trailing freshly-allocated blocks (this step's
+                # new tokens) are zeroed by _update_states and overwritten by the
+                # forward pass, so re-rotating them is a harmless no-op. R(-d_grp)
+                # is position-independent, so a uniform rotation of every key in
+                # the row is exactly right (incl. the block_pool_size-packed
+                # encoder, whose frames all shift by pool*D).
+                live = bt.block_table.np[idx, :n].copy()
+                live_t = torch.from_numpy(live).to(self.device, torch.long)
+                if not getattr(self, "_reanchor_dbg_done", False):
+                    logger.info(
+                        "Re-anchor dbg: req=%s D=%d clock=%d group=%d "
+                        "head=%d d_grp=%d n_blocks=%d kv_shape=%s",
+                        req_id, D, clock, gid, head_size, d_grp, n,
+                        tuple(fctx[group.layer_names[0]].kv_cache.shape)
+                        if not isinstance(
+                            fctx[group.layer_names[0]].kv_cache, (list, tuple))
+                        else "list")
+                for layer_name in group.layer_names:
+                    kv = fctx[layer_name].kv_cache
+                    if isinstance(kv, (list, tuple)):
+                        kv = kv[0]
+                    # (num_blocks, 2, block, num_kv_heads, head_size);
+                    # index 0 = key (post-RoPE), 1 = value (untouched).
+                    key = kv[live_t, 0]
+                    kv[live_t, 0] = _apply_inverse_rotary(
+                        key, d_grp, head_size, base, is_neox)
+            self._reanchor_dbg_done = True
+            logger.info(
+                "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
+                req_id, D, clock)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -4040,6 +4160,11 @@ class GPUModelRunner(
         ):
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
+
+            # [EXPERIMENTAL] Unbounded realtime: re-anchor requests at this
+            # between-steps barrier (no in-flight attention) before _prepare_inputs.
+            if scheduler_output.reanchor_reqs:
+                self._reanchor_requests(scheduler_output.reanchor_reqs)
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(

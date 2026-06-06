@@ -67,6 +67,20 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    enable_realtime_unbounded: bool = False
+    """[EXPERIMENTAL] Enable unbounded-duration realtime streaming for
+    sliding-window realtime models (e.g. Voxtral realtime). When True, a
+    streaming session's RoPE position clock is periodically re-anchored (the
+    live sliding window is shifted down) so the session can run indefinitely
+    without the absolute position counter ever reaching max_model_len. The
+    per-stream KV cost stays constant (bounded by the sliding window). Requires
+    a non-fp8 KV cache. Off by default."""
+
+    realtime_reanchor_margin_tokens: int = 4096
+    """[EXPERIMENTAL] With `enable_realtime_unbounded`, re-anchor a streaming
+    session's sliding window this many tokens before its position clock would
+    reach max_model_len. Must be larger than the model's sliding window."""
+
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""

@@ -354,6 +354,8 @@ class Scheduler(SchedulerInterface):
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+        # [EXPERIMENTAL] unbounded realtime: req_id -> D to re-anchor this step.
+        reanchor_reqs: dict[str, int] = {}
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -408,6 +410,12 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+
+            # NOTE: realtime sessions advance their position clock through the
+            # WAITING loop (each audio chunk resumes the session with WAITING
+            # status), so the unbounded-realtime re-anchor trigger lives there,
+            # not here. The re-anchor margin keeps the running-loop decode clear
+            # of max_model_len between chunks.
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -682,6 +690,21 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    # [EXPERIMENTAL] Unbounded realtime: before the position clock
+                    # would reach max_model_len, re-anchor it down instead of
+                    # length-capping, then schedule this chunk's new tokens at the
+                    # rebased positions (FUSED -- the session is re-added this step
+                    # and the worker re-rotates its live keys by R(-D)).
+                    # num_new_tokens is invariant under re-anchor: the clock and
+                    # the accumulated token count both drop by D.
+                    if (
+                        request.reanchor_stream
+                        and num_computed_tokens + num_new_tokens
+                        >= self.max_model_len
+                        - self.scheduler_config.realtime_reanchor_margin_tokens
+                        and self._reanchor_session(request, reanchor_reqs)
+                    ):
+                        num_computed_tokens = request.num_computed_tokens
                     # Clamp to max_model_len. Mirrors the RUNNING-path guard
                     # above, but ONLY for streaming/resumable sessions whose
                     # accumulated token count can grow past max_model_len across
@@ -973,6 +996,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            reanchor_reqs=reanchor_reqs or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1109,6 +1133,124 @@ class Scheduler(SchedulerInterface):
 
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
+
+    @property
+    def _reanchor_sliding_window(self) -> int | None:
+        """The decoder (largest) sliding window across KV groups, or None if the
+        model is not a pure sliding-window model. Cached after first lookup."""
+        sw = getattr(self, "_reanchor_sw_cache", -1)
+        if sw == -1:
+            sw = None
+            for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+                mgr_sw = getattr(mgr, "sliding_window", None)
+                if mgr_sw is None:
+                    sw = None  # a non-sliding (full-attention) group is present
+                    break
+                sw = mgr_sw if sw is None else max(sw, mgr_sw)
+            self._reanchor_sw_cache = sw
+        return sw
+
+    def _reanchor_session(self, request: Request, reanchor_reqs: dict[str, int]) -> bool:
+        """[EXPERIMENTAL] Re-anchor a streaming session's RoPE position clock down
+        by D tokens so it never reaches max_model_len (unbounded duration).
+
+        Drops the oldest D tokens (all older than the sliding window, hence already
+        evicted to null blocks), rebases the request's token/position bookkeeping
+        and the per-group block lists, and records ``req_id -> D`` so the worker
+        re-rotates the live cached keys by R(-D). Called inline while scheduling
+        the session's next chunk (FUSED): the request keeps this step's new tokens
+        and is re-added to the persistent batch with the rebased clock, so the
+        worker only has to re-rotate keys.
+
+        Returns True if a re-anchor was performed. Only for sliding-window models
+        with prefix caching disabled (so no block hashes to rebase).
+        """
+        sw = self._reanchor_sliding_window
+        if sw is None or self.cache_config.enable_prefix_caching:
+            return False
+        bs = self.block_size
+        # Drop everything older than the (largest) window, block-aligned.
+        d = ((request.num_computed_tokens - sw) // bs) * bs
+        if d <= 0:
+            return False
+        shift_blocks = d // bs
+        # Safety tripwire: the leading shift_blocks of every group must already
+        # be null (evicted past the window by remove_skipped_blocks, run from
+        # allocate_slots every prior step). If any is not, deleting it would
+        # corrupt block accounting, so fail safe (no re-anchor, no mutation).
+        managers = self.kv_cache_manager.coordinator.single_type_managers
+        for mgr in managers:
+            blocks = mgr.req_to_blocks.get(request.request_id)
+            if not blocks:
+                continue
+            null_block = getattr(mgr, "_null_block", None)
+            if null_block is None:
+                continue
+            for i in range(min(shift_blocks, len(blocks))):
+                if blocks[i] is not null_block:
+                    logger.warning(
+                        "Re-anchor aborted for %s: leading block %d not null "
+                        "in a KV group (window=%d, clock=%d).",
+                        request.request_id, i, sw, request.num_computed_tokens)
+                    return False
+        # (1) token / position bookkeeping
+        request.num_computed_tokens -= d
+        del request._all_token_ids[: d]
+        if request.prompt_token_ids is not None and len(request.prompt_token_ids) >= d:
+            del request.prompt_token_ids[: d]
+            request.num_prompt_tokens -= d
+        # (2) multimodal features: drop the dead leading features (those fully
+        # before the new origin -> beyond the window, audio long since
+        # transcribed and evicted) and shift the rest down by d. Dropping is
+        # required for unbounded duration: each audio chunk appends a feature
+        # whose ``data`` payload is non-trivial, so keeping them all leaks host
+        # RAM without bound. Features are referenced by LIST INDEX (input_id) by
+        # the encoder cache (request_cached_ids) and the per-step scheduler
+        # (get_mm_features_in_window binary-searches the monotonic offsets), so
+        # we release any still-cached dead input and reindex the survivors.
+        n_drop = 0
+        if request.mm_features:
+            for mm_feature in request.mm_features:
+                pos = mm_feature.mm_position
+                if pos.offset + pos.length <= d:
+                    n_drop += 1
+                else:
+                    break
+            if n_drop:
+                ecm = self.encoder_cache_manager
+                for i in list(ecm.get_cached_input_ids(request)):
+                    if i < n_drop:
+                        ecm.free_encoder_input(request, i)
+                rid = request.request_id
+                if rid in ecm.request_cached_ids:
+                    ecm.request_cached_ids[rid] = {
+                        i - n_drop for i in ecm.request_cached_ids[rid]
+                    }
+                del request.mm_features[:n_drop]
+            for mm_feature in request.mm_features:
+                pos = mm_feature.mm_position
+                mm_feature.mm_position = replace(pos, offset=pos.offset - d)
+        # (3) per-group block lists: drop the leading shift_blocks (already-null /
+        # evicted blocks). The same count applies to every group (encoder blocks
+        # pool the decoder blocks 1:1 in count).
+        for mgr in self.kv_cache_manager.coordinator.single_type_managers:
+            blocks = mgr.req_to_blocks.get(request.request_id)
+            if blocks:
+                del blocks[: min(shift_blocks, len(blocks))]
+        reanchor_reqs[request.request_id] = d
+        request.reanchor_offset += d
+        logger.info(
+            "Re-anchored realtime session %s by D=%d (clock now %d, total folded "
+            "%d; mm_features=%d dropped=%d all_tokens=%d).",
+            request.request_id,
+            d,
+            request.num_computed_tokens,
+            request.reanchor_offset,
+            len(request.mm_features) if request.mm_features else 0,
+            n_drop,
+            len(request._all_token_ids),
+        )
+        return True
 
     def _make_cached_request_data(
         self,
@@ -1718,7 +1860,7 @@ class Scheduler(SchedulerInterface):
             # max_model_len. Without this guard a fatal assertion fires in
             # gpu_model_runner._bookkeeping_sync once the streaming input pushes
             # the total past the limit (continuous Voxtral realtime sessions).
-            if request.num_tokens >= self.max_model_len:
+            if request.num_tokens >= self.max_model_len and not request.reanchor_stream:
                 logger.warning(
                     "Streaming session %s reached max_model_len (%d >= %d) "
                     "after session update. Finishing request gracefully.",
@@ -1856,7 +1998,10 @@ class Scheduler(SchedulerInterface):
                 # continuous audio streaming accumulating encoder tokens past
                 # the limit), finish gracefully here instead of letting it
                 # crash later in the model runner.
-                if existing.num_tokens >= self.max_model_len:
+                if (
+                    existing.num_tokens >= self.max_model_len
+                    and not existing.reanchor_stream
+                ):
                     logger.warning(
                         "Streaming session %s reached max_model_len "
                         "(%d >= %d) after session update. Finishing request "
@@ -1875,6 +2020,11 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+                # [EXPERIMENTAL] mark resumable realtime sessions for unbounded
+                # re-anchoring (only effective for sliding-window models with
+                # prefix caching off; gated in _reanchor_session).
+                if self.scheduler_config.enable_realtime_unbounded:
+                    request.reanchor_stream = True
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.connector is not None:
