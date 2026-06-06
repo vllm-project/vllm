@@ -50,6 +50,19 @@ fn factory_resolves_deepseek_v4_to_qwen3_alias() {
 }
 
 #[test]
+fn factory_resolves_granite_models_to_granite_parser() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-3.1-8b-instruct"),
+        Some(names::GRANITE)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
+        Some(names::GRANITE)
+    );
+}
+
+#[test]
 fn factory_rejects_unknown_parser_names() {
     let tokenizer = Arc::new(FakeTokenizer);
     let factory = ReasoningParserFactory::new();
