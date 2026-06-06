@@ -151,6 +151,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         ),
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Glm4vForConditionalGeneration",
+            ),
+        },
     ),
 }
 
