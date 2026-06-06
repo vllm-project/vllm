@@ -1417,10 +1417,12 @@ class SpecDecodeBaseProposer:
                             "Shared target model lm_head with MTP shared_head.head."
                         )
 
-        if hasattr(target_language_model.model, "topk_indices_buffer"):
-            if hasattr(self.model.model, "topk_indices_buffer"):
-                del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = (
+        if (
+            hasattr(target_language_model.model, "topk_indices_buffer")
+            and hasattr(self.model.model, "topk_indices_buffer")
+            and self.model.model.topk_indices_buffer is not None
+        ):
+            self.model.model.topk_indices_buffer.set_(
                 target_language_model.model.topk_indices_buffer
             )
             logger.info(
