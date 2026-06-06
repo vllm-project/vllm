@@ -563,11 +563,10 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
-def test_resolve_need_send_accounts_for_remote_pp_fanout():
-    """Producer-side completion should wait for every consumer PP pull."""
+def test_resolve_need_send_accounts_for_remote_tp_fanout():
+    """Producer-side completion waits for every paired consumer TP pull."""
 
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.pp_size = 1
     worker.async_zmq_ctx = MagicMock()
     worker.is_kv_consumer = True
     worker.is_kv_producer = True
@@ -577,21 +576,10 @@ def test_resolve_need_send_accounts_for_remote_pp_fanout():
         local_block_ids=[[1]],
         ready=asyncio.Event(),
     )
-    xfer_meta = MooncakeXferMetadata(
-        remote_hostname="consumer-host",
-        remote_port=54321,
-        remote_tp_size=2,
-        remote_tp_rank=0,
-        req_blocks={"d-req-1": ("xfer-req-1", [[1]])},
-        kv_caches_base_addr=[0x2000],
-        block_lens=[4096],
-        remote_pp_size=4,
-        remote_pp_rank=0,
-    )
 
-    worker.resolve_need_send(send_meta, remote_tp_ranks=[0, 1], meta=xfer_meta)
+    worker.resolve_need_send(send_meta, remote_tp_ranks=[0, 1])
 
-    assert send_meta.need_send == 8
+    assert send_meta.need_send == 2
 
 
 @pytest.mark.asyncio

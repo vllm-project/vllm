@@ -368,10 +368,6 @@ class MooncakeXferMetadata(
     block_lens: list[int]
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
-    start_layer: int = 0
-    end_layer: int = 0
-    remote_pp_size: int = 1
-    remote_pp_rank: int = 0
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -1227,7 +1223,7 @@ class MooncakeConnectorWorker:
                     # Mark it sending to avoid expiration.
                     send_meta.sending += 1
                     if not send_meta.need_send:
-                        self.resolve_need_send(send_meta, remote_tp_ranks, meta)
+                        self.resolve_need_send(send_meta, remote_tp_ranks)
                     ready_reqs.append((d_req_id, send_meta))
                 else:
                     # Otherwise (expired, very unlikely), just forget it.
@@ -1303,20 +1299,15 @@ class MooncakeConnectorWorker:
         self,
         send_meta: SendBlockMeta,
         remote_tp_ranks: list[int],
-        meta: MooncakeXferMetadata,
     ):
         # Prepare for heterogeneous TP (one P pairs to multiple D)
-        remote_pp_fanout = (
-            meta.remote_pp_size if self.pp_size != meta.remote_pp_size else 1
-        )
-        send_meta.need_send = len(remote_tp_ranks) * remote_pp_fanout
+        send_meta.need_send = len(remote_tp_ranks)
         logger.debug(
-            "Mooncake request %s will be served by %d consumer workers: "
-            "TP ranks=%s, PP fanout=%d",
+            "Mooncake request %s will be served by %d consumer TP workers: "
+            "TP ranks=%s",
             send_meta.transfer_id,
             send_meta.need_send,
             remote_tp_ranks,
-            remote_pp_fanout,
         )
 
     async def _build_transfer_params(
@@ -1703,10 +1694,6 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_layer,
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
-            start_layer=self.start_layer,
-            end_layer=self.end_layer,
-            remote_pp_size=self.pp_size,
-            remote_pp_rank=self.pp_rank,
         )
 
         encoded_data = self._encoder.encode(metadata)
