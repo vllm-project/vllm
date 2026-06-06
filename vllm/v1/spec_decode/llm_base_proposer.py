@@ -114,6 +114,10 @@ class SpecDecodeBaseProposer:
             self.speculative_config.use_local_argmax_reduction
         )
 
+        self.use_heterogeneous_vocab: bool = (
+            self.speculative_config.use_heterogeneous_vocab
+        )
+
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens, dtype=np.int32)
@@ -402,6 +406,11 @@ class SpecDecodeBaseProposer:
         """Greedy-sample draft tokens from hidden states."""
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
+        if self.use_heterogeneous_vocab:
+            logits = self.model.compute_logits(hidden_states)
+            logits = self.vocab_mapping.constrain_draft_logits(logits)
+            draft_token_ids = logits.argmax(dim=-1)
+            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)       
         return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
     def _sample_from_logits(
@@ -575,7 +584,11 @@ class SpecDecodeBaseProposer:
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
-            input_ids = self._prepare_draft_input_ids(draft_token_ids_list[-1].int())
+            input_ids = draft_token_ids_list[-1].int()
+
+            if self.use_heterogeneous_vocab:
+                # Map target token IDs to draft vocab space (TLI algorithm)
+                input_ids = self.vocab_mapping.map_target_to_draft_ids(input_ids)
 
             if not self.constant_draft_positions:
                 positions = self._update_positions_dependent_metadata(
@@ -709,6 +722,14 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
+        # Map target token IDs to draft vocab space (TLI algorithm)
+        if self.use_heterogeneous_vocab:
+            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                target_token_ids
+            )
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
+                next_token_ids
+            )
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
@@ -879,7 +900,7 @@ class SpecDecodeBaseProposer:
         return per_group_attn_metadata, per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
-        return self.method not in ("mtp", "draft_model", "universal_draft", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(
         self,

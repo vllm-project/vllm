@@ -16,15 +16,16 @@ def _detect_space_prefix(tokenizer) -> tuple[str, ...]:
     pairs (e.g. BPE draft + SentencePiece target).
     """
     try:
-        space_ids = tokenizer.encode(" ", add_special_tokens=False)
+        space_ids = tokenizer.encode(" a", add_special_tokens=False)
         if space_ids:
             tok_str = tokenizer.convert_ids_to_tokens(space_ids[0])
             if (
                 isinstance(tok_str, str)
                 and len(tok_str) > 1
-                and tok_str[0] not in (" ", "\t")
+                and tok_str.endswith("a")
+                and tok_str[0] not in (" ", "	")
             ):
-                return (tok_str[0],)
+                return (tok_str[:-1],)
     except Exception:
         pass
     # Fallback: cover both BPE (Ġ U+0120) and SentencePiece (▁ U+2581)

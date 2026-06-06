@@ -65,7 +65,6 @@ SpeculativeMethod = Literal[
     "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
-    "universal_draft",
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
@@ -136,6 +135,12 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+
+    use_heterogeneous_vocab: bool = False
+    """Allow draft and target models to use different vocabularies.
+    When enabled, builds a token-level intersection at init and constrains
+    draft logits to shared tokens only (TLI algorithm). Requires
+    method='draft_model'."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -677,7 +682,7 @@ class SpeculativeConfig:
                     runner="draft",
                     tokenizer=(
                         self.model
-                        if self.method == "universal_draft"
+                        if self.use_heterogeneous_vocab
                         else self.target_model_config.tokenizer
                     ),
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
@@ -729,19 +734,7 @@ class SpeculativeConfig:
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
                         )
-                elif self.draft_model_config.hf_config.model_type in (
-                    "longcat_flash_mtp"
-                ):
-                    self.method = "longcat_flash_mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                            "LongCat MTP models only have "
-                            "one layer. Might need some code changes "
-                            "to support multiple layers."
-                        )
                 elif self.method == "draft_model":
-                    pass
-                elif self.method == "universal_draft":
                     pass
                 else:
                     raise NotImplementedError(
@@ -1032,7 +1025,12 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.method != "universal_draft":
+        if self.use_heterogeneous_vocab and not self.uses_draft_model():
+            raise ValueError(
+                "use_heterogeneous_vocab only works with method='draft_model'"
+        )
+
+        if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
 
@@ -1063,7 +1061,7 @@ class SpeculativeConfig:
         if self.parallel_drafting:
             # For parallel drafting, we need one new slot per 'masked' token
             slots_per_req = self.num_speculative_tokens - 1
-        if self.uses_draft_model() or self.uses_universal_draft():
+        if self.uses_draft_model():
             # For draft model-based speculation, we need one new slot per request
             # Since we do not slice the draft tokens
             slots_per_req += 1
@@ -1090,9 +1088,6 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
-
-    def uses_universal_draft(self) -> bool:
-        return self.method == "universal_draft"
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

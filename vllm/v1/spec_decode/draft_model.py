@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers.registry import get_tokenizer
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.vocab_mapping import VocabMapping
@@ -32,8 +32,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self._raise_if_draft_tp_mismatch()
 
+        self.use_heterogeneous_vocab = (
+            self.speculative_config.use_heterogeneous_vocab
+        )
+
         spec = self.speculative_config
-        if spec.uses_universal_draft():
+        if self.use_heterogeneous_vocab:
             # Heterogeneous vocabularies: build a VocabMapping to translate
             # token IDs between the two tokenizers and constrain draft logits
             # to the intersection so rejection sampling stays lossless.
@@ -112,45 +116,3 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         # Draft models don't share lm_head with the target model
         pass
-
-    @override
-    def _prepare_draft_input_ids(self, token_ids: torch.Tensor) -> torch.Tensor:
-        if self.vocab_mapping is not None:
-            return self.vocab_mapping.map_target_to_draft_ids(token_ids)
-        return token_ids
-
-    @override
-    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.model.compute_logits(hidden_states)
-        if self.vocab_mapping is not None:
-            logits = self.vocab_mapping.constrain_draft_logits(logits)
-        draft_token_ids = logits.argmax(dim=-1)
-        if self.vocab_mapping is not None:
-            return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
-        return draft_token_ids
-
-    @override
-    def set_inputs_first_pass(
-        self,
-        target_token_ids: torch.Tensor,
-        next_token_ids: torch.Tensor,
-        target_positions: torch.Tensor,
-        target_hidden_states: torch.Tensor,
-        token_indices_to_sample: torch.Tensor | None,
-        cad: CommonAttentionMetadata,
-        num_rejected_tokens_gpu: torch.Tensor | None,
-    ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
-        if self.vocab_mapping is not None:
-            target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
-                target_token_ids
-            )
-            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
-        return super().set_inputs_first_pass(
-            target_token_ids=target_token_ids,
-            next_token_ids=next_token_ids,
-            target_positions=target_positions,
-            target_hidden_states=target_hidden_states,
-            token_indices_to_sample=token_indices_to_sample,
-            cad=cad,
-            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-        )
