@@ -135,7 +135,6 @@ class DeepseekV4FP8Config(Fp8Config):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
-                skip_with_substr=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":

@@ -152,6 +152,37 @@ def test_experts_path_substr():
     )
 
 
+def test_experts_parent_prefix_with_child_ignored_legacy():
+    """Regression for #44628 review: a child expert listed in
+    ``ignored_layers`` must skip when ``get_quant_method`` is called on the
+    parent ``RoutedExperts`` prefix in legacy (exact-match) mode. The legacy
+    MoE convention relies on parent-in-child containment via the experts
+    branch.
+    """
+    assert (
+        is_layer_skipped(
+            prefix="model.layers.0.mlp.experts",
+            ignored_layers=["model.layers.0.mlp.experts.0.w1"],
+        )
+        is True
+    )
+
+
+def test_experts_parent_prefix_with_child_ignored_substr():
+    """Same as above but for the substring-match path the FP8 family opts
+    into. Without preserving the experts branch in substr mode the MoE layer
+    would be silently quantized despite the child being listed.
+    """
+    assert (
+        is_layer_skipped(
+            prefix="model.layers.0.mlp.experts",
+            ignored_layers=["model.layers.0.mlp.experts.0.w1"],
+            skip_with_substr=True,
+        )
+        is True
+    )
+
+
 # ---------------------------------------------------------------------------
 # Empty ignored_layers: never skip.
 # ---------------------------------------------------------------------------
