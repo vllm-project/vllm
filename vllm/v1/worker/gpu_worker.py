@@ -265,7 +265,7 @@ class Worker(WorkerBase):
                 self.local_rank += dp_local_rank * tp_pp_world_size
 
             # Publish assigned_gpu_ids for topology queries (NIC affinity,
-            # P2P checks) without touching CUDA_VISIBLE_DEVICES.
+            # P2P checks) and use them for device selection.
             assigned = parallel_config.assigned_gpu_ids
             if assigned is not None:
                 from vllm.platforms.interface import set_assigned_gpu_ids
@@ -275,13 +275,15 @@ class Worker(WorkerBase):
                     f"local_rank {self.local_rank} is out of bounds for "
                     f"assigned_gpu_ids {assigned}"
                 )
+                device_index = assigned[self.local_rank]
             else:
                 assert self.local_rank < torch.accelerator.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of "
                     f"bounds for {torch.accelerator.device_count()} devices."
                 )
+                device_index = self.local_rank
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            self.device = torch.device(f"cuda:{device_index}")
             torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
