@@ -279,9 +279,14 @@ async def merge_async_iterators(
     iterator that yields the item.
     """
     if len(iterators) == 1:
-        # Fast-path single iterator case.
-        async for item in iterators[0]:
-            yield 0, item
+        # Fast-path single iterator case; close the underlying iterator on
+        # exit, matching the multi-iterator cleanup below.
+        try:
+            async for item in iterators[0]:
+                yield 0, item
+        finally:
+            with contextlib.suppress(BaseException):
+                await iterators[0].aclose()
         return
 
     loop = asyncio.get_running_loop()
