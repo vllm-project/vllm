@@ -78,6 +78,7 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
     dtype: str
     vllm_version: str
+    hash_block_size: int | None = None
 
 
 class EngineCoreRequest(

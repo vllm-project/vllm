@@ -729,6 +729,17 @@ class MPClient(EngineCoreClient):
         # worker for hybrid Mamba models.
         vllm_config.cache_config.block_size = response.block_size
 
+        if response.hash_block_size is not None:
+            hash_block_size = vllm_config.cache_config.hash_block_size
+            if hash_block_size is None:
+                vllm_config.cache_config.hash_block_size = response.hash_block_size
+            elif hash_block_size != response.hash_block_size:
+                raise ValueError(
+                    "EngineCore resolved hash_block_size="
+                    f"{response.hash_block_size}, but frontend has "
+                    f"hash_block_size={hash_block_size}."
+                )
+
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's
         # initial handshake with the rank 0 front-end.
