@@ -159,7 +159,7 @@ fn factory_new_resolves_default_patterns() {
     );
     assert_eq!(
         factory.resolve_name_for_model("ibm-granite/granite-20b-functioncalling"),
-        None
+        Some(names::GRANITE_20B_FC)
     );
 
     assert_eq!(
