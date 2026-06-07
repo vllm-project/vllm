@@ -1072,8 +1072,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
     """
@@ -1508,8 +1508,8 @@ def test_is_uniform_decode() -> None:
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     """Test that a ValueError is raised when max_num_seqs exceeds the
