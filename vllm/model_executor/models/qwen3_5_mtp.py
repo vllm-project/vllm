@@ -175,8 +175,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 param,
                 curr_expert_weight,
                 name,
-                shard_id,
-                expert_id,
+                shard_id=shard_id,
+                expert_id=expert_id,
                 return_success=True,
             )
             if success:
@@ -381,6 +381,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:
