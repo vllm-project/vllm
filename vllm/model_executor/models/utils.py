@@ -476,7 +476,6 @@ def _merge_multimodal_embeddings(
         mm_embeds_device = mm_embeds_flat.to(
             dtype=input_dtype, device=inputs_embeds.device
         )
-        is_mm_device = is_multimodal.to(device=inputs_embeds.device)
 
         # Operand Padding (Zero-Leak Strategy)
         target_len = inputs_embeds.shape[0]
@@ -497,7 +496,7 @@ def _merge_multimodal_embeddings(
         # 2. Direct Mapping: cumsum gives 0 for all positions before the first True.
         # It increments by 1 for each True, cleanly pointing to the
         # corresponding mm_embed.
-        gather_indices = torch.cumsum(is_mm_device, dim=0, dtype=torch.long)
+        gather_indices = torch.cumsum(is_multimodal, dim=0, dtype=torch.long)
 
         # On GPUs, we clamp indices to prevent asynchronous device-side asserts from
         # crashing the context on out-of-bounds mismatches.
@@ -509,11 +508,11 @@ def _merge_multimodal_embeddings(
 
         # 3. Execution: Pointwise select to avoid dynamic slicing
         inputs_embeds = torch.where(
-            is_mm_device.unsqueeze(-1),
+            is_multimodal.unsqueeze(-1),
             mapped_mm_embeds,
             inputs_embeds,
         )
-    except (RuntimeError, IndexError) as e:
+    except (RuntimeError, IndexError, AssertionError) as e:
         num_actual_tokens = len(mm_embeds_flat)
         num_expected_tokens = is_multimodal.sum().item()
 
