@@ -575,7 +575,9 @@ def per_token_group_quant_fp8(
 
     # prefer CUDA/XPU kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
-    if (current_platform.is_cuda() or current_platform.is_xpu()) and x.is_contiguous():
+    if (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    ) and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,
@@ -664,8 +666,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min, fp8_max = finfo.min, finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     # compute DeepGEMM-style packed scale tensor shape.
     hidden_dim = x.shape[-1]
@@ -681,10 +682,10 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         dtype=torch.int32,
     )
 
-    # CUDA kernel path only (DeepGEMM + E8M0 is CUDA-specific).
-    assert current_platform.is_cuda(), (
-        "per_token_group_quant_fp8_packed_for_deepgemm is only valid on CUDA "
-        "platforms using DeepGEMM."
+    # Native kernel (libtorch stable); used with DeepGEMM on CUDA and
+    # available on ROCm for the same packed UE8M0 scale layout.
+    assert current_platform.is_cuda_alike(), (
+        "per_token_group_quant_fp8_packed_for_deepgemm requires a CUDA or ROCm GPU."
     )
 
     x_contiguous = x.contiguous()

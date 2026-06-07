@@ -48,6 +48,7 @@ mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
+pub mod lora;
 pub mod multimodal;
 pub mod stats;
 pub mod tensor;
@@ -349,7 +350,7 @@ pub struct EngineCoreRequest {
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
     #[serde(default)]
-    pub lora_request: Option<OpaqueValue>,
+    pub lora_request: Option<lora::LoraRequest>,
     #[serde(default)]
     pub cache_salt: Option<String>,
     #[serde(default)]
