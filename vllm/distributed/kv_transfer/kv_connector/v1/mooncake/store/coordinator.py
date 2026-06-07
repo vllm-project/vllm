@@ -13,7 +13,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
-    spec_manager_map,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -21,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 # Dummy placeholder hash for store_mask's template computation.
 _DUMMY_BLOCK_HASH = BlockHash(b"\x00" * 32)
@@ -89,7 +89,10 @@ class MooncakeStoreCoordinator:
         ] = []
         for i, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
-            manager_cls = spec_manager_map[type(spec)]
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            assert manager_cls is not None, (
+                f"No manager registered for KVCacheSpec {spec}"
+            )
             for existing_spec, group_ids, existing_cls in attention_groups:
                 if existing_spec == spec:
                     assert manager_cls is existing_cls
@@ -233,7 +236,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
                 kv_cache_spec=spec,
-                use_eagle=(0 in eagle_indices),
+                drop_eagle_block=(0 in eagle_indices),
                 alignment_tokens=spec.block_size,
             )
             num_groups = len(self.kv_cache_groups)
@@ -262,9 +265,9 @@ class MooncakeStoreCoordinator:
                     )
                     continue
 
-                use_eagle = idx in eagle_indices and idx not in eagle_verified
+                drop_eagle_block = idx in eagle_indices and idx not in eagle_verified
                 _max_length = curr_hit_length
-                if use_eagle:
+                if drop_eagle_block:
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
                 hit_blocks = manager_cls.find_longest_cache_hit(
@@ -273,11 +276,11 @@ class MooncakeStoreCoordinator:
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),
                     kv_cache_spec=spec,
-                    use_eagle=use_eagle,
+                    drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self.lcm_block_size,
                 )
                 _new_hit_length = len(hit_blocks[0]) * spec.block_size
-                if use_eagle:
+                if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
                     eagle_verified.clear()

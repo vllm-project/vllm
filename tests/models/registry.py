@@ -931,6 +931,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "google/gemma-4-E2B-it",
         min_transformers_version="5.5.0",
     ),
+    # TODO: update min_transformers_version when Gemma4 Unified lands in
+    # a stable transformers release.
+    "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        min_transformers_version="5.8.0",
+        is_available_online=False,
+    ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
@@ -944,6 +951,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b",
         extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-speech-4.1-2b-plus",
+        min_transformers_version="5.8.0",
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
