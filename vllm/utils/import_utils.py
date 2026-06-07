@@ -404,7 +404,7 @@ def _has_module(module_name: str) -> bool:
         if importlib.util.find_spec(module_name) is None:
             return False
         importlib.import_module(module_name)
-    except ImportError:
+    except Exception:
         logger.warning(
             "Module %s was found but failed to import", module_name, exc_info=True
         )

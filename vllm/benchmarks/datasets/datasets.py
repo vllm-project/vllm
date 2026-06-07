@@ -44,6 +44,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -363,7 +364,11 @@ def lora_path_on_disk(lora_path: str) -> str:
 lora_tokenizer_cache: dict[int, TokenizerLike] = {}
 
 
-def process_image(image: Any) -> Mapping[str, Any]:
+def process_image(
+    image: Any,
+    *,
+    ensure_client_side_data: bool = False,
+) -> Mapping[str, Any]:
     """
     Process a single image input and return a multimedia content dictionary.
 
@@ -380,6 +385,9 @@ def process_image(image: Any) -> Mapping[str, Any]:
        encoded data.  - If string starts with "data:image/", treats as base64.
        - If string starts with "http://", "https://", or "file://", treats as URL.
        - Otherwise treats as local file path and prepends "file://".
+       - If ensure_client_side_data is True, local and HTTP(S) image references
+         are loaded and encoded as base64 image data URLs. Existing data:image
+         URLs are kept unchanged.
        - Returns a dictionary with the image URL or base64 data.
 
     Raises:
@@ -403,6 +411,13 @@ def process_image(image: Any) -> Mapping[str, Any]:
             if image.startswith(("http://", "https://", "file://", "data:image/"))
             else f"file://{image}"
         )
+
+        if ensure_client_side_data and not image_url.startswith("data:image/"):
+            try:
+                fetched_image = fetch_image(image_url)
+                image_url = encode_image_url(fetched_image)
+            except Exception as e:
+                raise ValueError(f"Invalid image URL: {image_url}") from e
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
@@ -1645,6 +1660,16 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "value overrides potential output length loaded from the dataset. It is "
         "used only for custom dataset.",
     )
+    custom_group.add_argument(
+        "--custom-ensure-client-side-data",
+        action="store_true",
+        help=(
+            "Ensure custom dataset media is sent as client-side data instead "
+            "of references. For custom_image datasets, this loads local and "
+            "HTTP(S) images on the benchmark client and encodes them as "
+            "base64 data URLs. Existing data:image URLs are kept unchanged."
+        ),
+    )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
     spec_bench_group.add_argument(
@@ -2055,6 +2080,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.skip_chat_template,
+            chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2075,6 +2101,9 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             enable_multimodal_chat=args.enable_multimodal_chat,
+            ensure_client_side_data=getattr(
+                args, "custom_ensure_client_side_data", False
+            ),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2381,6 +2410,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
+                chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2468,6 +2498,7 @@ class CustomDataset(BenchmarkDataset):
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        chat_template_kwargs: dict | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # load all data if needed
@@ -2515,6 +2546,7 @@ class CustomDataset(BenchmarkDataset):
                         [{"role": "user", "content": prompt}],
                         add_generation_prompt=True,
                         tokenize=False,
+                        **(chat_template_kwargs or {}),
                     )
 
                 prompt_len = len(tokenizer(prompt).input_ids)
@@ -2627,7 +2659,12 @@ class CustomImageDataset(CustomDataset):
         return parts
 
     @classmethod
-    def _process_content_part(cls, part: dict[str, Any]) -> dict[str, Any]:
+    def _process_content_part(
+        cls,
+        part: dict[str, Any],
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> dict[str, Any]:
         content_type = part.get("type")
         if content_type == "text":
             text = part.get("text")
@@ -2638,12 +2675,22 @@ class CustomImageDataset(CustomDataset):
         if content_type == "image":
             if "image" not in part:
                 raise ValueError("Image content parts must contain an 'image' field.")
-            return dict(process_image(part["image"]))
+            return dict(
+                process_image(
+                    part["image"],
+                    ensure_client_side_data=ensure_client_side_data,
+                )
+            )
 
         if content_type == "image_url":
             image_url = part.get("image_url")
             if isinstance(image_url, str):
-                return dict(process_image(image_url))
+                return dict(
+                    process_image(
+                        image_url,
+                        ensure_client_side_data=ensure_client_side_data,
+                    )
+                )
 
             if isinstance(image_url, dict):
                 url = image_url.get("url")
@@ -2652,7 +2699,12 @@ class CustomImageDataset(CustomDataset):
                         "Image URL content parts must contain a string 'image_url.url'."
                     )
 
-                processed_part = dict(process_image(url))
+                processed_part = dict(
+                    process_image(
+                        url,
+                        ensure_client_side_data=ensure_client_side_data,
+                    )
+                )
                 processed_image_url = dict(processed_part["image_url"])
                 processed_image_url.update(
                     {key: value for key, value in image_url.items() if key != "url"}
@@ -2671,9 +2723,17 @@ class CustomImageDataset(CustomDataset):
         )
 
     @classmethod
-    def _process_interleaved_content(cls, content: Any) -> list[dict[str, Any]]:
+    def _process_interleaved_content(
+        cls,
+        content: Any,
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> list[dict[str, Any]]:
         return [
-            cls._process_content_part(part)
+            cls._process_content_part(
+                part,
+                ensure_client_side_data=ensure_client_side_data,
+            )
             for part in cls._validate_content_parts(content)
         ]
 
@@ -2682,11 +2742,23 @@ class CustomImageDataset(CustomDataset):
         return "".join(part["text"] for part in content if part.get("type") == "text")
 
     @staticmethod
-    def _process_image_files(images: Any) -> dict[str, Any] | list[dict[str, Any]]:
+    def _process_image_files(
+        images: Any,
+        *,
+        ensure_client_side_data: bool = False,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         if not isinstance(images, list) or not images:
             raise ValueError("'image_files' must be a non-empty list.")
 
-        mm_content = [dict(process_image(image)) for image in images]
+        mm_content = [
+            dict(
+                process_image(
+                    image,
+                    ensure_client_side_data=ensure_client_side_data,
+                )
+            )
+            for image in images
+        ]
         if len(mm_content) == 1:
             return mm_content[0]
 
@@ -2698,6 +2770,7 @@ class CustomImageDataset(CustomDataset):
         num_requests: int,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
+        ensure_client_side_data: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
@@ -2718,9 +2791,14 @@ class CustomImageDataset(CustomDataset):
                 break
 
             if "content" in item:
-                content = self._process_interleaved_content(item["content"])
+                content = self._process_interleaved_content(
+                    item["content"],
+                    ensure_client_side_data=ensure_client_side_data,
+                )
                 text_prompt = self._get_text_from_content(content)
-                prompt_len = len(tokenizer(text_prompt).input_ids)
+                prompt_len = (
+                    1 if tokenizer is None else len(tokenizer(text_prompt).input_ids)
+                )
                 prompt = (
                     [{"role": "user", "content": content}]
                     if enable_multimodal_chat
@@ -2741,8 +2819,11 @@ class CustomImageDataset(CustomDataset):
             if not isinstance(prompt, str):
                 raise ValueError("'prompt' must be a string.")
 
-            prompt_len = len(tokenizer(prompt).input_ids)
-            mm_content = self._process_image_files(item["image_files"])
+            prompt_len = 1 if tokenizer is None else len(tokenizer(prompt).input_ids)
+            mm_content = self._process_image_files(
+                item["image_files"],
+                ensure_client_side_data=ensure_client_side_data,
+            )
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
