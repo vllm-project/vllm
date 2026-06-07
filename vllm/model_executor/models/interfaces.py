@@ -331,7 +331,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int | None:
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
         """
         Implement this function to enable LoRA support
         for the connector module of the multi-modal model.
@@ -350,11 +350,9 @@ class SupportsMultiModal(Protocol):
         """
         Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
 
-        The default preserves the historical contract where the tower token
-        count is derived from the decoder-side multimodal embedding count, and
-        the connector token count is derived from the tower token count.
-        Models with padded encoder inputs can override this to report the
-        actual token counts seen by their tower and connector modules.
+        MM LoRA uses these counts to build adapter mappings for the tower and
+        connector forwards. Models with multiple modalities can override this
+        when each modality has different encoder padding or pooling behavior.
         """
         del modality, mm_kwargs
         num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)

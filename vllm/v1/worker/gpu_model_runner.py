@@ -2933,7 +2933,6 @@ class GPUModelRunner(
             for (req_id, pos_info), (modality, mm_item) in zip(
                 mm_lora_refs,
                 mm_kwargs,
-                strict=True,
             ):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
