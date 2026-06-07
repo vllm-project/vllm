@@ -351,14 +351,6 @@ def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
     return None
 
 
-def _get_num_attn_module_for_model(model_config: Any) -> int:
-    return 2 if model_config.hf_config.model_type == "longcat_flash" else 1
-
-
-def _extract_layer_index_for_model(model_config: Any, layer_name: str) -> int:
-    return extract_layer_index(layer_name, _get_num_attn_module_for_model(model_config))
-
-
 class MooncakeXferMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -1538,7 +1530,7 @@ class MooncakeConnectorWorker:
         split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            layer_index = _extract_layer_index_for_model(self.model_config, layer_name)
+            layer_index = extract_layer_index(layer_name)
             assert self.start_layer <= layer_index < self.end_layer, (
                 "Mooncake registered layer is outside this PP shard: "
                 f"layer={layer_name}, index={layer_index}, "

@@ -12,9 +12,6 @@ import torch
 import zmq.asyncio
 
 from vllm.config import set_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
-    mooncake_connector as mooncake_connector_module,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
@@ -989,21 +986,6 @@ def test_register_kv_caches():
                 assert bl == tensor1.nbytes // tensor1.shape[0]
             assert worker.registered_layer_names == list(kv_caches)
             assert worker.registered_layer_indices == [0, 1]
-
-
-def test_mooncake_layer_index_uses_model_attention_module_count():
-    """Mooncake layer indices should match vLLM's KV cache binding."""
-
-    model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(model_type="longcat_flash")
-    )
-
-    assert (
-        mooncake_connector_module._extract_layer_index_for_model(
-            model_config, "model.layers.0.self_attn.1"
-        )
-        == 1
-    )
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
