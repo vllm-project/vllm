@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.spec_decode.ssd_worker import SSDAsyncOverlap
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -54,9 +57,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # SSD (Speculative Speculative Decoding) async overlap.
         # Initialized lazily in load_draft_model when the predictor path is set.
         # See: vllm/v1/spec_decode/ssd_worker.py
-        self._ssd: Optional["SSDAsyncOverlap"] = None  # type: ignore[name-defined]
-        self._ssd_last_draft_logits: Optional[torch.Tensor] = None
-        self._ssd_last_draft_hidden: Optional[torch.Tensor] = None
+        self._ssd: SSDAsyncOverlap | None = None
+        self._ssd_last_draft_logits: torch.Tensor | None = None
+        self._ssd_last_draft_hidden: torch.Tensor | None = None
 
     @property
     def advance_draft_positions(self) -> bool:
@@ -172,7 +175,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
     def load_model(self, target_model) -> None:  # type: ignore[override]
-        """Load draft model and optionally initialise SSD."""
+        """Load draft model and optionally initialize SSD."""
         super().load_model(target_model)
         self._init_ssd()
 

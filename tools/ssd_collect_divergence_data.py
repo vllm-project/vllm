@@ -49,7 +49,7 @@ DEFAULT_OUTPUT = (
 )
 DEFAULT_NUM_STEPS = 2000
 K = 4
-DRAFT_TEMP = 1.5   # Higher → more diverse draft, more rejections
+DRAFT_TEMP = 1.5  # Higher → more diverse draft, more rejections
 TARGET_TEMP = 0.7  # Lower  → more peaked target, reflects confident target model
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -94,11 +94,15 @@ def load_model(model_path: str):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.float32,
-        output_hidden_states=True,
-    ).to(DEVICE).eval()
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.float32,
+            output_hidden_states=True,
+        )
+        .to(DEVICE)
+        .eval()
+    )
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  Loaded {n_params:.0f}M params on {DEVICE}")
@@ -184,9 +188,11 @@ def collect(model, tokenizer, num_steps: int) -> list[dict]:
     prompt = PROMPTS[prompt_idx % len(PROMPTS)]
     input_ids = tokenizer.encode(prompt, return_tensors="pt")[0].to(DEVICE)
 
-    print(f"\nCollecting {num_steps} divergence steps "
-          f"(draft_T={DRAFT_TEMP}, target_T={TARGET_TEMP}, K={K})")
-    print(f"Expected acceptance: pos0≈0.70, pos1≈0.50, pos2≈0.35, pos3≈0.22")
+    print(
+        f"\nCollecting {num_steps} divergence steps "
+        f"(draft_T={DRAFT_TEMP}, target_T={TARGET_TEMP}, K={K})"
+    )
+    print("Expected acceptance: pos0≈0.70, pos1≈0.50, pos2≈0.35, pos3≈0.22")
 
     for step in range(num_steps):
         if step % 200 == 0:
@@ -194,8 +200,10 @@ def collect(model, tokenizer, num_steps: int) -> list[dict]:
             if data:
                 all_m = torch.stack([d["accept_mask"] for d in data])
                 acc_so_far = all_m.float().mean().item()
-            print(f"  step {step:4d}/{num_steps} | "
-                  f"ctx={len(input_ids):3d} | acc={acc_so_far:.3f}")
+            print(
+                f"  step {step:4d}/{num_steps} | "
+                f"ctx={len(input_ids):3d} | acc={acc_so_far:.3f}"
+            )
 
         if len(input_ids) > 300:
             prompt_idx += 1
@@ -203,22 +211,22 @@ def collect(model, tokenizer, num_steps: int) -> list[dict]:
             input_ids = tokenizer.encode(prompt, return_tensors="pt")[0].to(DEVICE)
 
         try:
-            draft_tokens, draft_logits, hidden = draft_k_tokens(
-                model, input_ids, K)
-            accept_mask = target_verify(
-                model, input_ids, draft_tokens, draft_logits)
+            draft_tokens, draft_logits, hidden = draft_k_tokens(model, input_ids, K)
+            accept_mask = target_verify(model, input_ids, draft_tokens, draft_logits)
 
-            data.append({
-                "draft_logits": draft_logits.cpu().float(),
-                "hidden_state": hidden.cpu().float(),
-                "accept_mask": accept_mask.cpu(),
-            })
+            data.append(
+                {
+                    "draft_logits": draft_logits.cpu().float(),
+                    "hidden_state": hidden.cpu().float(),
+                    "accept_mask": accept_mask.cpu(),
+                }
+            )
 
             # Advance: accepted tokens + correction
             n = int(accept_mask.sum().item())
             new_tokens = draft_tokens[:n]
             if n < K:
-                new_tokens = torch.cat([new_tokens, draft_tokens[n:n+1]])
+                new_tokens = torch.cat([new_tokens, draft_tokens[n : n + 1]])
             else:
                 new_tokens = torch.cat([new_tokens, draft_tokens[-1:]])
             input_ids = torch.cat([input_ids, new_tokens])
@@ -232,7 +240,7 @@ def collect(model, tokenizer, num_steps: int) -> list[dict]:
     if data:
         all_m = torch.stack([d["accept_mask"] for d in data])
         print(f"\nResults: {len(data)} samples")
-        print(f"  Per-position acceptance:")
+        print("  Per-position acceptance:")
         for k in range(K):
             rate = all_m[:, k].float().mean().item()
             print(f"    pos{k}: {rate:.3f}")
@@ -256,7 +264,8 @@ def main():
     data = collect(model, tokenizer, args.num_steps)
 
     if not data:
-        print("ERROR: No data collected"); return 1
+        print("ERROR: No data collected")
+        return 1
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
     torch.save(data, args.output)

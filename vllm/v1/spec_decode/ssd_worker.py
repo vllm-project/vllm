@@ -28,7 +28,8 @@ Reference: AAAI 2026 SSD paper, vLLM issue #36037
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -56,9 +57,7 @@ class SSDAsyncOverlap:
         target_out, accept_mask, pred_correct = ssd.run_verify_phase(
             verify_fn, draft_tokens, draft_scores
         )
-        ssd.run_predraft_phase(
-            draft_fn, draft_logits, draft_hidden, draft_tokens
-        )
+        ssd.run_predraft_phase(draft_fn, draft_logits, draft_hidden, draft_tokens)
         accepted_tokens = ssd.sync_and_get_result(
             accept_mask, target_out, draft_tokens, redraft_fn
         )
@@ -66,10 +65,10 @@ class SSDAsyncOverlap:
 
     def __init__(
         self,
-        outcome_predictor_path: Optional[str] = None,
+        outcome_predictor_path: str | None = None,
         hidden_size: int = 2048,
         num_speculative_tokens: int = 4,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
     ) -> None:
         self._device = device or torch.device("cuda")
 
@@ -86,7 +85,7 @@ class SSDAsyncOverlap:
         self.predraft_done_event = torch.cuda.Event()
 
         # Outcome predictor (tiny MLP -- loads lazily)
-        self._predictor: Optional[OutcomePredictor] = None
+        self._predictor: OutcomePredictor | None = None
         if outcome_predictor_path:
             self._load_predictor(
                 outcome_predictor_path,
@@ -95,15 +94,15 @@ class SSDAsyncOverlap:
             )
 
         # Pre-speculation cache
-        self._pre_spec_tokens: Optional[torch.Tensor] = None  # [batch, K] int
-        self._pre_spec_scores: Optional[torch.Tensor] = None  # [batch, K] float
-        self._pre_spec_mask: Optional[torch.Tensor] = None  # [batch, K] bool
+        self._pre_spec_tokens: torch.Tensor | None = None  # [batch, K] int
+        self._pre_spec_scores: torch.Tensor | None = None  # [batch, K] float
+        self._pre_spec_mask: torch.Tensor | None = None  # [batch, K] bool
         self._pre_spec_valid: bool = False
 
         # Accumulated state from last draft step (needed for outcome predictor)
-        self._last_draft_logits: Optional[torch.Tensor] = None  # [batch, K, vocab]
-        self._last_draft_hidden: Optional[torch.Tensor] = None  # [batch, hidden]
-        self._last_draft_tokens: Optional[torch.Tensor] = None  # [batch, K] int
+        self._last_draft_logits: torch.Tensor | None = None  # [batch, K, vocab]
+        self._last_draft_hidden: torch.Tensor | None = None  # [batch, hidden]
+        self._last_draft_tokens: torch.Tensor | None = None  # [batch, K] int
 
         # Metrics
         self._correct_predictions: int = 0
@@ -130,11 +129,11 @@ class SSDAsyncOverlap:
         self,
         verify_fn: Callable[
             [torch.Tensor, torch.Tensor],
-            Tuple[Any, torch.Tensor],
+            tuple[Any, torch.Tensor],
         ],
         draft_tokens: torch.Tensor,  # [batch, K]
         draft_scores: torch.Tensor,  # [batch, K]
-    ) -> Tuple[Any, torch.Tensor, Optional[bool]]:
+    ) -> tuple[Any, torch.Tensor, bool | None]:
         """
         Run target verification on verify_stream.
 
@@ -148,11 +147,10 @@ class SSDAsyncOverlap:
             (target_output, actual_accept_mask, was_prediction_correct)
             was_prediction_correct is None when no pre-speculation was cached.
         """
-        prediction_correct: Optional[bool] = None
+        prediction_correct: bool | None = None
 
         with torch.cuda.stream(self.verify_stream):
-            target_output, actual_accept_mask = verify_fn(draft_tokens,
-                                                          draft_scores)
+            target_output, actual_accept_mask = verify_fn(draft_tokens, draft_scores)
 
             # Signal that KV cache is updated (draft stream can now pre-speculate)
             self.kv_ready_event.record(self.verify_stream)
@@ -160,7 +158,8 @@ class SSDAsyncOverlap:
             # Check if our pre-speculation prediction was correct
             if self._pre_spec_valid and self._pre_spec_mask is not None:
                 prediction_correct = bool(
-                    torch.equal(actual_accept_mask, self._pre_spec_mask))
+                    torch.equal(actual_accept_mask, self._pre_spec_mask)
+                )
                 self._total_predictions += 1
                 if prediction_correct:
                     self._correct_predictions += 1
@@ -173,7 +172,7 @@ class SSDAsyncOverlap:
         self,
         draft_fn: Callable[
             [torch.Tensor],
-            Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         ],
         draft_logits: torch.Tensor,  # [batch, K, vocab]
         draft_hidden: torch.Tensor,  # [batch, hidden]
@@ -202,15 +201,18 @@ class SSDAsyncOverlap:
             # Predict acceptance mask using tiny MLP -- no .item() calls
             with torch.no_grad():
                 predicted_mask = self._predictor.predict_acceptance_mask(
-                    draft_logits, draft_hidden)  # [batch, K] bool
+                    draft_logits, draft_hidden
+                )  # [batch, K] bool
 
             # Determine predicted continuation token
             predicted_continuation = self._get_predicted_continuation(
-                predicted_mask, draft_tokens)
+                predicted_mask, draft_tokens
+            )
 
             # Pre-draft tokens for the predicted continuation
             pre_tokens, pre_scores, new_hidden, new_logits = draft_fn(
-                predicted_continuation)
+                predicted_continuation
+            )
 
             # Cache pre-speculated tokens for next verify phase
             self._pre_spec_tokens = pre_tokens
@@ -241,7 +243,6 @@ class SSDAsyncOverlap:
         # predicted_mask: True = accepted, False = rejected
         # First False position is where speculation continues from
         # If all accepted: use the last draft token
-        batch_size = predicted_mask.shape[0]
         K = predicted_mask.shape[1]
 
         # Inverted mask: True where rejected
@@ -253,14 +254,13 @@ class SSDAsyncOverlap:
         first_rejection = rejected.int().argmax(dim=-1)  # [batch] int64
 
         # If no rejection: fall back to last position (K-1)
-        cont_idx = torch.where(has_rejection, first_rejection,
-                               torch.full_like(first_rejection,
-                                               K - 1))  # [batch]
+        cont_idx = torch.where(
+            has_rejection, first_rejection, torch.full_like(first_rejection, K - 1)
+        )  # [batch]
 
         # Gather the continuation token for each batch element
         cont_idx_expanded = cont_idx.unsqueeze(-1)  # [batch, 1]
-        continuation = draft_tokens.gather(1,
-                                           cont_idx_expanded).squeeze(-1)  # [batch]
+        continuation = draft_tokens.gather(1, cont_idx_expanded).squeeze(-1)  # [batch]
         return continuation
 
     def sync_and_get_result(
@@ -270,9 +270,9 @@ class SSDAsyncOverlap:
         draft_tokens: torch.Tensor,  # [batch, K]
         redraft_fn: Callable[
             [torch.Tensor, torch.Tensor],
-            List[torch.Tensor],
+            list[torch.Tensor],
         ],
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """
         Finalize the result for this step.
 
@@ -302,7 +302,8 @@ class SSDAsyncOverlap:
             else:
                 # Prediction wrong -- re-draft from correct continuation
                 correct_cont = self._get_correct_continuation(
-                    actual_accept_mask, draft_tokens, target_output)
+                    actual_accept_mask, draft_tokens, target_output
+                )
                 return redraft_fn(correct_cont, actual_accept_mask)
 
         return self._apply_acceptance(actual_accept_mask, draft_tokens)
@@ -311,10 +312,10 @@ class SSDAsyncOverlap:
         self,
         accept_mask: torch.Tensor,  # [batch, K] bool
         draft_tokens: torch.Tensor,  # [batch, K] int
-    ) -> List[torch.Tensor]:
+    ) -> list[torch.Tensor]:
         """Extract accepted tokens using acceptance mask (no .item() calls)."""
         batch_size = accept_mask.shape[0]
-        results: List[torch.Tensor] = []
+        results: list[torch.Tensor] = []
         for b in range(batch_size):
             mask = accept_mask[b]
             tokens = draft_tokens[b]
@@ -335,7 +336,6 @@ class SSDAsyncOverlap:
 
         Returns [batch] int tensor on the same device as draft_tokens.
         """
-        batch_size = actual_mask.shape[0]
         K = actual_mask.shape[1]
 
         rejected = ~actual_mask  # [batch, K]
@@ -343,20 +343,23 @@ class SSDAsyncOverlap:
         first_rejection = rejected.int().argmax(dim=-1)  # [batch]
 
         # Default: use draft token at first rejected position
-        cont_idx = torch.where(has_rejection, first_rejection,
-                               torch.full_like(first_rejection, K - 1))
+        cont_idx = torch.where(
+            has_rejection, first_rejection, torch.full_like(first_rejection, K - 1)
+        )
         result = draft_tokens.gather(1, cont_idx.unsqueeze(-1)).squeeze(-1)
 
         # Override with target model bonus tokens if available
-        if (target_output is not None
-                and hasattr(target_output, "bonus_tokens")
-                and target_output.bonus_tokens is not None):
+        if (
+            target_output is not None
+            and hasattr(target_output, "bonus_tokens")
+            and target_output.bonus_tokens is not None
+        ):
             bonus = target_output.bonus_tokens  # [batch]
             result = torch.where(has_rejection, bonus, result)
 
         return result
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self) -> dict[str, Any]:
         """Return SSD prediction accuracy metrics."""
         return {
             "ssd_prediction_accuracy": self.prediction_accuracy,

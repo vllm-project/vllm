@@ -11,7 +11,6 @@ Covers:
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -63,7 +62,6 @@ def draft_tokens() -> torch.Tensor:
 
 
 class TestOutcomePredictor:
-
     def test_forward_output_shape(
         self,
         predictor: OutcomePredictor,
@@ -103,8 +101,7 @@ class TestOutcomePredictor:
         """extract_features must return [batch, K, FEATURE_SIZE]."""
         features = predictor.extract_features(draft_logits)
         expected = (BATCH, K, OutcomePredictor.FEATURE_SIZE)
-        assert features.shape == expected, (
-            f"Expected {expected}, got {features.shape}")
+        assert features.shape == expected, f"Expected {expected}, got {features.shape}"
 
     def test_predict_acceptance_mask_dtype(
         self,
@@ -124,8 +121,7 @@ class TestOutcomePredictor:
     ) -> None:
         """predict_acceptance_mask must return [batch, K]."""
         mask = predictor.predict_acceptance_mask(draft_logits, hidden_state)
-        assert mask.shape == (BATCH, K), (
-            f"Expected ({BATCH}, {K}), got {mask.shape}")
+        assert mask.shape == (BATCH, K), f"Expected ({BATCH}, {K}), got {mask.shape}"
 
     def test_no_item_calls_in_predict(
         self,
@@ -139,7 +135,8 @@ class TestOutcomePredictor:
         """
         mask = predictor.predict_acceptance_mask(draft_logits, hidden_state)
         assert isinstance(mask, torch.Tensor), (
-            ".item() should not have been called -- result must be a Tensor")
+            ".item() should not have been called -- result must be a Tensor"
+        )
 
     def test_threshold_effect(
         self,
@@ -149,12 +146,15 @@ class TestOutcomePredictor:
     ) -> None:
         """High threshold -> fewer accepted; low threshold -> more accepted."""
         mask_high = predictor.predict_acceptance_mask(
-            draft_logits, hidden_state, threshold=0.99)
+            draft_logits, hidden_state, threshold=0.99
+        )
         mask_low = predictor.predict_acceptance_mask(
-            draft_logits, hidden_state, threshold=0.01)
+            draft_logits, hidden_state, threshold=0.01
+        )
         # low threshold should accept >= high threshold
         assert mask_low.sum() >= mask_high.sum(), (
-            "Lower threshold should accept at least as many tokens")
+            "Lower threshold should accept at least as many tokens"
+        )
 
     def test_from_pretrained_roundtrip(
         self,
@@ -174,12 +174,13 @@ class TestOutcomePredictor:
             K=K,
             mlp_hidden=32,
         )
-        loaded.mlp[0].weight  # confirm it loaded
+        assert loaded.mlp[0].weight is not None  # confirm weights loaded
 
         out_orig = predictor(draft_logits, hidden_state)
         out_loaded = loaded(draft_logits, hidden_state)
         assert torch.allclose(out_orig, out_loaded, atol=1e-6), (
-            "Reloaded predictor outputs should match original")
+            "Reloaded predictor outputs should match original"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -258,14 +259,18 @@ class TestSSDPredictedContinuation:
     def test_first_rejection_chosen(self) -> None:
         """If mask = [T, T, F, F], continuation is draft_tokens[:, 2]."""
         ssd = self._make_ssd()
-        mask = torch.tensor([
-            [True, True, False, False],
-            [True, True, False, False],
-        ])
-        tokens = torch.tensor([
-            [10, 20, 30, 40],
-            [50, 60, 70, 80],
-        ])
+        mask = torch.tensor(
+            [
+                [True, True, False, False],
+                [True, True, False, False],
+            ]
+        )
+        tokens = torch.tensor(
+            [
+                [10, 20, 30, 40],
+                [50, 60, 70, 80],
+            ]
+        )
         cont = ssd._get_predicted_continuation(mask, tokens)
         assert cont[0].item() == 30, f"Expected 30, got {cont[0].item()}"
         assert cont[1].item() == 70, f"Expected 70, got {cont[1].item()}"
@@ -274,10 +279,12 @@ class TestSSDPredictedContinuation:
         """If mask = all True, continuation is draft_tokens[:, K-1]."""
         ssd = self._make_ssd()
         mask = torch.ones(2, K, dtype=torch.bool)
-        tokens = torch.tensor([
-            [10, 20, 30, 40],
-            [50, 60, 70, 80],
-        ])
+        tokens = torch.tensor(
+            [
+                [10, 20, 30, 40],
+                [50, 60, 70, 80],
+            ]
+        )
         cont = ssd._get_predicted_continuation(mask, tokens)
         assert cont[0].item() == 40, f"Expected 40, got {cont[0].item()}"
         assert cont[1].item() == 80, f"Expected 80, got {cont[1].item()}"
@@ -286,10 +293,12 @@ class TestSSDPredictedContinuation:
         """If mask = [F, F, F, F], continuation is draft_tokens[:, 0]."""
         ssd = self._make_ssd()
         mask = torch.zeros(2, K, dtype=torch.bool)
-        tokens = torch.tensor([
-            [10, 20, 30, 40],
-            [50, 60, 70, 80],
-        ])
+        tokens = torch.tensor(
+            [
+                [10, 20, 30, 40],
+                [50, 60, 70, 80],
+            ]
+        )
         cont = ssd._get_predicted_continuation(mask, tokens)
         assert cont[0].item() == 10
         assert cont[1].item() == 50
@@ -301,4 +310,5 @@ class TestSSDPredictedContinuation:
         tokens = torch.randint(0, VOCAB, (1, K))
         result = ssd._get_predicted_continuation(mask, tokens)
         assert isinstance(result, torch.Tensor), (
-            "Result must be a Tensor -- .item() should not be called")
+            "Result must be a Tensor -- .item() should not be called"
+        )

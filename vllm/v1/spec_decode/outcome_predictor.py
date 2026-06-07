@@ -18,8 +18,6 @@ Reference: AAAI 2026 SSD paper, vLLM issue #36037
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
@@ -80,20 +78,19 @@ class OutcomePredictor(nn.Module):
         """
         # Top-32 logit values (distribution shape signal)
         top_logits = draft_logits.topk(
-            self.NUM_TOP_K_FEATURES, dim=-1).values  # [batch, K, 32]
+            self.NUM_TOP_K_FEATURES, dim=-1
+        ).values  # [batch, K, 32]
 
         # Entropy: H(p) = -sum(p * log(p)) -- uncertainty measure
         probs = draft_logits.softmax(dim=-1)
-        entropy = -(probs *
-                    (probs + 1e-10).log()).sum(dim=-1,
-                                              keepdim=True)  # [batch, K, 1]
+        entropy = -(probs * (probs + 1e-10).log()).sum(
+            dim=-1, keepdim=True
+        )  # [batch, K, 1]
 
         # Max logit: draft confidence
-        max_logit = draft_logits.max(dim=-1,
-                                     keepdim=True).values  # [batch, K, 1]
+        max_logit = draft_logits.max(dim=-1, keepdim=True).values  # [batch, K, 1]
 
-        return torch.cat([top_logits, entropy, max_logit],
-                         dim=-1)  # [batch, K, 34]
+        return torch.cat([top_logits, entropy, max_logit], dim=-1)  # [batch, K, 34]
 
     def forward(
         self,
@@ -106,8 +103,7 @@ class OutcomePredictor(nn.Module):
         features = self.extract_features(draft_logits)  # [batch, K, 34]
 
         # Expand hidden state to per-position: [batch, 1, H] -> [batch, K, H]
-        hidden_exp = hidden_state.unsqueeze(1).expand(-1, features.shape[1],
-                                                      -1)
+        hidden_exp = hidden_state.unsqueeze(1).expand(-1, features.shape[1], -1)
 
         # MLP input: [batch, K, hidden+34]
         mlp_input = torch.cat([hidden_exp, features], dim=-1)
@@ -134,12 +130,11 @@ class OutcomePredictor(nn.Module):
         hidden_size: int = 2048,
         K: int = 4,
         mlp_hidden: int = 256,
-        device: Optional[torch.device] = None,
-    ) -> "OutcomePredictor":
+        device: torch.device | None = None,
+    ) -> OutcomePredictor:
         """Load a trained OutcomePredictor from disk."""
         predictor = cls(hidden_size=hidden_size, K=K, mlp_hidden=mlp_hidden)
-        state_dict = torch.load(path,
-                                map_location=device or torch.device("cpu"))
+        state_dict = torch.load(path, map_location=device or torch.device("cpu"))
         predictor.load_state_dict(state_dict)
         predictor.eval()
         if device is not None:
