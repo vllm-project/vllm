@@ -260,8 +260,11 @@ def test_triton_attn_nvfp4_pure_prefill_softcap_uses_raw_kv(monkeypatch) -> None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@pytest.mark.parametrize("sharing_on_impl", [True, False])
 @torch.inference_mode()
-def test_triton_attn_nvfp4_kv_sharing_uses_cache(monkeypatch) -> None:
+def test_triton_attn_nvfp4_kv_sharing_uses_cache(
+    monkeypatch, sharing_on_impl: bool
+) -> None:
     torch.set_default_device(DEVICE_TYPE)
 
     num_tokens = 4
@@ -277,10 +280,14 @@ def test_triton_attn_nvfp4_kv_sharing_uses_cache(monkeypatch) -> None:
     key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
     value = torch.randn_like(key)
     output = torch.empty_like(query)
+    runtime_kv_sharing_target_layer_name = (
+        None if sharing_on_impl else "runtime_target_layer"
+    )
     layer = SimpleNamespace(
         _q_scale=torch.tensor(1.0),
         _k_scale=torch.tensor(1.0),
         _v_scale=torch.tensor(1.0),
+        kv_sharing_target_layer_name=runtime_kv_sharing_target_layer_name,
     )
     impl = TritonAttentionImpl(
         num_heads=num_query_heads,
@@ -290,7 +297,7 @@ def test_triton_attn_nvfp4_kv_sharing_uses_cache(monkeypatch) -> None:
         alibi_slopes=None,
         sliding_window=None,
         kv_cache_dtype="nvfp4",
-        kv_sharing_target_layer_name="target_layer",
+        kv_sharing_target_layer_name="init_target_layer" if sharing_on_impl else None,
     )
     kv_cache = torch.empty(
         1,
