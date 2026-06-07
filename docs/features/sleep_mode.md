@@ -74,7 +74,7 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
-If you need direct resource-level control, use `sleep(tags=...)` and `wake_up(tags=...)` with memory tags. Currently supported tags are `"kv_cache"` and `"weights"`. Sleeping `"weights"` discards weight memory; sleeping `"kv_cache"` discards KV cache contents. Sleeping memory is remapped empty on wake-up. Like level-based sleep, tag-based sleep accepts a `mode` argument to control in-flight requests. The default is `mode="abort"`, which aborts in-flight requests before memory is released.
+If you need direct resource-level control, use `sleep(tags=...)` and `wake_up(tags=...)` with memory tags. Tags identify GPU memory to release; they are not offload directives. Currently supported tags are `"kv_cache"` and `"weights"`. Sleeping `"weights"` releases weight GPU memory; sleeping `"kv_cache"` releases KV cache GPU memory and discards KV cache contents. Sleeping memory is remapped empty on wake-up. Like level-based sleep, tag-based sleep accepts a `mode` argument to control in-flight requests. The default is `mode="abort"`, which aborts in-flight requests before memory is released.
 
 ```python
 llm.sleep(tags=["kv_cache"])
@@ -122,7 +122,7 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
-- `POST /sleep?tags=kv_cache&mode=abort` — Sleep the requested memory tags. Repeat `tags` to sleep multiple resources, for example `?tags=weights&tags=kv_cache`.
+- `POST /sleep?tags=kv_cache&mode=abort` — Release the requested memory tags. Repeat `tags` to release multiple resources, for example `?tags=weights&tags=kv_cache`.
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.

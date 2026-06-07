@@ -741,7 +741,8 @@ class EngineCore:
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
             tags: Optional memory tags to sleep instead of using a level
-                preset.
+                preset. Tags identify GPU memory to release and do not imply
+                CPU offload.
         """
 
         if tags is not None:

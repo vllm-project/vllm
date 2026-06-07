@@ -167,12 +167,12 @@ class EngineClient(ABC):
         mode: "PauseMode" = "abort",
         tags: list[str] | None = None,
     ) -> None:
-        """Sleep the engine"""
+        """Sleep the engine and optionally release tagged GPU memory."""
         ...
 
     @abstractmethod
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        """Wake up the engine"""
+        """Wake up the engine, reallocating sleeping memory tags if provided."""
         ...
 
     @abstractmethod

@@ -831,8 +831,10 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             mode: How to handle any existing requests, can be "abort", "wait",
                 or "keep".
             tags: Optional memory tags to sleep instead of using a level
-                preset. Values must be in `("weights", "kv_cache")`. If tags
-                are provided, they take precedence over the level preset.
+                preset. Values must be in `("weights", "kv_cache")`. Tags
+                identify GPU memory to release and do not imply CPU offload.
+                If tags are provided, they take precedence over the level
+                preset.
         """
         self.llm_engine.sleep(level=level, mode=mode, tags=tags)
 
