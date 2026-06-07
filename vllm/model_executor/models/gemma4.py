@@ -1409,16 +1409,6 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = loaded_weight[0]
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
