@@ -668,6 +668,38 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           });
       break;
 
+    case 5:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 5><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 6:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 6><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 7:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 7><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 8:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 8><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
     default:
       torch::stable::sum_out(output, input, std::array<int64_t, 1>{1});
       break;
