@@ -127,18 +127,13 @@ class CPUWorker(Worker):
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 iomp_loaded = check_preloaded_libs("libiomp")
                 if not iomp_loaded and self.vllm_config.speculative_config is not None:
-                    hint = ""
-                    import ctypes.util
-
-                    iomp_path = ctypes.util.find_library("iomp5")
-                    if iomp_path:
-                        hint = f" Found candidate: {iomp_path}"
                     logger.warning(
                         "Speculative decoding on CPU without Intel OpenMP in "
                         "LD_PRELOAD will cause significant performance loss. "
-                        "Run with: "
-                        "LD_PRELOAD=libiomp5.so python -m vllm...%s",
-                        hint,
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
                     )
 
         def skip_set_num_threads(x: int):
