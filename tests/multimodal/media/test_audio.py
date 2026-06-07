@@ -67,6 +67,7 @@ def test_audio_media_io_encode_base64(dummy_audio):
         assert decoded == b"dummy_wav_data"
         mock_write.assert_called_once()
 
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
