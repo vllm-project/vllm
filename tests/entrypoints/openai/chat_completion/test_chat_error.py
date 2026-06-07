@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -192,6 +192,36 @@ async def test_openai_chat_keeps_mm_cache_for_engine_execution():
         ]
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_template_value_error_returns_error_response():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.generate = MagicMock()
+
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.openai_serving_render.preprocess_chat = AsyncMock(
+        side_effect=ValueError("System message must be at the beginning.")
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "you are a bot"},
+        ],
+    )
+
+    result = await serving_chat.create_chat_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.code == 400
+    assert "System message must be at the beginning" in result.error.message
+    mock_engine.generate.assert_not_called()
 
 
 @pytest.mark.asyncio
