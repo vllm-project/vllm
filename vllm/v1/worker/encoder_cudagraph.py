@@ -631,12 +631,12 @@ class EncoderCudaGraphManager:
             )
             assert output is not None
             self.model.postprocess_encoder_output(
-                    output,
-                    batch_orig_indices,
-                    per_item_out_tokens,
-                    outputs_by_orig_idx,
-                    clone=True,
-                    batch_mm_kwargs=batch_mm_kwargs,
+                output,
+                batch_orig_indices,
+                per_item_out_tokens,
+                outputs_by_orig_idx,
+                clone=True,
+                batch_mm_kwargs=batch_mm_kwargs,
             )
 
         # Return in original batch order (caller maps outputs to token positions)
