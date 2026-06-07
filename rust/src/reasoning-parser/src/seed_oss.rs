@@ -4,10 +4,6 @@ use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
 /// Reasoning parser for SeedOSS models using `<seed:think>`/`</seed:think>`
 /// delimiters.
-///
-/// Defaults to `in_reasoning = true` so streams that omit the opening
-/// delimiter are still parsed correctly, like
-/// [`super::DeepSeekR1ReasoningParser`].
 pub struct SeedOssReasoningParser {
     inner: DelimitedReasoningParser,
 }
@@ -16,7 +12,12 @@ impl SeedOssReasoningParser {
     /// Create a SeedOSS parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<seed:think>", "</seed:think>", true)?,
+            inner: DelimitedReasoningParser::new(
+                tokenizer,
+                "<seed:think>",
+                "</seed:think>",
+                false,
+            )?,
         })
     }
 }

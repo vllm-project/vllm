@@ -10,9 +10,6 @@ use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 /// reasoning across pushes until either more reasoning text or `</think>`
 /// arrives, and dropping a leading `\n` from the first content delta after
 /// the boundary.
-///
-/// Defaults to `in_reasoning = true` so streams that omit `<think>` still
-/// parse correctly.
 pub struct Step3p5ReasoningParser {
     inner: DelimitedReasoningParser,
     /// `\n` at end of last reasoning delta, held in case `</think>` follows.
@@ -26,7 +23,7 @@ impl Step3p5ReasoningParser {
     /// Create a Step3p5 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false)?,
             pending_reasoning_newline: false,
             just_ended_reasoning: false,
         })

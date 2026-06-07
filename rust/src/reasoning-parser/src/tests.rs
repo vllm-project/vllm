@@ -80,29 +80,6 @@ fn delimited_partial_tokens_across_chunks() {
 }
 
 #[test]
-fn delimited_strips_explicit_start_token_while_in_reasoning() {
-    let tokenizer = Arc::new(FakeTokenizer);
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true).unwrap();
-
-    let delta = parser.push("<think>reason</think>answer");
-    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
-}
-
-#[test]
-fn delimited_buffers_partial_start_token_while_in_reasoning() {
-    let tokenizer = Arc::new(FakeTokenizer);
-    let mut parser = DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true).unwrap();
-
-    let first = parser.push("reason<thi");
-    // The partial "<thi" must not leak into reasoning yet.
-    assert_eq!(first.reasoning.as_deref(), Some("reason"));
-    let second = parser.push("nk>more</think>tail");
-    assert_eq!(second.reasoning.as_deref(), Some("more"));
-    assert_eq!(second.content.as_deref(), Some("tail"));
-}
-
-#[test]
 fn delimited_finish_flushes_buffer() {
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser =
@@ -175,16 +152,6 @@ fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
 }
 
 #[test]
-fn deepseek_r1_strips_explicit_start_token() {
-    let tokenizer = Arc::new(FakeTokenizer);
-    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
-
-    let delta = parser.push("<think>reason</think>answer").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
-}
-
-#[test]
 fn deepseek_r1_stops_scanning_at_last_special_token() {
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
@@ -197,13 +164,16 @@ fn deepseek_r1_stops_scanning_at_last_special_token() {
 }
 
 #[test]
-fn seed_oss_defaults_to_reasoning_without_prompt_boundary() {
+fn seed_oss_without_prompt_markers_expects_start_token() {
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("implicit reasoning</seed:think>answer").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("implicit reasoning"));
-    assert_eq!(delta.content.as_deref(), Some("answer"));
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(
+        delta.content.as_deref(),
+        Some("implicit reasoning</seed:think>answer")
+    );
 }
 
 #[test]
@@ -231,10 +201,11 @@ fn seed_oss_respects_prompt_end_boundary() {
 }
 
 #[test]
-fn step3p5_handles_no_start_token_compat_path() {
-    // A stream that omits `<think>` is still split at `</think>`.
+fn step3p5_picks_up_prompt_start_boundary() {
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
+    // Prompt prefills `<think>` (id 1), opening reasoning before the stream.
+    parser.initialize(&[1]).unwrap();
 
     let delta = parser.push("This is a reasoning section</think>This is the rest").unwrap();
     assert_eq!(
@@ -274,6 +245,7 @@ fn step3p5_complex_newline_pattern_trims_only_single_framing_newline_each_side()
     // `</think>`; surrounding newlines remain part of reasoning/content.
     let tokenizer = Arc::new(FakeTokenizer);
     let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[1]).unwrap();
 
     let delta = parser
         .push("\n This is a \n reasoning section\n\n\n</think>\n\nThis is the rest")
@@ -414,18 +386,6 @@ fn seed_oss_handles_explicit_start_token() {
     let delta = parser.push("<seed:think>reason</seed:think>answer").unwrap();
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
     assert_eq!(delta.content.as_deref(), Some("answer"));
-}
-
-#[test]
-fn seed_oss_no_tokens_treats_everything_as_reasoning() {
-    // Streams with neither delimiter surface entirely as reasoning under the
-    // default-in-reasoning fallback.
-    let tokenizer = Arc::new(FakeTokenizer);
-    let mut parser = SeedOssReasoningParser::new(tokenizer).unwrap();
-
-    let delta = parser.push("just plain text").unwrap();
-    assert_eq!(delta.reasoning.as_deref(), Some("just plain text"));
-    assert_eq!(delta.content, None);
 }
 
 #[test]

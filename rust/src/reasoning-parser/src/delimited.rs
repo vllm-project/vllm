@@ -92,33 +92,14 @@ impl DelimitedReasoningParser {
     }
 
     /// Parse text that is known not to end with a partial delimiter suffix.
-    ///
-    /// While in reasoning mode the parser watches for both delimiters: an
-    /// `end_token` transitions to content, while a `start_token` is skipped
-    /// as a no-op. This lets `default_in_reasoning = true` parsers cover both
-    /// streams that omit the start delimiter and streams that emit it
-    /// explicitly.
     fn parse_stable_text(&mut self, mut stable: &str) -> ReasoningDelta {
         let mut delta = ReasoningDelta::default();
 
         while !stable.is_empty() {
             if self.current_in_reasoning {
-                let start_idx = stable.find(&self.start_token);
-                let end_idx = stable.find(&self.end_token);
-                let start_wins = match (start_idx, end_idx) {
-                    (Some(s), Some(e)) => s < e,
-                    (Some(_), None) => true,
-                    _ => false,
-                };
-                if start_wins {
-                    // Redundant start delimiter while already in reasoning:
-                    // emit text up to it, then skip it without transitioning.
-                    let s = start_idx.expect("start_wins implies Some");
-                    delta.push_reasoning(&stable[..s]);
-                    stable = &stable[s + self.start_token.len()..];
-                } else if let Some(e) = end_idx {
-                    delta.push_reasoning(&stable[..e]);
-                    stable = &stable[e + self.end_token.len()..];
+                if let Some(end_idx) = stable.find(&self.end_token) {
+                    delta.push_reasoning(&stable[..end_idx]);
+                    stable = &stable[end_idx + self.end_token.len()..];
                     self.current_in_reasoning = false;
                 } else {
                     delta.push_reasoning(stable);
