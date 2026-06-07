@@ -983,7 +983,6 @@ class Llama4ForConditionalGeneration(
 
         return name
 
-
     def _load_other_weights(
         self,
         other_weights: Iterable[tuple[str, torch.Tensor]],
@@ -1044,7 +1043,7 @@ class Llama4ForConditionalGeneration(
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
 
-        # Stream the (dominant) language-model weights straight into
+        # Stream thelanguage-model weights straight into
         # AutoWeightsLoader so each tensor is loaded and released as we iterate,
         # instead of materializing the whole checkpoint in host memory first.
         # Only the small vision/projector and scalar expert-scale groups are
@@ -1080,9 +1079,7 @@ class Llama4ForConditionalGeneration(
                     and "scale" in renamed
                     and ".shared_expert" not in renamed
                 ):
-                    renamed = maybe_remap_moe_expert_param_name(
-                        renamed, params_dict
-                    )
+                    renamed = maybe_remap_moe_expert_param_name(renamed, params_dict)
                     if renamed in params_dict:
                         param = params_dict[renamed]
                         if (
