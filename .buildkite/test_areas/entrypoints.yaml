@@ -44,7 +44,7 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -104,7 +104,7 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       depends_on:
       - image-build-amd
 
