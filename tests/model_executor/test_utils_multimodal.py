@@ -92,3 +92,22 @@ def test_device_dtype_parity(device, dtype):
     assert actual_embeds.device.type == device
     assert actual_embeds.dtype == dtype
     assert torch.equal(expected_embeds, actual_embeds)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Skip if not cuda")
+def test_cross_device_merger():
+    seq_len = 5
+    hidden_size = 4
+
+    inputs_embeds = torch.randn(seq_len, hidden_size, device="cuda")
+
+    is_multimodal = torch.tensor([False, True, True, True, False], device="cpu")
+    mm_embeds_flat = torch.randn(3, hidden_size, device="cpu")
+    try:
+        out = _merge_multimodal_embeddings(
+            inputs_embeds.clone(), [mm_embeds_flat], is_multimodal
+        )
+        assert out is not None
+        assert out.device.type == "cuda"
+    except RuntimeError as e:
+        pytest.fail(f"Cross-device merge failed with RuntimeError: {e}")
