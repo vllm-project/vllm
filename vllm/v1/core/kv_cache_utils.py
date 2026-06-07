@@ -459,19 +459,21 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return a domain-tagged LoRA name of the request if it is a LoRA
+        request. Return empty list otherwise. The ``"lora"`` tag keeps the
+        adapter name in its own key namespace so it cannot collide with an
+        identically valued key from another source (e.g. ``cache_salt``).
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [("lora", request.lora_request.lora_name)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
@@ -520,9 +522,11 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    lora_extra_keys: list[tuple[str, str]] = _gen_lora_extra_hash_keys(request)
+    cache_salt_keys: list[tuple[str, str]] = (
+        [("cache_salt", request.cache_salt)]
+        if (start_token_idx == 0 and request.cache_salt)
+        else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
