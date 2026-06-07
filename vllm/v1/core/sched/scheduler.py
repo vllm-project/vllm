@@ -702,7 +702,7 @@ class Scheduler(SchedulerInterface):
                         and num_computed_tokens + num_new_tokens
                         >= self.max_model_len
                         - self.scheduler_config.realtime_reanchor_margin_tokens
-                        and self._reanchor_session(request, reanchor_reqs)
+                        and self._reanchor_session(request)
                     ):
                         num_computed_tokens = request.num_computed_tokens
                     # Clamp to max_model_len. Mirrors the RUNNING-path guard
@@ -931,6 +931,23 @@ class Scheduler(SchedulerInterface):
             scheduled_running_reqs
         ) <= len(self.running)
 
+        # [FIX] Ship the re-anchor key re-rotation to the worker ONLY for requests
+        # that actually scheduled this step (i.e. are in the persistent batch).
+        # _reanchor_session accumulates the owed rotation on
+        # request.pending_reanchor_d; a request whose clock/block rebase committed
+        # but which then broke out of the loop UNSCHEDULED (KV/encoder-budget
+        # pressure) keeps its pending rotation and gets re-rotated on a later step
+        # when it does schedule -- never silently skipped (the old per-step dict
+        # shipped it unconditionally, so the worker found idx=None and dropped the
+        # rotation, leaving the live keys on the old RoPE clock -> minutes of
+        # corrupted attention until they evicted past the sliding window).
+        for req in (
+            scheduled_new_reqs + scheduled_resumed_reqs + scheduled_running_reqs
+        ):
+            if req.pending_reanchor_d:
+                reanchor_reqs[req.request_id] = req.pending_reanchor_d
+                req.pending_reanchor_d = 0
+
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
@@ -1150,19 +1167,22 @@ class Scheduler(SchedulerInterface):
             self._reanchor_sw_cache = sw
         return sw
 
-    def _reanchor_session(
-        self, request: Request, reanchor_reqs: dict[str, int]
-    ) -> bool:
+    def _reanchor_session(self, request: Request) -> bool:
         """[EXPERIMENTAL] Re-anchor a streaming session's RoPE position clock down
         by D tokens so it never reaches max_model_len (unbounded duration).
 
         Drops the oldest D tokens (all older than the sliding window, hence already
         evicted to null blocks), rebases the request's token/position bookkeeping
-        and the per-group block lists, and records ``req_id -> D`` so the worker
-        re-rotates the live cached keys by R(-D). Called inline while scheduling
-        the session's next chunk (FUSED): the request keeps this step's new tokens
-        and is re-added to the persistent batch with the rebased clock, so the
-        worker only has to re-rotate keys.
+        and the per-group block lists, and ACCUMULATES the owed key re-rotation on
+        ``request.pending_reanchor_d`` so the worker re-rotates the live cached keys
+        by R(-D). Called inline while scheduling the session's next chunk: the
+        request keeps this step's new tokens and is re-added to the persistent batch
+        with the rebased clock. The clock/block rebase must commit here (allocation
+        needs the rebased positions), but the rotation record is deferred to the
+        request object -- the scheduler ships it to the worker ONLY for requests that
+        actually schedule this step. If this request then breaks out unscheduled, the
+        pending rotation rides forward to the next step it schedules instead of being
+        silently lost (which would desync keys from the rebased clock -> corruption).
 
         Returns True if a re-anchor was performed. Only for sliding-window models
         with prefix caching disabled (so no block hashes to rebase).
@@ -1170,16 +1190,24 @@ class Scheduler(SchedulerInterface):
         sw = self._reanchor_sliding_window
         if sw is None or self.cache_config.enable_prefix_caching:
             return False
+        # ``d`` is block-aligned to the scheduler block size = LCM of every KV
+        # group's block size, so it is also a whole multiple of EACH group's own
+        # block size. The number of leading blocks to drop is therefore computed
+        # PER manager as ``d // mgr.block_size`` -- not one shared count: with
+        # unequal text/audio sliding windows the decoder and encoder land in
+        # separate groups with DIFFERENT block sizes (the encoder's is enlarged to
+        # equalize page size), so a single ``d // self.block_size`` would
+        # under-drop the smaller-block group and leave its block table misaligned
+        # against the re-rotated keys.
         bs = self.block_size
         # Drop everything older than the (largest) window, block-aligned.
         d = ((request.num_computed_tokens - sw) // bs) * bs
         if d <= 0:
             return False
-        shift_blocks = d // bs
-        # Safety tripwire: the leading shift_blocks of every group must already
-        # be null (evicted past the window by remove_skipped_blocks, run from
-        # allocate_slots every prior step). If any is not, deleting it would
-        # corrupt block accounting, so fail safe (no re-anchor, no mutation).
+        # Safety tripwire: the leading (d // mgr.block_size) blocks of every group
+        # must already be null (evicted past the window by remove_skipped_blocks,
+        # run from allocate_slots every prior step). If any is not, deleting it
+        # would corrupt block accounting, so fail safe (no re-anchor, no mutation).
         managers = self.kv_cache_manager.coordinator.single_type_managers
         for mgr in managers:
             blocks = mgr.req_to_blocks.get(request.request_id)
@@ -1188,7 +1216,8 @@ class Scheduler(SchedulerInterface):
             null_block = getattr(mgr, "_null_block", None)
             if null_block is None:
                 continue
-            for i in range(min(shift_blocks, len(blocks))):
+            mgr_shift = d // mgr.block_size
+            for i in range(min(mgr_shift, len(blocks))):
                 if blocks[i] is not null_block:
                     logger.warning(
                         "Re-anchor aborted for %s: leading block %d not null "
@@ -1232,14 +1261,19 @@ class Scheduler(SchedulerInterface):
             for mm_feature in request.mm_features:
                 pos = mm_feature.mm_position
                 mm_feature.mm_position = replace(pos, offset=pos.offset - d)
-        # (3) per-group block lists: drop the leading shift_blocks (already-null /
-        # evicted blocks). The same count applies to every group (encoder blocks
-        # pool the decoder blocks 1:1 in count).
+        # (3) per-group block lists: drop the leading (d // mgr.block_size)
+        # already-null / evicted blocks. The count is PER manager (groups may have
+        # different block sizes under unequal windows), not one shared count.
         for mgr in self.kv_cache_manager.coordinator.single_type_managers:
             blocks = mgr.req_to_blocks.get(request.request_id)
             if blocks:
-                del blocks[: min(shift_blocks, len(blocks))]
-        reanchor_reqs[request.request_id] = d
+                mgr_shift = d // mgr.block_size
+                del blocks[: min(mgr_shift, len(blocks))]
+        # (4) Owe the worker an R(-D) key re-rotation. Accumulate on the request
+        # (NOT a per-step dict) so the rotation survives if this request fails to
+        # schedule this step; it is shipped to the worker only once the request is
+        # actually in the persistent batch (see schedule()'s reanchor_reqs build).
+        request.pending_reanchor_d += d
         request.reanchor_offset += d
         logger.info(
             "Re-anchored realtime session %s by D=%d (clock now %d, total folded "

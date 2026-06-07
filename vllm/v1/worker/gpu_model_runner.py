@@ -1173,28 +1173,28 @@ class GPUModelRunner(
         for req_id, D in reanchor_reqs.items():
             idx = ib.req_id_to_index.get(req_id)
             if idx is None or D <= 0:
-                # Full re-add regime: the rebased request MUST be in the batch
-                # (it was scheduled this step). If not, the keys would silently
-                # desync from the rebased clock -- surface it loudly.
-                logger.warning(
-                    "Re-anchor: request %s absent from persistent batch "
-                    "(idx=%s, D=%s); skipping key re-rotation.", req_id, idx, D)
+                # INVARIANT: the scheduler now ships reanchor_reqs ONLY for
+                # requests that scheduled this step (those whose
+                # pending_reanchor_d was drained in schedule()), so the request
+                # MUST be in the persistent batch here. If it is not, the owed
+                # rotation would be lost and the live keys would desync from the
+                # rebased clock (corrupted attention). That is a scheduler bug,
+                # not a recoverable state -- surface it LOUDLY rather than
+                # silently skipping. (Pending rotations that did NOT schedule are
+                # retained on the request and never reach this dict.)
+                logger.error(
+                    "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
+                    "but absent from persistent batch (idx=%s, D=%s); key "
+                    "re-rotation dropped -- attention will be corrupted for this "
+                    "stream. This should be unreachable; investigate schedule().",
+                    req_id, idx, D)
                 continue
             # By this point the persistent-batch row must already carry the
             # rebased (small) clock from full re-add, not the pre-rebase value
             # near max_model_len; the clock is logged below for observability.
             clock = int(ib.num_computed_tokens_cpu[idx])
+            base = 1.0e6  # Voxtral rope_theta
             for gid, group in enumerate(groups):
-                head_size = group.kv_cache_spec.head_size
-                # The Voxtral decoder is NeoX-style with a 128-dim rotary and
-                # rope_theta=1e6 -- the only RoPE params the shipped realtime
-                # model uses. Assert so a variant with different params fails
-                # loudly here instead of silently mis-rotating cached keys.
-                assert head_size in (64, 128), (
-                    f"re-anchor: unexpected rotary head_size {head_size}")
-                is_neox = head_size == 128
-                d_grp = D if is_neox else pool * D
-                base = 1.0e6  # Voxtral rope_theta
                 bt = ib.block_table.block_tables[gid]
                 n = int(bt.num_blocks_per_row[idx])
                 if n <= 0:
@@ -1204,17 +1204,30 @@ class GPUModelRunner(
                 # new tokens) are zeroed by _update_states and overwritten by the
                 # forward pass, so re-rotating them is a harmless no-op. R(-d_grp)
                 # is position-independent, so a uniform rotation of every key in
-                # the row is exactly right. (The non-NeoX branch is defensive: no
-                # shipped realtime model currently paged-caches RoPE-rotated
-                # encoder keys, so only the decoder group is exercised today.)
+                # the row is exactly right.
                 live = bt.block_table.np[idx, :n].copy()
                 live_t = torch.from_numpy(live).to(self.device, torch.long)
                 for layer_name in group.layer_names:
                     kv = fctx[layer_name].kv_cache
                     if isinstance(kv, (list, tuple)):
                         kv = kv[0]
-                    # (num_blocks, 2, block, num_kv_heads, head_size);
+                    # KV layout: (num_blocks, 2, block, num_kv_heads, head_size);
                     # index 0 = key (post-RoPE), 1 = value (untouched).
+                    # head_size is read PER LAYER from the tensor, not from a
+                    # per-group spec: when the text & audio sliding windows are
+                    # EQUAL, vLLM merges the decoder and audio-encoder layers into
+                    # one UniformTypeKVCacheSpecs group (no single .head_size, and
+                    # mixed head sizes within the group). The Voxtral decoder is
+                    # NeoX-style (128-dim rotary, shift D); the causal audio
+                    # encoder is 64-dim and runs at pool x the decoder clock
+                    # (shift pool*D). rope_theta=1e6. Assert so a variant with
+                    # different rotary params fails loudly instead of silently
+                    # mis-rotating cached keys.
+                    head_size = kv.shape[-1]
+                    assert head_size in (64, 128), (
+                        f"re-anchor: unexpected rotary head_size {head_size}")
+                    is_neox = head_size == 128
+                    d_grp = D if is_neox else pool * D
                     key = kv[live_t, 0]
                     kv[live_t, 0] = _apply_inverse_rotary(
                         key, d_grp, head_size, base, is_neox)
