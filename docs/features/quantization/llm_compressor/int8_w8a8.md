@@ -17,14 +17,16 @@ Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs re
 To use INT8 quantization with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```bash
-pip install llmcompressor
+(venv-llm-compressor) pip install llmcompressor
 ```
 
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm "lm-eval[api]>=0.4.12"
+(venv-vllm) pip install vllm "lm-eval[api]>=0.4.12"
 ```
+
+Please use separate environments for vLLM and llm-compressor as they might not work together.
 
 ## Quantization Process
 
@@ -57,26 +59,24 @@ When quantizing activations to INT8, you need sample data to estimate the activa
 It's best to use calibration data that closely matches your deployment data.
 For a general-purpose instruction-tuned model, you can use a dataset like `ultrachat`:
 
-??? code
+```python
+from datasets import load_dataset
 
-    ```python
-    from datasets import load_dataset
+NUM_CALIBRATION_SAMPLES = 512
+MAX_SEQUENCE_LENGTH = 2048
 
-    NUM_CALIBRATION_SAMPLES = 512
-    MAX_SEQUENCE_LENGTH = 2048
+# Load and preprocess the dataset
+ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
 
-    # Load and preprocess the dataset
-    ds = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
-    ds = ds.shuffle(seed=42).select(range(NUM_CALIBRATION_SAMPLES))
+def preprocess(example):
+    return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
+ds = ds.map(preprocess)
 
-    def preprocess(example):
-        return {"text": tokenizer.apply_chat_template(example["messages"], tokenize=False)}
-    ds = ds.map(preprocess)
-
-    def tokenize(sample):
-        return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
-    ds = ds.map(tokenize, remove_columns=ds.column_names)
-    ```
+def tokenize(sample):
+    return tokenizer(sample["text"], padding=False, max_length=MAX_SEQUENCE_LENGTH, truncation=True, add_special_tokens=False)
+ds = ds.map(tokenize, remove_columns=ds.column_names)
+```
 
 </details>
 
@@ -84,33 +84,31 @@ For a general-purpose instruction-tuned model, you can use a dataset like `ultra
 
 Now, apply the quantization algorithms:
 
-??? code
+```python
+from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import GPTQModifier
+from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 
-    ```python
-    from llmcompressor import oneshot
-    from llmcompressor.modifiers.quantization import GPTQModifier
-    from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
+# Configure the quantization algorithms
+recipe = [
+    SmoothQuantModifier(smoothing_strength=0.8),
+    GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
+]
 
-    # Configure the quantization algorithms
-    recipe = [
-        SmoothQuantModifier(smoothing_strength=0.8),
-        GPTQModifier(targets="Linear", scheme="W8A8", ignore=["lm_head"]),
-    ]
+# Apply quantization
+oneshot(
+    model=model,
+    dataset=ds,
+    recipe=recipe,
+    max_seq_length=MAX_SEQUENCE_LENGTH,
+    num_calibration_samples=NUM_CALIBRATION_SAMPLES,
+)
 
-    # Apply quantization
-    oneshot(
-        model=model,
-        dataset=ds,
-        recipe=recipe,
-        max_seq_length=MAX_SEQUENCE_LENGTH,
-        num_calibration_samples=NUM_CALIBRATION_SAMPLES,
-    )
-
-    # Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
-    SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
-    model.save_pretrained(SAVE_DIR, save_compressed=True)
-    tokenizer.save_pretrained(SAVE_DIR)
-    ```
+# Save the compressed model: Meta-Llama-3-8B-Instruct-W8A8-Dynamic-Per-Token
+SAVE_DIR = MODEL_ID.split("/")[1] + "-W8A8-Dynamic-Per-Token"
+model.save_pretrained(SAVE_DIR, save_compressed=True)
+tokenizer.save_pretrained(SAVE_DIR)
+```
 
 This process creates a W8A8 model with weights and activations quantized to 8-bit integers.
 
