@@ -139,11 +139,11 @@ def test_event_pool_acquire_and_release():
     assert e0 is not e1
 
     pool.release("r0")
-    assert len(pool._free) == 2
+    assert len(pool._free) == 3  # 2 never-acquired + r0 returned
     assert "r0" not in pool._used
 
     pool.release("r1")
-    assert len(pool._free) == 3
+    assert len(pool._free) == 4  # all 4 events back in pool
     assert len(pool._used) == 0
 
 
