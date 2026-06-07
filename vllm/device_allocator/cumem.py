@@ -8,7 +8,6 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
-import dataclasses
 import gc
 import os
 from collections.abc import Callable, Iterator
@@ -17,6 +16,7 @@ from typing import Any
 
 import torch
 
+from vllm.device_allocator import AllocationData, HandleType
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
@@ -43,16 +43,6 @@ except ModuleNotFoundError:
     python_create_and_map = None
     python_unmap_and_release = None
     lib_name = None
-
-# py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = tuple[int, int, int, int]
-
-
-@dataclasses.dataclass
-class AllocationData:
-    handle: HandleType
-    tag: str
-    cpu_backup_tensor: torch.Tensor | None = None
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -180,8 +170,9 @@ class CuMemAllocator:
         All data in the memory allocation with the specified tag will be
         offloaded to CPU memory, and others will be discarded.
 
-        :param offload_tags: The tags of the memory allocation that will be
-            offloaded. The rest of the memory allocation will be discarded.
+        Args:
+            offload_tags: The tags of the memory allocation that will be
+                offloaded. The rest of the memory allocation will be discarded.
         """
         if offload_tags is None:
             # by default, allocated tensors are offloaded
@@ -230,9 +221,10 @@ class CuMemAllocator:
         All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
 
-        :param tags: The tags of the memory allocation that will be loaded
-            back to GPU memory. If None, all memory allocation will be loaded
-            back to GPU memory.
+        Args:
+            tags: The tags of the memory allocation that will be loaded
+                back to GPU memory. If None, all memory allocation will be loaded
+                back to GPU memory.
         """
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
@@ -255,8 +247,9 @@ class CuMemAllocator:
         All memory allocation created inside the context will be allocated
         in the memory pool, and has the specified tag.
 
-        :param tag: The tag of the memory allocation. If None, the default tag
-            will be used.
+        Args:
+            tag: The tag of the memory allocation. If None, the default tag
+                will be used.
         """
         if tag is None:
             tag = CuMemAllocator.default_tag
