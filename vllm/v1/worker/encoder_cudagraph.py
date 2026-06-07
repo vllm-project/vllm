@@ -517,26 +517,21 @@ class EncoderCudaGraphManager:
                 token_budget,
                 (token_budget - batch_out_tokens) / token_budget * 100,
             )
-            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                batch_mm_kwargs,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-            )
 
             # graph_hits counted inside _run_budget_graph after replay.
             output = self._run_budget_graph(
                 batch_mm_kwargs,
                 token_budget,
-                replay.buffers,
                 secondary_capture_axis_key,
             )
             assert output is not None
-            self._scatter_output_slices(
+            self.model.postprocess_encoder_output(
                 output,
                 batch_orig_indices,
                 per_item_out_tokens,
                 outputs_by_orig_idx,
                 clone=True,
+                batch_mm_kwargs=batch_mm_kwargs,
             )
 
         # Return in original batch order (caller maps outputs to token positions)
