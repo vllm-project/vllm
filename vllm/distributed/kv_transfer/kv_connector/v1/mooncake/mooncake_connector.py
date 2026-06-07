@@ -266,10 +266,9 @@ def _align_transfer_regions(
     """Align KV transfer regions by registered layer-name occurrence.
 
     PP shards own different layer subsets. Positional matching is therefore
-    wrong once producer and consumer have different PP layouts. This mirrors
-    NIXL's registered_layer_names approach: multiple registered transfer buffers
-    for the same layer are represented by repeated layer names and matched by
-    occurrence order.
+    wrong once producer and consumer have different PP layouts. Multiple
+    registered transfer buffers for the same layer are represented by repeated
+    layer names and matched by occurrence order.
     """
 
     def keyed_regions(
@@ -569,7 +568,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         Note the P/D asymmetry: because Mooncake is P-push (P calls
         batch_transfer_sync_write), P records successful transfer latency,
         bytes, and descriptor counts, while D only records failures
-        (recv/ZMQ errors). Aggregated NIXL-style dashboards will find
+        (recv/ZMQ errors). Aggregated transfer dashboards will find
         successful-transfer metrics on the P worker, not D.
         """
         if self.connector_worker is None:
