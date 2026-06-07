@@ -45,6 +45,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
 from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
     ExllamaLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+    HummingLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.machete import (
     MacheteLinearKernel,
 )
@@ -60,6 +63,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
+    ZentorchWNA16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp4 import (
     MxFp4LinearKernel,
@@ -122,6 +128,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
@@ -158,7 +165,11 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
+    XPUFp8BlockScaledMMKernel,
     XPUFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
@@ -257,7 +268,7 @@ def _filter_kernels_by_backend(
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
+    PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
@@ -275,6 +286,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
         AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
         AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
@@ -311,6 +323,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CPUFp8BlockScaledMMKernel,
     ],
     PlatformEnum.XPU: [
+        XPUFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],
 }
@@ -337,6 +350,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MacheteLinearKernel,
         AllSparkLinearKernel,
         MarlinLinearKernel,
+        HummingLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
         TritonW4A16LinearKernel,
@@ -353,6 +367,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
     PlatformEnum.CPU: [
         Dynamic4bitLinearKernel,
+        ZentorchWNA16LinearKernel,
         CPUWNA16LinearKernel,
     ],
 }
@@ -833,7 +848,7 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
 }
 
 
-def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
@@ -876,7 +891,9 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     elif linear_backend == "auto":
         # Deprecated env-var overrides — only honoured when --linear-backend
         # is "auto". Deprecation warnings are emitted from vllm/envs.py.
-        if envs.VLLM_USE_FBGEMM:
+        if use_a16:  # force a16 if running weight-only quantization
+            force_kernel = MarlinNvFp4LinearKernel
+        elif envs.VLLM_USE_FBGEMM:
             force_kernel = FbgemmNvFp4LinearKernel
         elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             force_kernel = EmulationNvFp4LinearKernel
@@ -1009,6 +1026,7 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
+    "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
     "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
     "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
@@ -1023,6 +1041,8 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "ZentorchInt8ScaledMMLinearKernel",
+    "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
     "AllSparkLinearKernel",

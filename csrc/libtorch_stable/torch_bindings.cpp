@@ -1,4 +1,5 @@
 #include "ops.h"
+#include "cuda_utils.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/library.h>
@@ -7,11 +8,6 @@
 // Note: We register under namespace "_C" so ops are accessible as
 // torch.ops._C.<op_name> for compatibility with existing code.
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
-#ifndef USE_ROCM
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
-#endif
-
-#ifndef USE_ROCM
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(
@@ -31,7 +27,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
+#ifndef USE_ROCM
+
+  // TODO: Remove this once ROCm upgrade to torch 2.11.
+  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+#endif
+
+#ifndef USE_ROCM
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(
@@ -321,6 +325,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed) -> ()");
 
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -336,6 +350,38 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
       "bool is_neox, Tensor position_ids, "
       "int forced_token_heads_per_warp=-1) -> ()");
+
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
+      "Tensor q_in, Tensor kv, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+
+  // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
+  // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
+      "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
+      "Tensor position_ids, Tensor cos_sin_cache, float eps, "
+      "int cache_block_size) -> ()");
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
+      "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
+      "int cache_block_size) -> ()");
+
+#ifndef USE_ROCM
+  ops.def(
+      "minimax_allreduce_rms("
+      "Tensor input, Tensor norm_weight, Tensor workspace, "
+      "int rank, int nranks, float eps) -> Tensor");
+  ops.def(
+      "minimax_allreduce_rms_qk("
+      "Tensor qkv, Tensor norm_weight_q, Tensor norm_weight_k, "
+      "Tensor workspace, int q_size, int kv_size, int rank, int nranks, "
+      "float eps) -> (Tensor, Tensor)");
+#endif
 
   // Apply repetition penalties to logits in-place.
   ops.def(
@@ -508,11 +554,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
-#ifndef USE_ROCM
-  ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
-
-#ifndef USE_ROCM
   // Per-token group quantization
   ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
   ops.impl("per_token_group_fp8_quant_packed",
@@ -520,6 +561,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
+  ops.impl("permute_cols", TORCH_BOX(&permute_cols));
+
+#ifndef USE_ROCM
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
   ops.impl("cutlass_scaled_mm_azp", TORCH_BOX(&cutlass_scaled_mm_azp));
@@ -567,10 +611,24 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_dynamic_per_token_quant",
            TORCH_BOX(&rms_norm_dynamic_per_token_quant));
   ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+  ops.impl("silu_and_mul_per_block_quant",
+           TORCH_BOX(&silu_and_mul_per_block_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
+  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+           TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
+#ifndef USE_ROCM
+  ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
+  ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
+#endif
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
@@ -616,6 +674,28 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
   ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
+
+// TODO: Remove this once ROCm upgrade to torch 2.11.
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
+  ops.impl("get_cuda_view_from_cpu_tensor",
+           TORCH_BOX(&get_cuda_view_from_cpu_tensor));
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
+  cuda_utils.def(
+      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
+                          cuda_utils) {
+  cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
+                  TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
+}
+
+#endif
 
 // These capability-check functions take only primitive args (no tensors), so
 // there is no device to dispatch on. CompositeExplicitAutograd makes them
@@ -723,6 +803,45 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
   ops.def(
       "cp_gather_indexer_k_quant_cache(Tensor kv_cache, Tensor! dst_k, Tensor! "
       "dst_scale, Tensor block_table, Tensor cu_seq_lens) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
+  custom_ar.def(
+      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool fully_connected) -> int");
+  custom_ar.def(
+      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.def("dispose(int fa) -> ()");
+  custom_ar.def("meta_size() -> int");
+  custom_ar.def("register_buffer(int fa, int[] ipc_tensors) -> ()");
+  custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (int[], int[])");
+  custom_ar.def(
+      "register_graph_buffers(int fa, int[][] handles, int[][] offsets) -> ()");
+  custom_ar.def("allocate_shared_buffer_and_handle(int size) -> (int, Tensor)");
+  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int");
+  custom_ar.def("free_shared_buffer(int ptr) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CUDA, custom_ar) {
+  custom_ar.impl("init_custom_ar", TORCH_BOX(&init_custom_ar));
+  custom_ar.impl("all_reduce", TORCH_BOX(&all_reduce));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, custom_ar) {
+  custom_ar.impl("open_mem_handle", TORCH_BOX(&open_mem_handle));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, custom_ar) {
+  custom_ar.impl("dispose", TORCH_BOX(&dispose));
+  custom_ar.impl("meta_size", TORCH_BOX(&meta_size));
+  custom_ar.impl("register_buffer", TORCH_BOX(&register_buffer));
+  custom_ar.impl("get_graph_buffer_ipc_meta",
+                 TORCH_BOX(&get_graph_buffer_ipc_meta));
+  custom_ar.impl("register_graph_buffers", TORCH_BOX(&register_graph_buffers));
+  custom_ar.impl("allocate_shared_buffer_and_handle",
+                 TORCH_BOX(&allocate_shared_buffer_and_handle));
+  custom_ar.impl("free_shared_buffer", TORCH_BOX(&free_shared_buffer));
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CPU, ops) {

@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -325,6 +326,27 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = block
 
         self.num_free_blocks += 1
+
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the front of the free list."""
+        if len(blocks) == 0:
+            return
+
+        first_block = self.fake_free_list_head.next_free_block
+        assert first_block is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        prev_block = self.fake_free_list_head
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+
+        prev_block.next_free_block = first_block
+        first_block.prev_free_block = prev_block
+
+        self.num_free_blocks += len(blocks)
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks back into the free list
@@ -1991,6 +2013,9 @@ def get_kv_cache_configs(
                     "across workers. This is not supported yet."
                 )
 
+    # Check if the KV cache specs are registered correctly.
+    # This is to prevent that some layers are initialized with unregistered specs.
+    KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
