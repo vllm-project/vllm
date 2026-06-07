@@ -48,15 +48,14 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
-    """Broadcast engine_id from TP rank 0 so all workers in a
-    multi-node TP group share the same value."""
+def _sync_engine_id_across_model_parallel(vllm_config: "VllmConfig") -> None:
+    """Broadcast engine_id from global rank 0 across TP/PP worker ranks."""
     from vllm.distributed.parallel_state import (
-        get_tp_group,
+        get_world_group,
     )
 
     assert vllm_config.kv_transfer_config is not None
-    synced_id = get_tp_group().broadcast_object(
+    synced_id = get_world_group().broadcast_object(
         vllm_config.kv_transfer_config.engine_id, src=0
     )
     vllm_config.kv_transfer_config.engine_id = synced_id
@@ -78,7 +77,7 @@ def ensure_kv_transfer_initialized(
         vllm_config.kv_transfer_config.is_kv_transfer_instance
         and _KV_CONNECTOR_AGENT is None
     ):
-        _sync_engine_id_across_tp(vllm_config)
+        _sync_engine_id_across_model_parallel(vllm_config)
 
         _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
             config=vllm_config,
