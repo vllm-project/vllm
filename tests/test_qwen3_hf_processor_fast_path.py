@@ -224,11 +224,6 @@ def test_qwen3_fast_preprocess_requires_merge_aligned_size() -> None:
         merge_aligned,
         {},
     )
-    assert Qwen3VLMultiModalProcessor._can_fast_preprocess_batched_images(
-        image_processor,
-        merge_aligned,
-        {"truncation": False},
-    )
 
 
 def test_qwen3_image_only_mm_only_matches_dummy_text_path() -> None:
@@ -267,6 +262,23 @@ def test_qwen3_image_only_mm_only_matches_dummy_text_path() -> None:
         .reshape_as(baseline_pixel_values)
     )
     assert torch.equal(expanded_compact, baseline_pixel_values)
+
+
+def test_qwen3_mm_only_fallback_ignores_tokenization_kwargs() -> None:
+    processor = _make_processor()
+    images = [
+        Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8), "RGB"),
+        Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8), "RGB"),
+    ]
+    mm_items = processor.data_parser.parse_mm_data({"image": images})
+
+    optimized = processor._apply_hf_processor_mm_only(
+        mm_items,
+        {"return_mm_token_type_ids": False},
+        {"truncation": False},
+    )
+
+    assert optimized["image_grid_thw"].shape[0] == 2
 
 
 def test_qwen3_patch_embed_compact_image_matches_duplicated_temporal(

@@ -1360,7 +1360,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         if not image_processor.do_rescale or not image_processor.do_normalize:
             return False
 
-        ignored_kwargs = {"disable_grouping", "truncation"}
+        ignored_kwargs = {"disable_grouping"}
         if any(key not in ignored_kwargs for key in processor_kwargs):
             return False
 
@@ -1485,7 +1485,11 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             processor_data = dict(processor_data)
             processor_data["images"] = batched_images
 
-        processor_kwargs = dict(**hf_processor_mm_kwargs, **tokenization_kwargs)
+        # The direct image-processor path does not consume tokenizer kwargs.
+        # Passing tokenizer-only options such as `truncation` into
+        # Qwen2VLImageProcessor makes Transformers validate them as image
+        # kwargs and raise.
+        processor_kwargs = dict(hf_processor_mm_kwargs)
         if not prebatched_images:
             processor_kwargs.setdefault("disable_grouping", False)
         processor_kwargs.pop("return_mm_token_type_ids", None)
