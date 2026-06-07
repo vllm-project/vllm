@@ -149,10 +149,11 @@ def test_audio_in_video_same_audio_different_video(model_id: str) -> None:
     The existing ``test_audio_in_video_cache_correctness`` reuses a single
     video across turns, so this cross-request collision is not covered there.
 
-    The fix couples ``video[i]`` with ``audio[i]`` (via
-    ``_get_mm_cache_coupled_groups``) so a cache-missed video drags its paired
-    audio back through the HF processor even when the audio is individually
-    cached. This test asserts the second request neither raises nor produces
+    The fix couples ``video[i]`` with ``audio[i]`` (via the Qwen-Omni
+    ``_cached_apply_hf_processor`` override) so a cache-missed video drags its
+    paired audio back through the HF processor even when the audio is
+    individually cached. This test asserts the second request neither raises
+    nor produces
     wrong tokens.
     """
     ctx = build_model_context(
@@ -292,19 +293,11 @@ def test_audio_in_video_cache_keys_do_not_change_semantic_hashes(
 
 
 @pytest.mark.parametrize("model_id", MODELS)
-def test_audio_in_video_partial_residency_reprocesses_whole_group(
-    model_id: str,
-) -> None:
-    """Group-aware keys alone are not enough: a coupled group's members are
-    still stored as independent cache entries, so LRU eviction can drop one
-    member while the other survives. If only the video is evicted, a later
-    request would otherwise get video-miss / audio-hit and run the HF processor
-    on the video without its paired audio (the #44538 StopIteration).
-
-    Group-miss expansion in ``_get_cache_missing_items`` must therefore drag the
-    still-resident audio back into the reprocessed set. This drives that method
-    directly with a fake cache simulating audio-resident / video-evicted, which
-    is deterministic (no reliance on LRU eviction order).
+def test_coupled_cache_keys_are_group_aware(model_id: str) -> None:
+    """The fix's processor-cache keys make each coupled member's key depend on
+    *all* members' content hashes, so a member is reused only when its whole
+    pairing matches (fixing both #44538 polarities) and an unpaired group is
+    left untouched. This unit-tests that key derivation directly.
     """
     ctx = build_model_context(
         model_id,
@@ -313,33 +306,43 @@ def test_audio_in_video_partial_residency_reprocesses_whole_group(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
 
-    mm_data = create_paired_mm_data(video_seed=5, audio_seed=6)
-    mm_items = processor.info.parse_mm_data(mm_data)
+    groups = [[("video", 0), ("audio", 0)]]
+    keys_AX = processor._coupled_cache_keys({"video": ["vA"], "audio": ["aX"]}, groups)
+    keys_AX_again = processor._coupled_cache_keys(
+        {"video": ["vA"], "audio": ["aX"]}, groups
+    )
+    keys_BX = processor._coupled_cache_keys({"video": ["vB"], "audio": ["aX"]}, groups)
+    keys_AY = processor._coupled_cache_keys({"video": ["vA"], "audio": ["aY"]}, groups)
 
-    coupled_groups = processor._get_mm_cache_coupled_groups(
+    # Same pairing -> identical keys (full reuse).
+    assert keys_AX == keys_AX_again
+    # Different video -> the AUDIO key also changes (reported polarity: a shared
+    # audio is not reused across different videos).
+    assert keys_AX["audio"][0] != keys_BX["audio"][0]
+    # Different audio -> the VIDEO key also changes (reverse polarity).
+    assert keys_AX["video"][0] != keys_AY["video"][0]
+    # Members stay distinct within a group.
+    assert keys_AX["video"][0] != keys_AX["audio"][0]
+    # No coupling -> keys are returned unchanged.
+    assert processor._coupled_cache_keys({"video": ["vA"], "audio": ["aX"]}, []) == {
+        "video": ["vA"],
+        "audio": ["aX"],
+    }
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_coupling_only_active_for_use_audio_in_video(model_id: str) -> None:
+    """Coupling (and therefore the custom cache path) must engage only when
+    ``use_audio_in_video=True``; otherwise the base cache path is used."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+        mm_processor_cache_gb=1,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
+    mm_items = processor.info.parse_mm_data(create_paired_mm_data(5, 6))
+
+    assert processor._get_audio_in_video_coupled_groups(
         mm_items, {"use_audio_in_video": True}
-    )
-    assert coupled_groups, "coupling must be active for use_audio_in_video"
-
-    class _AudioResidentVideoEvictedCache:
-        """Simulates the audio member surviving in cache while the video member
-        was evicted (partial residency)."""
-
-        def is_cached(self, keys: list[str]) -> list[bool]:
-            return [key.startswith("audio:") for key in keys]
-
-    mm_cache_keys = {"video": ["video:0"], "audio": ["audio:0"]}
-
-    mm_needs_processing, mm_missing_items = processor._get_cache_missing_items(
-        cache=_AudioResidentVideoEvictedCache(),
-        mm_data_items=mm_items,
-        mm_cache_keys=mm_cache_keys,
-        coupled_groups=coupled_groups,
-    )
-
-    # Video missed; the resident audio is dragged back in by group expansion.
-    assert mm_needs_processing["video"] == [True]
-    assert mm_needs_processing["audio"] == [True]
-    # Both must be present in the data fed to the HF processor.
-    assert mm_missing_items.get_count("video", strict=False) == 1
-    assert mm_missing_items.get_count("audio", strict=False) == 1
+    ) == [[("video", 0), ("audio", 0)]]
+    assert processor._get_audio_in_video_coupled_groups(mm_items, {}) == []
