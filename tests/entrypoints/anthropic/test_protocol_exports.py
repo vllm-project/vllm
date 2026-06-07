@@ -5,7 +5,9 @@
 Guards against Docker/nightly images shipping a stale protocol module that is
 missing symbols imported by ``vllm.entrypoints.anthropic.serving`` (issue #44759).
 """
+
 import pytest
+
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
     AnthropicContextManagement,
