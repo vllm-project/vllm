@@ -22,7 +22,6 @@ Test coverage:
 from __future__ import annotations
 
 import time
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -50,7 +49,7 @@ def _make_mock_event(query_result: bool = True) -> MagicMock:
 
 
 def _make_mock_scheduler(
-    granularity: Optional[int] = 128,
+    granularity: int | None = 128,
     decode_threshold: int = 1,
     running_count: int = 0,
 ) -> FlowPrefillMixin:
@@ -209,9 +208,7 @@ def test_flowprefill_enabled_when_granularity_set():
 
 def test_flowprefill_no_checkpoint_when_no_decode_pressure():
     """Checkpoint is skipped when decode queue is below threshold."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=2, running_count=1
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=2, running_count=1)
     result = sched._fp_maybe_checkpoint(
         request_id="r0",
         current_pos=0,
@@ -223,9 +220,7 @@ def test_flowprefill_no_checkpoint_when_no_decode_pressure():
 
 def test_flowprefill_no_checkpoint_when_remainder_fits_in_subchunk():
     """Checkpoint is skipped when remaining_tokens <= granularity."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=2
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=2)
     result = sched._fp_maybe_checkpoint(
         request_id="r0",
         current_pos=896,
@@ -237,9 +232,7 @@ def test_flowprefill_no_checkpoint_when_remainder_fits_in_subchunk():
 
 def test_flowprefill_checkpoint_inserted_under_decode_pressure():
     """Checkpoint is created when decode queue meets threshold."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=1
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=1)
     mock_event = _make_mock_event()
     sched._event_pool.acquire = MagicMock(return_value=mock_event)
 
@@ -261,9 +254,7 @@ def test_flowprefill_checkpoint_inserted_under_decode_pressure():
 
 def test_flowprefill_checkpoint_skipped_when_pool_exhausted():
     """No checkpoint is inserted when the event pool is exhausted."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=1
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=1)
     sched._event_pool.acquire = MagicMock(return_value=None)
 
     result = sched._fp_maybe_checkpoint(
@@ -283,9 +274,7 @@ def test_flowprefill_checkpoint_skipped_when_pool_exhausted():
 
 def test_fp_resume_when_event_ready_and_no_decode_pressure():
     """Suspended prefill resumes when event fires and decode queue is clear."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=0
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=0)
     mock_event = _make_mock_event(query_result=True)
     sched._suspended_prefills["r0"] = PrefillCheckpointState(
         request_id="r0",
@@ -305,9 +294,7 @@ def test_fp_resume_when_event_ready_and_no_decode_pressure():
 
 def test_fp_no_resume_when_event_not_ready():
     """Suspended prefill stays suspended when CUDA event has not fired."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=0
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=0)
     mock_event = _make_mock_event(query_result=False)
     sched._suspended_prefills["r0"] = PrefillCheckpointState(
         request_id="r0",
@@ -324,9 +311,7 @@ def test_fp_no_resume_when_event_not_ready():
 
 def test_fp_no_resume_when_decode_pressure_high():
     """Suspended prefill stays suspended when decode queue is at/above threshold."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=2, running_count=2
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=2, running_count=2)
     mock_event = _make_mock_event(query_result=True)
     sched._suspended_prefills["r0"] = PrefillCheckpointState(
         request_id="r0",
@@ -348,9 +333,7 @@ def test_fp_no_resume_when_decode_pressure_high():
 
 def test_fp_schedule_no_decode_pressure_no_checkpoint():
     """_fp_schedule does not insert checkpoints when decode queue is empty."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=0
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=0)
     requests = [_make_fake_request("r0", num_remaining_tokens=512)]
     scheduled, suspended, budget = sched._fp_schedule(
         waiting_requests=requests,
@@ -367,9 +350,7 @@ def test_fp_schedule_no_decode_pressure_no_checkpoint():
 
 def test_fp_schedule_inserts_checkpoint_under_decode_pressure():
     """_fp_schedule suspends a long prefill and inserts a checkpoint."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=1
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=1)
     mock_event = _make_mock_event()
     sched._event_pool.acquire = MagicMock(return_value=mock_event)
 
@@ -390,9 +371,7 @@ def test_fp_schedule_inserts_checkpoint_under_decode_pressure():
 
 def test_fp_schedule_event_query_is_nonblocking():
     """CUDA Event.query() must be called without arguments (non-blocking)."""
-    sched = _make_mock_scheduler(
-        granularity=128, decode_threshold=1, running_count=0
-    )
+    sched = _make_mock_scheduler(granularity=128, decode_threshold=1, running_count=0)
     mock_event = _make_mock_event(query_result=True)
     sched._suspended_prefills["r0"] = PrefillCheckpointState(
         request_id="r0",
