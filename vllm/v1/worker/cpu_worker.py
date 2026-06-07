@@ -134,8 +134,8 @@ class CPUWorker(Worker):
                     if iomp_path:
                         hint = f" Found candidate: {iomp_path}"
                     logger.warning(
-                        "Speculative decoding on CPU without libiomp5 in "
-                        "LD_PRELOAD causes ~2x throughput loss. "
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
                         "Run with: "
                         "LD_PRELOAD=libiomp5.so python -m vllm...%s",
                         hint,
