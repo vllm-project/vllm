@@ -38,6 +38,7 @@ pub struct Config {
     /// API keys for protecting OpenAI-compatible endpoints. When set, the
     /// authentication middleware requires a valid `Authorization: Bearer <key>`
     /// header on all guarded routes.
+    #[serde(skip)]
     pub api_key: Option<Vec<String>>,
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
