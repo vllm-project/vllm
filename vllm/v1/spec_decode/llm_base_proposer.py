@@ -66,6 +66,7 @@ class SpecDecodeBaseProposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self._share_mtp_indices = False
 
         self.device = device
         self.dtype = vllm_config.model_config.dtype
@@ -486,7 +487,7 @@ class SpecDecodeBaseProposer:
         # Step 0 of index_share_for_mtp_iteration: let the MTP layer
         # compute its own indices (skip_topk=False) so subsequent steps
         # can reuse them.
-        if self._share_mtp_indices:
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(False)
 
         with set_forward_context(
@@ -508,7 +509,7 @@ class SpecDecodeBaseProposer:
 
         # After step 0: switch to reuse mode so steps 1+ skip the indexer
         # and read the indices that step 0 just wrote into the shared buffer.
-        if self._share_mtp_indices:
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(True)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
