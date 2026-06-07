@@ -283,15 +283,42 @@ _JSON_NAME_LITERALS = {
 def get_parameter_value(val: ast.expr) -> Any:
     """Extract a Python literal value from an AST expression node.
 
-    Handles constants, dicts, lists, and JSON-style name literals
+    Handles constants, dicts, lists, JSON-style name literals
     (null, true, false) that some models produce instead of Python
-    literals (None, True, False).
+    literals (None, True, False), and unary operators applied to
+    literals (-5, +5, not True).
+
+    Negative and explicitly-positive numbers, and boolean negation,
+    are represented in the Python AST as ``UnaryOp(op, operand)``,
+    not as a single ``Constant`` — e.g. ``-5`` parses as
+    ``UnaryOp(USub, Constant(5))``. Without ``UnaryOp`` handling,
+    every pythonic tool call with a negative or boolean-negated
+    argument (e.g. ``set_temperature(value=-5)``) would raise
+    ``UnexpectedAstError``.
 
     Raises:
         UnexpectedAstError: If the AST node is not a supported literal type.
     """
     if isinstance(val, ast.Constant):
         return val.value
+    elif isinstance(val, ast.UnaryOp):
+        # ``-5`` -> UnaryOp(USub, Constant(5))
+        # ``+5`` -> UnaryOp(UAdd, Constant(5))
+        # ``not True`` -> UnaryOp(Not, Constant(True))
+        # ``ast.Invert`` (``~``) is intentionally not supported — bitwise
+        # ops aren't a natural fit for tool-call argument literals.
+        operand = get_parameter_value(val.operand)
+        if isinstance(val.op, ast.USub):
+            return -operand
+        if isinstance(val.op, ast.UAdd):
+            return +operand
+        if isinstance(val.op, ast.Not):
+            return not operand
+        logger.warning(
+            "Unsupported unary op in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be literals")
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             logger.warning(

@@ -58,6 +58,34 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+# Regression coverage for GitHub #19569 — pythonic tool call parsing must
+# accept unary-op literals (negative numbers, explicit +, boolean not).
+NEGATIVE_NUMBERS_FUNCTION_OUTPUT = (
+    "set_position(x=-10, y=5, z=-3.14, offset=+2)"
+)
+NEGATIVE_NUMBERS_FUNCTION_CALL = FunctionCall(
+    name="set_position",
+    arguments='{"x": -10, "y": 5, "z": -3.14, "offset": 2}',
+)
+NEGATIVE_LIST_FUNCTION_OUTPUT = "load_offsets(deltas=[-1, -2, -3])"
+NEGATIVE_LIST_FUNCTION_CALL = FunctionCall(
+    name="load_offsets",
+    arguments='{"deltas": [-1, -2, -3]}',
+)
+NEGATIVE_DICT_FUNCTION_OUTPUT = (
+    "configure(settings={'min': -100, 'max': 100})"
+)
+NEGATIVE_DICT_FUNCTION_CALL = FunctionCall(
+    name="configure",
+    arguments='{"settings": {"min": -100, "max": 100}}',
+)
+BOOLEAN_NOT_FUNCTION_OUTPUT = (
+    "toggle(active=not True, enabled=not False)"
+)
+BOOLEAN_NOT_FUNCTION_CALL = FunctionCall(
+    name="toggle",
+    arguments='{"active": false, "enabled": true}',
+)
 
 
 @pytest.mark.parametrize("streaming", [True, False])
@@ -159,6 +187,56 @@ TEST_CASES = [
         f"[{SIMPLE_FUNCTION_OUTPUT}, {MORE_TYPES_FUNCTION_OUTPUT}]",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_nonstreaming",
+    ),
+    # Regression coverage for #19569 — pythonic tool call parsing must accept
+    # unary-op literals (negative numbers, explicit +, boolean not).
+    pytest.param(
+        True,
+        f"[{NEGATIVE_NUMBERS_FUNCTION_OUTPUT}]",
+        [NEGATIVE_NUMBERS_FUNCTION_CALL],
+        id="negative_numbers_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{NEGATIVE_NUMBERS_FUNCTION_OUTPUT}]",
+        [NEGATIVE_NUMBERS_FUNCTION_CALL],
+        id="negative_numbers_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{NEGATIVE_LIST_FUNCTION_OUTPUT}]",
+        [NEGATIVE_LIST_FUNCTION_CALL],
+        id="negative_list_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{NEGATIVE_LIST_FUNCTION_OUTPUT}]",
+        [NEGATIVE_LIST_FUNCTION_CALL],
+        id="negative_list_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{NEGATIVE_DICT_FUNCTION_OUTPUT}]",
+        [NEGATIVE_DICT_FUNCTION_CALL],
+        id="negative_dict_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{NEGATIVE_DICT_FUNCTION_OUTPUT}]",
+        [NEGATIVE_DICT_FUNCTION_CALL],
+        id="negative_dict_nonstreaming",
+    ),
+    pytest.param(
+        True,
+        f"[{BOOLEAN_NOT_FUNCTION_OUTPUT}]",
+        [BOOLEAN_NOT_FUNCTION_CALL],
+        id="boolean_not_streaming",
+    ),
+    pytest.param(
+        False,
+        f"[{BOOLEAN_NOT_FUNCTION_OUTPUT}]",
+        [BOOLEAN_NOT_FUNCTION_CALL],
+        id="boolean_not_nonstreaming",
     ),
 ]
 
