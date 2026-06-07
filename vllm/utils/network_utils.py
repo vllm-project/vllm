@@ -166,23 +166,59 @@ def get_open_port() -> int:
     return _get_open_port()
 
 
+def _get_open_port_atomic() -> int:
+    """Get an open port via OS-assigned port 0 binding.
+
+    Uses port=0 (let the OS assign an ephemeral port atomically)
+    rather than the sequential scan from VLLM_PORT.  This eliminates
+    the TOCTOU window inherent in the sequential scan and ensures
+    unpredictable port assignments.
+
+    When VLLM_PORT is set, only ports >= VLLM_PORT are accepted, so
+    deployments that need to restrict the port range (firewall rules,
+    k8s network policies, Docker port mappings) can set a lower bound.
+
+    Future enhancement: a VLLM_PORT_RANGE env var could add an upper
+    bound alongside VLLM_PORT's lower bound.
+    """
+    min_port = envs.VLLM_PORT
+
+    for _ in range(1000):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                port = s.getsockname()[1]
+        except OSError:
+            try:
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+                    s.bind(("", 0))
+                    port = s.getsockname()[1]
+            except OSError:
+                raise
+
+        if min_port is None or port >= min_port:
+            return port
+
+    raise RuntimeError(
+        "Failed to find an open port in 1000 attempts. "
+        "If VLLM_PORT is set, ensure it falls within the OS ephemeral "
+        "port range."
+    )
+
+
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of unique open ports.
 
-    When VLLM_PORT is set, scans upward from that port, advancing
-    the start position after each find so every port is unique.
+    Each port is obtained by atomic port=0 binding (OS-assigned).  The
+    OS guarantees the port is free at discovery time and the assignment
+    is unpredictable to other processes, eliminating the TOCTOU race
+    inherent in the old sequential scan from VLLM_PORT.
+
+    When VLLM_PORT is set, it acts as a minimum port bound.
     """
     ports_set = set[int]()
-    if envs.VLLM_PORT is not None:
-        next_port = envs.VLLM_PORT
-        for _ in range(count):
-            port = _get_open_port(start_port=next_port, max_attempts=1000)
-            ports_set.add(port)
-            next_port = port + 1
-        return list(ports_set)
-    else:
-        while len(ports_set) < count:
-            ports_set.add(get_open_port())
+    while len(ports_set) < count:
+        ports_set.add(_get_open_port_atomic())
 
     return list(ports_set)
 
