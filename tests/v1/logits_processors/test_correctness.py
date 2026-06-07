@@ -58,6 +58,7 @@ STR_THINKING_BUDGET = "thinking_budget"
 THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
+TOOL_CALL_TOKEN_ID = 997
 
 # LogitsProcessor subclass or "none"
 LogitprocType: TypeAlias = type[LogitsProcessor] | str
@@ -104,7 +105,12 @@ class MockReasoningConfig:
 
     reasoning_start_token_ids = [THINK_START_TOKEN_ID]
     reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    implicit_reasoning_end_token_ids: list[list[int]] = []
     enabled = True
+
+
+class MockReasoningConfigWithImplicitEnd(MockReasoningConfig):
+    implicit_reasoning_end_token_ids = [[TOOL_CALL_TOKEN_ID]]
 
 
 def _generate_fake_sampling_metadata(
@@ -1122,6 +1128,42 @@ def test_thinking_budget_holder_empty_end_tokens_disables_row():
     )
     h.update_state([[THINK_START_TOKEN_ID, 1]], None, None)
     assert h._state[0]["thinking_token_budget"] == -1
+
+
+def test_thinking_budget_stops_counting_after_implicit_end():
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfigWithImplicitEnd(),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_token_ids: list[int] = []
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=3),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+
+    output_token_ids.extend(
+        [THINK_START_TOKEN_ID, 10, TOOL_CALL_TOKEN_ID, 20, 21, 22, 23]
+    )
+    h.update_state([output_token_ids], None, None)
+
+    state = h._state[0]
+    assert not state["in_think"]
+    assert not state["in_end"]
+    assert state["force_index"] == []
 
 
 def test_thinking_budget_enforced_without_penalties():
