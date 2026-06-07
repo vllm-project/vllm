@@ -602,7 +602,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         fp8_use_mixed_batch = (
             self.num_heads < MIN_HEADS_FOR_BF16_PREFILL and not self.is_deepseek_v4
         )
-        # DeepseekV4 has its own attention impl (DeepseekV4MLAAttention) that does not
+        # DeepseekV4 has its own attention impl (DeepseekV4Attention) that does not
         # consume fp8_extra_metadata. Skipping the build here avoids a
         # forced D2H sync on seq_lens that would otherwise fire on every
         # prefill-bearing step, lifting GPU utilization on long-prefill

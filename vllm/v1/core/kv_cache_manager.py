@@ -274,6 +274,7 @@ class KVCacheManager:
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
         num_running_reqs: int = 0,
+        reserved_blocks: int = 0,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -302,6 +303,11 @@ class KVCacheManager:
             num_running_reqs: The number of requests currently in the running
                 queue. Used to size the dynamic watermark (free-block headroom)
                 applied when admitting a waiting/preempted request.
+            reserved_blocks: Number of free blocks that must be left available for
+                other in-flight sequences to complete. The actual allocation is only
+                made if it fits within (free blocks - reserved_blocks). Used to gate
+                async KV-connector loads so their initial allocation cannot consume
+                blocks an already in-flight (prefilling) sequence is relying on.
 
         Blocks layout:
         ```
@@ -424,8 +430,11 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
+        # Keep `reserved_blocks` free for other in-flight sequences, and an
+        # additional watermark of headroom for waiting/preempted admissions.
+        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
         required_blocks = num_blocks_to_allocate + watermark_blocks
-        if required_blocks > self.block_pool.get_num_free_blocks():
+        if required_blocks > available_blocks:
             # Cannot allocate new blocks
             return None
 
