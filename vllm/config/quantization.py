@@ -17,6 +17,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp8Dynamic,
+    kTurboquantW2,
+    kTurboquantW3,
+    kTurboquantW4,
 )
 
 # User-facing names addressable from quantization_config.
@@ -29,6 +32,9 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    "turboquant_2bit": kTurboquantW2,
+    "turboquant_3bit": kTurboquantW3,
+    "turboquant_4bit": kTurboquantW4,
 }
 
 
@@ -125,6 +131,18 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # TurboQuant: Linear-only today (MoE pass-through). Bare "turboquant"
+    # defaults to 3-bit (the sweet spot for quality / compression on most
+    # models); explicit 2/4-bit shorthands available.
+    "turboquant": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kTurboquantW3),
+    ),
+    "turboquant_2bit": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kTurboquantW2),
+    ),
+    "turboquant_4bit": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kTurboquantW4),
     ),
 }
 
