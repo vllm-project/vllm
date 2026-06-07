@@ -306,6 +306,93 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
         assert lengths == [2 * block_len, 2 * block_len]
 
 
+@pytest.mark.asyncio
+async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
+    monkeypatch,
+):
+    """Producer sends its PP layer shard to the matching consumer layer address."""
+
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+
+        block_len = 4096
+        kv_half = block_len // 2
+        prefill_worker.kv_caches_base_addr = [0x1000]
+        prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.registered_layer_names = ["model.layers.1.self_attn"]
+        prefill_worker.registered_layer_indices = [1]
+
+        class InlineSenderLoop:
+            async def run_in_executor(self, executor, func, *args):
+                return func(*args)
+
+        origin_sender_loop = prefill_worker.sender_loop
+        prefill_worker.sender_loop = InlineSenderLoop()
+
+        transfer_id = "xfer-layer-align"
+        send_meta = SendBlockMeta(
+            p_req_id="p-req-layer-align",
+            transfer_id=transfer_id,
+            local_block_ids=[[10]],
+            ready=asyncio.Event(),
+        )
+        prefill_worker.reqs_need_send[transfer_id] = send_meta
+        send_meta.ready.set()
+
+        xfer_meta = MooncakeXferMetadata(
+            remote_hostname="consumer-host",
+            remote_port=54321,
+            remote_tp_size=1,
+            remote_tp_rank=0,
+            req_blocks={"d-req-layer-align": (transfer_id, [[20]])},
+            kv_caches_base_addr=[0xA000, 0xB000],
+            block_lens=[block_len, block_len],
+            registered_layer_names=[
+                "model.layers.0.self_attn",
+                "model.layers.1.self_attn",
+            ],
+            registered_layer_indices=[0, 1],
+        )
+        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
+        mock_socket.send_multipart = AsyncMock()
+        identity = b"consumer-layer-align"
+
+        with patch.object(
+            prefill_worker, "_send_blocks", return_value=0
+        ) as mock_send_blocks:
+            await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
+
+        src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
+        assert src_ptrs == [
+            0x1000 + 10 * block_len,
+            0x1000 + 10 * block_len + kv_half,
+        ]
+        assert dst_ptrs == [
+            0xB000 + 20 * block_len,
+            0xB000 + 20 * block_len + kv_half,
+        ]
+        assert lengths == [kv_half, kv_half]
+
+        sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
+        assert sent_identity == identity
+        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
+        assert response.status == MooncakeXferResponseStatus.FINISH
+        assert response.ok_reqs == ["d-req-layer-align"]
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
+
+
 def test_basic_interface():
     """Unit test for basic MooncakeConnector interface functionality."""
 

@@ -568,7 +568,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         Note the P/D asymmetry: because Mooncake is P-push (P calls
         batch_transfer_sync_write), P records successful transfer latency,
         bytes, and descriptor counts, while D only records failures
-        (recv/ZMQ errors). Aggregated transfer dashboards will find
+        (recv/ZMQ errors). Aggregated NIXL-style dashboards will find
         successful-transfer metrics on the P worker, not D.
         """
         if self.connector_worker is None:
