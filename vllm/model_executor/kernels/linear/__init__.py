@@ -400,8 +400,9 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
-        # upstream CUTLASS SM121 MMA op guard is resolved; use
-        # --linear-backend flashinfer_b12x to opt in explicitly.
+        # upstream CUTLASS SM121 MMA op guard is resolved; opt in explicitly
+        # via --linear-backend flashinfer_b12x or
+        # VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x.
         FlashInferCutlassNvFp4LinearKernel,
         CutlassNvFp4LinearKernel,
         MarlinNvFp4LinearKernel,
@@ -831,6 +832,20 @@ def init_wfp8_a16_linear_kernel(
     )
 
 
+# Maps VLLM_NVFP4_GEMM_BACKEND env var values to kernel classes. This is an
+# env-driven alternative to --linear-backend for forcing a specific NVFP4
+# linear kernel (e.g. VLLM_NVFP4_GEMM_BACKEND=flashinfer-b12x).
+_NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
+    "flashinfer-b12x": FlashInferB12xNvFp4LinearKernel,
+    "flashinfer-cutlass": FlashInferCutlassNvFp4LinearKernel,
+    "cutlass": CutlassNvFp4LinearKernel,
+    "marlin": MarlinNvFp4LinearKernel,
+    "flashinfer-trtllm": FlashInferTrtllmNvFp4LinearKernel,
+    "flashinfer-cudnn": FlashInferCudnnNvFp4LinearKernel,
+    "emulation": EmulationNvFp4LinearKernel,
+}
+
+
 def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
@@ -870,6 +885,16 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
+    elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
+        # Env-driven override (alternative to --linear-backend). Maps a
+        # VLLM_NVFP4_GEMM_BACKEND value to a concrete kernel class.
+        backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
+        force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
+        if force_kernel is None:
+            raise ValueError(
+                f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
+                f"Valid choices: {list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+            )
     elif linear_backend == "auto" and use_a16:
         # Force a16 (Marlin) when running weight-only quantization.
         force_kernel = MarlinNvFp4LinearKernel

@@ -233,6 +233,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
+    VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
@@ -1672,6 +1673,31 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(
         int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
+    ),
+    # Selects the GEMM backend used for NVFP4-quantized linear/MoE layers.
+    # Supported options:
+    # - "flashinfer-b12x": use flashinfer b12x (Blackwell 12.x) NVFP4 kernels
+    # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
+    # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
+    # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
+    # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
+    # - "emulation":
+    #     use BF16/FP16 GEMM, dequantizing weights and running QDQ on activations.
+    #     This is only meant for research purposes to run on devices where NVFP4
+    #     GEMM kernels are not available.
+    # - <none>: automatically pick an available backend
+    "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
+        "VLLM_NVFP4_GEMM_BACKEND",
+        None,
+        [
+            "flashinfer-b12x",
+            "flashinfer-cudnn",
+            "flashinfer-trtllm",
+            "flashinfer-cutlass",
+            "cutlass",
+            "marlin",
+            "emulation",
+        ],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
