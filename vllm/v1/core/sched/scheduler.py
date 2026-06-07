@@ -166,7 +166,7 @@ class FlowPrefillMixin:
     """
 
     def _init_flowprefill(self) -> None:
-        """Initialise FlowPrefill state.  Call once from ``__init__``."""
+        """Initialize FlowPrefill state.  Call once from ``__init__``."""
         sched_cfg = self.scheduler_config  # type: ignore[attr-defined]
 
         self._fp_granularity: int | None = getattr(
