@@ -22,7 +22,7 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import config, getattr_iter, lazy_platform
 from vllm.logger import init_logger
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -509,38 +509,28 @@ class ModelConfig:
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
-        if (
-            self.override_attention_dtype is not None
-            or self.enable_sleep_mode
-            or self.enable_cumem_allocator
-        ):
+        if self.override_attention_dtype is not None and not lazy_platform().is_rocm():
+            warnings.warn(
+                "override-attention-dtype is set but not using ROCm platform",
+                stacklevel=2,
+            )
+
+        if self.enable_sleep_mode:
             from vllm.platforms import current_platform
 
-            if (
-                self.override_attention_dtype is not None
-                and not current_platform.is_rocm()
-            ):
-                warnings.warn(
-                    "override-attention-dtype is set but not using ROCm platform",
-                    stacklevel=2,
+            if not current_platform.is_sleep_mode_available():
+                raise ValueError("Sleep mode is not supported on current platform.")
+            if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
+                logger.info_once(
+                    "Enabling cumem allocator because sleep mode requires it."
                 )
+                self.enable_cumem_allocator = True
 
-            if self.enable_sleep_mode:
-                if not current_platform.is_sleep_mode_available():
-                    raise ValueError("Sleep mode is not supported on current platform.")
-                if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
-                    logger.info_once(
-                        "Enabling cumem allocator because sleep mode requires it."
-                    )
-                    self.enable_cumem_allocator = True
-
-            if (
-                self.enable_cumem_allocator
-                and not current_platform.is_cumem_allocator_available()
-            ):
-                raise ValueError(
-                    "cumem allocator is not supported on current platform."
-                )
+        if (
+            self.enable_cumem_allocator
+            and not lazy_platform().is_cumem_allocator_available()
+        ):
+            raise ValueError("cumem allocator is not supported on current platform.")
 
         hf_config = get_config(
             self.hf_config_path or self.model,

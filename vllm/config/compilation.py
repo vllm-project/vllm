@@ -11,7 +11,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.config.utils import Range, config, get_hash_factors, hash_factors
+from vllm.config.utils import (
+    Range,
+    config,
+    get_hash_factors,
+    hash_factors,
+    lazy_platform,
+)
 from vllm.env_override import is_torch_equal_or_newer
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -26,12 +32,6 @@ else:
     VllmConfig = object
 
 logger = init_logger(__name__)
-
-
-def lazy_platform():
-    from vllm.platforms import current_platform
-
-    return current_platform
 
 
 class CompilationMode(enum.IntEnum):
@@ -1076,7 +1076,9 @@ class CompilationConfig:
         Returns:
             The backend for the compilation config.
         """
-        self.apply_platform_defaults(lazy_platform())
+        from vllm.platforms import current_platform
+
+        self.apply_platform_defaults(current_platform)
         if self.mode is None:
             raise ValueError(
                 "No compilation mode is set. This method should only be "

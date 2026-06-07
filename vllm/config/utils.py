@@ -28,6 +28,8 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+
+    from vllm.platforms import Platform
 else:
     DataclassInstance = Any
 
@@ -466,3 +468,21 @@ def set_from_deprecated_env_if_set(
         elif to_int:
             field_value = int(env_value)
         setattr(config, field_name, field_value)
+
+
+def lazy_platform() -> "Platform":
+    """Importing `current_platform` for the first time is very expensive.
+    so e.g.:
+    ```if X and Y and lazy_platform().is_Z:
+           do_something()
+    ```
+    Is sometimes nicer than equivalent:
+    ```if X and Y:
+           from vllm.platforms import current_platform
+
+           if current_platform.is_Z():
+               do_something()
+    ```"""
+    from vllm.platforms import current_platform
+
+    return current_platform
