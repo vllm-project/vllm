@@ -247,14 +247,25 @@ class CudaPlatformBase(Platform):
             # WSL implies WSL2. Gate on kernel >= 4.19.121, the first WSL2
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
-            if version is not None and version >= (4, 19, 121):
-                return True
-            logger.warning(
-                "Using 'pin_memory=False' as WSL is detected and the "
-                "WSL2 kernel version is below 4.19.121. This may slow "
-                "down performance. Please run `wsl --update`."
+            if version is None or version < (4, 19, 121):
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+            # On capable WSL2 kernels, only enable pinned memory when
+            # cpu_offload_gb is used or v2 model runner is used, as these
+            # two cases require pinned memory support.
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            if vllm_config is None:
+                return False
+            return (
+                vllm_config.offload_config.uva.cpu_offload_gb > 0
+                or vllm_config.use_v2_model_runner
             )
-            return False
         return True
 
     @classmethod
