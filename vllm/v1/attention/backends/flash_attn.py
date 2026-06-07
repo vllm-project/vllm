@@ -194,7 +194,7 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return True
+        return is_fa_version_supported(4)
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -589,14 +589,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # multimodal tokens with bidirectional ranges.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
         if mm_ranges is not None:
-            from vllm.v1.attention.backends.triton_attn import (
-                TritonAttentionMetadata,
+            from vllm.v1.attention.backends.utils import (
+                compute_mm_prefix_range_tensor,
             )
 
-            attn_metadata.mm_prefix_range_tensor = (
-                TritonAttentionMetadata.compute_mm_prefix_range_tensor(
-                    mm_ranges, num_reqs, seq_lens.device
-                )
+            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
+                mm_ranges, num_reqs, seq_lens.device
             )
 
         return attn_metadata
