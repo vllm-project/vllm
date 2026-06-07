@@ -80,7 +80,10 @@ class Gemma4Config(VerifyAndUpdateConfig):
         max_head_dim = max(head_dim, global_head_dim)
 
         if is_fa_version_supported(4) and max_head_dim <= 512:
-            if vllm_config.attention_config.flash_attn_version is None:
+            if (
+                vllm_config.attention_config.flash_attn_version is None
+                and vllm_config.attention_config.backend is None
+            ):
                 vllm_config.attention_config.flash_attn_version = 4
                 logger.info(
                     "Gemma4 model has heterogeneous head dimensions "

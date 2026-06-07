@@ -206,6 +206,10 @@ def flash_attn_varlen_func(
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
+    # FA4 mask_mod / aux_tensors (for PrefixLM bidirectional attention)
+    mask_mod=None,
+    aux_tensors=None,
+    block_sparse_tensors=None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -388,6 +392,9 @@ def flash_attn_varlen_func(
             return_lse=return_softmax_lse,
             out=out,
             learnable_sink=s_aux,
+            mask_mod=mask_mod,
+            aux_tensors=aux_tensors,
+            block_sparse_tensors=block_sparse_tensors,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
