@@ -82,6 +82,14 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
+def _parse_gemma4_key(key_str: str) -> str:
+    """Parse a Gemma4 key into a Python dict key string."""
+    key_str = key_str.strip()
+    if key_str.startswith(STRING_DELIM) and key_str.endswith(STRING_DELIM):
+        return key_str[len(STRING_DELIM) : -len(STRING_DELIM)]
+    return key_str
+
+
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
@@ -121,7 +129,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             i += 1
         if i >= n:
             break
-        key = args_str[key_start:i].strip()
+        key = _parse_gemma4_key(args_str[key_start:i])
         i += 1  # skip ':'
 
         # Parse value
