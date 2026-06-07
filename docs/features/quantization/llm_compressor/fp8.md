@@ -21,8 +21,16 @@ The FP8 types typically supported in hardware have two distinct representations,
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:
 
 ```bash
-pip install llmcompressor
+(venv-llm-compressor) pip install llmcompressor
 ```
+
+Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
+
+```bash
+(venv-vllm) pip install vllm "lm-eval[api]>=0.4.12"
+```
+
+Please use separate environments for vLLM and llm-compressor as they might not work together.
 
 ## Quantization Process
 
@@ -57,35 +65,27 @@ For FP8 quantization, we can recover accuracy with simple RTN quantization. We r
 
 Since simple RTN does not require data for weight quantization and the activations are quantized dynamically, we do not need any calibration data for this quantization flow.
 
-??? code
+```python
+from llmcompressor import oneshot
+from llmcompressor.modifiers.quantization import QuantizationModifier
 
-    ```python
-    from llmcompressor import oneshot
-    from llmcompressor.modifiers.quantization import QuantizationModifier
+# Configure the simple PTQ quantization
+recipe = QuantizationModifier(
+    targets="Linear",
+    scheme="FP8_DYNAMIC",
+    ignore=["lm_head"],
+)
 
-    # Configure the simple PTQ quantization
-    recipe = QuantizationModifier(
-        targets="Linear",
-        scheme="FP8_DYNAMIC",
-        ignore=["lm_head"],
-    )
+# Apply the quantization algorithm.
+oneshot(model=model, recipe=recipe)
 
-    # Apply the quantization algorithm.
-    oneshot(model=model, recipe=recipe)
-
-    # Save the model: Meta-Llama-3-8B-Instruct-FP8-Dynamic
-    SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-Dynamic"
-    model.save_pretrained(SAVE_DIR)
-    tokenizer.save_pretrained(SAVE_DIR)
-    ```
+# Save the model: Meta-Llama-3-8B-Instruct-FP8-Dynamic
+SAVE_DIR = MODEL_ID.split("/")[1] + "-FP8-Dynamic"
+model.save_pretrained(SAVE_DIR)
+tokenizer.save_pretrained(SAVE_DIR)
+```
 
 ### 3. Evaluating Accuracy
-
-Install `vllm` and `lm-evaluation-harness` for evaluation:
-
-```bash
-pip install vllm "lm-eval[api]>=0.4.12"
-```
 
 Load and run the model in `vllm`:
 
