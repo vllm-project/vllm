@@ -498,12 +498,6 @@ def _merge_multimodal_embeddings(
         # corresponding mm_embed.
         gather_indices = torch.cumsum(is_multimodal, dim=0, dtype=torch.long)
 
-        # On GPUs, we clamp indices to prevent asynchronous device-side asserts from
-        # crashing the context on out-of-bounds mismatches.
-        if inputs_embeds.device.type == "cuda":
-            gather_indices = torch.clamp(
-                gather_indices, max=mm_embeds_padded.shape[0] - 1
-            )
         mapped_mm_embeds = mm_embeds_padded[gather_indices]
 
         # 3. Execution: Pointwise select to avoid dynamic slicing
