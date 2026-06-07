@@ -16,7 +16,7 @@ User-set flags take precedence over optimization level defaults.
 
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
+vllm serve RedHatAI/Llama-3.2-1B-FP8 -O1
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
@@ -56,7 +56,7 @@ Fusions:
 - `-cc.pass_config.fuse_norm_quant=True`*
 - `-cc.pass_config.fuse_act_quant=True`*
 - `-cc.pass_config.fuse_act_padding=True`†
-- `-cc.pass_config.fuse_rope_kvcache=True`† (will be moved to O2)
+- `-cc.pass_config.fuse_mla_dual_rms_norm=True`†
 
 \* These fusions are only enabled when either op is using a custom kernel, otherwise Inductor fusion is better.</br>
 † These fusions are ROCm-only and require AITER.
@@ -71,6 +71,9 @@ Settings (on top of `-O1`):
 
 - `-cc.cudagraph_mode=FULL_AND_PIECEWISE`
 - `-cc.pass_config.fuse_allreduce_rms=True`
+- `-cc.pass_config.fuse_rope_kvcache=True`†
+
+† These fusions are ROCm-only and require AITER.
 
 ### `-O3`: Aggressive Optimization
 

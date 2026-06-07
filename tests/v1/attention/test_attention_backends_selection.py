@@ -13,6 +13,7 @@ from vllm.model_executor.models.minimax_text_01 import MiniMaxText01LinearAttent
 from vllm.v1.attention.backends.linear_attn import LinearAttentionBackend
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
 
 
@@ -32,7 +33,7 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
                 use_rms_norm=True,
             ),
             Mamba1AttentionBackend,
-            "mamba1",
+            MambaAttentionBackendEnum.MAMBA1,
         ),
         (
             MambaMixer2,
@@ -48,23 +49,22 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
                 head_dim=32,
             ),
             Mamba2AttentionBackend,
-            "mamba2",
+            MambaAttentionBackendEnum.MAMBA2,
         ),
         (
             MiniMaxText01LinearAttention,
             dict(
-                hidden_size=128,
-                hidden_inner_size=256,
-                num_heads=8,
-                head_dim=32,
-                max_position=2048,
-                block_size=64,
-                num_hidden_layer=12,
-                layer_idx=0,
-                linear_layer_idx=0,
+                config=SimpleNamespace(
+                    hidden_size=256,
+                    num_attention_heads=8,
+                    head_dim=32,
+                    num_hidden_layers=12,
+                    block=64,
+                ),
+                prefix="layers.0.self_attn",
             ),
             LinearAttentionBackend,
-            "linear_attention",
+            MambaAttentionBackendEnum.LINEAR,
         ),
         (
             ShortConv,
@@ -74,7 +74,7 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
                 layer_idx=0,
             ),
             ShortConvAttentionBackend,
-            "short_conv",
+            MambaAttentionBackendEnum.SHORT_CONV,
         ),
     ],
 )
@@ -87,6 +87,8 @@ def test_mamba_layers_get_attn_backend(
     expected_mamba_type,
 ):
     """Test that Mamba-like layers return the correct attention backend."""
+    if layer_class is MiniMaxText01LinearAttention:
+        init_kwargs["vllm_config"] = default_vllm_config
     layer = layer_class(**init_kwargs)
 
     backend_class = layer.get_attn_backend()
@@ -97,10 +99,14 @@ def test_mamba_layers_get_attn_backend(
 @pytest.mark.parametrize(
     "layer_class,expected_backend,expected_mamba_type",
     [
-        (MambaMixer, Mamba1AttentionBackend, "mamba1"),
-        (MambaMixer2, Mamba2AttentionBackend, "mamba2"),
-        (MiniMaxText01LinearAttention, LinearAttentionBackend, "linear_attention"),
-        (ShortConv, ShortConvAttentionBackend, "short_conv"),
+        (MambaMixer, Mamba1AttentionBackend, MambaAttentionBackendEnum.MAMBA1),
+        (MambaMixer2, Mamba2AttentionBackend, MambaAttentionBackendEnum.MAMBA2),
+        (
+            MiniMaxText01LinearAttention,
+            LinearAttentionBackend,
+            MambaAttentionBackendEnum.LINEAR,
+        ),
+        (ShortConv, ShortConvAttentionBackend, MambaAttentionBackendEnum.SHORT_CONV),
     ],
 )
 def test_mamba_layers_have_unified_interface(

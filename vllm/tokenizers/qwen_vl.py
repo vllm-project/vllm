@@ -61,6 +61,10 @@ def get_qwen_vl_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
 
 class QwenVLTokenizer(TokenizerLike):
+    image_start_tag: str
+    image_end_tag: str
+    image_pad_tag: str
+
     @classmethod
     def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
         tokenizer = AutoTokenizer.from_pretrained(*args, **kwargs)

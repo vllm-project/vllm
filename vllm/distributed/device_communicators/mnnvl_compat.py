@@ -5,9 +5,9 @@ from typing import Any
 import torch.distributed as dist
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 
-from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.flashinfer import has_flashinfer_nvlink_two_sided
 
-assert has_flashinfer_all2all(), "Flashinfer alltoallv module cannot be found"
+assert has_flashinfer_nvlink_two_sided(), "Flashinfer alltoallv module cannot be found"
 
 
 class CustomCommunicator(CommBackend):
@@ -25,14 +25,14 @@ class CustomCommunicator(CommBackend):
         dist.all_gather_object(gathered, data, group=self._group)
         return gathered
 
-    # NOTE(rob): CommBackend is an abstract class, and bcast/barrier
-    # are unimplemented on vLLM side. If we need to utilize these
-    # methods in the future, can create a concrete implementation.
     def bcast(self, data: Any, root: int) -> Any:
-        raise NotImplementedError
+        obj_list = [data]
+        # broadcast_object_list mutates obj_list in-place
+        dist.broadcast_object_list(obj_list, src=root, group=self._group)
+        return obj_list[0]
 
     def barrier(self) -> None:
-        raise NotImplementedError
+        dist.barrier(group=self._group)
 
     def Split(self, color: int, key: int) -> "CustomCommunicator":
         return self
