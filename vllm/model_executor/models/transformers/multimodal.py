@@ -60,11 +60,15 @@ logger = init_logger(__name__)
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_audio_model(self) -> bool:
         processor = self.get_hf_processor()
-        return hasattr(processor, "audio_token")
+        return hasattr(processor, "feature_extractor") or hasattr(
+            processor, "audio_processor"
+        )
 
-    def _is_vision_model(self) -> bool:
-        processor = self.get_hf_processor()
-        return hasattr(processor, "image_token") or hasattr(processor, "boi_token")
+    def _is_image_model(self) -> bool:
+        return hasattr(self.get_hf_processor(), "image_processor")
+
+    def _is_video_model(self) -> bool:
+        return hasattr(self.get_hf_processor(), "video_processor")
 
     def _get_audio_token_id(self) -> int:
         processor = self.get_hf_processor()
@@ -100,7 +104,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         limits = {}
         if self._is_audio_model():
             limits["audio"] = None
-        if self._is_vision_model():
+        if self._is_image_model():
             limits["image"] = None
         return limits if limits else {"image": None}
 
@@ -108,25 +112,26 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         result = {}
         if self._is_audio_model():
             result["audio"] = self.get_max_audio_tokens()
-        if self._is_vision_model():
+        if self._is_image_model():
             result["image"] = self.get_max_image_tokens()
         return result if result else {"image": self.get_max_image_tokens()}
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
-        sub = getattr_iter(config, ("audio_config", "encoder_config"))
-        if sub is not None:
-            val = getattr_iter(
-                sub,
-                ("max_source_positions", "max_position_embeddings", "max_pos_emb"),
-            )
+        audio_config_names = ("audio_config", "encoder_config")
+        audio_config = getattr_iter(config, audio_config_names)
+        if audio_config is not None:
+            names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
+            val = getattr_iter(audio_config, names)
             if val is not None:
                 return int(val)
+            raise ValueError(
+                f"Unable to get max input length from {type(audio_config).__name__}. "
+                f"The following attribute names were checked: {names}."
+            )
         raise ValueError(
-            f"{type(config).__name__} does not have a recognized audio "
-            "encoder config with max_source_positions, max_position_embeddings, "
-            "or max_pos_emb. Please update the model config or add support "
-            "for this architecture in get_max_audio_tokens()."
+            f"Unable to get audio config from {type(config).__name__}. "
+            f"The following audio config names were checked: {audio_config_names}."
         )
 
     def get_max_image_tokens(self) -> int:

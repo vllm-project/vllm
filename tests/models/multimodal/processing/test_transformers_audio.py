@@ -61,9 +61,12 @@ AUDIO_MODEL_SETTINGS = {
         pytest.param(
             "mistralai/Voxtral-Mini-3B-2507",
             marks=pytest.mark.xfail(
-                reason="MistralCommonBackend tokenizer does not produce audio "
-                "placeholder token (ID 24) from text; requires "
-                "apply_chat_template path",
+                reason="MistralCommonBackend.encode does not produce the audio "
+                "placeholder token (ID 24) from raw text. apply_chat_template "
+                "yields token IDs with placeholders, but MultiModalProcessor."
+                "apply() decodes the prompt back to text and re-tokenizes, at "
+                "which point the placeholders are lost. Fix belongs in "
+                "mistral_common or in the Voxtral-specific path.",
                 strict=False,
             ),
         ),

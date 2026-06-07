@@ -56,10 +56,10 @@ AUDIO_MODEL_SETTINGS = {
 }
 
 
-def get_fixture_path(filename):
-    return os.path.join(
-        os.path.dirname(__file__), "../../fixtures/transformers_audio", filename
-    )
+FIXTURE_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "../../fixtures/transformers_audio_expected_results.json",
+)
 
 
 def assert_output_matches(output, expected_text, expected_token_ids):
@@ -78,15 +78,7 @@ def assert_output_matches(output, expected_text, expected_token_ids):
     [
         "ibm-granite/granite-speech-3.3-2b",
         "nvidia/audio-flamingo-3-hf",
-        pytest.param(
-            "microsoft/VibeVoice-ASR-HF",
-            marks=pytest.mark.xfail(
-                reason="ConvNet-based acoustic tokenizer has no positional "
-                "embeddings; get_max_audio_tokens() raises ValueError "
-                "during profiling",
-                strict=False,
-            ),
-        ),
+        "microsoft/VibeVoice-ASR-HF",
         "zai-org/GLM-ASR-Nano-2512",
     ],
 )
@@ -102,11 +94,10 @@ def test_transformers_audio_generation(monkeypatch, model_id):
     disable_envs_cache()
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-    fixture_path = get_fixture_path("expected_results.json")
-    if not os.path.exists(fixture_path):
-        pytest.skip(f"Fixture not found: {fixture_path}")
+    if not os.path.exists(FIXTURE_PATH):
+        pytest.skip(f"Fixture not found: {FIXTURE_PATH}")
 
-    with open(fixture_path) as f:
+    with open(FIXTURE_PATH) as f:
         all_expected = json.load(f)
 
     if model_id not in all_expected:
