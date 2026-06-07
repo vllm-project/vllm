@@ -465,7 +465,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                 config=config.vit_config,
                 visual_vocab_size=config.visual_vocab_size,
                 quant_config=quant_config,
-                prefix=f"{prefix}.visual_tokenizer",
+                prefix=maybe_prefix(prefix, "visual_tokenizer"),
             )
             self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
 

@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend base class."""
 
-import sys
 from collections.abc import Callable, Iterable
 from itertools import chain
 from operator import attrgetter
@@ -150,7 +149,7 @@ class Base(
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
-            if quant_method_name == "mxfp4":
+            if quant_method_name in ("mxfp4", "gpt_oss_mxfp4"):
                 raise NotImplementedError(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
@@ -268,16 +267,11 @@ class Base(
             dynamic_arg_dims,
         )
 
-        @support_torch_compile(
+        support_torch_compile(
             dynamic_arg_dims=dynamic_arg_dims,
             enable_if=enable_if,
             is_encoder=is_encoder,
-        )
-        class SupportTorchCompileWrapper(cls): ...
-
-        # Patch the class in its module
-        module = sys.modules[cls.__module__]
-        setattr(module, cls.__name__, SupportTorchCompileWrapper)
+        )(cls)
 
     def _decorate_for_torch_compile(self, **kwargs: dict):
         """

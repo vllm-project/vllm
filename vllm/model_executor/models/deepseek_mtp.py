@@ -11,7 +11,9 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -31,9 +33,10 @@ from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
+    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .utils import get_pp_missing_layer_names, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -197,10 +200,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         )
         # Set MoE hyperparameters
         self.set_moe_parameters()
-        self.is_fp4_ckpt = (
-            self.quant_config is not None
-            and self.quant_config.get_name() == "modelopt_fp4"
-        )
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -255,15 +254,14 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        if self.is_fp4_ckpt:
-            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-            indexer_fused_mapping = [
-                ("wk_weights_proj", "wk", 0),
-                ("wk_weights_proj", "weights_proj", 1),
-            ]
-            stacked_params_mapping.extend(indexer_fused_mapping)
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
 
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -276,8 +274,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ),
         )
 
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -288,6 +288,17 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
+            ):
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:

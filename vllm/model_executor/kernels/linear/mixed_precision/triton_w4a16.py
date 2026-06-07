@@ -235,6 +235,14 @@ def triton_w4a16_gemm(
         else:
             BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
 
+    # The kernel loads scales/zeros for a single group per BLOCK_K tile
+    # (one g_idx per iteration). If BLOCK_K > group_size, rows at the tail
+    # of the tile dequantize with the wrong group's scales, silently
+    # corrupting the output. Clamp BLOCK_K to group_size to keep one
+    # scale group per tile.
+    if group_size < BLOCK_K:
+        BLOCK_K = group_size
+
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
     triton_w4a16_gemm_kernel[grid](
@@ -280,8 +288,8 @@ class TritonW4A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
-        if not current_platform.is_rocm():
-            return False, "TritonW4A16LinearKernel only targets ROCm"
+        if not (current_platform.is_rocm() or current_platform.is_cuda()):
+            return False, "TritonW4A16LinearKernel requires CUDA or ROCm"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
             return (

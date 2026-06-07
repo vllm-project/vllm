@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -15,6 +16,9 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.batch_invariant import (
+    linear_batch_invariant,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -66,6 +70,8 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+            return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
@@ -284,6 +290,7 @@ class VocabParallelEmbedding(PluggableLayer):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
         # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(
@@ -432,6 +439,12 @@ class VocabParallelEmbedding(PluggableLayer):
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
+            if (
+                loaded_weight.ndim == 0
+                and param.data.ndim == 1
+                and param.data.numel() == 1
+            ):
+                loaded_weight = loaded_weight.reshape(1)
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return

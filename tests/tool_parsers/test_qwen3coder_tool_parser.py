@@ -6,8 +6,11 @@ from collections.abc import Generator
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
+from xgrammar import StructuralTag
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -21,7 +24,10 @@ from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.qwen3coder_tool_parser import (
     Qwen3CoderToolParser,
 )
-from vllm.tool_parsers.qwen3xml_tool_parser import Qwen3XMLToolParser
+from vllm.tool_parsers.qwen3xml_tool_parser import (
+    Qwen3XMLToolParser,
+    StreamingXMLToolCallParser,
+)
 
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
@@ -69,6 +75,23 @@ AREA_PARAMS = {
     },
 }
 
+QUESTION_PARAMS = {
+    "type": "object",
+    "properties": {
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "multiSelect": {"type": "boolean"},
+                    "answer": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 
 @pytest.fixture(params=["chat_completion", "responses_api"])
 def sample_tools(request):
@@ -108,6 +131,27 @@ def sample_tools(request):
         ]
 
 
+def _as_chat_completion_tools(
+    tools: list[ChatCompletionToolsParam | FunctionTool],
+) -> list[ChatCompletionToolsParam]:
+    normalized: list[ChatCompletionToolsParam] = []
+    for tool in tools:
+        if isinstance(tool, ChatCompletionToolsParam):
+            normalized.append(tool)
+        else:
+            normalized.append(
+                ChatCompletionToolsParam(
+                    type="function",
+                    function={
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                )
+            )
+    return normalized
+
+
 def assert_tool_calls(
     actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
 ):
@@ -122,6 +166,47 @@ def assert_tool_calls(
         assert json.loads(actual_tool_call.function.arguments) == json.loads(
             expected_tool_call.function.arguments
         )
+
+
+def test_qwen3xml_deferred_array_parses_json_literals():
+    parser = StreamingXMLToolCallParser()
+    parser.set_tools(
+        [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "AskUserQuestion",
+                    "parameters": QUESTION_PARAMS,
+                },
+            )
+        ]
+    )
+
+    delta = parser.parse_single_streaming_chunks(
+        """<tool_call>
+<function=AskUserQuestion>
+<parameter=questions>
+[{"question": "Pick a color", "multiSelect": false, "answer": null}]
+</parameter>
+</function>
+</tool_call>"""
+    )
+
+    arguments = "".join(
+        tool_call.function.arguments or ""
+        for tool_call in delta.tool_calls or []
+        if tool_call.function and tool_call.function.arguments is not None
+    )
+
+    assert json.loads(arguments) == {
+        "questions": [
+            {
+                "question": "Pick a color",
+                "multiSelect": False,
+                "answer": None,
+            }
+        ]
+    }
 
 
 def stream_delta_message_generator(
@@ -448,6 +533,190 @@ hello world
     assert args["bool_param"] is True
     assert args["str_param"] == "hello world"
     assert args["obj_param"] == {"key": "value"}
+
+
+def test_extract_tool_calls_anyof_type_conversion(qwen3_tokenizer):
+    """Test type conversion for anyOf/oneOf nullable schemas (Pydantic v2).
+
+    Pydantic v2 emits anyOf for Optional[T] fields, e.g.:
+        Optional[int] -> {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+    The parser must extract the non-null type and apply the correct
+    conversion (int(), float(), etc.) instead of returning a raw string.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "test_anyof",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "anyof_int": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "anyof_str": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_array": {
+                            "anyOf": [
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ],
+                        },
+                        "anyof_obj": {
+                            "anyOf": [
+                                {"type": "object"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "type_as_array": {
+                            "type": ["integer", "null"],
+                        },
+                        "multi_non_null": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=test_anyof>
+<parameter=anyof_int>
+5
+</parameter>
+<parameter=anyof_str>
+hello
+</parameter>
+<parameter=anyof_array>
+["a", "b", "c"]
+</parameter>
+<parameter=anyof_obj>
+{"key": "value"}
+</parameter>
+<parameter=type_as_array>
+42
+</parameter>
+<parameter=multi_non_null>
+some text
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted = parser.extract_tool_calls(model_output, request=request)
+
+    args = json.loads(extracted.tool_calls[0].function.arguments)
+    assert args["anyof_int"] == 5
+    assert isinstance(args["anyof_int"], int)
+    assert args["anyof_str"] == "hello"
+    assert isinstance(args["anyof_str"], str)
+    assert args["anyof_array"] == ["a", "b", "c"]
+    assert isinstance(args["anyof_array"], list)
+    assert args["anyof_obj"] == {"key": "value"}
+    assert isinstance(args["anyof_obj"], dict)
+    assert args["type_as_array"] == 42
+    assert isinstance(args["type_as_array"], int)
+    # Multi non-null: anyOf[string, integer, null] → first non-null is string
+    assert args["multi_non_null"] == "some text"
+    assert isinstance(args["multi_non_null"], str)
+
+
+def test_extract_tool_calls_anyof_type_conversion_streaming(qwen3_tokenizer):
+    """Test streaming e2e for anyOf/oneOf nullable schemas (Pydantic v2).
+
+    Verifies that the full streaming pipeline — tokenize, incrementally
+    decode, extract_tool_calls_streaming — correctly resolves types from
+    anyOf schemas and produces valid JSON with properly typed values.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "search_web",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "null"},
+                            ],
+                        },
+                        "count": {
+                            "anyOf": [
+                                {"type": "integer"},
+                                {"type": "null"},
+                            ],
+                            "default": 5,
+                        },
+                        "verbose": {
+                            "anyOf": [
+                                {"type": "boolean"},
+                                {"type": "null"},
+                            ],
+                        },
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=search_web>
+<parameter=query>
+vllm tool parser
+</parameter>
+<parameter=count>
+10
+</parameter>
+<parameter=verbose>
+true
+</parameter>
+</function>
+</tool_call>"""
+
+    parser = Qwen3CoderToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    tool_states = {}
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {"name": None, "arguments": ""}
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    assert len(tool_states) == 1
+    assert tool_states[0]["name"] == "search_web"
+    assert tool_states[0]["arguments"] is not None
+    args = json.loads(tool_states[0]["arguments"])
+    assert args["query"] == "vllm tool parser"
+    assert isinstance(args["query"], str)
+    assert args["count"] == 10
+    assert isinstance(args["count"], int)
+    assert args["verbose"] is True
+    assert isinstance(args["verbose"], bool)
 
 
 @pytest.mark.parametrize(
@@ -1146,3 +1415,88 @@ def test_no_double_serialization_string_args(qwen3_tool_parser):
     args = json.loads(raw_arguments)
     assert args["message"] == "hello world"
     assert '\\"hello world\\"' not in raw_arguments
+
+
+def test_get_vllm_registry_structural_tag_returns_structural_tag(
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="auto",
+    )
+    tag = qwen3_tool_parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    tag = qwen3_tool_parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    if request_tools:
+        tool = request_tools[0]
+        req = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=request_tools,
+        )
+        req.tool_choice = ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=tool.function.name)
+        )
+        tag = qwen3_tool_parser.get_structural_tag(req)
+        assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("include_reasoning", [True, False])
+def test_adjust_request_auto_uses_vllm_registry_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+    include_reasoning: bool,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        True,
+    )
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+    out = qwen3_tool_parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert isinstance(out.structured_outputs.structural_tag, str)
+    loaded = json.loads(out.structured_outputs.structural_tag)
+    assert isinstance(loaded, dict)
+
+
+def test_adjust_request_required_prefers_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    qwen3_tool_parser: Qwen3CoderToolParser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    monkeypatch.setattr(
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        True,
+    )
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    out = qwen3_tool_parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None

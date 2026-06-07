@@ -26,6 +26,7 @@ from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
     FutureWrapper,
     RayWorkerWrapper,
+    detach_zero_copy_from_model_runner_output,
     initialize_ray_cluster,
     ray,
 )
@@ -94,14 +95,6 @@ class RayDistributedExecutor(Executor):
         )
 
         self.scheduler_output: SchedulerOutput | None = None
-
-    @property
-    def max_concurrent_batches(self) -> int:
-        """Ray distributed executor supports pipeline parallelism,
-        meaning that it allows PP size batches to be executed concurrently.
-        """
-        pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:
@@ -463,7 +456,9 @@ class RayDistributedExecutor(Executor):
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                output = refs[0].get()
+                detach_zero_copy_from_model_runner_output(output)
+                return output
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
@@ -473,7 +468,10 @@ class RayDistributedExecutor(Executor):
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            outputs = ray.get(refs)
+            for output in outputs:
+                detach_zero_copy_from_model_runner_output(output)
+            return self.kv_output_aggregator.aggregate(outputs)
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)

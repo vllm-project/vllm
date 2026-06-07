@@ -22,7 +22,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -121,14 +121,19 @@ class Executor(ABC):
         underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+        compilation_times: list[CompilationTimes] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
-                compilation_times
+                t.language_model for t in compilation_times
+            )
+            self.vllm_config.compilation_config.encoder_compilation_time = max(
+                t.encoder for t in compilation_times
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
@@ -198,7 +203,7 @@ class Executor(ABC):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -247,10 +252,6 @@ class Executor(ABC):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
-
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 1
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))

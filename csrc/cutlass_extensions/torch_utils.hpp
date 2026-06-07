@@ -1,5 +1,7 @@
 #pragma once
 
+#include "torch_utils.h"
+
 // This header is shared between _C (unstable ABI, used by machete) and
 // _C_stable_libtorch (stable ABI, used by W4A8/sparse). TORCH_TARGET_VERSION
 // is defined only for the stable target, so we switch includes and types
@@ -8,13 +10,9 @@
   #include <torch/csrc/stable/tensor.h>
   #include <torch/headeronly/util/BFloat16.h>
   #include <torch/headeronly/util/Half.h>
-  #include <torch/headeronly/util/shim_utils.h>  // for STD_TORCH_CHECK
 using TorchTensor = torch::stable::Tensor;
-  #define TORCH_UTILS_CHECK STD_TORCH_CHECK
 #else
-  #include <torch/all.h>
 using TorchTensor = torch::Tensor;
-  #define TORCH_UTILS_CHECK TORCH_CHECK
 #endif
 
 #include "cute/layout.hpp"
