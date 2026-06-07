@@ -245,7 +245,7 @@ class LoRAModelManager:
             for modality in mm_budget.mm_max_toks_per_item
         ]
         num_encoder_tokens = max(
-            counts.tower for counts in lora_token_counts_by_modality
+            tower_tokens for tower_tokens, _ in lora_token_counts_by_modality
         )
 
         # Tower wrappers
@@ -262,9 +262,9 @@ class LoRAModelManager:
         if self.mm_mapping.connector:
             connector_tokens = max(
                 (
-                    counts.connector
-                    for counts in lora_token_counts_by_modality
-                    if counts.connector is not None
+                    connector_tokens
+                    for _, connector_tokens in lora_token_counts_by_modality
+                    if connector_tokens is not None
                 ),
                 default=None,
             )
@@ -406,10 +406,6 @@ class LoRAModelManager:
             if not self._match_target_modules(module_name):
                 continue
 
-            # if (wrapped_module := wrapped_modules_by_id.get(id(module))) is not None:
-            #     replace_submodule(self.model, module_name, wrapped_module)
-            #     continue
-
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
                 logger.warning(
@@ -516,8 +512,6 @@ class LoRAModelManager:
                 logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
-            # wrapped_modules_by_id[id(module)] = new_module
-            # wrapped_modules_by_id[id(new_module)] = new_module
 
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.

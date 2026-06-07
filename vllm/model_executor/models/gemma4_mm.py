@@ -3,8 +3,9 @@
 """Gemma 4 multimodal model (image + audio + video support).
 
 Adds vision tower, audio tower, and multimodal embedders on top of the
-text-only Gemma4ForCausalLM.  The vision tower uses vLLM-native modules
-for LoRA visibility; the audio tower is loaded via AutoModel.from_config.
+text-only Gemma4ForCausalLM.  The vision/audio encoders are loaded via
+AutoModel.from_config and run in eager mode while the language model uses
+the vLLM-optimized path.
 
 Video support:  Gemma4 does **not** have a native video tower.  Videos are
 decomposed into timestamped image frames (up to 32 frames at 70 soft tokens
@@ -18,13 +19,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import numpy as np
-import regex as re
 import torch
-import torch.nn.functional as F
 from PIL import Image as PILImage
 from torch import nn
 from transformers import AutoModel, BatchFeature
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.gemma4 import (
     Gemma4Config,
     Gemma4Processor,
@@ -39,9 +37,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
@@ -72,7 +69,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
-    MultiModalLoRATokenCounts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -903,618 +899,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
 
 # ---------------------------------------------------------------------------
-# Vision tower
-# ---------------------------------------------------------------------------
-
-
-class Gemma4RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6, with_scale: bool = True):
-        super().__init__()
-        self.eps = eps
-        self.with_scale = with_scale
-        if with_scale:
-            self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.float()
-        variance = hidden_states.pow(2).mean(dim=-1, keepdim=True) + self.eps
-        hidden_states = hidden_states * torch.pow(variance, -0.5)
-        if self.with_scale:
-            hidden_states = hidden_states * self.weight.float()
-        return hidden_states.to(input_dtype)
-
-
-class Gemma4ClippableReplicatedLinear(ReplicatedLinear):
-    """Gemma4 vision linear with optional activation clipping."""
-
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        input_size: int,
-        output_size: int,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(
-            input_size,
-            output_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=prefix,
-            return_bias=False,
-            disable_tp=True,
-        )
-        self.use_clipped_linears = config.use_clipped_linears
-
-        if self.use_clipped_linears:
-            self.register_buffer("input_min", torch.tensor(-float("inf")))
-            self.register_buffer("input_max", torch.tensor(float("inf")))
-            self.register_buffer("output_min", torch.tensor(-float("inf")))
-            self.register_buffer("output_max", torch.tensor(float("inf")))
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.use_clipped_linears:
-            hidden_states = torch.clamp(hidden_states, self.input_min, self.input_max)
-
-        hidden_states = super().forward(hidden_states)
-
-        if self.use_clipped_linears:
-            hidden_states = torch.clamp(hidden_states, self.output_min, self.output_max)
-
-        return hidden_states
-
-
-class Gemma4VisionPatchEmbedder(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.patch_size = config.patch_size
-        self.position_embedding_size = config.position_embedding_size
-
-        self.input_proj = ReplicatedLinear(
-            3 * self.patch_size**2,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.input_proj",
-            return_bias=False,
-            disable_tp=True,
-        )
-        self.position_embedding_table = nn.Parameter(
-            torch.ones(2, self.position_embedding_size, self.hidden_size)
-        )
-
-    def _position_embeddings(
-        self,
-        pixel_position_ids: torch.Tensor,
-        padding_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        clamped_positions = pixel_position_ids.clamp(min=0)
-        one_hot = F.one_hot(clamped_positions, num_classes=self.position_embedding_size)
-        one_hot = one_hot.permute(0, 2, 1, 3).to(self.position_embedding_table)
-        position_embeddings = one_hot @ self.position_embedding_table
-        position_embeddings = position_embeddings.sum(dim=1)
-        return torch.where(padding_positions.unsqueeze(-1), 0.0, position_embeddings)
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-        padding_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        pixel_values = 2 * (pixel_values - 0.5)
-        hidden_states = self.input_proj(pixel_values.to(self.input_proj.weight.dtype))
-        position_embeddings = self._position_embeddings(
-            pixel_position_ids, padding_positions
-        )
-        return hidden_states + position_embeddings
-
-
-class Gemma4VisionPooler(nn.Module):
-    def __init__(self, config: Gemma4VisionConfig):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.root_hidden_size = self.hidden_size**0.5
-
-    def _avg_pool_by_positions(
-        self,
-        hidden_states: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-        length: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_seq_len = hidden_states.shape[1]
-        k = int((input_seq_len // length) ** 0.5)
-        k_squared = k**2
-        if k_squared * length != input_seq_len:
-            raise ValueError(
-                f"Cannot pool {hidden_states.shape} to {length}: "
-                f"{k=}^2 times {length=} must be {input_seq_len}."
-            )
-
-        clamped_positions = pixel_position_ids.clamp(min=0)
-        max_x = clamped_positions[..., 0].max(dim=-1, keepdim=True)[0] + 1
-        kernel_idxs = torch.div(clamped_positions, k, rounding_mode="floor")
-        kernel_idxs = kernel_idxs[..., 0] + (max_x // k) * kernel_idxs[..., 1]
-        weights = F.one_hot(kernel_idxs.long(), length).float() / k_squared
-        output = weights.transpose(1, 2) @ hidden_states.float()
-        mask = torch.logical_not((weights == 0).all(dim=1))
-        return output.to(hidden_states.dtype), mask
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-        padding_positions: torch.Tensor,
-        output_length: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if output_length > hidden_states.shape[1]:
-            raise ValueError(
-                "Cannot output more soft tokens "
-                f"(requested {output_length}) than there are patches "
-                f"({hidden_states.shape[1]})."
-            )
-
-        hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0.0)
-
-        if hidden_states.shape[1] != output_length:
-            hidden_states, padding_positions = self._avg_pool_by_positions(
-                hidden_states, pixel_position_ids, output_length
-            )
-
-        hidden_states *= self.root_hidden_size
-        return hidden_states, padding_positions
-
-
-class Gemma4VisionMLP(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.gate_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_proj",
-        )
-        self.up_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.hidden_size,
-            config.intermediate_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.up_proj",
-        )
-        self.down_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.intermediate_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
-        )
-        self.act_fn = _ACTIVATION_REGISTRY[config.hidden_activation]
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(
-            hidden_states
-        )
-        return self.down_proj(hidden_states)
-
-
-class Gemma4VisionRotaryEmbedding(nn.Module):
-    inv_freq: torch.Tensor
-
-    def __init__(self, config: Gemma4VisionConfig):
-        super().__init__()
-        self.base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or (
-            config.hidden_size // config.num_attention_heads
-        )
-        self.spatial_dim = dim // 2
-        inv_freq = 1.0 / (
-            self.base
-            ** (
-                torch.arange(0, self.spatial_dim, 2, dtype=torch.int64).float()
-                / self.spatial_dim
-            )
-        )
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.attention_scaling = 1.0
-
-    @torch.no_grad()
-    def forward(
-        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep RoPE frequencies in fp32 even if module buffers are cast to the
-        # model dtype. Gemma4 vision is sensitive to bf16-rounded inv_freq.
-        inv_freq = 1.0 / (
-            self.base
-            ** (
-                torch.arange(
-                    0,
-                    self.spatial_dim,
-                    2,
-                    dtype=torch.int64,
-                    device=hidden_states.device,
-                ).float()
-                / self.spatial_dim
-            )
-        )
-        inv_freq_expanded = (
-            inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        )
-
-        all_cos, all_sin = [], []
-        for dim_idx in range(2):
-            dim_position_ids = position_ids[:, :, dim_idx]
-            dim_position_ids_expanded = dim_position_ids[:, None, :].float()
-            freqs = (
-                inv_freq_expanded.float() @ dim_position_ids_expanded.float()
-            ).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            all_cos.append(emb.cos() * self.attention_scaling)
-            all_sin.append(emb.sin() * self.attention_scaling)
-
-        cos = torch.cat(all_cos, dim=-1).to(dtype=hidden_states.dtype)
-        sin = torch.cat(all_sin, dim=-1).to(dtype=hidden_states.dtype)
-        return cos, sin
-
-
-def _rotate_half(hidden_states: torch.Tensor) -> torch.Tensor:
-    x1 = hidden_states[..., : hidden_states.shape[-1] // 2]
-    x2 = hidden_states[..., hidden_states.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _apply_rotary_pos_emb(
-    hidden_states: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    unsqueeze_dim: int = 1,
-) -> torch.Tensor:
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    return (hidden_states * cos) + (_rotate_half(hidden_states) * sin)
-
-
-def _apply_multidimensional_rope(
-    hidden_states: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-    position_ids: torch.Tensor,
-    unsqueeze_dim: int = 2,
-) -> torch.Tensor:
-    ndim = position_ids.shape[-1]
-    num_input_channels = hidden_states.shape[-1]
-    num_rotated_channels_per_dim = 2 * (num_input_channels // (2 * ndim))
-    if num_rotated_channels_per_dim <= 0:
-        raise ValueError(
-            "Invalid configuration: num_rotated_channels_per_dim must be > 0, "
-            f"got {num_rotated_channels_per_dim}."
-        )
-
-    split_sizes = [num_rotated_channels_per_dim] * ndim
-    hidden_parts = torch.split(hidden_states, split_sizes, dim=-1)
-    cos_parts = torch.split(cos, split_sizes, dim=-1)
-    sin_parts = torch.split(sin, split_sizes, dim=-1)
-    output_parts = [
-        _apply_rotary_pos_emb(
-            hidden_states=hidden_parts[k],
-            cos=cos_parts[k],
-            sin=sin_parts[k],
-            unsqueeze_dim=unsqueeze_dim,
-        )
-        for k in range(ndim)
-    ]
-    return torch.cat(output_parts, dim=-1)
-
-
-def _repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    batch, num_key_value_heads, seq_len, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, seq_len, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, seq_len, head_dim)
-
-
-def _gemma4_vision_attention_forward(
-    module: "Gemma4VisionAttention",
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-) -> torch.Tensor:
-    key_states = _repeat_kv(key, module.num_key_value_groups)
-    value_states = _repeat_kv(value, module.num_key_value_groups)
-    attn_output = F.scaled_dot_product_attention(
-        query,
-        key_states,
-        value_states,
-        attn_mask=attention_mask,
-        dropout_p=0.0,
-        scale=module.scaling,
-    )
-    return attn_output.transpose(1, 2).contiguous()
-
-
-class Gemma4VisionAttention(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        layer_idx: int,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(
-            config, "head_dim", config.hidden_size // config.num_attention_heads
-        )
-        self.num_key_value_groups = (
-            config.num_attention_heads // config.num_key_value_heads
-        )
-        self.scaling = 1.0
-        self.q_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.hidden_size,
-            config.num_attention_heads * self.head_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.q_proj",
-        )
-        self.k_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.hidden_size,
-            config.num_key_value_heads * self.head_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.k_proj",
-        )
-        self.v_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.hidden_size,
-            config.num_key_value_heads * self.head_dim,
-            quant_config=quant_config,
-            prefix=f"{prefix}.v_proj",
-        )
-        self.o_proj = Gemma4ClippableReplicatedLinear(
-            config,
-            config.num_attention_heads * self.head_dim,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        self.q_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = Gemma4RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.v_norm = Gemma4RMSNorm(
-            self.head_dim,
-            eps=config.rms_norm_eps,
-            with_scale=False,
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor | None,
-        position_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
-        cos, sin = position_embeddings
-
-        query_states = self.q_proj(hidden_states).view(hidden_shape)
-        query_states = self.q_norm(query_states)
-        query_states = _apply_multidimensional_rope(
-            query_states, cos, sin, position_ids
-        ).transpose(1, 2)
-
-        key_states = self.k_proj(hidden_states).view(hidden_shape)
-        key_states = self.k_norm(key_states)
-        key_states = _apply_multidimensional_rope(
-            key_states, cos, sin, position_ids
-        ).transpose(1, 2)
-
-        value_states = self.v_proj(hidden_states).view(hidden_shape)
-        value_states = self.v_norm(value_states).transpose(1, 2)
-
-        attn_output = _gemma4_vision_attention_forward(
-            self, query_states, key_states, value_states, attention_mask
-        )
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        return self.o_proj(attn_output)
-
-
-class Gemma4VisionEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        layer_idx: int,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.self_attn = Gemma4VisionAttention(
-            config,
-            layer_idx,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
-        self.mlp = Gemma4VisionMLP(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
-        self.input_layernorm = Gemma4RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_attention_layernorm = Gemma4RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.pre_feedforward_layernorm = Gemma4RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.post_feedforward_layernorm = Gemma4RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor | None,
-        position_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-        )
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.pre_feedforward_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
-        return residual + hidden_states
-
-
-class Gemma4VisionEncoder(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.rotary_emb = Gemma4VisionRotaryEmbedding(config)
-        self.layers = nn.ModuleList(
-            [
-                Gemma4VisionEncoderLayer(
-                    config,
-                    layer_idx=i,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{i}",
-                )
-                for i in range(config.num_hidden_layers)
-            ]
-        )
-
-    def _make_attention_mask(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        return attention_mask[:, None, None, :].to(
-            device=inputs_embeds.device,
-            dtype=torch.bool,
-        )
-
-    def forward(
-        self,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-    ) -> BaseModelOutputWithPast:
-        hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, pixel_position_ids)
-        extended_attention_mask = self._make_attention_mask(
-            inputs_embeds, attention_mask
-        )
-
-        for encoder_layer in self.layers:
-            hidden_states = encoder_layer(
-                hidden_states=hidden_states,
-                position_embeddings=position_embeddings,
-                attention_mask=extended_attention_mask,
-                position_ids=pixel_position_ids,
-            )
-
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
-
-
-class Gemma4VisionModel(nn.Module):
-    def __init__(
-        self,
-        config: Gemma4VisionConfig,
-        *,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.config = config
-        self.patch_embedder = Gemma4VisionPatchEmbedder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.patch_embedder",
-        )
-        self.encoder = Gemma4VisionEncoder(
-            config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.encoder",
-        )
-        self.pooler = Gemma4VisionPooler(config)
-
-        if self.config.standardize:
-            self.register_buffer("std_bias", torch.empty(self.config.hidden_size))
-            self.register_buffer("std_scale", torch.empty(self.config.hidden_size))
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-        output_length: int | None = None,
-    ) -> BaseModelOutputWithPast:
-        pooling_kernel_size = self.config.pooling_kernel_size
-        if output_length is None:
-            output_length = pixel_values.shape[-2] // (
-                pooling_kernel_size * pooling_kernel_size
-            )
-
-        padding_positions = (pixel_position_ids == -1).all(dim=-1)
-        inputs_embeds = self.patch_embedder(
-            pixel_values, pixel_position_ids, padding_positions
-        )
-        output = self.encoder(
-            inputs_embeds=inputs_embeds,
-            attention_mask=~padding_positions,
-            pixel_position_ids=pixel_position_ids,
-        )
-
-        hidden_states, pooler_mask = self.pooler(
-            hidden_states=output.last_hidden_state,
-            pixel_position_ids=pixel_position_ids,
-            padding_positions=padding_positions,
-            output_length=output_length,
-        )
-        hidden_states = hidden_states[pooler_mask]
-
-        if self.config.standardize:
-            hidden_states = (hidden_states - self.std_bias) * self.std_scale
-
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
-
-
-# ---------------------------------------------------------------------------
 # Multimodal embedder
 # ---------------------------------------------------------------------------
 
@@ -1523,7 +907,7 @@ class Gemma4MultimodalEmbedder(nn.Module):
     """Projects vision/audio soft tokens into LM embedding space.
 
     Architecture:
-        inputs_embeds → embedding_pre_projection_norm → embedding_projection
+        inputs_embeds → embedding_projection → embedding_post_projection_norm
 
     Unlike Gemma3n which has separate hard/soft embedding paths with
     per-path normalization and a learned embedding table, Gemma4 uses a
@@ -1553,10 +937,10 @@ class Gemma4MultimodalEmbedder(nn.Module):
             or multimodal_config.hidden_size
         )
 
-        self.embedding_pre_projection_norm = Gemma4RMSNorm(
+        self.embedding_pre_projection_norm = RMSNorm(
             embedding_dim,
             eps=self.eps,
-            with_scale=False,
+            has_weight=False,
         )
 
         self.embedding_projection = ReplicatedLinear(
@@ -1608,13 +992,6 @@ class Gemma4ForConditionalGeneration(
 
     # Maps checkpoint prefixes to vLLM module paths.
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_regex={
-            re.compile(
-                r"^model\.vision_tower\.(.*\."
-                r"(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj))"
-                r"\.linear\."
-            ): r"vision_tower.\1.",
-        },
         orig_to_new_prefix={
             # vision tower
             "model.vision_tower": "vision_tower",
@@ -1626,7 +1003,7 @@ class Gemma4ForConditionalGeneration(
             "model.language_model.": "language_model.model.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
-        },
+        }
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1657,11 +1034,7 @@ class Gemma4ForConditionalGeneration(
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.vision_tower = Gemma4VisionModel(
-                config=config.vision_config,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "vision_tower"),
-            )
+            self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -2155,15 +1528,12 @@ class Gemma4ForConditionalGeneration(
         # so the pre-allocated zeros are used instead.
         if self.per_layer_embeddings is not None:
             # Mask multimodal tokens (image/audio) to 0 for PLE
-            # computation. HF maps multimodal placeholder positions to the
-            # text pad token before looking up the token-identity PLE.
+            # computation (using token_type_ids == 0 as text_mask).
+            # Replicate this: map image token positions to token 0.
             if is_multimodal is not None:
-                pad_token_id = self.config.text_config.pad_token_id
-                if pad_token_id is None:
-                    pad_token_id = 0
                 ple_input_ids = torch.where(
                     is_multimodal.to(input_ids.device, non_blocking=True),
-                    torch.full_like(input_ids, pad_token_id),
+                    torch.zeros_like(input_ids),
                     input_ids,
                 )
             else:
@@ -2291,7 +1661,7 @@ class Gemma4ForConditionalGeneration(
         # Some checkpoints have vestigial embed_vision.embedding and
         # embed_audio.embedding weights from the Gemma3n architecture
         # that are not used by Gemma4's MultimodalEmbedder (which only
-        # has embedding_pre_projection_norm + embedding_projection).
+        # has embedding_projection + embedding_post_projection_norm).
         ignore_prefixes = [
             "embed_vision.embedding.",
             "embed_audio.embedding.",
@@ -2328,41 +1698,20 @@ class Gemma4ForConditionalGeneration(
             tower_model=tower_models,
         )
 
-    def get_num_mm_encoder_tokens(
-        self,
-        num_image_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        pooling_kernel_size = vision_config.pooling_kernel_size
-        return num_image_tokens * pooling_kernel_size**2
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        hf_config = self.config
-        vision_config = hf_config.vision_config
-        pooling_kernel_size = vision_config.pooling_kernel_size
-        return num_vision_tokens // pooling_kernel_size**2
-
     def get_mm_lora_token_counts(
         self,
         *,
         modality: str,
         mm_kwargs: MultiModalKwargsItem | None,
         num_mm_embeds: int,
-    ) -> MultiModalLoRATokenCounts:
+    ) -> tuple[int, int | None]:
         if modality in ("image", "video"):
             vision_config = self.config.vision_config
             pooling_k2 = vision_config.pooling_kernel_size**2
-            max_soft_tokens = (
-                _VIDEO_MAX_SOFT_TOKENS
-                if modality == "video"
-                else vision_config.default_output_length
-            )
 
             if modality == "image":
+                pixel_values_key = "pixel_values"
+                max_soft_tokens = vision_config.default_output_length
                 mm_processor_kwargs = getattr(
                     getattr(self, "multimodal_config", None),
                     "mm_processor_kwargs",
@@ -2372,15 +1721,18 @@ class Gemma4ForConditionalGeneration(
                     val, _ = _get_max_soft_tokens(mm_processor_kwargs)
                     if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
                         max_soft_tokens = val
+            else:
+                pixel_values_key = "pixel_values_videos"
+                max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
 
-            pixel_values_key = (
-                "pixel_values" if modality == "image" else "pixel_values_videos"
-            )
             tower_tokens = None
-            if mm_kwargs is not None and (field := mm_kwargs.get(pixel_values_key)):
-                data = field.data
-                if isinstance(data, torch.Tensor) and data.ndim >= 2:
-                    tower_tokens = int(math.prod(data.shape[:-1]))
+            connector_tokens = num_mm_embeds
+            if mm_kwargs is not None:
+                field = mm_kwargs.get(pixel_values_key)
+                if field is not None:
+                    data = field.data
+                    if isinstance(data, torch.Tensor) and data.ndim >= 2:
+                        tower_tokens = int(math.prod(data.shape[:-1]))
 
             if tower_tokens is None:
                 min_soft_tokens = min(_SUPPORTED_SOFT_TOKENS)
@@ -2390,17 +1742,21 @@ class Gemma4ForConditionalGeneration(
                     * pooling_k2
                 )
 
-            return MultiModalLoRATokenCounts(
-                tower=tower_tokens,
-                connector=num_mm_embeds,
-            )
+        if modality == "audio":
+            tower_tokens = num_mm_embeds
+            connector_tokens = num_mm_embeds
 
-        tower_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
-        connector_tokens = self.get_num_mm_connector_tokens(tower_tokens)
-        return MultiModalLoRATokenCounts(
-            tower=tower_tokens,
-            connector=connector_tokens,
-        )
+            if mm_kwargs is not None:
+                field = mm_kwargs.get("input_features_padded")
+                if field is not None:
+                    data = field.data
+                    if isinstance(data, torch.Tensor) and data.ndim >= 2:
+                        batch_size = math.prod(data.shape[:-2])
+                        audio_tokens = batch_size * math.ceil(data.shape[-2] / 4)
+                        tower_tokens = audio_tokens
+                        connector_tokens = audio_tokens
+
+        return tower_tokens, connector_tokens
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

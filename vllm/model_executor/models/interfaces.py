@@ -11,7 +11,6 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -90,17 +89,6 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 # Cache results of `SupportsMultiModal.get_language_model`
 _language_model_by_module = dict[nn.Module, VllmModel]()
-
-
-@dataclass(frozen=True)
-class MultiModalLoRATokenCounts:
-    """Token counts used to build LoRA mappings for multimodal modules."""
-
-    tower: int
-    """Number of tokens processed by the multimodal tower."""
-
-    connector: int | None = None
-    """Number of tokens processed by the multimodal connector, if present."""
 
 
 @runtime_checkable
@@ -358,9 +346,9 @@ class SupportsMultiModal(Protocol):
         modality: str,
         mm_kwargs: "MultiModalKwargsItem | None",
         num_mm_embeds: int,
-    ) -> MultiModalLoRATokenCounts:
+    ) -> tuple[int, int | None]:
         """
-        Return token counts for multimodal tower and connector LoRA mappings.
+        Return ``(tower_tokens, connector_tokens)`` for multimodal LoRA mappings.
 
         The default preserves the historical contract where the tower token
         count is derived from the decoder-side multimodal embedding count, and
@@ -371,11 +359,9 @@ class SupportsMultiModal(Protocol):
         del modality, mm_kwargs
         num_encoder_tokens = self.get_num_mm_encoder_tokens(num_mm_embeds)
         num_connector_tokens = self.get_num_mm_connector_tokens(num_encoder_tokens)
-        return MultiModalLoRATokenCounts(
-            tower=num_encoder_tokens,
-            connector=(
-                num_connector_tokens if isinstance(num_connector_tokens, int) else None
-            ),
+        return (
+            num_encoder_tokens,
+            num_connector_tokens if isinstance(num_connector_tokens, int) else None,
         )
 
     @overload
