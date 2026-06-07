@@ -41,7 +41,6 @@ from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weigh
 from .model import (
     DeepseekV4DecoderLayer,
     hc_head,
-    make_deepseek_v4_expert_params_mapping,
 )
 from vllm.model_executor.models.utils import maybe_prefix
 
@@ -333,19 +332,13 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
-        first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
-            expert_mapping = make_deepseek_v4_expert_params_mapping(
-                self.config.n_routed_experts
-            )
-        else:
-            expert_mapping = FusedMoE.make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.n_routed_experts,
-            )
+        expert_mapping = FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.n_routed_experts,
+        )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
         # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
