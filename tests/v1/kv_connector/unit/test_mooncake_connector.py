@@ -128,7 +128,7 @@ def test_align_transfer_regions_supports_pp_layer_subset():
 
 
 def test_align_transfer_regions_uses_layer_name_occurrences():
-    """Repeated layer names should align by occurrence, matching NIXL's shape."""
+    """Repeated layer names should align by occurrence order."""
 
     local_regions = [
         TransferRegion(
