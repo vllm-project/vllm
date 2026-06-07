@@ -1365,6 +1365,57 @@ class TestServingChatWithHarmony:
         )
 
     @pytest.mark.asyncio
+    async def test_system_message_without_tools(self, serving_chat, stream):
+        """Leading system message produces a developer message with
+        DeveloperContent (# Instructions header)."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
+        """Leading system message is folded into the developer message
+        alongside tool definitions."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = (
+            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        )
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                    "tool_definitions": ["get_weather"],
+                },
+                {"role": "user", "content": "What's the weather?"},
+            ],
+        )
+
+    @pytest.mark.asyncio
     async def test_tool_call_response_with_content(
         self, serving_chat, stream, weather_tools, weather_messages_start
     ):
