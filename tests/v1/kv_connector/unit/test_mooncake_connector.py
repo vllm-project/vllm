@@ -24,9 +24,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    get_mooncake_bootstrap_addr,
+    should_launch_bootstrap_server,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
+)
+from vllm.distributed.kv_transfer.kv_transfer_state import (
+    _sync_engine_id_across_model_parallel,
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -34,6 +39,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+MOONCAKE_CONNECTOR_MODULE = (
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
+)
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -490,6 +499,132 @@ def bootstrap_server():
     server.start()
     yield server
     server.shutdown()
+
+
+def test_mooncake_bootstrap_addr_uses_master_addr_for_internal_pp():
+    """Internal LB PP workers should register to the rank0 bootstrap server."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    parallel_config = vllm_config.parallel_config
+    parallel_config.pipeline_parallel_size = 2
+    parallel_config.master_addr = "10.0.0.1"
+    parallel_config.data_parallel_master_ip = "10.0.0.2"
+    parallel_config.data_parallel_external_lb = False
+    parallel_config.data_parallel_hybrid_lb = False
+
+    host, _ = get_mooncake_bootstrap_addr(vllm_config)
+
+    assert host == "10.0.0.1"
+
+
+def test_mooncake_bootstrap_addr_preserves_non_pp_and_external_lb():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    parallel_config = vllm_config.parallel_config
+    parallel_config.master_addr = "10.0.0.1"
+    parallel_config.data_parallel_master_ip = "10.0.0.2"
+
+    parallel_config.pipeline_parallel_size = 1
+    parallel_config.data_parallel_external_lb = False
+    parallel_config.data_parallel_hybrid_lb = False
+    host, _ = get_mooncake_bootstrap_addr(vllm_config)
+    assert host == "10.0.0.2"
+
+    parallel_config.pipeline_parallel_size = 2
+    parallel_config.data_parallel_external_lb = True
+    host, _ = get_mooncake_bootstrap_addr(vllm_config)
+    assert host == "127.0.0.1"
+
+
+def test_should_launch_bootstrap_server_internal_lb_uses_global_first_rank():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_external_lb = False
+    parallel_config.data_parallel_hybrid_lb = False
+    parallel_config.data_parallel_index = 0
+
+    with (
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
+            return_value=True,
+        ),
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
+            return_value=True,
+        ),
+    ):
+        assert should_launch_bootstrap_server(vllm_config) is True
+
+    with (
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
+            return_value=False,
+        ),
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
+            return_value=True,
+        ),
+    ):
+        assert should_launch_bootstrap_server(vllm_config) is False
+
+    parallel_config.data_parallel_index = 1
+    with patch(
+        f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
+        return_value=True,
+    ):
+        assert should_launch_bootstrap_server(vllm_config) is False
+
+
+def test_should_launch_bootstrap_server_external_lb_uses_local_first_rank():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    parallel_config = vllm_config.parallel_config
+    parallel_config.data_parallel_external_lb = True
+    parallel_config.data_parallel_hybrid_lb = False
+
+    with (
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_global_first_rank",
+            return_value=False,
+        ),
+        patch(
+            f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
+            return_value=True,
+        ),
+    ):
+        assert should_launch_bootstrap_server(vllm_config) is True
+
+    with patch(
+        f"{MOONCAKE_CONNECTOR_MODULE}.is_local_first_rank",
+        return_value=False,
+    ):
+        assert should_launch_bootstrap_server(vllm_config) is False
+
+
+def test_sync_engine_id_across_model_parallel_uses_world_group(monkeypatch):
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+    assert vllm_config.kv_transfer_config is not None
+    vllm_config.kv_transfer_config.engine_id = "local-engine"
+    fake_world_group = SimpleNamespace(
+        broadcast_object=MagicMock(return_value="shared-engine")
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.parallel_state.get_world_group",
+        lambda: fake_world_group,
+    )
+
+    _sync_engine_id_across_model_parallel(vllm_config)
+
+    fake_world_group.broadcast_object.assert_called_once_with("local-engine", src=0)
+    assert vllm_config.kv_transfer_config.engine_id == "shared-engine"
 
 
 @pytest.mark.asyncio

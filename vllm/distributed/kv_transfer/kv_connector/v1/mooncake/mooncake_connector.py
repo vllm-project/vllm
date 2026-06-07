@@ -43,6 +43,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    is_global_first_rank,
     is_local_first_rank,
 )
 from vllm.forward_context import ForwardContext
@@ -1993,12 +1994,12 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
     assert (parallel_config := vllm_config.parallel_config)
     # In hybrid or external LB mode,
     # each instance should have its own bootstrap server.
-    #
-    # In internal LB mode,
-    # only the real global first rank need to launch the bootstrap server.
-    return is_local_first_rank() and (
-        parallel_config.local_engines_only or parallel_config.data_parallel_index == 0
-    )
+    if parallel_config.local_engines_only:
+        return is_local_first_rank()
+
+    # In internal LB mode, all PP ranks in one engine register to the bootstrap
+    # server owned by the real global first rank.
+    return is_global_first_rank() and parallel_config.data_parallel_index == 0
 
 
 def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
@@ -2011,6 +2012,10 @@ def get_mooncake_bootstrap_addr(vllm_config: VllmConfig) -> tuple[str, int]:
     if parallel_config.local_engines_only:
         # In hybrid or external LB mode, connect to local server.
         host = "127.0.0.1"
+    elif parallel_config.pipeline_parallel_size > 1:
+        # Internal LB multi-node PP uses the model-parallel master as the
+        # single bootstrap endpoint for all PP ranks in the engine.
+        host = parallel_config.master_addr
     else:
         host = parallel_config.data_parallel_master_ip
     port = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
