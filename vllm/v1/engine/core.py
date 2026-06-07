@@ -1493,6 +1493,8 @@ class EngineCoreProc(EngineCore):
                 dp_stats_address=self.frontend_stats_publish_address,
                 dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
                 vllm_version=VLLM_VERSION,
+                world_size=self.vllm_config.parallel_config.world_size,
+                data_parallel_size=self.vllm_config.parallel_config.data_parallel_size,
             )
             ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:

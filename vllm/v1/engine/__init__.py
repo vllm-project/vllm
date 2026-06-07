@@ -78,6 +78,8 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
     dtype: str
     vllm_version: str
+    world_size: int
+    data_parallel_size: int
 
 
 class EngineCoreRequest(

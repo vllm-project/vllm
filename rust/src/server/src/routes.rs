@@ -9,6 +9,7 @@ pub(crate) mod openai;
 mod server_info;
 mod sleep;
 mod version;
+mod world_size;
 
 use std::sync::Arc;
 
@@ -91,6 +92,7 @@ fn build_router_with_options(
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
             .route("/server_info", get(server_info::server_info))
+            .route("/get_world_size", get(world_size::get_world_size))
     }
 
     let enable_request_id_headers = state.enable_request_id_headers;

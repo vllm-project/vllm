@@ -42,6 +42,10 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
+    /// World size (TP * PP) from the parallel config.
+    pub world_size: u64,
+    /// Data parallelism size from the parallel config.
+    pub data_parallel_size: u64,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
