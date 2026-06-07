@@ -35,6 +35,10 @@ pub enum CoordinatorMode {
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Config {
+    /// API keys for protecting OpenAI-compatible endpoints. When set, the
+    /// authentication middleware requires a valid `Authorization: Bearer <key>`
+    /// header on all guarded routes.
+    pub api_key: Option<Vec<String>>,
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
     /// Requested frontend-side coordinator behavior.

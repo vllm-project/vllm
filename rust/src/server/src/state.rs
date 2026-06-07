@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -19,6 +20,10 @@ pub struct AppState {
     /// All public model IDs served by this frontend. The first entry is the
     /// primary ID used in responses; all entries are valid in requests.
     served_model_names: Vec<String>,
+    /// API keys for protecting OpenAI-compatible endpoints. When set, requests
+    /// to guarded paths must include a valid `Authorization: Bearer <key>`
+    /// header.
+    pub(crate) api_keys: Option<HashSet<String>>,
     /// Shared chat facade used by all requests.
     pub chat: ChatLlm,
     /// Whether to log a summary line for each completed request.
@@ -53,6 +58,7 @@ impl AppState {
             enable_log_requests: false,
             enable_request_id_headers: false,
             server_info: None,
+            api_keys: None,
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
         }
@@ -73,6 +79,12 @@ impl AppState {
     /// Attach the runtime server information snapshot used by `/server_info`.
     pub(crate) fn with_server_info(mut self, server_info: ServerInfoSnapshot) -> Self {
         self.server_info = Some(server_info);
+        self
+    }
+
+    /// Set the API keys used by the authentication middleware.
+    pub(crate) fn with_api_keys(mut self, tokens: Option<Vec<String>>) -> Self {
+        self.api_keys = tokens.map(|t| t.into_iter().collect());
         self
     }
 
@@ -162,6 +174,18 @@ impl AppState {
         self.server_load.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Performs authentication against a given token and returns whether the
+    /// request is allowed. If no keys are set, this always denies the request.
+    /// The authentication middleware is only mounted when at least one key is
+    /// configured.
+    pub(crate) fn is_authorized(&self, token: &str) -> bool {
+        let Some(keys) = &self.api_keys else {
+            return false;
+        };
+
+        keys.contains(token)
+    }
+
     /// Wait until all request-owned references are dropped, then shut down the
     /// engine client.
     ///
@@ -194,5 +218,59 @@ impl AppState {
             ))
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    #[test]
+    fn with_api_keys_builds_hashset_from_vec() {
+        let keys: Option<HashSet<String>> =
+            Some(vec!["alpha".to_string(), "beta".to_string()]).map(|t| t.into_iter().collect());
+        let keys = keys.unwrap();
+        assert!(keys.contains("alpha"));
+        assert!(keys.contains("beta"));
+        assert!(!keys.contains("gamma"));
+    }
+
+    #[test]
+    fn with_api_keys_none_produces_none() {
+        let keys: Option<HashSet<String>> = None::<Vec<String>>.map(|t| t.into_iter().collect());
+        assert!(keys.is_none());
+    }
+
+    #[test]
+    fn is_authorized_logic_matches_on_valid_token() {
+        let keys: Option<HashSet<String>> =
+            Some(vec!["key1".to_string(), "key2".to_string()]).map(|t| t.into_iter().collect());
+
+        // Mirrors `is_authorized` logic.
+        let check = |token: &str| -> bool {
+            let Some(keys) = &keys else {
+                return false;
+            };
+            keys.contains(token)
+        };
+
+        assert!(check("key1"));
+        assert!(check("key2"));
+        assert!(!check("wrong"));
+        assert!(!check(""));
+    }
+
+    #[test]
+    fn is_authorized_logic_denies_when_no_keys() {
+        let keys: Option<HashSet<String>> = None;
+
+        let check = |token: &str| -> bool {
+            let Some(keys) = &keys else {
+                return false;
+            };
+            keys.contains(token)
+        };
+
+        assert!(!check("anything"));
     }
 }

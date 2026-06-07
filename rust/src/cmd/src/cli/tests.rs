@@ -31,6 +31,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
+                        api_key: None,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -261,6 +262,7 @@ fn frontend_args_accept_json() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
+                        api_key: None,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -446,15 +448,15 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"ssl_keyfile":"/tmp/key.pem"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"api_key":"secret"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","allow_credentials":true,"ssl_keyfile":"/tmp/key.pem"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
         - allow_credentials
-        - api_key
+        - ssl_keyfile
 
         Remove these arguments to continue.
 
@@ -662,6 +664,7 @@ fn serve_args_accept_handshake_aliases() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
+                        api_key: None,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
                         renderer: Auto,
@@ -765,6 +768,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
 
     expect![[r#"
         Config {
+            api_key: None,
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
@@ -833,6 +837,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
 
     expect![[r#"
         Config {
+            api_key: None,
             transport_mode: HandshakeOwner {
                 handshake_address: "tcp://10.99.48.128:29550",
                 advertised_host: "10.99.48.128",
@@ -913,6 +918,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
 
     expect![[r#"
         Config {
+            api_key: None,
             transport_mode: Bootstrapped {
                 input_address: "ipc:///tmp/input.sock",
                 output_address: "ipc:///tmp/output.sock",
@@ -965,5 +971,51 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
         HttpListenerMode::BindUnix {
             path: "/tmp/vllm.sock".to_string(),
         }
+    );
+}
+
+#[test]
+fn serve_passes_api_key_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--api-key",
+        "key1 key2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(
+        config.api_key,
+        Some(vec!["key1".to_string(), "key2".to_string()])
+    );
+}
+
+#[test]
+fn frontend_args_json_accepts_api_key() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","api_key":["key1","key2"]}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(
+        args.runtime.api_key,
+        Some(vec!["key1".to_string(), "key2".to_string()])
     );
 }

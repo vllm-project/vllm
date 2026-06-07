@@ -102,6 +102,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default = "default_engine_ready_timeout_secs")]
     pub engine_ready_timeout_secs: u64,
 
+    /// API Key for OpenAI services. If provided, this api key will overwrite the
+    /// api key obtained through environment variables. It is important to note that
+    /// this option only applies to the OpenAI-Compatible API endpoints and NOT other
+    /// endpoints that may be present in the server. See the security guide in vLLM docs
+    /// for more details.
+    #[arg(long, env = "VLLM_API_KEY", num_args=1.., value_delimiter = ' ')]
+    #[serde(default)]
+    pub api_key: Option<Vec<String>>,
+
     /// Select the tool call parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -231,6 +240,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
 
         Config {
+            api_key: self.api_key,
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
@@ -274,6 +284,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
 
         Config {
+            api_key: self.api_key,
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
