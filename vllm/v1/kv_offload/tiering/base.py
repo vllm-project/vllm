@@ -15,7 +15,6 @@ from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingCon
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
-    from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -153,25 +152,6 @@ class SecondaryTierManager(ABC):
             last call.
         """
         pass
-
-    @abstractmethod
-    def create_lookup_worker(
-        self,
-        tier_idx: int,
-        max_results: int = 1_000_000,
-    ) -> "AsyncLookupWorker":
-        """Create an AsyncLookupWorker for this tier.
-
-        Each tier returns a concrete AsyncLookupWorker subclass that
-        implements batch_lookup() for its own storage backend.
-
-        Args:
-            tier_idx: Index of this tier in the secondary_tiers list,
-                      embedded in FOUND results so the manager knows which
-                      tier to promote from.
-            max_results: Capacity of the lookup state cache.
-        """
-        ...
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """

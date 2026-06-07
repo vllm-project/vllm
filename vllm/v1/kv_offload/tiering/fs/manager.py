@@ -26,7 +26,11 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
+from vllm.v1.kv_offload.tiering.async_lookup import (
+    FOUND,
+    NOT_FOUND,
+    AsyncLookupManager,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -42,16 +46,16 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FsAsyncLookupWorker(AsyncLookupWorker):
-    """Async lookup worker for FileSystemTierManager."""
+class FsAsyncLookupManager(AsyncLookupManager):
+    """Async lookup manager for FileSystemTierManager."""
 
     def __init__(
         self,
         tier: "FileSystemTierManager",
-        tier_idx: int,
+        tier_type: str,
         max_results: int = 1_000_000,
     ) -> None:
-        super().__init__(tier_idx=tier_idx, max_results=max_results)
+        super().__init__(tier_type=tier_type, max_results=max_results)
         self._tier = tier
 
     def batch_lookup(
@@ -130,25 +134,25 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
+        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._store_job_keys: dict[int, list[OffloadKey]] = {}
+
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
     @override
-    def lookup(
-        self, key: OffloadKey, req_context: ReqContext | None = None
-    ) -> bool | None:
-        return os.path.exists(self.file_mapper.get_file_name(key))
-
-    def create_lookup_worker(
-        self, tier_idx: int, max_results: int = 1_000_000
-    ) -> FsAsyncLookupWorker:
-        return FsAsyncLookupWorker(
-            tier=self, tier_idx=tier_idx, max_results=max_results
-        )
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result == FOUND:
+            return True
+        if result == NOT_FOUND:
+            return False
+        return None
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         tasks = (
             functools.partial(
                 store_block,
@@ -177,20 +181,26 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """
-        Collect completed jobs from the finished-jobs queue.
-        """
-        return (
-            JobResult(job_id=job_id, success=success)
-            for job_id, success in self._pool.get_finished()
-        )
+        """Collect completed jobs and update the lookup cache for stores."""
+        self._lookup_manager.drain_results()
+        results: list[JobResult] = []
+        for job_id, success in self._pool.get_finished():
+            keys = self._store_job_keys.pop(job_id, None)
+            if keys is not None and success:
+                self._lookup_manager.update_cached_exists(keys)
+            results.append(JobResult(job_id=job_id, success=success))
+        return results
+
+    @override
+    def on_schedule_end(self) -> None:
+        self._lookup_manager.flush()
 
     @override
     def shutdown(self) -> None:
         """
         Release resources held by this tier.
 
-        Shuts down the thread pool, clearing pending tasks and waiting for
-        active threads to complete.
+        Shuts down the lookup manager and the thread pool.
         """
+        self._lookup_manager.shutdown()
         self._pool.shutdown(wait=True)

@@ -11,7 +11,11 @@ from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupWorker
+from vllm.v1.kv_offload.tiering.async_lookup import (
+    FOUND,
+    NOT_FOUND,
+    AsyncLookupManager,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -50,20 +54,20 @@ class TransferEntry(NamedTuple):
     obj_handle: "nixl_prepped_dlist_handle"
 
 
-class ObjAsyncLookupWorker(AsyncLookupWorker):
-    """Async lookup worker for ObjectStoreSecondaryTierManager.
+class ObjAsyncLookupManager(AsyncLookupManager):
+    """Async lookup manager for ObjectStoreSecondaryTierManager.
 
-    Batches existence probes into a single query_memory() call so the worker
-    thread issues one round-trip per step instead of one per key.
+    Batches existence probes into a single query_memory() call so the
+    background thread issues one round-trip per step instead of one per key.
     """
 
     def __init__(
         self,
         tier: "ObjectStoreSecondaryTierManager",
-        tier_idx: int,
+        tier_type: str,
         max_results: int = 1_000_000,
     ) -> None:
-        super().__init__(tier_idx=tier_idx, max_results=max_results)
+        super().__init__(tier_type=tier_type, max_results=max_results)
         self._tier = tier
 
     def batch_lookup(
@@ -131,6 +135,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._dram_prepped_handle: nixl_prepped_dlist_handle = (
             self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
         )
+
+        self._lookup_manager = ObjAsyncLookupManager(
+            tier=self, tier_type=self.tier_type
+        )
+        self._store_job_keys: dict[int, list[OffloadKey]] = {}
 
     def _probe_connectivity(self) -> None:
         """Verify object store connectivity at startup via a NIXL lookup probe.
@@ -212,20 +221,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        try:
-            return self._exists(self._file_mapper.get_file_name(key))
-        except Exception as e:
-            logger.warning("lookup failed for key %s: %s", key, e)
+        result = self._lookup_manager.lookup(key, req_context)
+        if result == FOUND:
+            return True
+        if result == NOT_FOUND:
             return False
-
-    def create_lookup_worker(
-        self, tier_idx: int, max_results: int = 1_000_000
-    ) -> ObjAsyncLookupWorker:
-        return ObjAsyncLookupWorker(
-            tier=self, tier_idx=tier_idx, max_results=max_results
-        )
+        return None
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
@@ -237,11 +241,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
         )
 
+    def on_schedule_end(self) -> None:
+        self._lookup_manager.flush()
+
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        self._lookup_manager.drain_results()
         results: list[JobResult] = self._failed_jobs
         self._failed_jobs = []
         for job_id, entry in list(self._transfers.items()):
@@ -262,10 +270,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._agent.release_xfer_handle(entry.xfer_handle)
             self._agent.release_dlist_handle(entry.obj_handle)
             self._agent.deregister_memory(entry.files_desc)
+            keys = self._store_job_keys.pop(job_id, None)
+            if keys is not None and success:
+                self._lookup_manager.update_cached_exists(keys)
             results.append(JobResult(job_id=job_id, success=success))
         return results
 
     def shutdown(self) -> None:
+        self._lookup_manager.shutdown()
         for job_id, entry in self._transfers.items():
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)

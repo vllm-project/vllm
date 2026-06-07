@@ -41,7 +41,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.tiering.async_lookup import FOUND, AsyncLookupWorker
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
@@ -145,9 +144,6 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._job_id_counter: int = 0
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
-        self._async_lookup_workers: list[AsyncLookupWorker] = [
-            tier.create_lookup_worker(i) for i, tier in enumerate(self.secondary_tiers)
-        ]
 
         # Job tracking: maps job_id to metadata for all in-flight transfers.
         # JobMetadata.is_promotion distinguishes direction:
@@ -198,17 +194,14 @@ class TieringOffloadingManager(OffloadingManager):
         Unconditionally poll all secondary tiers for completed jobs.
 
         This method:
-        1. Drains async lookup results so query() sees up-to-date state.
-        2. Calls get_finished_jobs() on each secondary tier
-        3. For completed stores (primary→secondary): calls primary.complete_read()
+        1. Calls get_finished_jobs() on each secondary tier
+        2. For completed stores (primary→secondary): calls primary.complete_read()
            to decrement ref_cnt
-        4. For completed loads (secondary→primary): calls primary.complete_write()
+        3. For completed loads (secondary→primary): calls primary.complete_write()
            to make blocks available
         """
         if not self.secondary_tiers:
             return
-        for worker in self._async_lookup_workers:
-            worker.drain_results()
         for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished_jobs():
                 job_id = completed_job.job_id
@@ -232,10 +225,6 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
-                    if completed_job.success:
-                        self._async_lookup_workers[i].update_cached_exists(
-                            job_metadata.keys
-                        )
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -267,18 +256,18 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_hit is None:
             return None
 
-        if not self._async_lookup_workers:
+        if not self.secondary_tiers:
             return False
 
-        # Fan out: query all tier workers simultaneously so their background
-        # threads run concurrently.  Then sweep in priority order — the first
-        # FOUND wins, and a higher-priority None blocks acting on any
-        # lower-priority result until that tier resolves.
-        results = [w.query(key, req_context) for w in self._async_lookup_workers]
+        # Fan out: call all tiers so each can queue the key internally.
+        # Then sweep in priority order — the first True wins, and a
+        # higher-priority None blocks acting on any lower-priority result
+        # until that tier resolves.
+        results = [tier.lookup(key, req_context) for tier in self.secondary_tiers]
         for i, result in enumerate(results):
             if result is None:
                 return None
-            if result == FOUND:
+            if result is True:
                 if not self._initiate_promotion(
                     self.secondary_tiers[i], key, req_context
                 ):
@@ -592,8 +581,6 @@ class TieringOffloadingManager(OffloadingManager):
         self._maybe_process_finished_jobs()
         self._processed_jobs_this_step = False
         self._flush_pending_promotions()
-        for worker in self._async_lookup_workers:
-            worker.flush()
         for tier in self.secondary_tiers:
             tier.on_schedule_end()
 
@@ -615,11 +602,11 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._flush_pending_promotions()
 
-        # Flush any buffered lookup keys not yet posted by on_schedule_end()
-        # (e.g. in tests that call take_events() directly).  No-op when the
-        # buffer is already empty.
-        for worker in self._async_lookup_workers:
-            worker.flush()
+        # Notify tiers of end-of-step so they can flush any buffered work
+        # (e.g. in tests that call take_events() directly without
+        # on_schedule_end()).
+        for tier in self.secondary_tiers:
+            tier.on_schedule_end()
 
         # Reset the per-step gate so next step's first call does real work.
         self._processed_jobs_this_step = False
@@ -633,8 +620,6 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
-        for worker in self._async_lookup_workers:
-            worker.shutdown()
         for tier in self.secondary_tiers:
             tier.shutdown()
         self.primary_tier.shutdown()
