@@ -708,8 +708,12 @@ def _tq_fwht_input_gemm_launcher(
 
 
 # Register as torch.library.custom_op for fullgraph compatibility.
-# Dynamo treats custom ops as opaque (no tracing into kernel body).
-try:
+# Dynamo treats custom ops as opaque (no tracing into kernel body). Gated
+# on _HAS_TRITON because the registered ops dispatch into launchers that
+# call `triton.cdiv`/`triton.next_power_of_2` at call time; without
+# Triton, leaving them bound would crash with NameError on the first
+# forward and bypass the PyTorch fallback path below.
+if _HAS_TRITON:
 
     @torch.library.custom_op(
         "turboquant::tq_fused_gemm",
@@ -842,8 +846,8 @@ try:
             bits,
             bias,
         )
-except (AttributeError, RuntimeError, NameError):
-    # Triton not available — tq_fused_gemm / tq_fwht_input_gemm undefined
+else:
+    # Triton missing — the PyTorch fallback in apply() handles it.
     tq_fused_gemm = None  # type: ignore[assignment]
     tq_fwht_input_gemm = None  # type: ignore[assignment]
 
@@ -988,8 +992,11 @@ class _TurboQuantOnlineLinearMethodBase(LinearMethodBase):
                     *args, group_size=self.GROUP_SIZE, bits=self.BITS, bias=bias
                 )
 
-        # PyTorch fallback (no Triton)
-        indices = _unpack_indices(layer.tq_packed_weight, self.BITS, self.GROUP_SIZE)
+        # PyTorch fallback (no Triton). Unpack the full padded width
+        # (out_features × padded_in indices), then reshape into per-group
+        # rows for the Lloyd-Max dequant before the matmul.
+        indices = _unpack_indices(layer.tq_packed_weight, self.BITS, layer.tq_padded_in)
+        indices = indices.reshape(-1, self.GROUP_SIZE)
         norms_flat = layer.tq_norms.reshape(-1)
         quantizer = _get_quantizer(self.GROUP_SIZE, self.BITS, str(x.device))
         w_groups = quantizer.dequantize(indices, norms_flat)

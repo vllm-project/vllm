@@ -44,6 +44,7 @@ QuantizationMethods = Literal[
     "mxfp8",
     "turboquant",
     "turboquant_2bit",
+    "turboquant_3bit",
     "turboquant_4bit",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
