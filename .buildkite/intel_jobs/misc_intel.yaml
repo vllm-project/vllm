@@ -53,3 +53,26 @@ steps:
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
       pytest -v -s v1/test_outputs.py'
+
+- label: XPU CPU Offload
+  timeout_in_minutes: 60
+  device: intel_gpu
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - vllm/v1/kv_offload/
+    - vllm/v1/kv_connector/
+    - tests/v1/kv_offload/
+    - tests/v1/kv_connector/unit/test_offloading_connector.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      cd tests &&
+      pytest -v -s v1/kv_offload &&
+      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
