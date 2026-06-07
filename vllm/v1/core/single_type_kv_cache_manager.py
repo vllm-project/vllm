@@ -193,12 +193,6 @@ class SingleTypeKVCacheManager(ABC):
         1.5. (Optional) For sliding window, skipped blocks are padded with nulls.
         2. Add the remaining computed blocks.
 
-        This is the first of the two-phase allocation done by the coordinator:
-        every group's local blocks are touched before *any* group allocates
-        blocks for external computed tokens, so an earlier group's external
-        allocation can never evict a later group's (not-yet-touched) cache-hit
-        blocks (issue #33775).
-
         Args:
             request_id: The request ID.
             new_computed_blocks: The new computed blocks just hitting the
