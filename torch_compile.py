@@ -1,0 +1,6 @@
+import torch
+from torch.compile import register_custom_pass
+from .torch_compile_custom_passes import fused_moe_finalize_residual_add_allreduce_rmsnorm
+
+# Register the custom pass
+register_custom_pass(fused_moe_finalize_residual_add_allreduce_rmsnorm)
