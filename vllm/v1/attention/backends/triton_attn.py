@@ -649,7 +649,10 @@ class TritonAttentionImpl(AttentionImpl):
             )
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
-        uses_shared_kv_cache = self.kv_sharing_target_layer_name is not None
+        uses_shared_kv_cache = (
+            self.kv_sharing_target_layer_name is not None
+            or getattr(layer, "kv_sharing_target_layer_name", None) is not None
+        )
         if (
             self._kv_quant_mode == KVQuantMode.NVFP4
             and not uses_shared_kv_cache
