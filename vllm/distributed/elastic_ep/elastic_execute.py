@@ -470,10 +470,14 @@ class ElasticEPScalingExecutor:
                     module._replace_quant_method(module.quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
+        eplb_model_state.expert_buffer = [
+            torch.empty_like(w) for w in model.expert_weights[0]
+        ]
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights[0],
+            expert_weights=model.expert_weights,
+            expert_buffer=eplb_model_state.expert_buffer,
         )
 
         if (

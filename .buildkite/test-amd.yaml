@@ -908,10 +908,10 @@ steps:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_cumem.py
+  - tests/basic_correctness/test_mem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/test_cumem.py
+  - pytest -v -s basic_correctness/test_mem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
@@ -1299,12 +1299,11 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
-  - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s entrypoints/llm/test_generate.py
-  - pytest -v -s entrypoints/offline_mode
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
@@ -1346,7 +1345,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
-  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/offline_mode --ignore=entrypoints/openai --ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/openai --ignore=entrypoints/serve --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --ignore=entrypoints/speech_to_text --ignore=tests/entrypoints/generate
 
 - label: OpenAI API correctness # TBD
   timeout_in_minutes: 180
