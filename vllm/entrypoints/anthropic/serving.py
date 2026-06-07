@@ -508,6 +508,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             usage=AnthropicUsage(
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
+                cache_read_input_tokens=generator.usage.cache_read_input_tokens,
+                cache_creation_input_tokens=generator.usage.cache_creation_input_tokens,
             ),
             kv_transfer_params=generator.kv_transfer_params,
         )
@@ -664,6 +666,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         if origin_chunk.usage
                                         else 0,
                                         output_tokens=0,
+                                        cache_read_input_tokens=origin_chunk.usage.cache_read_input_tokens
+                                        if origin_chunk.usage
+                                        else None,
+                                        cache_creation_input_tokens=origin_chunk.usage.cache_creation_input_tokens
+                                        if origin_chunk.usage
+                                        else None,
                                     ),
                                 ),
                             )
@@ -689,6 +697,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     output_tokens=origin_chunk.usage.completion_tokens
                                     if origin_chunk.usage
                                     else 0,
+                                    cache_read_input_tokens=origin_chunk.usage.cache_read_input_tokens
+                                    if origin_chunk.usage
+                                    else None,
+                                    cache_creation_input_tokens=origin_chunk.usage.cache_creation_input_tokens
+                                    if origin_chunk.usage
+                                    else None,
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
