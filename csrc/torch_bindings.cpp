@@ -32,37 +32,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
+#ifdef USE_ROCM
+  // TODO: Remove this once we upgrade to torch 2.11.
+  // ROCm still uses torch 2.10,
+  // So we still need to use unstable torch ABI for now.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
   ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
            &get_cuda_view_from_cpu_tensor);
+#endif
 
   // Activation ops (quantized only — basic ops moved to _C_stable_libtorch)
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-           &silu_and_mul_per_block_quant);
-
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
-  // kernel launch.
-  ops.def(
-      "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert("
-      "Tensor q_in, Tensor kv, Tensor! k_cache, "
-      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
-      "int q_head_padded, float eps, int cache_block_size) -> Tensor");
-  ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
-           &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
+  // kernel launch. Registered in _C_stable_libtorch (incl. the FlashInfer V4
+  // full-cache bf16/fp8 variants).
 
   // Quantization ops
 #ifndef USE_ROCM
@@ -163,37 +150,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // conditionally compiled so impl registration is in source file
 
 #endif
-
-#ifndef USE_ROCM
-  ops.def(
-      "minimax_allreduce_rms("
-      "Tensor input,"
-      "Tensor norm_weight,"
-      "Tensor workspace,"
-      "int rank,"
-      "int nranks,"
-      "float eps) -> Tensor");
-  ops.impl("minimax_allreduce_rms", torch::kCUDA, &minimax_allreduce_rms);
-  ops.def(
-      "minimax_allreduce_rms_qk("
-      "Tensor qkv,"
-      "Tensor norm_weight_q,"
-      "Tensor norm_weight_k,"
-      "Tensor workspace,"
-      "int q_size,"
-      "int kv_size,"
-      "int rank,"
-      "int nranks,"
-      "float eps) -> (Tensor, Tensor)");
-  ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
-
-  //  conditionally compiled so impl in source file
-#endif
 }
 
+#ifdef USE_ROCM
+TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
+  // Quick Reduce all-reduce kernels (ROCm-only; stays on legacy _C).
+  custom_ar.def(
+      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
+      "cast_bf2half) -> ()");
+  custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
+
+  custom_ar.def("init_custom_qr", &init_custom_qr);
+  custom_ar.def("qr_destroy", &qr_destroy);
+  custom_ar.def("qr_get_handle", &qr_get_handle);
+
+  custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
+  custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
+
+  custom_ar.def("qr_max_size", &qr_max_size);
+}
+
+// TODO: Remove this once ROCm upgrade to torch 2.11.
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   // Cuda utils
-
   // Gets the specified device attribute.
   cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
   cuda_utils.impl("get_device_attribute", &get_device_attribute);
@@ -204,49 +183,6 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
                   &get_max_shared_memory_per_block_device_attribute);
 }
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
-  // Custom all-reduce kernels
-  custom_ar.def(
-      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
-      "int rank, bool fully_connected) -> int");
-  custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
-  custom_ar.def(
-      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
-      "int reg_buffer_sz_bytes) -> ()");
-  custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
-
-  custom_ar.def("dispose", &dispose);
-  custom_ar.def("meta_size", &meta_size);
-
-  custom_ar.def("register_buffer", &register_buffer);
-  custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
-  custom_ar.def("register_graph_buffers", &register_graph_buffers);
-
-  custom_ar.def("allocate_shared_buffer_and_handle",
-                &allocate_shared_buffer_and_handle);
-  custom_ar.def("open_mem_handle(Tensor mem_handle) -> int", &open_mem_handle);
-  custom_ar.impl("open_mem_handle", torch::kCPU, &open_mem_handle);
-
-  custom_ar.def("free_shared_buffer", &free_shared_buffer);
-#ifdef USE_ROCM
-  // Quick Reduce all-reduce kernels
-  custom_ar.def(
-      "qr_all_reduce(int fa, Tensor inp, Tensor out, int quant_level, bool "
-      "cast_bf2half) -> ()");
-  custom_ar.impl("qr_all_reduce", torch::kCUDA, &qr_all_reduce);
-
-  custom_ar.def("init_custom_qr", &init_custom_qr);
-  custom_ar.def("qr_destroy", &qr_destroy);
-
-  custom_ar.def("qr_get_handle", &qr_get_handle);
-
-  custom_ar.def("qr_open_handles(int _fa, Tensor[](b!) handles) -> ()");
-  custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
-
-  // Max input size in bytes
-  custom_ar.def("qr_max_size", &qr_max_size);
 #endif
-}
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
