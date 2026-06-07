@@ -87,6 +87,8 @@ class Mxfp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     # Humming
     HUMMING = "HUMMING"
+    # Cutlass
+    CUTLASS_MXFP4 = "CUTLASS_MXFP4"
 
 
 # AITER backends group
@@ -222,6 +224,13 @@ def backend_to_kernel_cls(
 
         return [OCP_MXQuantizationEmulationTritonExperts]
 
+    elif backend == Mxfp4MoeBackend.CUTLASS_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
+
+        return [CutlassExpertsMxfp4]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -258,6 +267,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
+        "cutlass_mxfp4": [Mxfp4MoeBackend.CUTLASS_MXFP4],
     }
     if backends := mapping.get(runner_backend):
         return backends
@@ -529,6 +539,18 @@ def select_mxfp4_moe_backend(
             config,
             kMxfp4Static,
             None,
+            activation_format,
+        )
+
+    if (
+        envs.is_set("VLLM_USE_CUTLASS_MXFP4_MXFP4")
+        and envs.VLLM_USE_CUTLASS_MXFP4_MXFP4
+    ):
+        return _return_or_raise(
+            Mxfp4MoeBackend.CUTLASS_MXFP4,
+            config,
+            kMxfp4Static,
+            requested_activation_key,
             activation_format,
         )
 
