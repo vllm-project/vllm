@@ -457,7 +457,7 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
 
     calls = []
 
-    def fake_lm(*args, **kwargs):
+    def fake_lm_non_first_rank(*args, **kwargs):
         del args
         calls.append(kwargs)
         return torch.ones(1, 1)
@@ -465,7 +465,7 @@ def test_moss_audio_pp_forward_routes_deepstack(monkeypatch):
     _patch_pp_group(monkeypatch, first=False)
     model = object.__new__(MossAudioModel)
     torch.nn.Module.__init__(model)
-    model.language_model = fake_lm
+    model.language_model = fake_lm_non_first_rank
     model.deepstack_input_embeds = IntermediateTensors({})
     inter = IntermediateTensors(
         {
