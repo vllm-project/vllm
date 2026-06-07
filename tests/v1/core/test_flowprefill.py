@@ -12,7 +12,7 @@ Test coverage:
   - Disabled path (preemption_granularity=None) — zero overhead, unchanged.
   - PrefillCheckpointState dataclass construction and field access.
   - CudaEventPool acquire/release lifecycle.
-  - FlowPrefillMixin initialisation and property.
+  - FlowPrefillMixin initialization and property.
   - Checkpoint insertion decision logic (_fp_maybe_checkpoint).
   - Resume logic (_fp_try_resume_suspended) with mocked CUDA events.
   - Full scheduling loop (_fp_schedule) — checkpoint and non-checkpoint paths.
