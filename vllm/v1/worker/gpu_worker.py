@@ -298,6 +298,7 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+                device_index=device_index,
             )
 
             if self.use_v2_model_runner:
@@ -1166,6 +1167,7 @@ def init_worker_distributed_environment(
     distributed_init_method: str | None = None,
     local_rank: int = -1,
     backend: str = "nccl",
+    device_index: int | None = None,
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
@@ -1191,6 +1193,7 @@ def init_worker_distributed_environment(
         local_rank,
         backend,
         timeout,
+        device_index=device_index,
     )
 
     ensure_model_parallel_initialized(

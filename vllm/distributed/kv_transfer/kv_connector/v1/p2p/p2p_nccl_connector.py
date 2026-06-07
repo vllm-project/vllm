@@ -89,7 +89,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         self._rank = get_world_group().rank if role == KVConnectorRole.WORKER else 0
         self._local_rank = (
-            get_world_group().local_rank if role == KVConnectorRole.WORKER else 0
+            get_world_group().device_index if role == KVConnectorRole.WORKER else 0
         )
 
         self.p2p_nccl_engine = (
