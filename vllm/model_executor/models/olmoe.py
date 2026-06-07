@@ -46,6 +46,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.router_logit_logger import maybe_log_router_logits
+from vllm.model_executor.layers.expert_load_logger import maybe_log_expert_load
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -88,6 +89,7 @@ class OlmoeMoE(nn.Module):
     ):
         super().__init__()
         self.hidden_size = hidden_size
+        self.top_k = top_k  # B2: needed by the expert-load hook
         self.layer_idx = extract_layer_index(prefix)  # B1: tag router-logit records
 
         # Gate always runs at half / full precision for now.
@@ -118,6 +120,7 @@ class OlmoeMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         maybe_log_router_logits(router_logits, self.layer_idx)  # B1 Q6 (no-op if off)
+        maybe_log_expert_load(router_logits, self.layer_idx, self.top_k)  # B2 Q1/Q5/Q6
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
