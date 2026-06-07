@@ -200,6 +200,23 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def reset_cache(self) -> bool | None:
+        """Reset the external Mooncake store on prefix-cache reset.
+
+        Drains the worker send queue, then runs ``remove_all`` on the
+        Mooncake master. Caller must first pause generation (e.g.
+        ``pause_generation``) so no new puts are enqueued during drain.
+
+        Returns True on ack, False on failure, None for the worker role.
+        """
+        if self.role == KVConnectorRole.SCHEDULER:
+            assert self.connector_scheduler is not None
+            # Clear local references to keys we're about to wipe.
+            self.connector_scheduler.load_specs.clear()
+            self._kv_cache_events = None
+            return self.connector_scheduler.reset_store()
+        return None
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(
@@ -269,6 +286,10 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeStoreConnectorMetadata)
         return self.connector_worker.get_finished(finished_req_ids, metadata)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        assert self.connector_worker is not None
+        return self.connector_worker.get_block_ids_with_load_errors()
 
     def get_kv_connector_kv_cache_events(
         self,

@@ -482,8 +482,8 @@ class Phi4MMImagePixelInputs(TensorSchema):
     ]
 
     image_attention_mask: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "nc", 32, 32),  # H_mask, W_mask
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "nc", 32, 32, dynamic_dims={"nc"}),  # H_mask, W_mask
     ]
 
 
@@ -543,6 +543,39 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
         output[slices] = t
         index += t.shape[dim]
+
+    return output
+
+
+def stack_with_pad(
+    tensors: torch.Tensor | list[torch.Tensor],
+    padding_value: int | float = 0,
+) -> torch.Tensor:
+    """
+    Stack tensors, padding dimensions that differ across items.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return tensors
+
+    assert len(tensors) > 0, "Cannot stack an empty tensor list"
+    first_shape = tensors[0].shape
+    if all(t.shape == first_shape for t in tensors):
+        return torch.stack(tensors)
+
+    ndim = tensors[0].dim()
+    assert all(t.dim() == ndim for t in tensors[1:]), (
+        "All tensors must have the same number of dimensions"
+    )
+
+    out_size = [
+        len(tensors),
+        *(max(t.shape[i] for t in tensors) for i in range(ndim)),
+    ]
+    output = tensors[0].new_full(out_size, padding_value)
+
+    for idx, tensor in enumerate(tensors):
+        slices = [idx, *(slice(0, size) for size in tensor.shape)]
+        output[tuple(slices)] = tensor
 
     return output
 
@@ -1176,9 +1209,9 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         self, image_input: Phi4MMImagePixelInputs
     ) -> list[torch.Tensor]:
         dtype = next(self.vision_encoder.parameters()).dtype
-        pixel_values = image_input["pixel_values"].to(dtype)
+        pixel_values = stack_with_pad(image_input["pixel_values"]).to(dtype)
         image_sizes = image_input["image_sizes"]
-        image_attention_mask = image_input["image_attention_mask"]
+        image_attention_mask = stack_with_pad(image_input["image_attention_mask"])
         image_embeds = self.vision_encoder(
             pixel_values, image_sizes, image_attention_mask
         )
