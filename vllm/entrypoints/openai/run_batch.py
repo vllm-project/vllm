@@ -51,6 +51,7 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -61,7 +62,6 @@ from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.entrypoints.utils import create_error_response
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
