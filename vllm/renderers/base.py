@@ -64,6 +64,7 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.multimodal.processing import TimingContext
 
 logger = init_logger(__name__)
 
@@ -88,10 +89,12 @@ class BaseRenderer(ABC, Generic[_T]):
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
 
-        # Multimodal preprocessing is always offloaded to the thread pool
-        # to keep the asyncio event loop responsive under concurrent load.
+        # Multimodal cache misses are offloaded to the thread pool to keep the
+        # asyncio event loop responsive. Cache hits use a synchronous fast path
+        # in the event loop to avoid queueing behind expensive HF processing.
         self._mm_executor: Executor = self._executor
 
+        self._mm_cache_inflight_futures: dict[str, asyncio.Future[None]] = {}
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
@@ -101,11 +104,14 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._executor
         )
-        self._process_multimodal_async = make_async(
+        self._process_multimodal_in_executor = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
         self._safe_load_prompt_embeds_async = make_async(
             safe_load_prompt_embeds, executor=self._executor
+        )
+        self._prefill_multimodal_cache_in_executor = make_async(
+            self._prefill_multimodal_cache, executor=self._mm_executor
         )
         if mm_registry.supports_multimodal_inputs(config.model_config):
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
@@ -177,17 +183,23 @@ class BaseRenderer(ABC, Generic[_T]):
         return mm_cache_stats
 
     def update_mm_cache_stats(self) -> None:
+        mm_processor = self.mm_processor
         mm_processor_cache = self.mm_processor_cache
         mm_cache_stats = self._mm_cache_stats
 
         if mm_processor_cache and mm_cache_stats:
-            delta = mm_processor_cache.make_stats(delta=True)
+            assert mm_processor is not None
+            with mm_processor._cache_lock:
+                delta = mm_processor_cache.make_stats(delta=True)
             mm_cache_stats.record(delta.total, delta.hits)
 
     def clear_mm_cache(self) -> None:
+        mm_processor = self.mm_processor
         mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
-            mm_processor_cache.clear_cache()
+            assert mm_processor is not None
+            with mm_processor._cache_lock:
+                mm_processor_cache.clear_cache()
 
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
@@ -201,7 +213,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         processor_cache = processor.cache
         if processor_cache is not None:
-            processor_cache.clear_cache()
+            with processor._cache_lock:
+                processor_cache.clear_cache()
 
     def _warmup_mm_processor(
         self,
@@ -273,8 +286,8 @@ class BaseRenderer(ABC, Generic[_T]):
                 self._clear_processor_cache(self._readonly_mm_processor)
 
     async def clear_mm_cache_async(self) -> None:
-        """Serialize clear_mm_cache through the shared executor to avoid
-        races with concurrent process_inputs on the mm_processor_cache."""
+        """Serialize clear_mm_cache and take the processor cache lock to avoid
+        races with concurrent multimodal preprocessing."""
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
@@ -722,6 +735,191 @@ class BaseRenderer(ABC, Generic[_T]):
         self.update_mm_cache_stats()
 
         return mm_inputs
+
+    def _get_mm_cache_waiters(
+        self,
+        missing_hashes: Sequence[str],
+    ) -> list[asyncio.Future[None]]:
+        waiters: list[asyncio.Future[None]] = []
+        seen: set[str] = set()
+        for item_hash in missing_hashes:
+            if item_hash in seen:
+                continue
+            seen.add(item_hash)
+
+            waiter = self._mm_cache_inflight_futures.get(item_hash)
+            if waiter is not None:
+                waiters.append(waiter)
+
+        return waiters
+
+    def _reserve_mm_cache_misses(
+        self,
+        missing_hashes: Sequence[str],
+    ) -> list[tuple[str, asyncio.Future[None]]]:
+        loop = asyncio.get_running_loop()
+        reservations: list[tuple[str, asyncio.Future[None]]] = []
+        seen: set[str] = set()
+        for item_hash in missing_hashes:
+            if item_hash in seen:
+                continue
+            seen.add(item_hash)
+
+            if item_hash in self._mm_cache_inflight_futures:
+                continue
+
+            waiter = loop.create_future()
+            self._mm_cache_inflight_futures[item_hash] = waiter
+            reservations.append((item_hash, waiter))
+
+        return reservations
+
+    def _release_mm_cache_misses(
+        self,
+        reservations: Sequence[tuple[str, asyncio.Future[None]]],
+    ) -> None:
+        for item_hash, waiter in reservations:
+            if self._mm_cache_inflight_futures.get(item_hash) is waiter:
+                del self._mm_cache_inflight_futures[item_hash]
+
+            if not waiter.done():
+                waiter.set_result(None)
+
+
+    def _get_unreserved_mm_cache_misses(
+        self,
+        missing_hashes: Sequence[str],
+    ) -> list[str]:
+        missing_without_waiters: list[str] = []
+        seen: set[str] = set()
+        for item_hash in missing_hashes:
+            if item_hash in seen:
+                continue
+            seen.add(item_hash)
+
+            if item_hash not in self._mm_cache_inflight_futures:
+                missing_without_waiters.append(item_hash)
+
+        return missing_without_waiters
+
+    def _prefill_multimodal_cache(
+        self,
+        mm_processor: "BaseMultiModalProcessor",
+        mm_processor_inputs: MMProcessorInputs,
+        item_hashes: Sequence[str],
+        mm_timing_ctx: "TimingContext",
+    ) -> None:
+        with set_default_torch_num_threads():
+            mm_processor.prefill_cache_items(
+                mm_processor_inputs,
+                item_hashes,
+                mm_timing_ctx,
+            )
+
+        self.update_mm_cache_stats()
+
+    async def _process_multimodal_async(
+        self,
+        prompt: list[int] | str,
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        tokenization_kwargs: dict[str, Any] | None,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> "MultiModalInput":
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+
+        if skip_mm_cache and self._readonly_mm_processor is not None:
+            mm_processor = self._readonly_mm_processor
+        else:
+            mm_processor = self.get_mm_processor()
+
+        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuid_items = parse_mm_uuids(mm_uuids)
+
+        mm_uuid_items = self._process_mm_uuids(
+            mm_data, mm_data_items, mm_uuid_items, mm_req_id
+        )
+
+        mm_processor_inputs = MMProcessorInputs(
+            prompt,
+            mm_data_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            tokenization_kwargs=tokenization_kwargs or {},
+        )
+        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        while True:
+            with set_default_torch_num_threads():
+                cached_result = mm_processor.try_apply_cached_or_get_missing_hashes(
+                    mm_processor_inputs,
+                    mm_timing_ctx,
+                )
+
+            if cached_result.mm_input is not None:
+                self.update_mm_cache_stats()
+                return cached_result.mm_input
+
+            missing_hashes = cached_result.missing_hashes
+            if not missing_hashes:
+                reservations: list[tuple[str, asyncio.Future[None]]] = []
+                break
+            waiters = self._get_mm_cache_waiters(missing_hashes)
+            if waiters:
+                shielded_waiters = [
+                    asyncio.shield(waiter) for waiter in waiters
+                ]
+                missing_without_waiters = self._get_unreserved_mm_cache_misses(
+                    missing_hashes
+                )
+                reservations = self._reserve_mm_cache_misses(missing_without_waiters)
+                if reservations:
+                    reserved_hashes = [
+                        item_hash for item_hash, _ in reservations
+                    ]
+                    prefill_future = self._prefill_multimodal_cache_in_executor(
+                        mm_processor,
+                        mm_processor_inputs,
+                        reserved_hashes,
+                        mm_timing_ctx,
+                    )
+
+                    def release_prefill(
+                        _future: asyncio.Future[None],
+                        reservations=reservations,
+                    ) -> None:
+                        self._release_mm_cache_misses(reservations)
+
+                    prefill_future.add_done_callback(release_prefill)
+                    await asyncio.gather(
+                        *shielded_waiters,
+                        asyncio.shield(prefill_future),
+                    )
+                else:
+                    await asyncio.gather(*shielded_waiters)
+                continue
+
+            reservations = self._reserve_mm_cache_misses(missing_hashes)
+            break
+
+        mm_future = self._process_multimodal_in_executor(
+            prompt,
+            mm_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
+            mm_uuids=mm_uuids,
+            skip_mm_cache=skip_mm_cache,
+        )
+        if not reservations:
+            return await mm_future
+
+        mm_future.add_done_callback(
+            lambda _: self._release_mm_cache_misses(reservations)
+        )
+
+        return await asyncio.shield(mm_future)
 
     def _process_tokens(
         self,
