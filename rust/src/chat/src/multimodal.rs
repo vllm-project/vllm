@@ -289,6 +289,12 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
                     detail: *detail,
                     uuid: uuid.clone(),
                 }),
+                ChatContentPart::VideoUrl { video_url, uuid } => {
+                    all_parts.push(MediaContentPart::VideoUrl {
+                        url: video_url.clone(),
+                        uuid: uuid.clone(),
+                    })
+                }
             }
         }
     }

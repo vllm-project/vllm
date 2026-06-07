@@ -36,6 +36,11 @@ pub enum ChatContentPart {
         detail: Option<ImageDetail>,
         uuid: Option<String>,
     },
+    /// One video URL content block.
+    VideoUrl {
+        video_url: String,
+        uuid: Option<String>,
+    },
     // ImageData...
     // ImageEmbeds...
 }
@@ -55,12 +60,21 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one video URL content part with the given URL string.
+    pub fn video_url(video_url: impl Into<String>) -> Self {
+        Self::VideoUrl {
+            video_url: video_url.into(),
+            uuid: None,
+        }
+    }
+
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+            Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
         }
     }
 
@@ -74,6 +88,7 @@ impl ChatContentPart {
         match self {
             Self::Text { .. } => false,
             Self::ImageUrl { .. } => true,
+            Self::VideoUrl { .. } => true,
         }
     }
 }

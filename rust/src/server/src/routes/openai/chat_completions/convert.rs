@@ -267,7 +267,13 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
                     detail: image_url.detail,
                     uuid,
                 }),
-                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+                ContentPart::VideoUrl { video_url, uuid } => Ok(ChatContentPart::VideoUrl {
+                    video_url: video_url.url,
+                    uuid,
+                }),
+                _ => bail_invalid_request!(
+                    "Only text, image_url, and video_url content parts are supported."
+                ),
             })
             .try_collect()
             .map(ChatContent::Parts),

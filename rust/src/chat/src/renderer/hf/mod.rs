@@ -235,6 +235,7 @@ enum TemplateContent {
 enum TemplateContentPart {
     Text { text: String },
     Image,
+    Video,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,6 +402,10 @@ fn to_template_openai_content(
                     multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
                     Ok(TemplateContentPart::Image)
                 }
+                ChatContentPart::VideoUrl { .. } => {
+                    multimodal.ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                    Ok(TemplateContentPart::Video)
+                }
             })
             .collect(),
     }
@@ -420,6 +425,11 @@ fn to_template_string_content(
                     ChatContentPart::ImageUrl { .. } => {
                         let multimodal =
                             multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
+                        out.push_str(&multimodal.placeholder_token);
+                    }
+                    ChatContentPart::VideoUrl { .. } => {
+                        let multimodal =
+                            multimodal.ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
                         out.push_str(&multimodal.placeholder_token);
                     }
                 }
